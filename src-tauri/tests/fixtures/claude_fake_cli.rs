@@ -345,7 +345,7 @@ fn run_probe(scenario: &str) {
             "catalog_success" => {
                 emit(
                     &mut out,
-                    &control_response(request_id.clone(), catalog_success_payload()),
+                    &control_response(request_id, catalog_success_payload()),
                 );
                 return;
             }
@@ -364,19 +364,12 @@ fn run_probe(scenario: &str) {
                 );
                 emit(
                     &mut out,
-                    &control_response(request_id.clone(), catalog_success_payload()),
+                    &control_response(request_id, catalog_success_payload()),
                 );
                 return;
             }
             "catalog_error" => {
-                emit(
-                    &mut out,
-                    &serde_json::json!({
-                        "type": "control_response",
-                        "request_id": request_id,
-                        "response": {"subtype": "error", "message": "auth required"}
-                    }),
-                );
+                emit(&mut out, &control_error(request_id, "auth required"));
                 return;
             }
             // An error response with a chatty-but-alive process (issue #543
@@ -386,14 +379,7 @@ fn run_probe(scenario: &str) {
             // its auth guidance on stderr).
             "catalog_error_chatty" => {
                 eprintln!("claude-fake: please run `claude login` before listing models");
-                emit(
-                    &mut out,
-                    &serde_json::json!({
-                        "type": "control_response",
-                        "request_id": request_id,
-                        "response": {"subtype": "error", "message": "auth required"}
-                    }),
-                );
+                emit(&mut out, &control_error(request_id, "auth required"));
                 return;
             }
             "catalog_no_response" => {
@@ -444,15 +430,26 @@ fn catalog_success_payload() -> serde_json::Value {
 }
 
 /// Wrap a success payload in a control_response envelope echoing the
-/// request id.
+/// request id. The echo rides INSIDE the response payload
+/// (`response.request_id`), not at the frame's top level -- the wire
+/// measured on 2.1.222 against the CLI's own emit sites.
 fn control_response(
     request_id: serde_json::Value,
     response: serde_json::Value,
 ) -> serde_json::Value {
     serde_json::json!({
         "type": "control_response",
-        "request_id": request_id,
-        "response": {"subtype": "success", "response": response}
+        "response": {"subtype": "success", "request_id": request_id, "response": response}
+    })
+}
+
+/// Wrap an error diagnostic in a control_response envelope echoing the
+/// request id (the same nested placement). The CLI's error frames carry
+/// the diagnostic under `error`, not `message`.
+fn control_error(request_id: serde_json::Value, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {"subtype": "error", "request_id": request_id, "error": error}
     })
 }
 
