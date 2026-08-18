@@ -175,6 +175,23 @@ fn hook_frames_are_tolerated_end_to_end() {
     }
 }
 
+/// Non-JSON lines between valid frames (a startup banner, an update
+/// warning) hit the pump's line-level skip branch (`from_str` failure ->
+/// continue), never a parse failure: the outcome stays a clean Text. Real
+/// CLI stdout carries such noise (banners, warnings) -- a regression here
+/// would kill whole turns.
+#[test]
+fn garbage_lines_are_skipped_not_fatal() {
+    let (outcome, _) = run("garbage_lines", 24);
+    match &outcome.termination {
+        Termination::Text(t) => {
+            assert_eq!(t, "the answer is 42");
+            assert!(!t.contains("update available"), "no noise leaks: {t}");
+        }
+        other => panic!("expected Text despite garbage lines, got {other:?}"),
+    }
+}
+
 /// An error result frame maps to Transient carrying the CLI's detail.
 #[test]
 fn result_error_maps_to_transient() {
@@ -237,6 +254,78 @@ fn step_cap_overflow_yields_step_cap_termination() {
     assert!(
         start.elapsed() < std::time::Duration::from_secs(3),
         "took {:?} -- resolved via the wall-clock watchdog, not the step-cap path",
+        start.elapsed()
+    );
+}
+
+/// A stuck agent (system{init}, then stdout held open in silence) under a
+/// short wall-clock: the watchdog fires the shared token and the pump's
+/// loop-top cancel check resolves the turn as Cancelled -- the only
+/// backstop when a real CLI hangs (the acp_engine.rs
+/// `wall_clock_watchdog_fires_cancel_on_a_stuck_agent` peer).
+#[test]
+fn wall_clock_watchdog_fires_cancel_on_a_silent_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_millis(300)));
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "turn_silent");
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "watchdog on a stuck agent -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // The watchdog resolves in ~300ms. A no-fire regression is caught by
+    // the Cancelled assert itself (the run then rides the fixture's 30s
+    // sleep to an EOF transient); the window pin catches a slow-but-correct
+    // resolution (a poll-interval blowup, a kill-and-reap hang) before it
+    // stalls the suite (the acp_engine.rs timing-pin precedent).
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "took {:?} -- the watchdog did not fire; the fixture sleeps 30s",
+        start.elapsed()
+    );
+}
+
+/// A cross-thread user cancel mid-turn (the stop button's path): the pump's
+/// loop-top cancel check resolves the whole turn as Cancelled, no hang (the
+/// acp_engine.rs `user_cancel_aborts_the_whole_turn` peer).
+#[test]
+fn user_cancel_aborts_the_whole_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    // No wall-clock: the watchdog must stay out of the way so the test
+    // observes the user-cancel path alone.
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "turn_silent");
+    // Fire cancel shortly after run starts (the fixture holds stdout open
+    // until cancel arrives). Spawned AFTER the env set (under the lock) --
+    // begin_turn (inside run) clears any stale `requested` at turn start,
+    // so a cancel fired while blocked on the lock would be wiped before the
+    // turn observes it. The 200ms delay covers spawn + the stdin write.
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // The cancel resolves in ~200ms (the spawn delay); a missed cancel is
+    // caught by the Cancelled assert (the run then rides the fixture's 30s
+    // hold to an EOF transient). Same window-pin rationale as the watchdog
+    // test: catch a slow-but-correct resolution, not the outright miss.
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "took {:?} -- the cancel was not observed; the fixture sleeps 30s",
         start.elapsed()
     );
 }

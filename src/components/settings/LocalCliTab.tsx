@@ -11,6 +11,7 @@ import type {
   AdapterCatalogEntry,
   AdapterCatalogs,
   AdapterEntry,
+  CatalogModel,
   ModelCatalogOutcome,
   DiscoveredRuntime,
   ProbeError,
@@ -349,6 +350,67 @@ function formatProbedAt(intl: IntlShape, probedAtMillis: number): string {
   }).format(probedAtMillis);
 }
 
+/** The per-model catalog a NON-acp cache entry carries. The single
+ *  dispatch point for every per-model read off a cache entry (the fold +
+ *  the summary badge); the argument is the post-acp narrowing, so every
+ *  kind here is per-model. Exhaustive with a `never` guard (the file's
+ *  other dispatches' shape): a future backend kind fails at compile time,
+ *  not as a silently missing render. */
+function perModelModels(
+  entry: Exclude<AdapterCatalogEntry, { probe_kind: "acp" }>,
+): CatalogModel[] {
+  switch (entry.probe_kind) {
+    case "codex_event_stream":
+      return entry.outcome.codex_event_stream.models;
+    case "claude_stream_json":
+      return entry.outcome.claude_stream_json.models;
+    default: {
+      const _exhaustive: never = entry;
+      throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/** The cache mirror for a fresh probe result (issue #536): the entry the
+ *  backend just wrote to the sidecar, rebuilt client-side so the
+ *  timestamped display is immediately consistent. The degraded per-model
+ *  outcome was not cached server-side -- `null` mirrors that (the entry
+ *  stays whatever it was, absent included). The kind dispatch is
+ *  exhaustive with a `never` guard, mirroring `ProbeResult` /
+ *  `perModelModels`: a fourth kind must fail at compile time instead of
+ *  silently mirroring its models under the wrong tag. */
+function mirrorEntryFromProbe(result: ProbeOk): AdapterCatalogEntry | null {
+  if (result.kind === "acp") {
+    return {
+      probe_kind: "acp",
+      outcome: { acp: { discovered: result.data.discovered } },
+      probed_at_millis: Date.now(),
+    };
+  }
+  if (result.data.outcome.status !== "available") {
+    return null;
+  }
+  const { models } = result.data.outcome;
+  switch (result.kind) {
+    case "codex_event_stream":
+      return {
+        probe_kind: "codex_event_stream",
+        outcome: { codex_event_stream: { models } },
+        probed_at_millis: Date.now(),
+      };
+    case "claude_stream_json":
+      return {
+        probe_kind: "claude_stream_json",
+        outcome: { claude_stream_json: { models } },
+        probed_at_millis: Date.now(),
+      };
+    default: {
+      const _exhaustive: never = result;
+      throw new Error(`Unknown probe ok kind: ${String(_exhaustive)}`);
+    }
+  }
+}
+
 /** The cached-catalog block (ADR-0096 D5, issue #536): renders the sidecar
  *  entry through the SAME per-format components as a fresh probe result
  *  (one rendering path -- no drift between "just tested" and "restored
@@ -361,22 +423,11 @@ function CachedCatalog({ entry }: { entry: AdapterCatalogEntry }) {
   if (entry.probe_kind === "acp") {
     return <AcpProbeResult catalog={entry.outcome.acp.discovered} />;
   }
-  if (entry.probe_kind === "codex_event_stream") {
-    return (
-      <ModelCatalogProbeResult
-        outcome={{ status: "available", models: entry.outcome.codex_event_stream.models }}
-      />
-    );
-  }
-  if (entry.probe_kind === "claude_stream_json") {
-    return (
-      <ModelCatalogProbeResult
-        outcome={{ status: "available", models: entry.outcome.claude_stream_json.models }}
-      />
-    );
-  }
-  const _exhaustive: never = entry;
-  throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
+  return (
+    <ModelCatalogProbeResult
+      outcome={{ status: "available", models: perModelModels(entry) }}
+    />
+  );
 }
 
 /** The probe's model count for one row, from whichever source is live: the
@@ -399,16 +450,10 @@ function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): n
       return null;
     }
   } else if (probe.status === "idle" && cached) {
-    if (cached.probe_kind === "acp") {
-      count = cached.outcome.acp.discovered.models.length;
-    } else if (cached.probe_kind === "codex_event_stream") {
-      count = cached.outcome.codex_event_stream.models.length;
-    } else if (cached.probe_kind === "claude_stream_json") {
-      count = cached.outcome.claude_stream_json.models.length;
-    } else {
-      const _exhaustive: never = cached;
-      throw new Error(`Unknown probe kind: ${String(_exhaustive)}`);
-    }
+    count =
+      cached.probe_kind === "acp"
+        ? cached.outcome.acp.discovered.models.length
+        : perModelModels(cached).length;
   } else {
     return null;
   }
@@ -500,37 +545,11 @@ export function LocalCliTab({
       // The backend wrote this probe's entry to the sidecar cache; mirror
       // it into the query cache so the timestamped display is immediately
       // consistent (issue #536 AC: post-probe display matches the cache).
-      // The degraded per-model outcome was not cached server-side --
-      // reflect that here too (the entry stays whatever it was, absent
-      // included).
-      if (result.kind === "acp") {
+      const mirrored = mirrorEntryFromProbe(result);
+      if (mirrored) {
         queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
           ...(prev ?? {}),
-          [id]: {
-            probe_kind: "acp",
-            outcome: { acp: { discovered: result.data.discovered } },
-            probed_at_millis: Date.now(),
-          },
-        }));
-      } else if (result.data.outcome.status === "available") {
-        const { models } = result.data.outcome;
-        // The mirror entry's kind + outcome tag must agree (the same
-        // tagged-union invariant the backend stamps); dispatch per kind.
-        const entry: AdapterCatalogEntry =
-          result.kind === "codex_event_stream"
-            ? {
-                probe_kind: "codex_event_stream",
-                outcome: { codex_event_stream: { models } },
-                probed_at_millis: Date.now(),
-              }
-            : {
-                probe_kind: "claude_stream_json",
-                outcome: { claude_stream_json: { models } },
-                probed_at_millis: Date.now(),
-              };
-        queryClient.setQueryData(adapterKeys.catalogs(), (prev: AdapterCatalogs | undefined) => ({
-          ...(prev ?? {}),
-          [id]: entry,
+          [id]: mirrored,
         }));
       }
     } catch (e) {

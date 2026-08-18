@@ -22,7 +22,8 @@
 //! INSIDE the `response` payload, and error responses carry the diagnostic
 //! under `error`.
 //!
-//! Degrade footing (ADR-0097 Decision 5 "无响应降级空目录"): a success
+//! Degrade footing (ADR-0097 Decision 5, the no-response empty-catalog
+//! degrade): a success
 //! response yields `Available` with the extracted models (possibly none);
 //! an ERROR control response degrades to `Unavailable` (the process being
 //! alive is diagnostic signal, the ADR-0096 D2 precedent); a child that
@@ -64,18 +65,6 @@ struct InitializeControlRequest {
 #[derive(serde::Serialize)]
 struct InitializeRequestPayload {
     subtype: &'static str,
-}
-
-/// One model entry on the initialize response wire (measured on 2.1.222).
-/// Everything but `value` is optional data -- a third-party provider's
-/// response may carry a subset; the extraction degrades per field, per
-/// entry, never failing the query.
-struct InitializeModel {
-    id: String,
-    display_name: String,
-    is_default: bool,
-    default_reasoning_effort: String,
-    supported_reasoning_efforts: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,17 +201,7 @@ fn extract_models(payload: &Value) -> Vec<CatalogModel> {
     let Some(entries) = payload.get("models").and_then(Value::as_array) else {
         return Vec::new();
     };
-    entries
-        .iter()
-        .filter_map(model_from_initialize)
-        .map(|m| CatalogModel {
-            id: m.id,
-            display_name: m.display_name,
-            is_default: m.is_default,
-            default_reasoning_effort: m.default_reasoning_effort,
-            supported_reasoning_efforts: m.supported_reasoning_efforts,
-        })
-        .collect()
+    entries.iter().filter_map(model_from_initialize).collect()
 }
 
 /// Project one initialize `models[]` entry onto the catalog shape. The
@@ -232,7 +211,7 @@ fn extract_models(payload: &Value) -> Vec<CatalogModel> {
 /// tolerates both bare strings and `{value}`-shaped objects; `isDefault` /
 /// `defaultEffort` are optional markers (an absent default marker leaves
 /// the selector's "CLI default" row unannotated -- honest, never guessed).
-fn model_from_initialize(entry: &Value) -> Option<InitializeModel> {
+fn model_from_initialize(entry: &Value) -> Option<CatalogModel> {
     // `value` is the `--model` injection key: an entry without a usable
     // (non-empty) alias contributes nothing.
     let id = string_field(entry, "value")?;
@@ -259,7 +238,7 @@ fn model_from_initialize(entry: &Value) -> Option<InitializeModel> {
                 .collect()
         })
         .unwrap_or_default();
-    Some(InitializeModel {
+    Some(CatalogModel {
         id,
         display_name,
         is_default,

@@ -183,8 +183,8 @@ fn query_error_response_chatty_degrades_carries_stderr_tail() {
 }
 
 /// AC: a child that reads the request but exits without answering degrades
-/// to the EMPTY catalog (ADR-0097 Decision 5 "无响应降级空目录") -- an
-/// `Available` with no models, never a failure.
+/// to the EMPTY catalog (the no-response empty-catalog degrade, ADR-0097
+/// Decision 5) -- an `Available` with no models, never a failure.
 #[test]
 fn query_no_response_degrades_to_empty_catalog() {
     let models = expect_available(

@@ -85,9 +85,9 @@ pub struct AcpTurnInput {
     /// The session-level thought-level choice to inject this turn (ADR-0095).
     /// `None` = the CLI's own default. ACP path: one
     /// `session/set_config_option` after the handshake, keyed like `model`;
-    /// CodexEventStream path: argv via `AdapterSpec.effort_config_key`
-    /// (the `-c` surface); ClaudeStreamJson path: argv via
-    /// `AdapterSpec.effort_arg` (ADR-0097 Decision 6).
+    /// CodexEventStream path: argv via the `-c` config surface;
+    /// ClaudeStreamJson path: argv via the flag surface
+    /// (`AdapterSpec.effort`, ADR-0097 Decision 6).
     pub thought_level: Option<String>,
     /// The full windowed context for this turn (the question + history), as
     /// text content blocks. ADR-0076 statelessness: the whole context every
@@ -1231,8 +1231,7 @@ mod tests {
             stream_format: StreamFormat::CodexEventStream,
             probe_argv: Some(&["probe"]),
             model_arg: None,
-            effort_config_key: None,
-            effort_arg: None,
+            effort: None,
         };
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);
@@ -1278,8 +1277,7 @@ mod tests {
             stream_format: StreamFormat::ClaudeStreamJson,
             probe_argv: Some(&["probe"]),
             model_arg: None,
-            effort_config_key: None,
-            effort_arg: None,
+            effort: None,
         };
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);

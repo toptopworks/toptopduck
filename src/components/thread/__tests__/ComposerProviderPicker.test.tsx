@@ -1773,4 +1773,26 @@ describe("ComposerProviderPicker claude-code dropdowns (issue #561, ADR-0097)", 
       await screen.findByText("CLI default (claude-fake-4)"),
     ).toBeInTheDocument();
   });
+
+  it("keeps a bare CLI default when the discovered catalog is another runtime's", async () => {
+    // The annotation's provenance guard: a residual cached_discovered from
+    // a DIFFERENT runtime (reachable after an ACP -> claude-code switch,
+    // before this runtime's first turn) must not annotate this runtime's
+    // label with the other runtime's current model.
+    await openClaude({
+      catalogs: {},
+      cached_discovered: {
+        models: [],
+        current_model: "ghost-model",
+        thought_levels: [],
+        current_thought_level: null,
+        adapter_id: "qwen-code",
+      },
+    });
+    expect(
+      screen.queryByText("CLI default (ghost-model)"),
+    ).not.toBeInTheDocument();
+    // Both labels stay bare (model + thinking).
+    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
+  });
 });

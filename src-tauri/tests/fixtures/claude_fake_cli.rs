@@ -60,6 +60,8 @@ const SCENARIOS: &[&str] = &[
     "crash_with_text",
     "empty_stdout",
     "step_cap_overflow",
+    "turn_silent",
+    "garbage_lines",
     // Probe surface.
     "catalog_success",
     "catalog_hook_noise",
@@ -242,6 +244,33 @@ fn run_turn(scenario: &str) {
         }
         "empty_stdout" => {
             // Close stdout immediately -- no frames, no text.
+        }
+        "turn_silent" => {
+            // system{init}, then silence with stdout HELD OPEN: the pump
+            // keeps polling until the watchdog (or a user cancel) ends the
+            // turn -- the stuck-agent shape the interrupt tests drive.
+            emit(&mut out, &system_init());
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        "garbage_lines" => {
+            // Non-JSON lines (a startup banner, an update warning, a usage
+            // note) interleaved between valid frames -- the pump's line-level
+            // skip branch, not a parse failure.
+            let _ = writeln!(out, "claude-code v2.1.222 (headless mode)");
+            emit(&mut out, &system_init());
+            let _ = writeln!(
+                out,
+                "update available: run npm i -g @anthropic-ai/claude-code"
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "the answer is 42"}]}
+                }),
+            );
+            let _ = writeln!(out, "usage: 10 input tokens, 5 output tokens");
+            emit(&mut out, &result_success("the answer is 42"));
         }
         "step_cap_overflow" => {
             // Emit more gateway tool_use frames than the step cap (tests pass

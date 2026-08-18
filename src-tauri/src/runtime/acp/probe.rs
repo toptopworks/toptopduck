@@ -68,9 +68,9 @@ pub enum ProbeOk {
     /// control plane's `initialize` response (ADR-0097 Decision 5). Same
     /// degrade footing as the codex variant: an error control response
     /// degrades to `Unavailable`; a silent / EOF-ing child degrades to an
-    /// EMPTY catalog (`Available` with no models -- the no-response shape,
-    /// ADR-0097 Decision 5 "无响应降级空目录"); only a spawn failure, a
-    /// timeout, or a write fault fails outright.
+    /// EMPTY catalog (`Available` with no models -- the no-response
+    /// empty-catalog degrade, ADR-0097 Decision 5); only a spawn failure,
+    /// a timeout, or a write fault fails outright.
     ClaudeStreamJson { outcome: ModelCatalogOutcome },
 }
 
