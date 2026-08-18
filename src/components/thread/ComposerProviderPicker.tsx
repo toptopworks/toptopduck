@@ -494,8 +494,18 @@ export function ComposerProviderPicker({
       })
     : PRESET_CUSTOM;
   const preset = presetId === PRESET_CUSTOM ? undefined : findPreset(presetId);
-  const providerName =
-    preset?.display_name ?? activeProfile?.display_name.trim() ?? unnamed;
+  // Zero-profile built-in posture (ADR-0098 D1, issue #570): with an empty
+  // profile set the readout says "Not configured" -- never "Unnamed profile"
+  // (nothing is mislabeled) and never a "default" label (the four-state model
+  // display is issue #573's surface).
+  const noProfiles = provider.profiles.length === 0;
+  const notConfigured = intl.formatMessage({
+    id: "composer.providerPicker.notConfigured",
+    defaultMessage: "Not configured",
+  });
+  const providerName = noProfiles
+    ? notConfigured
+    : (preset?.display_name ?? activeProfile?.display_name.trim() ?? unnamed);
 
   // Tooltip preview text (also Radix Tooltip's aria-describedby content, so SR
   // users hear the live context on trigger focus). The honest "no key" mark is
@@ -528,11 +538,13 @@ export function ComposerProviderPicker({
     },
     { adapter: activeAdapter?.display_name ?? activeAdapterId ?? "" },
   );
-  const builtInTooltip = keychainFault
-    ? `${summary} · ${keychainUnavailableMark}`
-    : hasKey
-      ? summary
-      : `${summary} · ${noKeyMark}`;
+  const builtInTooltip = noProfiles
+    ? notConfigured
+    : keychainFault
+      ? `${summary} · ${keychainUnavailableMark}`
+      : hasKey
+        ? summary
+        : `${summary} · ${noKeyMark}`;
   const tooltipText = isExternal ? externalTooltip : builtInTooltip;
 
   // Model field draft. The popover's model input commits on blur / Enter, NOT
@@ -635,15 +647,19 @@ export function ComposerProviderPicker({
               />
               {/* Native <select> (precedent: ProviderPresetField) styled to
                   match Input. No Radix Select primitive for a single picker
-                  (KISS). */}
+                  (KISS). Zero profiles: disabled with a single placeholder
+                  option -- nothing to switch (ADR-0098 D1). */}
               <select
                 value={provider.active_profile ?? ""}
                 onChange={(e) => onSwitchActive(e.target.value)}
+                disabled={noProfiles}
                 className={cn(
                   "border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none",
                   "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
+                  "disabled:cursor-not-allowed disabled:opacity-50",
                 )}
               >
+                {noProfiles && <option value="">{notConfigured}</option>}
                 {provider.profiles.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.display_name.trim() || unnamed}
@@ -664,6 +680,7 @@ export function ComposerProviderPicker({
                 list={datalistId}
                 value={modelDraft}
                 onChange={(e) => setModelDraft(e.target.value)}
+                disabled={activeProfile == null}
                 onBlur={commitModel}
                 onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
                   if (e.key === "Enter") {
@@ -724,10 +741,17 @@ export function ComposerProviderPicker({
                 </span>
               ) : !hasKey ? (
                 <span className="text-muted-foreground">
-                  <FormattedMessage
-                    id="settings.profiles.key.hintUnset"
-                    defaultMessage="No key saved for this profile — asking with this profile active will return a “not configured” failure."
-                  />
+                  {noProfiles ? (
+                    <FormattedMessage
+                      id="composer.providerPicker.notConfiguredHint"
+                      defaultMessage="No access profile yet. Create one in Settings."
+                    />
+                  ) : (
+                    <FormattedMessage
+                      id="settings.profiles.key.hintUnset"
+                      defaultMessage="No key saved for this profile — asking with this profile active will return a “not configured” failure."
+                    />
+                  )}
                 </span>
               ) : null}
             </div>

@@ -553,6 +553,41 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     }
   });
 
+  it("cold-start submit with zero profiles opens Settings on the API Access tab instead of creating (ADR-0098 D4, issue #570)", async () => {
+    // ADR-0098 Decision 1 made zero profiles representable, activating the
+    // honest gate's "no profile -> Settings" branch (ADR-0092 D4): a built-in
+    // submit with an empty profile set redirects to the Runtime section's
+    // API Access sub-tab instead of minting a session whose first turn would
+    // fail unconfigured. useProfileKeys skips the key fetch on an empty set,
+    // so the gate resolves without a key-overlay round-trip.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      provider: { profiles: [], active_profile: null },
+    });
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // The settings overlay opens on the runtime section's API Access
+      // sub-tab; no session is created and the centered bar persists.
+      await waitFor(() =>
+        expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      expect(screen.getByRole("tab", { name: "API 接入配置" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    } finally {
+      // The beforeEach only clearAllMocks (call history), so the mock
+      // IMPLEMENTATION must be restored (null is an App-level state, not an
+      // IPC return -- cast per the real getAppConfig signature).
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+    }
+  });
+
   it("cold-start submit with external runtime creates session + applies external via setSessionRuntime (#499 AC3)", async () => {
     // The cold-start bar's runtime picker writes to pendingRuntime (no IPC).
     // On submit, the handler bypasses the built-in key gate (external pick)

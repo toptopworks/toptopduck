@@ -52,7 +52,8 @@ import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 // are immediate: create commits on its bottom button (a freshly-minted profile
 // is held in memory -- `addingProfile` -- and never listed until committed; its
 // key can still be set first via the ADR-0064 orphan slot), delete commits on
-// confirm (last profile guarded), and set-active commits at once (mirroring the
+// confirm (deleting the last profile lands the legal zero-profile state,
+// ADR-0098), and set-active commits at once (mirroring the
 // top-bar quick-switcher). The API-key field keeps its OWN
 // immediate Set/Clear IPC (ADR-0029 -- the key never enters app-config) and does
 // NOT participate in the blur / create commit.
@@ -370,7 +371,10 @@ export function ProfilesSection({
     });
     setCommitBusy(false);
     setFormError(err);
-    if (selectedId === id) setSelectedId(null);
+    // Deselect only on success -- a failed delete keeps the selection (and
+    // the form it hosts) so the pane-bottom error has a surface to render on,
+    // mirroring commitDraft's stay-put on failure.
+    if (err === null && selectedId === id) setSelectedId(null);
   }
 
   async function handleSetActive(id: string) {
@@ -442,9 +446,6 @@ export function ProfilesSection({
     ? provider.profiles.find((p) => p.id === confirmDeleteId)
     : undefined;
   const deleteTargetName = deleteTarget?.display_name.trim() || unnamed;
-  // The last profile cannot be deleted (an empty list leaves the live provider
-  // with no active endpoint; normalize would have to invent one).
-  const canDelete = provider.profiles.length > 1;
 
   // The key-status refresh button -- lives in the PaneHeader action slot when
   // ProfilesSection owns its header, or in the profile-list toolbar when the
@@ -626,15 +627,7 @@ export function ProfilesSection({
                     size="sm"
                     className="profiles-delete text-destructive hover:text-destructive"
                     onClick={() => setConfirmDeleteId(draft.id)}
-                    disabled={fieldsDisabled || !canDelete}
-                    title={
-                      canDelete
-                        ? undefined
-                        : intl.formatMessage({
-                            id: "settings.profiles.deleteLastDisabled",
-                            defaultMessage: "The last profile cannot be deleted.",
-                          })
-                    }
+                    disabled={fieldsDisabled}
                     aria-label={intl.formatMessage({
                       id: "common.delete",
                       defaultMessage: "Delete",
@@ -713,16 +706,20 @@ export function ProfilesSection({
                 </div>
               )}
 
-              {formError && <p className="text-destructive text-sm">{formError}</p>}
             </div>
-          ) : (
+          ) : provider.profiles.length > 0 ? (
             <p className="text-muted-foreground text-sm">
               <FormattedMessage
                 id="settings.profiles.selectPrompt"
                 defaultMessage="Select a profile on the left to edit it, or create a new one."
               />
             </p>
-          )}
+          ) : null}
+          {/* Commit failures render at the pane bottom regardless of the
+              right pane's mode (draft form, select prompt, or zero-profile
+              empty state) -- a failed delete keeps no draft of its own, so
+              the error must not live inside the draft branch. */}
+          {formError && <p className="text-destructive text-sm">{formError}</p>}
         </div>
       </div>
 
@@ -748,7 +745,7 @@ export function ProfilesSection({
               <AlertDialogDescription>
                 <FormattedMessage
                   id="settings.profiles.deleteConfirm.body"
-                  defaultMessage="This permanently removes “{name}”. The active profile switches to the next one if needed."
+                  defaultMessage="This permanently removes “{name}”. The active profile switches to the next remaining one, or none if this was the last."
                   values={{ name: deleteTargetName }}
                 />
               </AlertDialogDescription>
