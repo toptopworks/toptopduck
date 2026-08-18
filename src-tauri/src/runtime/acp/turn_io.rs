@@ -38,11 +38,12 @@ pub(crate) fn flatten_prompt(blocks: &[ContentBlock]) -> String {
 /// `[model_arg, id]`, the thought level per the adapter's ONE effort
 /// surface -- `["-c", "{key}={value}"]` for [`EffortSurface::ConfigKey`]
 /// (the codex `-c` surface) or `[flag, level]` for
-/// [`EffortSurface::ArgvFlag`] (claude-code's `--effort`, ADR-0097 Decision
-/// 6). A single exhaustive match over the enum: an adapter with no surface
-/// contributes no effort flag, and dual surfaces (a silent-precedence
-/// hazard) are unrepresentable. Pure -- adapters without the matching spec
-/// fields contribute nothing (the CLI defaults rule).
+/// [`EffortSurface::ArgvFlag`] (claude-code's `--effort`, ADR-0097
+/// Decision 6). A single exhaustive match over the enum: an adapter with
+/// no surface contributes no effort flag, and dual surfaces (a
+/// silent-precedence hazard) are unrepresentable. Pure -- adapters
+/// without the matching spec fields contribute nothing (the CLI defaults
+/// rule).
 pub(crate) fn build_model_flags(
     adapter: &AdapterSpec,
     model: Option<&str>,

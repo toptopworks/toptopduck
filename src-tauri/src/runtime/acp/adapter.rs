@@ -62,8 +62,8 @@ pub enum StreamFormat {
 // Adapter spec
 // ---------------------------------------------------------------------------
 
-/// The ONE surface an adapter's reasoning-effort selection rides (ADR-0095
-/// + ADR-0097 Decision 6). An enum, not two independent Option fields, so
+/// The ONE surface an adapter's reasoning-effort selection rides (ADR-0095,
+/// ADR-0097 Decision 6). An enum, not two independent Option fields, so
 /// "at most one effort surface per adapter" is a type invariant: a
 /// dual-surface spec (which flag would win?) is unrepresentable, and the
 /// injection dispatch in [`crate::runtime::acp::turn_io::build_model_flags`]
