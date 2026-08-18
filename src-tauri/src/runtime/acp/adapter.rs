@@ -62,6 +62,23 @@ pub enum StreamFormat {
 // Adapter spec
 // ---------------------------------------------------------------------------
 
+/// The ONE surface an adapter's reasoning-effort selection rides (ADR-0095
+/// + ADR-0097 Decision 6). An enum, not two independent Option fields, so
+/// "at most one effort surface per adapter" is a type invariant: a
+/// dual-surface spec (which flag would win?) is unrepresentable, and the
+/// injection dispatch in [`crate::runtime::acp::turn_io::build_model_flags`]
+/// is a single exhaustive match with no silent precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffortSurface {
+    /// The `-c` runtime-config override: the engine appends
+    /// `["-c", "{key}={value}"]` to argv when a thought level is selected
+    /// (codex's `model_reasoning_effort`).
+    ConfigKey(&'static str),
+    /// The argv flag at spawn: the engine appends `[flag, value]` parallel
+    /// to [`AdapterSpec::model_arg`] (claude-code's `--effort`).
+    ArgvFlag(&'static str),
+}
+
 /// A stable identifier for a CLI adapter (per-turn provenance + the composer
 /// picker's key). Distinct from the binary name and from the display name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,22 +148,14 @@ pub struct AdapterSpec {
     /// model via a `session/set_config_option` request after the handshake
     /// instead (schema 0.13.8's `NewSessionRequest` carries no model field).
     pub model_arg: Option<&'static str>,
-    /// The runtime-config key for the reasoning-effort setting (ADR-0095).
-    /// Consumed ONLY by the CodexEventStream path (the engine appends
-    /// `["-c", "{key}={value}"]` to argv when a thought level is selected).
-    /// `None` on ACP adapters -- the ACP path sends one
-    /// `session/set_config_option` request after the handshake instead --
-    /// and on ClaudeStreamJson, whose effort rides an argv flag
-    /// ([`Self::effort_arg`]) instead of a `-c` config override.
-    pub effort_config_key: Option<&'static str>,
-    /// The argv flag that carries the reasoning effort at spawn (ADR-0097
-    /// Decision 6): the argv-shaped injection counterpart of
-    /// [`Self::effort_config_key`]'s `-c`-shaped one. Consumed ONLY by the
-    /// non-ACP paths (the engine appends `[flag, value]` when a thought level
-    /// is selected, parallel to [`Self::model_arg`]). claude-code = `--effort`;
-    /// `None` wherever the effort rides a config override (codex) or a
-    /// protocol request (ACP).
-    pub effort_arg: Option<&'static str>,
+    /// The ONE surface the reasoning-effort selection rides (ADR-0095 /
+    /// ADR-0097 Decision 6): a `-c` config override key (codex) or an argv
+    /// flag (claude-code's `--effort`). `None` on ACP adapters -- the ACP
+    /// path sends one `session/set_config_option` request after the
+    /// handshake instead. The enum makes "at most one surface per adapter"
+    /// a type invariant: a dual-surface spec cannot be constructed, so the
+    /// injection needs no precedence rule.
+    pub effort: Option<EffortSurface>,
 }
 
 impl AdapterSpec {
@@ -178,8 +187,7 @@ pub const fn gemini_cli() -> AdapterSpec {
         stream_format: StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
-        effort_config_key: None,
-        effort_arg: None,
+        effort: None,
     }
 }
 
@@ -221,8 +229,7 @@ pub const fn codex() -> AdapterSpec {
         // injection uses, ADR-0094). No argv-shaped effort flag (ADR-0097
         // Decision 6 leaves codex on the `-c` surface).
         model_arg: Some("--model"),
-        effort_config_key: Some("model_reasoning_effort"),
-        effort_arg: None,
+        effort: Some(EffortSurface::ConfigKey("model_reasoning_effort")),
     }
 }
 
@@ -244,8 +251,7 @@ pub const fn qwen_code() -> AdapterSpec {
         stream_format: StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
-        effort_config_key: None,
-        effort_arg: None,
+        effort: None,
     }
 }
 
@@ -269,8 +275,7 @@ pub const fn opencode() -> AdapterSpec {
         stream_format: StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
-        effort_config_key: None,
-        effort_arg: None,
+        effort: None,
     }
 }
 
@@ -344,8 +349,7 @@ pub const fn claude_code() -> AdapterSpec {
         // `--model <id>` and the reasoning effort as `--effort <level>` --
         // both argv-shaped (no `-c` config surface on this CLI).
         model_arg: Some("--model"),
-        effort_config_key: None,
-        effort_arg: Some("--effort"),
+        effort: Some(EffortSurface::ArgvFlag("--effort")),
     }
 }
 
@@ -898,26 +902,30 @@ mod tests {
     /// ADR-0095 injection fields: ACP adapters carry `None` (protocol
     /// injection), the CodexEventStream adapter (codex) carries `--model` +
     /// the reasoning-effort config key, the ClaudeStreamJson adapter carries
-    /// `--model` + the argv-shaped `--effort` (ADR-0097 Decision 6).
+    /// `--model` + the argv-shaped `--effort` (ADR-0097 Decision 6). The
+    /// single-enum field makes the at-most-one-surface invariant structural;
+    /// this test pins WHICH surface each adapter picked.
     #[test]
     fn adapters_declare_per_format_injection_fields() {
         for spec in [gemini_cli(), qwen_code(), opencode()] {
             assert_eq!(spec.stream_format, StreamFormat::Acp);
             assert!(spec.model_arg.is_none(), "{}", spec.id);
-            assert!(spec.effort_config_key.is_none(), "{}", spec.id);
-            assert!(spec.effort_arg.is_none(), "{}", spec.id);
+            assert!(spec.effort.is_none(), "{}", spec.id);
         }
         let codex = codex();
         assert_eq!(codex.model_arg, Some("--model"));
-        assert_eq!(codex.effort_config_key, Some("model_reasoning_effort"));
-        assert!(codex.effort_arg.is_none(), "codex effort rides `-c`");
+        assert_eq!(
+            codex.effort,
+            Some(EffortSurface::ConfigKey("model_reasoning_effort")),
+            "codex effort rides `-c`"
+        );
         let claude = claude_code();
         assert_eq!(claude.model_arg, Some("--model"));
-        assert!(
-            claude.effort_config_key.is_none(),
+        assert_eq!(
+            claude.effort,
+            Some(EffortSurface::ArgvFlag("--effort")),
             "claude-code has no `-c` config surface"
         );
-        assert_eq!(claude.effort_arg, Some("--effort"));
     }
 
     /// ADR-0096 D2: the probe argv is `None` on ACP adapters (the probe reuses

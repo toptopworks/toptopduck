@@ -12,7 +12,7 @@
 //! shared surface, so a feed / injection change lands in one place, not in
 //! each driver.
 
-use crate::runtime::acp::adapter::AdapterSpec;
+use crate::runtime::acp::adapter::{AdapterSpec, EffortSurface};
 use crate::runtime::acp::wire::ContentBlock;
 
 // ---------------------------------------------------------------------------
@@ -35,13 +35,14 @@ pub(crate) fn flatten_prompt(blocks: &[ContentBlock]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Build the argv segments carrying the ADR-0095 selections: the model as
-/// `[model_arg, id]`, the thought level as EITHER `["-c", "{key}={value}"]`
-/// (the codex `-c` surface via `effort_config_key`) OR `[effort_arg, level]`
-/// (the argv surface via `effort_arg`, ADR-0097 Decision 6 -- claude-code's
-/// `--effort`). The two effort surfaces are mutually exclusive per adapter
-/// (each spec carries at most one); an adapter with neither contributes no
-/// effort flag. Pure -- adapters without the matching spec fields contribute
-/// nothing (the CLI defaults rule).
+/// `[model_arg, id]`, the thought level per the adapter's ONE effort
+/// surface -- `["-c", "{key}={value}"]` for [`EffortSurface::ConfigKey`]
+/// (the codex `-c` surface) or `[flag, level]` for
+/// [`EffortSurface::ArgvFlag`] (claude-code's `--effort`, ADR-0097 Decision
+/// 6). A single exhaustive match over the enum: an adapter with no surface
+/// contributes no effort flag, and dual surfaces (a silent-precedence
+/// hazard) are unrepresentable. Pure -- adapters without the matching spec
+/// fields contribute nothing (the CLI defaults rule).
 pub(crate) fn build_model_flags(
     adapter: &AdapterSpec,
     model: Option<&str>,
@@ -53,12 +54,16 @@ pub(crate) fn build_model_flags(
         flags.push(id.to_string());
     }
     if let Some(level) = thought_level {
-        if let Some(key) = adapter.effort_config_key {
-            flags.push("-c".to_string());
-            flags.push(format!("{key}={level}"));
-        } else if let Some(flag) = adapter.effort_arg {
-            flags.push(flag.to_string());
-            flags.push(level.to_string());
+        match adapter.effort {
+            Some(EffortSurface::ConfigKey(key)) => {
+                flags.push("-c".to_string());
+                flags.push(format!("{key}={level}"));
+            }
+            Some(EffortSurface::ArgvFlag(flag)) => {
+                flags.push(flag.to_string());
+                flags.push(level.to_string());
+            }
+            None => {}
         }
     }
     flags
@@ -89,7 +94,7 @@ mod tests {
 
     // --- build_model_flags (ADR-0095/0097) -----------------------------------
 
-    fn stub_spec(model_arg: Option<&'static str>, key: Option<&'static str>) -> AdapterSpec {
+    fn stub_spec(model_arg: Option<&'static str>, effort: Option<EffortSurface>) -> AdapterSpec {
         AdapterSpec {
             id: crate::runtime::acp::adapter::AdapterId::new("stub"),
             display_name: "stub",
@@ -98,15 +103,17 @@ mod tests {
             stream_format: crate::runtime::acp::adapter::StreamFormat::CodexEventStream,
             probe_argv: None,
             model_arg,
-            effort_config_key: key,
-            effort_arg: None,
+            effort,
         }
     }
 
     /// Both selections land: `--model <id>` + `-c key=value`.
     #[test]
     fn model_flags_carry_model_and_effort() {
-        let s = stub_spec(Some("--model"), Some("model_reasoning_effort"));
+        let s = stub_spec(
+            Some("--model"),
+            Some(EffortSurface::ConfigKey("model_reasoning_effort")),
+        );
         assert_eq!(
             build_model_flags(&s, Some("gpt-5.1"), Some("high")),
             vec![
@@ -121,7 +128,10 @@ mod tests {
     /// No selection / no spec field -> nothing appended (CLI defaults rule).
     #[test]
     fn model_flags_empty_without_selection_or_spec_fields() {
-        let s = stub_spec(Some("--model"), Some("model_reasoning_effort"));
+        let s = stub_spec(
+            Some("--model"),
+            Some(EffortSurface::ConfigKey("model_reasoning_effort")),
+        );
         assert!(build_model_flags(&s, None, None).is_empty());
         let acp_like = stub_spec(None, None);
         assert!(build_model_flags(&acp_like, Some("m"), Some("high")).is_empty());
@@ -132,16 +142,15 @@ mod tests {
         );
     }
 
-    /// ADR-0097 Decision 6: the argv-shaped effort surface (`effort_arg`)
-    /// appends `[flag, level]` parallel to `model_arg` -- the claude-code
-    /// `--effort` injection. The two effort surfaces are mutually exclusive
-    /// per adapter; a spec carrying both would inject the effort twice, so
-    /// the `-c` surface wins the dispatch only by the spec never carrying
-    /// both (pinned per adapter in the spec tests).
+    /// ADR-0097 Decision 6: the argv-shaped effort surface
+    /// (`EffortSurface::ArgvFlag`) appends `[flag, level]` parallel to
+    /// `model_arg` -- the claude-code `--effort` injection. The surface is
+    /// one enum field, so the dual-surface hazard of the old two-Option
+    /// shape (both set, the `-c` arm silently winning) cannot be
+    /// constructed at all.
     #[test]
     fn model_flags_carry_argv_shaped_effort() {
-        let mut s = stub_spec(Some("--model"), None);
-        s.effort_arg = Some("--effort");
+        let s = stub_spec(Some("--model"), Some(EffortSurface::ArgvFlag("--effort")));
         assert_eq!(
             build_model_flags(&s, Some("claude-sonnet-4"), Some("high")),
             vec![

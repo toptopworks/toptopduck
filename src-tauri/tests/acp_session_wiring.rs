@@ -38,8 +38,7 @@ fn fake_cli_adapter() -> AdapterSpec {
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
-        effort_config_key: None,
-        effort_arg: None,
+        effort: None,
     }
 }
 
@@ -237,8 +236,7 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
-        effort_config_key: None,
-        effort_arg: None,
+        effort: None,
     }));
     let second = session.ask("this one cannot even spawn");
     std::env::set_var("PATH", old_path);
