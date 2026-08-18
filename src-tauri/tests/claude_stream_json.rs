@@ -278,10 +278,11 @@ fn wall_clock_watchdog_fires_cancel_on_a_silent_turn() {
         "watchdog on a stuck agent -> Cancelled: {:?}",
         outcome.termination
     );
-    // The watchdog resolves in ~300ms; a regression that fails to fire it
-    // rides the fixture's 30s sleep to an EOF transient. Pin the window so
-    // the regression fails fast instead of hanging the suite (the
-    // acp_engine.rs timing-pin precedent).
+    // The watchdog resolves in ~300ms. A no-fire regression is caught by
+    // the Cancelled assert itself (the run then rides the fixture's 30s
+    // sleep to an EOF transient); the window pin catches a slow-but-correct
+    // resolution (a poll-interval blowup, a kill-and-reap hang) before it
+    // stalls the suite (the acp_engine.rs timing-pin precedent).
     assert!(
         start.elapsed() < std::time::Duration::from_secs(3),
         "took {:?} -- the watchdog did not fire; the fixture sleeps 30s",
@@ -318,9 +319,10 @@ fn user_cancel_aborts_the_whole_turn() {
         "user cancel -> Cancelled: {:?}",
         outcome.termination
     );
-    // The user-cancel path resolves in ~200ms (the spawn delay); the
-    // fixture would otherwise hold the turn for 30s. Same pin rationale as
-    // the watchdog test above.
+    // The cancel resolves in ~200ms (the spawn delay); a missed cancel is
+    // caught by the Cancelled assert (the run then rides the fixture's 30s
+    // hold to an EOF transient). Same window-pin rationale as the watchdog
+    // test: catch a slow-but-correct resolution, not the outright miss.
     assert!(
         start.elapsed() < std::time::Duration::from_secs(3),
         "took {:?} -- the cancel was not observed; the fixture sleeps 30s",
