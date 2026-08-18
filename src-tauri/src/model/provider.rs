@@ -1,9 +1,12 @@
-//! LLM provider config (issue #29/#150, ADR-0007/0019/0029/0064). Multi-profile
-//! provider config (ADR-0064): a list of named access profiles (protocol +
-//! endpoint + model) plus the id of the active one. The active profile drives
-//! the live provider; its id is the keychain account suffix (`key-<id>`). The
-//! API key is NOT here (ADR-0029/0038: key only in the OS keychain, never in
-//! app-config).
+//! LLM provider config (issue #29/#150/#568, ADR-0007/0019/0029/0064/0098).
+//! Multi-profile provider config (ADR-0064): a list of named access profiles
+//! (protocol + endpoint + model) plus the id of the active one. The profile
+//! set may be EMPTY and the active pointer may be `None` -- zero profiles is a
+//! legal persistent state (ADR-0098, the CLI-only user shape); first install
+//! ships empty and normalize never re-seeds a skeleton. The active profile,
+//! when one exists, drives the live provider; its id is the keychain account
+//! suffix (`key-<id>`). The API key is NOT here (ADR-0029/0038: key only in
+//! the OS keychain, never in app-config).
 
 use serde::{Deserialize, Serialize};
 
@@ -63,20 +66,14 @@ impl AsRef<str> for ProfileId {
     }
 }
 
-impl Default for ProfileId {
-    fn default() -> Self {
-        // Falls back to the default profile's id so a config missing the
-        // active_profile field (serde default) points at the built-in default
-        // profile rather than an empty / dangling id.
-        Self(DEFAULT_PROFILE_ID.to_string())
-    }
-}
-
-/// The id of the built-in default profile (ADR-0064/0038 honest-degrade +
+/// The id of the built-in default profile (ADR-0064; the pre-ADR-0098
 /// first-launch skeleton). FIXED so repeated first-launches and degrades
 /// converge on the same keychain account (`key-default`) rather than minting a
 /// fresh id each time -- a user who sets a key once keeps it across a degrade.
-/// User-created profiles (a follow-up slice) will mint their own ids.
+/// No longer seeded into a fresh config (ADR-0098 zero-profile defaults); it
+/// still names the profile the legacy keychain-blob migration materializes
+/// (issue #53) and the account a pre-ADR-0098 stored profile references.
+/// User-created profiles mint their own ids.
 pub const DEFAULT_PROFILE_ID: &str = "default";
 
 /// Display name of the built-in default profile.
@@ -108,8 +105,12 @@ pub struct ProviderProfile {
 }
 
 impl ProviderProfile {
-    /// The built-in default anthropic profile (ADR-0064 skeleton): the
-    /// honest-degrade target and the single profile this slice ships.
+    /// The built-in default anthropic profile (ADR-0064). The pre-ADR-0098
+    /// first-launch skeleton / honest-degrade target; no longer seeded into a
+    /// fresh config (zero profiles is the legal default state), but still
+    /// materialized by the legacy keychain-blob migration
+    /// ([`crate::provider::live_config`], issue #53) so a carried-forward
+    /// endpoint lands on the stable `key-default` slot.
     pub fn default_anthropic() -> Self {
         Self {
             id: ProfileId(DEFAULT_PROFILE_ID.to_string()),
@@ -140,57 +141,66 @@ fn default_provider_model() -> String {
 /// "storage" and a "wire" variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    /// The named access profiles (ADR-0064). At least one in any valid config;
-    /// [`ProviderConfig::defaults`] seeds the single default anthropic profile.
+    /// The named access profiles (ADR-0064). May be empty: zero profiles is a
+    /// legal persistent state (ADR-0098 -- the CLI-only user shape); normalize
+    /// no longer re-seeds a skeleton into an empty list.
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
-    /// The id of the active profile (ADR-0064: global single active). Its
-    /// protocol + endpoint + model drive the live provider, and its id drives
-    /// the keychain account the key is read from.
+    /// The id of the active profile (ADR-0064: global single active), or
+    /// `None` when no profile is active. `None` is the honest zero-profile
+    /// state (ADR-0098) and also the repair target for a dangling pointer
+    /// (normalize nulls it rather than falling back to the first profile). A
+    /// profile's protocol + endpoint + model drive the live provider, and its
+    /// id drives the keychain account the key is read from.
     #[serde(default)]
-    pub active_profile: ProfileId,
+    pub active_profile: Option<ProfileId>,
 }
 
 impl ProviderConfig {
-    /// The built-in defaults (ADR-0064): one anthropic profile, active.
+    /// The built-in defaults (ADR-0098): zero profiles, no active pointer --
+    /// the CLI-only user shape is the first-launch state, not an anomaly to
+    /// repair. "New profile" form prefill (anthropic + direct endpoint) lives
+    /// in the interaction layer, never the persisted defaults.
     pub fn defaults() -> Self {
-        let profile = ProviderProfile::default_anthropic();
         Self {
-            active_profile: profile.id.clone(),
-            profiles: vec![profile],
+            profiles: Vec::new(),
+            active_profile: None,
         }
     }
 
-    /// The active profile, or `None` when no profile matches `active_profile`
-    /// (a malformed config that [`crate::app_config::AppConfig::normalize`]
-    /// repairs). Live readers fall back to the canonical defaults when this
-    /// returns `None` so a hand-edited gap never hands the provider an empty
-    /// endpoint.
+    /// The active profile, or `None` when `active_profile` is `None` (the
+    /// legal zero-profile state, ADR-0098) or points at no profile (a
+    /// dangling pointer [`crate::app_config::AppConfig::normalize`] nulls).
+    /// Live readers fall back to the canonical defaults when this returns
+    /// `None` so a hand-edited gap never hands the provider an empty endpoint.
     pub fn active(&self) -> Option<&ProviderProfile> {
-        self.profiles.iter().find(|p| p.id == self.active_profile)
+        self.active_profile
+            .as_ref()
+            .and_then(|id| self.profiles.iter().find(|p| p.id == *id))
     }
 
-    /// Mutable access to the active profile, or `None` when no profile matches
-    /// `active_profile`. [`crate::app_config::AppConfig::normalize`] establishes
-    /// the invariant (non-empty + active points at a real profile) before
-    /// callers that `expect` a profile run.
+    /// Mutable access to the active profile, or `None` when `active_profile`
+    /// is `None` or matches no profile. Callers that need a profile must seed
+    /// one first (the defaults ship zero profiles, ADR-0098).
     pub fn active_mut(&mut self) -> Option<&mut ProviderProfile> {
-        self.profiles
-            .iter_mut()
-            .find(|p| p.id == self.active_profile)
+        self.active_profile
+            .as_ref()
+            .and_then(|id| self.profiles.iter_mut().find(|p| p.id == *id))
     }
 
-    /// The active profile's base URL, or the canonical default when no profile
-    /// matches `active_profile` (a malformed config normalize repairs). Shared
-    /// by the live provider read path and the IPC view so a dangling active
-    /// always yields the same endpoint the provider itself uses, never "".
+    /// The active profile's base URL, or the canonical default when there is
+    /// no active profile (zero profiles -- legal, ADR-0098 -- or a dangling
+    /// pointer normalize nulls). The live provider read path keeps this total
+    /// so a hand-edited gap never hands the provider an empty endpoint; the
+    /// turn then refuses as NotWired on the missing key. The IPC view does NOT
+    /// share this fallback (it exposes the empty state honestly, ADR-0098).
     pub fn effective_base_url(&self) -> &str {
         self.active()
             .map(|p| p.base_url.as_str())
             .unwrap_or_else(|| {
                 log::warn!(
-                    "active_profile does not match any profile; falling back to \
-                     default base_url for this read"
+                    "no active profile (empty set or dangling pointer); falling \
+                     back to default base_url for this read"
                 );
                 DEFAULT_PROVIDER_BASE_URL
             })
@@ -201,31 +211,32 @@ impl ProviderConfig {
     pub fn effective_model(&self) -> &str {
         self.active().map(|p| p.model.as_str()).unwrap_or_else(|| {
             log::warn!(
-                "active_profile does not match any profile; falling back to \
-                     default model for this read"
+                "no active profile (empty set or dangling pointer); falling \
+                     back to default model for this read"
             );
             DEFAULT_PROVIDER_MODEL
         })
     }
 
-    /// The active profile's wire protocol, or [`Protocol::Anthropic`] when no
-    /// profile matches `active_profile` (a malformed config normalize repairs).
-    /// Drives the live provider's per-turn adapter routing (issue #152,
-    /// ADR-0064): `LiveProvider` reads this each turn so a protocol switch on
-    /// the active profile lands the next turn on the new adapter, no caching.
+    /// The active profile's wire protocol, or [`Protocol::Anthropic`] when
+    /// there is no active profile (see [`Self::effective_base_url`]). Drives
+    /// the live provider's per-turn adapter routing (issue #152, ADR-0064):
+    /// `LiveProvider` reads this each turn so a protocol switch on the active
+    /// profile lands the next turn on the new adapter, no caching.
     pub fn effective_protocol(&self) -> Protocol {
         match self.active() {
             Some(profile) => profile.protocol,
             None => {
-                // A malformed config whose active_profile points nowhere: log
-                // the silent fallback so the misconfiguration is observable.
-                // normalize repairs it on the next store; a hand-edit gap
-                // otherwise lands the turn on the Anthropic default with no
-                // trace, and a wrong-protocol turn is hard to diagnose from
-                // the bare NotWired/Unavailable it produces downstream.
+                // No active profile (zero profiles -- legal, ADR-0098 -- or a
+                // dangling pointer normalize nulls): log the fallback so the
+                // state is observable. The turn refuses as NotWired on the
+                // missing key before any request goes out; this keeps the
+                // trait read total, and a wrong-protocol turn is hard to
+                // diagnose from the bare NotWired/Unavailable it produces
+                // downstream.
                 log::warn!(
-                    "active_profile does not match any profile; falling back to \
-                     Anthropic protocol for this turn"
+                    "no active profile (empty set or dangling pointer); falling \
+                     back to Anthropic protocol for this turn"
                 );
                 Protocol::Anthropic
             }
@@ -237,17 +248,19 @@ impl ProviderConfig {
     /// Issue #275: the keychain read outcome rides in as a `Result` so a read
     /// fault surfaces on `keychain_fault` (with `has_key` a placeholder false)
     /// instead of being honest-degraded behind a bare `false`. One shape for
-    /// both `get_provider_config` and `set_provider_config` so the
-    /// active-missing fallback policy is single-sourced, not duplicated per
-    /// call site.
+    /// both `get_provider_config` and `set_provider_config`. ADR-0098: with no
+    /// active profile the endpoint fields are `None` -- the honest empty
+    /// state, NOT the canonical defaults masquerading as a configured value
+    /// (the live read path's total fallback serves the pre-gate turn path
+    /// only, and is deliberately not shared here).
     pub fn view(&self, key_read: Result<bool, String>) -> ProviderConfigView {
         let (has_key, keychain_fault) = match key_read {
             Ok(has_key) => (has_key, None),
             Err(detail) => (false, Some(detail)),
         };
         ProviderConfigView {
-            base_url: self.effective_base_url().to_string(),
-            model: self.effective_model().to_string(),
+            base_url: self.active().map(|p| p.base_url.clone()),
+            model: self.active().map(|p| p.model.clone()),
             has_key,
             keychain_fault,
         }
@@ -260,17 +273,22 @@ impl Default for ProviderConfig {
     }
 }
 
-/// The get_provider_config view (ADR-0029): the effective base URL + model the
-/// provider uses, plus the active profile's key status -- `has_key` (a boolean,
-/// never the key itself) and a keychain read-fault detail. The frontend's header
-/// key indicator learns whether to prompt for a key without ever receiving it,
-/// and distinguishes a read fault from a legitimate no-key state (issue #275).
-/// One shape for both `get_provider_config` and `set_provider_config` so the
-/// active-missing fallback policy is single-sourced.
+/// The get_provider_config view (ADR-0029): the active profile's base URL +
+/// model plus its key status -- `has_key` (a boolean, never the key itself)
+/// and a keychain read-fault detail. The frontend's header key indicator
+/// learns whether to prompt for a key without ever receiving it, and
+/// distinguishes a read fault from a legitimate no-key state (issue #275).
+/// One shape for both `get_provider_config` and `set_provider_config`.
+/// ADR-0098: `base_url` / `model` are `None` when there is no active profile
+/// -- the honest empty state (no endpoint to read), not the canonical
+/// defaults pretending a value exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderConfigView {
-    pub base_url: String,
-    pub model: String,
+    /// The active profile's base URL, or `None` when no profile is active
+    /// (ADR-0098 zero-profile state).
+    pub base_url: Option<String>,
+    /// The active profile's model id, or `None` when no profile is active.
+    pub model: Option<String>,
     /// Whether an API key is stored in the OS keychain. A boolean only (ADR-0029
     /// invariant 3: the key never crosses to the frontend). When
     /// [`Self::keychain_fault`] is `Some`, the read failed and this is a
@@ -395,42 +413,150 @@ mod tests {
     fn effective_protocol_returns_active_protocol() {
         // ADR-0064 (issue #152): effective_protocol follows the active_profile
         // POINTER, not a fixed field -- switching active to a different profile
-        // lands that profile's protocol on the next read. Seed a second profile
-        // with the Openai protocol and flip active_profile between the two; the
+        // lands that profile's protocol on the next read. Seed two profiles
+        // with different protocols and flip active_profile between the two; the
         // read tracks each flip, never a cached value. The live source
         // (LiveProviderConfig::protocol) delegates here, so this is the
         // load-bearing leaf of the per-turn read path.
         let mut cfg = ProviderConfig::defaults();
-        let anthropic_id = cfg.active_profile.clone();
+        let anthropic_id = ProfileId("__test_anthropic_profile".into());
         let openai_id = ProfileId("__test_openai_profile".into());
-        cfg.profiles.push(ProviderProfile {
-            id: openai_id.clone(),
-            display_name: "OpenAI".into(),
-            protocol: Protocol::Openai,
-            base_url: "https://api.openai.example.test".into(),
-            model: "gpt-4o".into(),
-        });
-        // Default active profile is the Anthropic one.
+        cfg.profiles = vec![
+            ProviderProfile {
+                id: anthropic_id.clone(),
+                display_name: "Anthropic".into(),
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.example.test".into(),
+                model: "claude-sonnet-4-6".into(),
+            },
+            ProviderProfile {
+                id: openai_id.clone(),
+                display_name: "OpenAI".into(),
+                protocol: Protocol::Openai,
+                base_url: "https://api.openai.example.test".into(),
+                model: "gpt-4o".into(),
+            },
+        ];
+        cfg.active_profile = Some(anthropic_id.clone());
         assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
 
         // Flip active_profile to the Openai profile -- effective_protocol follows.
-        cfg.active_profile = openai_id;
+        cfg.active_profile = Some(openai_id);
         assert_eq!(cfg.effective_protocol(), Protocol::Openai);
 
         // Flip back -- the read tracks each pointer switch, never a cached value.
-        cfg.active_profile = anthropic_id;
+        cfg.active_profile = Some(anthropic_id);
         assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
     }
 
     #[test]
     fn effective_protocol_falls_back_to_anthropic_when_active_missing() {
-        // A malformed config whose active_profile points nowhere falls back to
-        // the Anthropic protocol default, never panics -- mirrors
-        // effective_base_url / effective_model. normalize repairs it on the
-        // next store; this pins the pre-normalize live-read behavior so a
+        // A config with no resolvable active profile (a dangling pointer here;
+        // the zero-profile state is pinned separately below) falls back to the
+        // Anthropic protocol default on a live read, never panics -- mirrors
+        // effective_base_url / effective_model. normalize nulls the pointer on
+        // the next store; this pins the pre-normalize live-read behavior so a
         // hand-edited gap never dispatches a turn on a wrong/no protocol.
         let mut cfg = ProviderConfig::defaults();
-        cfg.active_profile = ProfileId("no-such-profile".into());
+        cfg.active_profile = Some(ProfileId("no-such-profile".into()));
         assert_eq!(cfg.effective_protocol(), Protocol::Anthropic);
+    }
+
+    #[test]
+    fn defaults_ship_zero_profiles_with_no_active_pointer() {
+        // ADR-0098: the built-in defaults are the CLI-only user shape -- an
+        // empty profile set with no active pointer. First install must NOT
+        // seed a skeleton profile (the pre-0098 behavior masked "not
+        // configured" behind a keyless skeleton).
+        let cfg = ProviderConfig::defaults();
+        assert!(cfg.profiles.is_empty());
+        assert_eq!(cfg.active_profile, None);
+        assert_eq!(cfg.active(), None);
+    }
+
+    #[test]
+    fn active_resolves_none_when_pointer_is_none_even_with_profiles_present() {
+        // `None` pointer + non-empty profile set is representable: no profile
+        // is active. active()/active_mut() resolve None rather than falling
+        // back to the first profile (the pre-0098 repair would have).
+        let mut cfg = ProviderConfig::defaults();
+        cfg.profiles.push(ProviderProfile::default_anthropic());
+        cfg.active_profile = None;
+        assert!(cfg.active().is_none());
+        assert!(cfg.active_mut().is_none());
+    }
+
+    #[test]
+    fn view_exposes_the_empty_state_when_no_active_profile() {
+        // ADR-0098: with no active profile the view carries null endpoint
+        // fields -- the honest "nothing configured" signal. The canonical
+        // defaults must NOT masquerade as a configured value (the live read
+        // path's total fallback is deliberately not shared with the view).
+        let cfg = ProviderConfig::defaults();
+        let view = cfg.view(Ok(false));
+        assert_eq!(view.base_url, None);
+        assert_eq!(view.model, None);
+        assert!(!view.has_key);
+        assert!(view.keychain_fault.is_none());
+
+        // A dangling pointer (pre-normalize hand-edit) exposes the same empty
+        // state -- there is still no endpoint to read.
+        let mut dangling = ProviderConfig::defaults();
+        dangling.active_profile = Some(ProfileId("no-such-profile".into()));
+        let view = dangling.view(Ok(false));
+        assert_eq!(view.base_url, None);
+        assert_eq!(view.model, None);
+    }
+
+    #[test]
+    fn view_surfaces_the_active_profile_endpoint_verbatim() {
+        // With an active profile the view carries its endpoint fields verbatim
+        // plus the key read outcome (ADR-0029: a boolean + read-fault detail
+        // cross, never the key).
+        let mut cfg = ProviderConfig::defaults();
+        let profile = ProviderProfile {
+            id: ProfileId("__test_view_profile".into()),
+            display_name: "Gateway".into(),
+            protocol: Protocol::Anthropic,
+            base_url: "https://gateway.example.test".into(),
+            model: "claude-opus-4-8".into(),
+        };
+        cfg.active_profile = Some(profile.id.clone());
+        cfg.profiles.push(profile);
+        let view = cfg.view(Ok(true));
+        assert_eq!(
+            view.base_url.as_deref(),
+            Some("https://gateway.example.test")
+        );
+        assert_eq!(view.model.as_deref(), Some("claude-opus-4-8"));
+        assert!(view.has_key);
+        assert!(view.keychain_fault.is_none());
+    }
+
+    #[test]
+    fn active_profile_round_trips_a_null_pointer_and_a_stored_id() {
+        // Wire/storage shape (ADR-0098): a null pointer stays null through a
+        // serde round trip (the zero-profile state persists as written), and a
+        // stored id string parses back into Some -- a pre-0098 file carrying a
+        // skeleton profile + its pointer keeps both verbatim, no cleaning.
+        let zero = ProviderConfig::defaults();
+        let json = serde_json::to_string(&zero).expect("serialize");
+        assert!(
+            json.contains(r#""active_profile":null"#),
+            "zero-profile state serializes an explicit null: {json}"
+        );
+        let back: ProviderConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, zero);
+
+        let mut seeded = ProviderConfig::defaults();
+        seeded.profiles.push(ProviderProfile::default_anthropic());
+        seeded.active_profile = Some(ProfileId(DEFAULT_PROFILE_ID.into()));
+        let json = serde_json::to_string(&seeded).expect("serialize");
+        let back: ProviderConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, seeded);
+        assert!(
+            back.active().is_some(),
+            "stored id resolves post round trip"
+        );
     }
 }

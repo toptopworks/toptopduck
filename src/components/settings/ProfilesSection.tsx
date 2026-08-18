@@ -359,11 +359,12 @@ export function ProfilesSection({
     setCommitBusy(true);
     const err = await onCommit((cfg) => {
       const profiles = cfg.provider.profiles.filter((p) => p.id !== id);
-      // Repoint a dangling active id at the first survivor (normalize would
-      // repair on the next store, but keep the write self-consistent).
+      // Repoint a dangling active id at the first survivor; deleting the last
+      // profile leaves null (the zero-profile state, ADR-0098 -- normalize
+      // would null it on the next store, but keep the write self-consistent).
       const active =
         cfg.provider.active_profile === id
-          ? (profiles[0]?.id ?? "")
+          ? (profiles[0]?.id ?? null)
           : cfg.provider.active_profile;
       return { ...cfg, provider: { profiles, active_profile: active } };
     });

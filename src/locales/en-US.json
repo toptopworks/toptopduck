@@ -122,6 +122,7 @@
   "error.store.destinationExists": "A folder with this name already exists; choose a different name",
   "error.store.ioFailure": "A file operation failed",
   "error.store.keychainFailure": "Failed to access the OS keychain",
+  "error.store.noActiveProfile": "No provider profile is active; create or activate one first",
   "error.store.openConflict": "This session is currently open; close it first",
   "error.turn.execute": "Failed to execute the query",
   "error.turn.invalidConfig": "The provider configuration is invalid",

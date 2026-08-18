@@ -122,6 +122,7 @@
   "error.store.destinationExists": "同名文件夹已存在，请更换名称",
   "error.store.ioFailure": "文件操作失败",
   "error.store.keychainFailure": "系统钥匙串访问失败",
+  "error.store.noActiveProfile": "当前没有激活的服务商档案，请先创建或激活档案",
   "error.store.openConflict": "该会话已打开，请先关闭后再操作",
   "error.turn.execute": "执行查询失败",
   "error.turn.invalidConfig": "提供方配置无效",

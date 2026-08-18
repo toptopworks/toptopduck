@@ -42,7 +42,7 @@ use crate::persistence::{
     default_sessions_root, scan_sessions_dir, validate_sessions_dir, SaveError, SessionMetadata,
     SessionsRoot,
 };
-use crate::provider::live_config::LiveProviderConfig;
+use crate::provider::live_config::{ActiveKeyError, LiveProviderConfig};
 use crate::runtime::acp::adapter::{
     detect_adapter, v1_adapters, AdapterSpec, DiscoveredRuntime, StreamFormat,
 };
@@ -113,6 +113,13 @@ pub enum StoreCommandError {
     /// one refusal to the user, not three messages.
     #[error("{0}")]
     ConfigWriteFailure(String),
+    /// An active-profile key write (`set_api_key` / `clear_api_key`) was refused
+    /// because there is no active profile to address (ADR-0098 zero-profile
+    /// state or null pointer). A user-correctable refusal like [`OpenConflict`]
+    /// -- the OS keychain was never touched, so this is NOT a
+    /// [`KeychainFailure`]; the remedy is creating/activating a profile.
+    #[error("no active provider profile to write the key for")]
+    NoActiveProfile,
 }
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
@@ -812,8 +819,7 @@ pub fn set_api_key(
     live: State<'_, LiveProviderConfig>,
     key: String,
 ) -> Result<(), StoreCommandError> {
-    live.set_key(&key)
-        .map_err(StoreCommandError::KeychainFailure)
+    live.set_key(&key).map_err(store_key_error)
 }
 
 /// Remove the stored API key. Idempotent: a missing entry is success; a real
@@ -822,31 +828,47 @@ pub fn set_api_key(
 /// and the next turn refuses honestly as not-wired.
 #[tauri::command]
 pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCommandError> {
-    live.clear_key().map_err(StoreCommandError::KeychainFailure)
+    live.clear_key().map_err(store_key_error)
+}
+
+/// Map an active-profile key write failure onto the IPC error contract: the
+/// no-active-profile refusal is a config-state rejection
+/// ([`StoreCommandError::NoActiveProfile`] -- the OS keychain was never
+/// touched), distinct from a real OS keychain fault
+/// ([`StoreCommandError::KeychainFailure`], ADR-0029).
+fn store_key_error(e: ActiveKeyError) -> StoreCommandError {
+    match e {
+        ActiveKeyError::NoActiveProfile => StoreCommandError::NoActiveProfile,
+        ActiveKeyError::Keychain(detail) => StoreCommandError::KeychainFailure(detail),
+    }
 }
 
 /// Read the effective provider endpoint + the active profile's key status
-/// (ADR-0019/0029/0038/0064). The base URL + model come from the ACTIVE profile
-/// in app-config; the key does not cross IPC -- only a boolean + a keychain
-/// read-fault detail, from the active profile's keychain slot
-/// `key-<active_profile_id>` (issue #275: a read fault rides `keychain_fault`
-/// so the header indicator renders "keychain unavailable", not "no key").
+/// (ADR-0019/0029/0038/0064/0098). The base URL + model come from the ACTIVE
+/// profile in app-config -- `null` when there is no active profile (the legal
+/// zero-profile state, ADR-0098: no endpoint to read, exposed honestly rather
+/// than masked by canonical defaults). The key does not cross IPC -- only a
+/// boolean + a keychain read-fault detail, from the active profile's keychain
+/// slot `key-<active_profile_id>` (issue #275: a read fault rides
+/// `keychain_fault` so the header indicator renders "keychain unavailable",
+/// not "no key").
 #[tauri::command]
 pub fn get_provider_config(
     live: State<'_, LiveProviderConfig>,
 ) -> Result<ProviderConfigView, String> {
     let cfg = live.load();
-    // view() shares the active-missing fallback with the live provider read
-    // path, so the IPC never hands the frontend "" (ADR-0019/0029/0064).
+    // view() single-sources the empty-state policy for both provider-config
+    // IPCs: null endpoints when no profile is active (ADR-0098).
     Ok(cfg.provider.view(live.has_key()))
 }
 
-/// Save the non-secret provider config (ADR-0019/0038/0064) into app-config --
-/// the multi-profile shape `{profiles, active_profile}`. normalize clamps the
-/// active profile's empty endpoint fields to the canonical defaults and
-/// repairs an empty profiles list / dangling active id, so the stored config is
-/// always valid. The API key never enters this path (ADR-0029/0038: key confined
-/// to the OS keychain; app-config has no key field at all).
+/// Save the non-secret provider config (ADR-0019/0038/0064/0098) into
+/// app-config -- the multi-profile shape `{profiles, active_profile}`. An
+/// empty profiles list + a null active pointer is a legal save (ADR-0098);
+/// normalize clamps the active profile's empty endpoint fields to the
+/// canonical defaults and nulls a dangling active id. The API key never
+/// enters this path (ADR-0029/0038: key confined to the OS keychain;
+/// app-config has no key field at all).
 #[tauri::command]
 pub fn set_provider_config(
     live: State<'_, LiveProviderConfig>,

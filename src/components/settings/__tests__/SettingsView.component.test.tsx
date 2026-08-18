@@ -527,6 +527,28 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(committed.provider.profiles[0].id).toBe("default");
   });
 
+  it("deleting the ACTIVE profile repoints the pointer at the first survivor", async () => {
+    // ADR-0098: normalize nulls a dangling pointer (no first-profile fallback),
+    // so the delete write itself must stay self-consistent -- deleting the
+    // active profile must repoint the pointer, not leave it dangling.
+    vi.mocked(listProviderProfiles).mockResolvedValue(twoProfileKeys);
+    const { onCommitAppConfig } = renderView({ appConfig: twoProfileConfig });
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    // Select the active profile (Anthropic) for editing. Regex name match:
+    // the row button's accessible name is the display name with the "Active"
+    // badge text concatenated whitespace-free ("AnthropicActive"), and the
+    // display name also appears as a preset <option> text (not a button).
+    fireEvent.click(await screen.findByRole("button", { name: /^Anthropic/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    expect(committed.provider.profiles).toHaveLength(1);
+    expect(committed.provider.profiles[0].id).toBe("second");
+    expect(committed.provider.active_profile).toBe("second");
+  });
+
   it("the last profile's delete button is disabled", async () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));

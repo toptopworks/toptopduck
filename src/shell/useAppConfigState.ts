@@ -179,8 +179,8 @@ export function useAppConfigState({
       if (!appConfig) return;
       const { provider } = appConfig;
       const active = provider.profiles.find((p) => p.id === provider.active_profile);
-      // No active profile (a malformed config normalize repairs on the next
-      // store) OR a no-op model: skip the pointless write.
+      // No active profile (the legal zero-profile state, ADR-0098) OR a no-op
+      // model: skip the pointless write.
       if (!active || model === active.model) return;
       try {
         await commitAppConfig({

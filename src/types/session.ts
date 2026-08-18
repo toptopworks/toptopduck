@@ -133,7 +133,8 @@ export type StoreCommandError =
   | { kind: "DestinationExists"; data: string }
   | { kind: "IoFailure"; data: string }
   | { kind: "KeychainFailure"; data: string }
-  | { kind: "ConfigWriteFailure"; data: string };
+  | { kind: "ConfigWriteFailure"; data: string }
+  | { kind: "NoActiveProfile" };
 
 // --- Progress side-channel events ----------------------------------------
 

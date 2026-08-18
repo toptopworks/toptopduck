@@ -32,6 +32,11 @@ use crate::window::WINDOW_TURNS;
 /// key ignored. Issue #268 retired `WindowGeometry` + `AppConfig.window` and
 /// moved geometry persistence to `tauri_plugin_window_state`; the stale `window`
 /// key in an old file is harmless, so no bump accompanies the removal.
+///
+/// ADR-0098 (issue #568) makes `provider.active_profile` nullable without a
+/// bump, same reasoning: a v2 file written before the change carries a string
+/// id that parses into `Some`, and the null form has no pre-change reader in
+/// the wild (the app is unreleased -- the ADR-0064 no-migrator stance).
 pub const APP_CONFIG_FORMAT_VERSION: u32 = 2;
 
 /// V1 default per-statement timeout (ms). No prior constant existed; 30s is a
@@ -295,51 +300,49 @@ impl AppConfig {
     /// - `format_version` pinned to the current schema version (a wrong/foreign
     ///   value would make the next read honest-degrade the WHOLE config to
     ///   defaults, silently losing every pref the user just saved);
-    /// - `provider.profiles` non-empty (an empty list seeds the default
-    ///   skeleton) and `active_profile` pointing at a real profile (a dangling
-    ///   id falls back to the first);
-    /// - empty/whitespace `base_url` / `model` on the ACTIVE profile -> the
-    ///   canonical defaults (so the provider always has a valid endpoint);
+    /// - `provider.profiles` may stay empty (zero profiles is a legal state,
+    ///   ADR-0098 -- no skeleton re-seed) and a dangling `active_profile`
+    ///   nulls (no first-profile fallback);
+    /// - empty/whitespace `base_url` / `model` on the ACTIVE profile (when one
+    ///   exists) -> the canonical defaults (so the provider always has a valid
+    ///   endpoint);
     /// - `threads` clamped to >= 1 (DuckDB rejects `PRAGMA threads=0`);
     /// - `window_turns` clamped to >= 1 (0 would summarize every turn, which is
     ///   nonsensical rather than dangerous).
     pub fn normalize(&mut self) {
         self.format_version = APP_CONFIG_FORMAT_VERSION;
-        // Ensure at least one profile; an empty list is malformed -> seed the
-        // default skeleton (ADR-0064/0038 honest-degrade target).
-        if self.provider.profiles.is_empty() {
-            self.provider = ProviderConfig::defaults();
-        }
-        // Ensure active_profile points at an existing profile; a dangling id
-        // falls back to the first profile so the live provider always has a
-        // valid endpoint to read.
-        if !self
+        // ADR-0098: an empty profile list stays empty -- the zero-profile state
+        // is legal persistence, not a malformed gap to repair with a skeleton.
+        // A dangling active pointer nulls (the repair target is "no active
+        // profile", not "the first profile"): the write is a hand-edit / race
+        // artifact, and silently activating a profile the user did not choose
+        // would point the live provider and the keychain read at the wrong slot.
+        let active_points_nowhere = !self
             .provider
             .profiles
             .iter()
-            .any(|p| p.id == self.provider.active_profile)
-        {
-            self.provider.active_profile = self.provider.profiles[0].id.clone();
+            .any(|p| Some(&p.id) == self.provider.active_profile.as_ref());
+        if active_points_nowhere {
+            self.provider.active_profile = None;
         }
         // Normalize the active profile's endpoint fields (mirrors the legacy
         // set_provider_config normalization): empty -> canonical defaults so the
-        // provider always has a valid endpoint.
-        let active = self
-            .provider
-            .active_mut()
-            .expect("normalize ensures a non-empty profiles list with a valid active id");
-        let base_url = active.base_url.trim().to_string();
-        active.base_url = if base_url.is_empty() {
-            DEFAULT_PROVIDER_BASE_URL.to_string()
-        } else {
-            base_url
-        };
-        let model = active.model.trim().to_string();
-        active.model = if model.is_empty() {
-            DEFAULT_PROVIDER_MODEL.to_string()
-        } else {
-            model
-        };
+        // provider always has a valid endpoint. Only the ACTIVE profile is
+        // touched; with no active profile there is no endpoint to repair.
+        if let Some(active) = self.provider.active_mut() {
+            let base_url = active.base_url.trim().to_string();
+            active.base_url = if base_url.is_empty() {
+                DEFAULT_PROVIDER_BASE_URL.to_string()
+            } else {
+                base_url
+            };
+            let model = active.model.trim().to_string();
+            active.model = if model.is_empty() {
+                DEFAULT_PROVIDER_MODEL.to_string()
+            } else {
+                model
+            };
+        }
         self.engine.threads = self.engine.threads.max(1);
         self.tunables.window_turns = self.tunables.window_turns.max(1);
         // Drop duplicate MCP server ids so the keychain-account suffix
@@ -370,6 +373,17 @@ impl Default for AppConfig {
 mod tests {
     use super::*;
 
+    /// A provider config with one active profile -- the pre-0098 stored shape.
+    /// The ADR-0098 defaults ship zero profiles, so every test that needs a
+    /// live endpoint seeds one explicitly.
+    fn seeded_provider() -> crate::model::ProviderConfig {
+        let profile = crate::model::ProviderProfile::default_anthropic();
+        crate::model::ProviderConfig {
+            active_profile: Some(profile.id.clone()),
+            profiles: vec![profile],
+        }
+    }
+
     #[test]
     fn defaults_match_live_engine_constants() {
         // The persisted engine defaults must mirror the live guardrail constants
@@ -383,7 +397,8 @@ mod tests {
     #[test]
     fn defaults_use_canonical_provider_profile() {
         // app-config reuses model::ProviderConfig verbatim, so its default must
-        // equal the canonical provider default (one anthropic profile, active).
+        // equal the canonical provider default (zero profiles, no active
+        // pointer -- ADR-0098).
         let provider = ProviderConfig::default();
         assert_eq!(provider, crate::model::ProviderConfig::defaults());
     }
@@ -454,10 +469,11 @@ mod tests {
         // back to the canonical defaults so the stored config always hands the
         // provider a valid endpoint.
         let mut cfg = AppConfig::defaults();
+        cfg.provider = seeded_provider();
         let active = cfg
             .provider
             .active_mut()
-            .expect("default config has an active profile");
+            .expect("seeded config has an active profile");
         active.base_url = "   ".into();
         active.model = "".into();
         cfg.normalize();
@@ -471,10 +487,11 @@ mod tests {
         // A user-supplied custom endpoint on the active profile survives
         // normalization (only empties reset to the default).
         let mut cfg = AppConfig::defaults();
+        cfg.provider = seeded_provider();
         let active = cfg
             .provider
             .active_mut()
-            .expect("default config has an active profile");
+            .expect("seeded config has an active profile");
         active.base_url = "  https://gateway.example.test  ".into();
         active.model = "claude-opus-4-8".into();
         cfg.normalize();
@@ -484,27 +501,73 @@ mod tests {
     }
 
     #[test]
-    fn normalize_seeds_default_profile_when_profiles_empty() {
-        // A malformed config with an empty profiles list is repaired to the
-        // default skeleton (ADR-0064/0038 honest-degrade target).
+    fn normalize_keeps_an_empty_profile_list_empty() {
+        // ADR-0098: zero profiles is a legal persistent state. normalize must
+        // NOT re-seed the skeleton -- deleting every profile and restarting
+        // stays at zero profiles (the pre-0098 behavior resurrected a keyless
+        // skeleton and masked "not configured").
         let mut cfg = AppConfig::defaults();
         cfg.provider.profiles.clear();
+        cfg.provider.active_profile = None;
         cfg.normalize();
-        assert_eq!(cfg.provider, ProviderConfig::defaults());
-        assert!(!cfg.provider.profiles.is_empty());
-        assert!(cfg.provider.active().is_some());
+        assert!(cfg.provider.profiles.is_empty());
+        assert_eq!(cfg.provider.active_profile, None);
+        assert!(cfg.provider.active().is_none());
+        // The zero-profile state also survives a persistence round trip: the
+        // file on disk is re-read as written (defaults ARE this shape, so the
+        // round-trip pin doubles as the fresh-install pin).
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.provider.profiles.is_empty());
+        assert_eq!(back.provider.active_profile, None);
     }
 
     #[test]
-    fn normalize_repairs_a_dangling_active_profile() {
-        // active_profile pointing at a non-existent id falls back to the first
-        // profile so the live provider always has a valid endpoint to read.
+    fn normalize_nulls_a_dangling_active_profile() {
+        // ADR-0098: active_profile pointing at a non-existent id repairs to
+        // None -- NOT the first profile (silently activating a profile the
+        // user did not choose would point the live provider and the keychain
+        // read at the wrong slot).
         let mut cfg = AppConfig::defaults();
-        cfg.provider.active_profile = crate::model::ProfileId("no-such-profile".into());
+        cfg.provider = seeded_provider();
+        cfg.provider.active_profile = Some(crate::model::ProfileId("no-such-profile".into()));
         cfg.normalize();
-        let first_id = cfg.provider.profiles[0].id.clone();
-        assert_eq!(cfg.provider.active_profile, first_id);
-        assert!(cfg.provider.active().is_some());
+        assert_eq!(cfg.provider.active_profile, None);
+        assert!(cfg.provider.active().is_none());
+        // The profiles themselves survive the repair untouched.
+        assert_eq!(cfg.provider.profiles.len(), 1);
+    }
+
+    #[test]
+    fn normalize_preserves_a_stored_skeleton_profile() {
+        // ADR-0098 file compat: a pre-0098 app-config carries the seeded
+        // skeleton profile. Reading it back + normalizing keeps it verbatim --
+        // visible in the UI, deletable by the user, never silently cleaned.
+        let json = serde_json::json!({
+            "format_version": 2,
+            "theme": "dark",
+            "provider": {
+                "profiles": [{
+                    "id": "default",
+                    "display_name": "Anthropic",
+                    "protocol": "anthropic",
+                    "base_url": "https://api.anthropic.com",
+                    "model": "claude-sonnet-4-6"
+                }],
+                "active_profile": "default"
+            }
+        });
+        let mut cfg: AppConfig = serde_json::from_value(json).expect("pre-0098 file parses");
+        cfg.normalize();
+        assert_eq!(cfg.provider.profiles.len(), 1, "skeleton not cleaned");
+        let profile = &cfg.provider.profiles[0];
+        assert_eq!(profile.id.as_str(), "default");
+        assert_eq!(profile.display_name, "Anthropic");
+        assert_eq!(
+            cfg.provider.active_profile.as_ref().map(|id| id.as_str()),
+            Some("default"),
+            "active pointer stays on the stored skeleton"
+        );
     }
 
     #[test]
@@ -514,6 +577,7 @@ mod tests {
         // keychain account (`key-<id>`) and the active_profile pointer stay
         // valid across a rename.
         let mut cfg = AppConfig::defaults();
+        cfg.provider = seeded_provider();
         let original_id = cfg.provider.active().expect("active profile").id.clone();
         cfg.provider
             .active_mut()
@@ -529,28 +593,34 @@ mod tests {
         // The IPC view carries the active profile's base URL + model verbatim
         // and the key read outcome as-is (ADR-0029: a boolean + read-fault
         // detail cross, never the key).
-        let mut provider = ProviderConfig::defaults();
+        let mut provider = seeded_provider();
         provider.active_mut().expect("active profile").base_url =
             "https://gateway.example.test".into();
         let view = provider.view(Ok(true));
-        assert_eq!(view.base_url, "https://gateway.example.test");
-        assert_eq!(view.model, crate::model::DEFAULT_PROVIDER_MODEL);
+        assert_eq!(
+            view.base_url.as_deref(),
+            Some("https://gateway.example.test")
+        );
+        assert_eq!(
+            view.model.as_deref(),
+            Some(crate::model::DEFAULT_PROVIDER_MODEL)
+        );
         assert!(view.has_key);
         assert!(view.keychain_fault.is_none());
     }
 
     #[test]
-    fn view_falls_back_to_defaults_when_active_profile_dangling() {
-        // A dangling active_profile (a malformed config normalize repairs)
-        // yields the canonical defaults, never "" -- the IPC view must match
-        // what the live provider read path resolves, so the frontend never
-        // observes an empty endpoint while the provider reads a real one.
-        let mut provider = ProviderConfig::defaults();
-        provider.active_profile = crate::model::ProfileId("no-such-profile".into());
-        // No normalize() -- pin the read-time fallback, not the store-time repair.
+    fn view_exposes_nulls_when_active_profile_dangling() {
+        // ADR-0098: a dangling active_profile (a hand-edit normalize nulls on
+        // the next store) yields NULL endpoint fields -- there is no endpoint
+        // to read, and the canonical defaults must not masquerade as a
+        // configured value. No normalize() here -- pin the read-time shape,
+        // not the store-time repair.
+        let mut provider = seeded_provider();
+        provider.active_profile = Some(crate::model::ProfileId("no-such-profile".into()));
         let view = provider.view(Ok(false));
-        assert_eq!(view.base_url, crate::model::DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(view.model, crate::model::DEFAULT_PROVIDER_MODEL);
+        assert_eq!(view.base_url, None);
+        assert_eq!(view.model, None);
         assert!(!view.has_key);
         assert!(view.keychain_fault.is_none());
     }
@@ -561,7 +631,7 @@ mod tests {
         // read fault surfaces on keychain_fault (with has_key a placeholder
         // false) instead of being honest-degraded behind a bare false -- the
         // header indicator renders "keychain unavailable", not "no key".
-        let provider = ProviderConfig::defaults();
+        let provider = seeded_provider();
         let view = provider.view(Err("keychain access failed: locked".into()));
         assert!(!view.has_key);
         assert_eq!(
@@ -569,7 +639,10 @@ mod tests {
             Some("keychain access failed: locked")
         );
         // The endpoint fields are unaffected by the key read outcome.
-        assert_eq!(view.base_url, crate::model::DEFAULT_PROVIDER_BASE_URL);
+        assert_eq!(
+            view.base_url.as_deref(),
+            Some(crate::model::DEFAULT_PROVIDER_BASE_URL)
+        );
     }
 
     #[test]
@@ -580,10 +653,11 @@ mod tests {
         // A non-default id is used so the assertion cannot pass by coincidence
         // with DEFAULT_PROFILE_ID.
         let mut cfg = AppConfig::defaults();
-        let profile = cfg.provider.profiles.get_mut(0).expect("default profile");
+        cfg.provider = seeded_provider();
+        let profile = cfg.provider.profiles.get_mut(0).expect("seeded profile");
         profile.id = crate::model::ProfileId("user-profile-7".into());
         profile.display_name = "My Gateway".into();
-        cfg.provider.active_profile = crate::model::ProfileId("user-profile-7".into());
+        cfg.provider.active_profile = Some(crate::model::ProfileId("user-profile-7".into()));
 
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
