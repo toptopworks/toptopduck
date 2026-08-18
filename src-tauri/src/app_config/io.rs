@@ -290,14 +290,17 @@ mod tests {
             row_cap: 500_000,
             statement_timeout_ms: 10_000,
         };
-        // Set the ACTIVE profile's endpoint (the default config ships one
-        // anthropic profile) so a successful round-trip is distinguishable from
-        // a defaults-degrade.
+        // Seed the ACTIVE profile's endpoint (the ADR-0098 defaults ship zero
+        // profiles) so a successful round-trip is distinguishable from a
+        // defaults-degrade.
         {
+            let profile = crate::model::ProviderProfile::default_anthropic();
+            cfg.provider.active_profile = Some(profile.id.clone());
+            cfg.provider.profiles.push(profile);
             let active = cfg
                 .provider
                 .active_mut()
-                .expect("default config has an active profile");
+                .expect("seeded config has an active profile");
             active.base_url = "https://gateway.example.test".into();
             active.model = "claude-opus-4-8".into();
         }

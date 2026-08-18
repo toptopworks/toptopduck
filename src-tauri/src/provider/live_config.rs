@@ -71,23 +71,34 @@ impl LiveProviderConfig {
     /// into [`crate::model::ProviderConfig::view`], which maps a fault onto the
     /// view's `keychain_fault` so the header indicator renders "keychain
     /// unavailable" instead of misreading the fault as "no key configured"
-    /// (issue #275).
+    /// (issue #275). With no active profile (ADR-0098 zero-profile state) there
+    /// is no slot to read: `Ok(false)` -- the honest no-key state, not a fault.
     pub fn has_key(&self) -> Result<bool, String> {
-        self.keychain
-            .has_key_for(&self.load().provider.active_profile)
+        match self.load().provider.active_profile.as_ref() {
+            Some(id) => self.keychain.has_key_for(id),
+            None => Ok(false),
+        }
     }
 
     /// Store the API key for the ACTIVE profile (one-shot frontend -> Rust
-    /// transfer, ADR-0029; ADR-0064 per-profile slot).
+    /// transfer, ADR-0029; ADR-0064 per-profile slot). With no active profile
+    /// (ADR-0098) there is no slot to write: an explicit refusal rather than a
+    /// silent success that would misread as "stored".
     pub fn set_key(&self, key: &str) -> Result<(), String> {
-        self.keychain
-            .set_key_for(&self.load().provider.active_profile, key)
+        match self.load().provider.active_profile.as_ref() {
+            Some(id) => self.keychain.set_key_for(id, key),
+            None => Err("no active provider profile to store the key for".into()),
+        }
     }
 
-    /// Remove the stored API key for the ACTIVE profile (idempotent).
+    /// Remove the stored API key for the ACTIVE profile (idempotent). With no
+    /// active profile (ADR-0098) the operation has no referent: an explicit
+    /// refusal (the caller cannot have meant any specific slot).
     pub fn clear_key(&self) -> Result<(), String> {
-        self.keychain
-            .clear_key_for(&self.load().provider.active_profile)
+        match self.load().provider.active_profile.as_ref() {
+            Some(id) => self.keychain.clear_key_for(id),
+            None => Err("no active provider profile to clear the key for".into()),
+        }
     }
 
     // --- Per-profile key (issue #153, ADR-0064) ------------------------------
@@ -356,19 +367,23 @@ impl LiveProviderConfig {
     }
 }
 
-/// Splice the legacy pre-#53 `{base_url, model}` blob into the active
-/// profile's endpoint (ADR-0038 one-time migration). Honest-degrade: a
-/// malformed / partial / wrong-typed blob leaves the defaults in place --
-/// the migration never fails, it just carries less forward. Pure (no IO) so
-/// each shape branch is unit-testable without a keychain.
+/// Splice the legacy pre-#53 `{base_url, model}` blob into the config
+/// (ADR-0038 one-time migration). The ADR-0098 defaults ship zero profiles, so
+/// a well-formed blob materializes the default profile (fixed id => the same
+/// `key-default` slot the pre-#53 era used) carrying the stored endpoint.
+/// Honest-degrade: a malformed / partial / wrong-typed blob leaves the
+/// zero-profile defaults in place -- the migration never fails, it just
+/// carries less forward. Pure (no IO) so each shape branch is unit-testable
+/// without a keychain.
 fn splice_legacy_endpoint(cfg: &mut AppConfig, blob: &serde_json::Value) {
     let base_url = blob.get("base_url").and_then(|v| v.as_str());
     let model = blob.get("model").and_then(|v| v.as_str());
     if let (Some(base_url), Some(model)) = (base_url, model) {
-        if let Some(active) = cfg.provider.active_mut() {
-            active.base_url = base_url.to_string();
-            active.model = model.to_string();
-        }
+        let mut profile = crate::model::ProviderProfile::default_anthropic();
+        profile.base_url = base_url.to_string();
+        profile.model = model.to_string();
+        cfg.provider.active_profile = Some(profile.id.clone());
+        cfg.provider.profiles.push(profile);
     }
 }
 
@@ -388,12 +403,16 @@ impl ProviderConfigSource for LiveProviderConfig {
         // the signature stays Option<String> (per-turn cannot carry the error,
         // and test_profile is the diagnostic entry point).
         let cfg = self.load();
-        match self.keychain.fetch_key_for(&cfg.provider.active_profile) {
+        // Zero-profile state (legal, ADR-0098) or a nulled dangling pointer: no
+        // slot to read, so no key (`?` returns None) -- the turn refuses as
+        // NotWired, the honest built-in-not-configured outcome.
+        let active_id = cfg.provider.active_profile.as_ref()?;
+        match self.keychain.fetch_key_for(active_id) {
             Ok(opt) => opt,
             Err(e) => {
                 log::warn!(
                     "keychain per-turn read failed for active {}: {e}",
-                    cfg.provider.active_profile
+                    active_id
                 );
                 None
             }
@@ -457,19 +476,53 @@ mod tests {
         (dir, live)
     }
 
+    /// An app-config with one active anthropic profile -- the pre-0098 stored
+    /// shape. The ADR-0098 defaults ship zero profiles, so endpoint/protocol
+    /// read tests seed one explicitly.
+    fn one_profile_cfg() -> AppConfig {
+        let mut cfg = AppConfig::defaults();
+        let profile = crate::model::ProviderProfile::default_anthropic();
+        cfg.provider.active_profile = Some(profile.id.clone());
+        cfg.provider.profiles.push(profile);
+        cfg
+    }
+
     #[test]
     fn load_on_first_launch_returns_defaults_when_no_legacy_blob() {
         // No file, no legacy keychain blob -> defaults (the production keychain
         // has no provider-config entry in CI, so fetch_legacy_provider_blob is
-        // None here).
+        // None here). ADR-0098: the defaults are the zero-profile shape.
         let (_dir, live) = live();
-        assert_eq!(live.load(), AppConfig::defaults());
+        let cfg = live.load();
+        assert_eq!(cfg, AppConfig::defaults());
+        assert!(cfg.provider.profiles.is_empty());
+        assert_eq!(cfg.provider.active_profile, None);
+    }
+
+    #[test]
+    fn store_persists_the_zero_profile_state_across_a_reload() {
+        // ADR-0098: deleting every profile persists -- the store path must not
+        // resurrect a skeleton (the pre-0098 normalize re-seeded), and a
+        // reload reads the same zero-profile state back.
+        let (_dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        cfg.provider.profiles.clear();
+        cfg.provider.active_profile = None;
+        let stored = live.store(cfg).expect("store");
+        assert!(stored.provider.profiles.is_empty());
+        assert_eq!(stored.provider.active_profile, None);
+        let back = live.load();
+        assert!(back.provider.profiles.is_empty());
+        assert_eq!(back.provider.active_profile, None);
     }
 
     #[test]
     fn splice_legacy_endpoint_copies_both_fields_when_well_formed() {
         // The pre-#53 legacy blob shape is `{base_url, model}`. Both fields
-        // splice into the active profile's endpoint when present and stringy.
+        // splice into the materialized default profile when present and
+        // stringy (ADR-0098 zero-profile defaults leave no slot to splice
+        // into, so the migration materializes one -- fixed id, so the stored
+        // key lands on the same `key-default` slot as the pre-#53 era).
         let mut cfg = AppConfig::defaults();
         let blob = serde_json::json!({
             "base_url": "https://gateway.example.test",
@@ -479,46 +532,45 @@ mod tests {
         let active = cfg.provider.active().expect("active profile");
         assert_eq!(active.base_url, "https://gateway.example.test");
         assert_eq!(active.model, "claude-fable-5");
+        assert_eq!(cfg.provider.profiles.len(), 1);
     }
 
     #[test]
     fn splice_legacy_endpoint_leaves_defaults_when_one_field_missing() {
         // ADR-0038 honest-degrade: a partial blob (only base_url) carries
-        // nothing forward -- BOTH fields stay at the canonical defaults so a
-        // half-shape legacy entry never seeds a mismatched endpoint/model pair.
+        // nothing forward -- the zero-profile defaults stand so a half-shape
+        // legacy entry never seeds a mismatched endpoint/model pair.
         let mut cfg = AppConfig::defaults();
         let blob = serde_json::json!({ "base_url": "https://gateway.example.test" });
         splice_legacy_endpoint(&mut cfg, &blob);
-        let active = cfg.provider.active().expect("active profile");
-        assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
+        assert!(cfg.provider.profiles.is_empty());
+        assert_eq!(cfg.provider.active_profile, None);
     }
 
     #[test]
     fn splice_legacy_endpoint_leaves_defaults_when_fields_are_wrong_type() {
         // Non-string fields (a number where base_url is expected, a bool where
         // model is expected) do not splice -- as_str() is None for both, so the
-        // defaults stand rather than seeding a nonsense endpoint.
+        // zero-profile defaults stand rather than seeding a nonsense endpoint.
         let mut cfg = AppConfig::defaults();
         let blob = serde_json::json!({ "base_url": 42, "model": true });
         splice_legacy_endpoint(&mut cfg, &blob);
-        let active = cfg.provider.active().expect("active profile");
-        assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
+        assert!(cfg.provider.profiles.is_empty());
+        assert_eq!(cfg.provider.active_profile, None);
     }
 
     #[test]
     fn splice_legacy_endpoint_leaves_defaults_when_blob_is_not_an_object() {
         // A non-object JSON value (array / string / null) has no base_url/model
-        // keys, so the splice is a no-op and the defaults stand. (A malformed
-        // JSON string never reaches this function -- migrate_from_legacy_blob
-        // gates on serde_json::from_str succeeding first.)
+        // keys, so the splice is a no-op and the zero-profile defaults stand.
+        // (A malformed JSON string never reaches this function --
+        // migrate_from_legacy_blob gates on serde_json::from_str succeeding
+        // first.)
         let mut cfg = AppConfig::defaults();
         let blob = serde_json::json!(["not", "an", "object"]);
         splice_legacy_endpoint(&mut cfg, &blob);
-        let active = cfg.provider.active().expect("active profile");
-        assert_eq!(active.base_url, DEFAULT_PROVIDER_BASE_URL);
-        assert_eq!(active.model, DEFAULT_PROVIDER_MODEL);
+        assert!(cfg.provider.profiles.is_empty());
+        assert_eq!(cfg.provider.active_profile, None);
     }
 
     #[test]
@@ -526,7 +578,7 @@ mod tests {
         // store normalizes (empty endpoint -> defaults) and persists; load reads
         // it back faithfully.
         let (_dir, live) = live();
-        let mut cfg = AppConfig::defaults();
+        let mut cfg = one_profile_cfg();
         cfg.theme = Theme::Dark;
         cfg.engine = EngineDefaults {
             memory_limit: "2048MB".into(),
@@ -536,7 +588,7 @@ mod tests {
         };
         cfg.provider
             .active_mut()
-            .expect("default config has an active profile")
+            .expect("seeded config has an active profile")
             .base_url = "   ".into(); // empty -> default
         let stored = live.store(cfg).expect("store");
         assert_eq!(stored.engine.threads, 1);
@@ -557,12 +609,12 @@ mod tests {
         // Seeding the active profile then reading via the trait returns the
         // seeded values.
         let (_dir, live) = live();
-        let mut cfg = AppConfig::defaults();
+        let mut cfg = one_profile_cfg();
         {
             let active = cfg
                 .provider
                 .active_mut()
-                .expect("default config has an active profile");
+                .expect("seeded config has an active profile");
             active.base_url = "https://gateway.example.test".into();
             active.model = "claude-opus-4-8".into();
         }
@@ -579,13 +631,13 @@ mod tests {
     fn provider_source_falls_back_to_default_endpoint_when_active_missing() {
         // A hand-edited config whose active_profile points nowhere must fall
         // back to the canonical endpoint defaults on a LIVE read (before
-        // normalize repairs it on the next store), never panic or emit "". The
+        // normalize nulls it on the next store), never panic or emit "". The
         // api_key() lookup uses the dangling id -> no slot -> None (safe).
         let (_dir, live) = live();
-        let mut cfg = AppConfig::defaults();
-        cfg.provider.active_profile = crate::model::ProfileId("no-such-profile".into());
+        let mut cfg = one_profile_cfg();
+        cfg.provider.active_profile = Some(crate::model::ProfileId("no-such-profile".into()));
         // Write WITHOUT normalize so the dangling active id survives on disk
-        // (a hand-edit scenario, not the store path which repairs it).
+        // (a hand-edit scenario, not the store path which nulls it).
         app_config::write_at(live.path(), &cfg).expect("write");
 
         assert_eq!(live.base_url(), DEFAULT_PROVIDER_BASE_URL);
@@ -594,11 +646,20 @@ mod tests {
     }
 
     #[test]
-    fn provider_source_returns_default_endpoint_when_unset() {
-        // A fresh app-config (defaults) hands the provider the canonical endpoint.
+    fn provider_source_reads_canonical_endpoint_in_the_zero_profile_state() {
+        // ADR-0098: a zero-profile app-config (the fresh defaults) still hands
+        // the provider read path the canonical endpoint -- the reads stay
+        // total, never "" -- but no key exists, so any turn refuses as
+        // NotWired (the honest built-in-not-configured outcome; the submit
+        // gate redirects to Settings before a turn can even start).
         let (_dir, live) = live();
         assert_eq!(live.base_url(), DEFAULT_PROVIDER_BASE_URL);
         assert_eq!(live.model(), DEFAULT_PROVIDER_MODEL);
+        assert!(live.api_key().is_none());
+        assert_eq!(live.protocol(), Protocol::Anthropic);
+        // The has_key view short-circuits: no active profile -> no slot to
+        // read -> the authoritative no-key state, not a keychain fault.
+        assert_eq!(live.has_key(), Ok(false));
     }
 
     #[test]
@@ -642,12 +703,12 @@ mod tests {
         // value (the production config source is the only protocol source the
         // router reads, so its correctness is load-bearing).
         let (_dir, live) = live();
-        let mut cfg = AppConfig::defaults();
+        let mut cfg = one_profile_cfg();
         {
             let active = cfg
                 .provider
                 .active_mut()
-                .expect("default config has an active profile");
+                .expect("seeded config has an active profile");
             active.protocol = Protocol::Openai;
         }
         live.store(cfg).expect("store");
@@ -658,15 +719,15 @@ mod tests {
     fn provider_source_falls_back_to_anthropic_when_active_missing() {
         // A hand-edited config whose active_profile points nowhere must fall
         // back to the Anthropic protocol default on a LIVE read (before
-        // normalize repairs it on the next store), never panic -- mirrors the
+        // normalize nulls it on the next store), never panic -- mirrors the
         // endpoint fallback contract. A wrong-protocol turn is hard to
         // diagnose from the bare NotWired/Unavailable it produces downstream,
         // so the fallback is deterministic Anthropic.
         let (_dir, live) = live();
-        let mut cfg = AppConfig::defaults();
-        cfg.provider.active_profile = crate::model::ProfileId("no-such-profile".into());
+        let mut cfg = one_profile_cfg();
+        cfg.provider.active_profile = Some(crate::model::ProfileId("no-such-profile".into()));
         // Write WITHOUT normalize so the dangling active id survives on disk
-        // (a hand-edit scenario, not the store path which repairs it).
+        // (a hand-edit scenario, not the store path which nulls it).
         app_config::write_at(live.path(), &cfg).expect("write");
         assert_eq!(live.protocol(), Protocol::Anthropic);
     }
@@ -685,22 +746,32 @@ mod tests {
         let (_dir, live) = live();
         let path = live.path().to_path_buf();
         let mut cfg = AppConfig::defaults();
-        let anthropic_id = cfg.provider.active_profile.clone();
+        let anthropic_id = ProfileId("__test_anthropic_profile".into());
         let openai_id = ProfileId("__test_openai_profile".into());
-        cfg.provider.profiles.push(ProviderProfile {
-            id: openai_id.clone(),
-            display_name: "OpenAI".into(),
-            protocol: Protocol::Openai,
-            base_url: "https://api.openai.example.test".into(),
-            model: "gpt-4o".into(),
-        });
+        cfg.provider.profiles = vec![
+            ProviderProfile {
+                id: anthropic_id.clone(),
+                display_name: "Anthropic".into(),
+                protocol: Protocol::Anthropic,
+                base_url: "https://api.anthropic.example.test".into(),
+                model: "claude-sonnet-4-6".into(),
+            },
+            ProviderProfile {
+                id: openai_id.clone(),
+                display_name: "OpenAI".into(),
+                protocol: Protocol::Openai,
+                base_url: "https://api.openai.example.test".into(),
+                model: "gpt-4o".into(),
+            },
+        ];
+        cfg.provider.active_profile = Some(anthropic_id.clone());
         live.store(cfg).expect("store");
-        // Starts on the default anthropic profile.
+        // Starts on the anthropic profile.
         assert_eq!(live.protocol(), Protocol::Anthropic);
 
         // Flip active to the Openai profile (the IPC set_active path).
         let mut cfg = live.load();
-        cfg.provider.active_profile = openai_id;
+        cfg.provider.active_profile = Some(openai_id);
         live.store(cfg).expect("store");
         assert_eq!(live.protocol(), Protocol::Openai);
 
@@ -713,7 +784,7 @@ mod tests {
         // Flip back to the anthropic profile -- both the original and the
         // rebound source follow each switch.
         let mut cfg = live.load();
-        cfg.provider.active_profile = anthropic_id;
+        cfg.provider.active_profile = Some(anthropic_id);
         live.store(cfg).expect("store");
         assert_eq!(live.protocol(), Protocol::Anthropic);
         assert_eq!(rebound.protocol(), Protocol::Anthropic);
@@ -773,7 +844,24 @@ mod tests {
         // tests/ipc_contract.rs (ProviderConfigView.keychain_fault) + the
         // Result-returning has_key_for contract.
         let (_dir, live) = live();
+        let cfg = one_profile_cfg();
+        live.store(cfg).expect("store");
         assert_eq!(live.has_key(), Ok(false));
+    }
+
+    #[test]
+    fn has_key_short_circuits_to_false_in_the_zero_profile_state() {
+        // ADR-0098: with no active profile there is no keychain slot to read.
+        // Ok(false) is the honest no-key state (not a fault), and no keychain
+        // entry is consulted -- the zero-profile config never surfaces a
+        // spurious keychain_fault on the view.
+        let (_dir, live) = live();
+        live.store(AppConfig::defaults()).expect("store");
+        assert_eq!(live.has_key(), Ok(false));
+        // set_key / clear_key have no referent: an explicit refusal, never a
+        // silent success that would misread as "stored" / "removed".
+        assert!(live.set_key("sk-test").is_err());
+        assert!(live.clear_key().is_err());
     }
 
     // --- MCP server CRUD (issue #301 slice B) -------------------------------

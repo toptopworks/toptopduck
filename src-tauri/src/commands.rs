@@ -826,27 +826,31 @@ pub fn clear_api_key(live: State<'_, LiveProviderConfig>) -> Result<(), StoreCom
 }
 
 /// Read the effective provider endpoint + the active profile's key status
-/// (ADR-0019/0029/0038/0064). The base URL + model come from the ACTIVE profile
-/// in app-config; the key does not cross IPC -- only a boolean + a keychain
-/// read-fault detail, from the active profile's keychain slot
-/// `key-<active_profile_id>` (issue #275: a read fault rides `keychain_fault`
-/// so the header indicator renders "keychain unavailable", not "no key").
+/// (ADR-0019/0029/0038/0064/0098). The base URL + model come from the ACTIVE
+/// profile in app-config -- `null` when there is no active profile (the legal
+/// zero-profile state, ADR-0098: no endpoint to read, exposed honestly rather
+/// than masked by canonical defaults). The key does not cross IPC -- only a
+/// boolean + a keychain read-fault detail, from the active profile's keychain
+/// slot `key-<active_profile_id>` (issue #275: a read fault rides
+/// `keychain_fault` so the header indicator renders "keychain unavailable",
+/// not "no key").
 #[tauri::command]
 pub fn get_provider_config(
     live: State<'_, LiveProviderConfig>,
 ) -> Result<ProviderConfigView, String> {
     let cfg = live.load();
-    // view() shares the active-missing fallback with the live provider read
-    // path, so the IPC never hands the frontend "" (ADR-0019/0029/0064).
+    // view() single-sources the empty-state policy for both provider-config
+    // IPCs: null endpoints when no profile is active (ADR-0098).
     Ok(cfg.provider.view(live.has_key()))
 }
 
-/// Save the non-secret provider config (ADR-0019/0038/0064) into app-config --
-/// the multi-profile shape `{profiles, active_profile}`. normalize clamps the
-/// active profile's empty endpoint fields to the canonical defaults and
-/// repairs an empty profiles list / dangling active id, so the stored config is
-/// always valid. The API key never enters this path (ADR-0029/0038: key confined
-/// to the OS keychain; app-config has no key field at all).
+/// Save the non-secret provider config (ADR-0019/0038/0064/0098) into
+/// app-config -- the multi-profile shape `{profiles, active_profile}`. An
+/// empty profiles list + a null active pointer is a legal save (ADR-0098);
+/// normalize clamps the active profile's empty endpoint fields to the
+/// canonical defaults and nulls a dangling active id. The API key never
+/// enters this path (ADR-0029/0038: key confined to the OS keychain;
+/// app-config has no key field at all).
 #[tauri::command]
 pub fn set_provider_config(
     live: State<'_, LiveProviderConfig>,

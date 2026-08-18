@@ -28,18 +28,22 @@ export interface ProviderProfile {
   model: string;
 }
 
-// Non-secret multi-profile provider config (ADR-0064): a list of named access
-// profiles plus the id of the active one. Never carries the API key
-// (ADR-0029/0038 -- the key lives only in the OS keychain). Mirrors the Rust
+// Non-secret multi-profile provider config (ADR-0064/0098): a list of named
+// access profiles plus the id of the active one. The profile set may be empty
+// and the active pointer may be null -- zero profiles is a legal persistent
+// state (ADR-0098, the CLI-only user shape); first install ships empty and
+// normalize never re-seeds a skeleton. Never carries the API key (ADR-0029/
+// 0038 -- the key lives only in the OS keychain). Mirrors the Rust
 // ProviderConfig. This is both the app-config storage shape (AppConfig.provider)
 // and the set_provider_config IPC input shape.
 export interface ProviderConfig {
-  // The named access profiles (ADR-0064); at least one in any valid config.
+  // The named access profiles (ADR-0064); may be empty (ADR-0098).
   profiles: ProviderProfile[];
-  // The id of the active profile (ADR-0064: global single active). Its
-  // protocol + endpoint + model drive the live provider; its id drives the
-  // keychain account the key is read from.
-  active_profile: string;
+  // The id of the active profile (ADR-0064: global single active), or null
+  // when no profile is active (the zero-profile state, ADR-0098). When set,
+  // its protocol + endpoint + model drive the live provider; its id drives
+  // the keychain account the key is read from.
+  active_profile: string | null;
 }
 
 // The active profile's key status pair (ADR-0029, issue #275): has_key is
@@ -54,13 +58,16 @@ export interface ProviderConfig {
 // keychain overlay).
 export type KeyStatus = { has_key: boolean; keychain_fault: string | null };
 
-// The get_provider_config view (ADR-0029): effective base URL + model plus the
-// active profile's KeyStatus. Mirrors the Rust ProviderConfigView. The
-// connection row learns whether to prompt for a key without ever receiving it,
-// and distinguishes a read fault from a legitimate no-key state (issue #275).
+// The get_provider_config view (ADR-0029/0098): the active profile's base URL
+// + model plus its KeyStatus. Mirrors the Rust ProviderConfigView. base_url /
+// model are null when no profile is active (the zero-profile state, ADR-0098)
+// -- the honest "not configured" signal, not canonical defaults masquerading
+// as a value. The connection row learns whether to prompt for a key without
+// ever receiving it, and distinguishes a read fault from a legitimate no-key
+// state (issue #275).
 export interface ProviderConfigView extends KeyStatus {
-  base_url: string;
-  model: string;
+  base_url: string | null;
+  model: string | null;
 }
 
 // Per-profile key-status overlay (issue #153, ADR-0064/0029). The Profiles

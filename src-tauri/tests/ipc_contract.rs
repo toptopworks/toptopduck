@@ -1093,17 +1093,20 @@ fn profile_key_status_serializes_as_a_flat_object() {
 #[test]
 fn provider_config_view_serializes_with_keychain_fault() {
     // ProviderConfigView (ADR-0029) crosses IPC as the get_provider_config +
-    // set_provider_config return -- the active profile's effective base URL +
-    // model plus its key status. Issue #275 adds `keychain_fault`: null on a
-    // successful read (has_key authoritative), a string detail when the OS
-    // keychain read itself failed. The shape src/types/provider.ts mirrors:
-    // base_url, model, has_key (boolean), keychain_fault (string | null).
+    // set_provider_config return -- the active profile's base URL + model plus
+    // its key status. Issue #275 adds `keychain_fault`: null on a successful
+    // read (has_key authoritative), a string detail when the OS keychain read
+    // itself failed. ADR-0098 (issue #568) makes base_url / model nullable:
+    // null when no profile is active (the zero-profile state) -- the honest
+    // empty state, not canonical defaults masquerading as a value. The shape
+    // src/types/provider.ts mirrors: base_url (string | null), model
+    // (string | null), has_key (boolean), keychain_fault (string | null).
     // ADR-0029 -- never the key itself.
     use toptopduck_lib::ProviderConfigView;
     assert_wire(
         &ProviderConfigView {
-            base_url: "https://api.anthropic.example".into(),
-            model: "claude-sonnet-4".into(),
+            base_url: Some("https://api.anthropic.example".into()),
+            model: Some("claude-sonnet-4".into()),
             has_key: true,
             keychain_fault: None,
         },
@@ -1111,12 +1114,24 @@ fn provider_config_view_serializes_with_keychain_fault() {
     );
     assert_wire(
         &ProviderConfigView {
-            base_url: "https://api.anthropic.example".into(),
-            model: "claude-sonnet-4".into(),
+            base_url: Some("https://api.anthropic.example".into()),
+            model: Some("claude-sonnet-4".into()),
             has_key: false,
             keychain_fault: None,
         },
         r#"{"base_url":"https://api.anthropic.example","model":"claude-sonnet-4","has_key":false,"keychain_fault":null}"#,
+    );
+    // ADR-0098: the zero-profile state -- null endpoints, no key (no slot to
+    // read), no fault. The frontend reads this as "not configured", never as
+    // a configured default endpoint.
+    assert_wire(
+        &ProviderConfigView {
+            base_url: None,
+            model: None,
+            has_key: false,
+            keychain_fault: None,
+        },
+        r#"{"base_url":null,"model":null,"has_key":false,"keychain_fault":null}"#,
     );
     // Issue #275: a keychain read fault rides keychain_fault (technical English
     // detail), with has_key as a placeholder false -- the status is unknown, not
@@ -1124,12 +1139,36 @@ fn provider_config_view_serializes_with_keychain_fault() {
     // "no key configured".
     assert_wire(
         &ProviderConfigView {
-            base_url: "https://api.anthropic.example".into(),
-            model: "claude-sonnet-4".into(),
+            base_url: Some("https://api.anthropic.example".into()),
+            model: Some("claude-sonnet-4".into()),
             has_key: false,
             keychain_fault: Some("keychain access failed: locked".into()),
         },
         r#"{"base_url":"https://api.anthropic.example","model":"claude-sonnet-4","has_key":false,"keychain_fault":"keychain access failed: locked"}"#,
+    );
+}
+
+#[test]
+fn provider_config_serializes_the_nullable_active_pointer() {
+    // ProviderConfig crosses IPC as the set_provider_config INPUT and rides
+    // inside get_app_config's return. ADR-0098 (issue #568): active_profile is
+    // nullable -- the zero-profile state (empty list + null pointer) is a
+    // legal payload, and a stored id string parses back into Some (pre-0098
+    // files keep their skeleton verbatim). src/types/provider.ts mirrors the
+    // `string | null` union.
+    use toptopduck_lib::{ProfileId, ProviderConfig, ProviderProfile};
+    let zero = ProviderConfig {
+        profiles: Vec::new(),
+        active_profile: None,
+    };
+    assert_wire(&zero, r#"{"profiles":[],"active_profile":null}"#);
+    let seeded = ProviderConfig {
+        profiles: vec![ProviderProfile::default_anthropic()],
+        active_profile: Some(ProfileId("default".into())),
+    };
+    assert_wire(
+        &seeded,
+        r#"{"profiles":[{"id":"default","display_name":"Anthropic","protocol":"anthropic","base_url":"https://api.anthropic.com","model":"claude-sonnet-4-6"}],"active_profile":"default"}"#,
     );
 }
 
