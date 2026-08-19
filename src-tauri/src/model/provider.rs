@@ -224,23 +224,20 @@ impl ProviderConfig {
     /// `LiveProvider` reads this each turn so a protocol switch on the active
     /// profile lands the next turn on the new adapter, no caching.
     pub fn effective_protocol(&self) -> Protocol {
-        match self.active() {
-            Some(profile) => profile.protocol,
-            None => {
-                // No active profile (zero profiles -- legal, ADR-0098 -- or a
-                // dangling pointer normalize nulls): log the fallback so the
-                // state is observable. The turn refuses as NotWired on the
-                // missing key before any request goes out; this keeps the
-                // trait read total, and a wrong-protocol turn is hard to
-                // diagnose from the bare NotWired/Unavailable it produces
-                // downstream.
-                log::warn!(
-                    "no active profile (empty set or dangling pointer); falling \
+        self.active().map(|p| p.protocol).unwrap_or_else(|| {
+            // No active profile (zero profiles -- legal, ADR-0098 -- or a
+            // dangling pointer normalize nulls): log the fallback so the
+            // state is observable. The turn refuses as NotWired on the
+            // missing key before any request goes out; this keeps the
+            // trait read total, and a wrong-protocol turn is hard to
+            // diagnose from the bare NotWired/Unavailable it produces
+            // downstream.
+            log::warn!(
+                "no active profile (empty set or dangling pointer); falling \
                      back to Anthropic protocol for this turn"
-                );
-                Protocol::Anthropic
-            }
-        }
+            );
+            Protocol::Anthropic
+        })
     }
 
     /// The IPC-shaped view of the active profile's endpoint + key status
@@ -258,9 +255,13 @@ impl ProviderConfig {
             Ok(has_key) => (has_key, None),
             Err(detail) => (false, Some(detail)),
         };
+        // One resolution for both fields: they derive from the SAME profile,
+        // and a single bind makes that shared provenance explicit (instead of
+        // two independent lookups the reader must reconcile).
+        let active = self.active();
         ProviderConfigView {
-            base_url: self.active().map(|p| p.base_url.clone()),
-            model: self.active().map(|p| p.model.clone()),
+            base_url: active.map(|p| p.base_url.clone()),
+            model: active.map(|p| p.model.clone()),
             has_key,
             keychain_fault,
         }

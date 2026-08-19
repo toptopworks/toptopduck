@@ -79,6 +79,19 @@ impl LiveProviderConfig {
 
     // --- Key (delegated to the OS keychain, ADR-0029) ------------------------
 
+    /// The bare `active_profile` pointer behind the key paths: one load +
+    /// field extract, no resolution against the profile list (that is
+    /// [`crate::model::ProviderConfig::active`]'s job). `None` iff the
+    /// pointer is null: the legal zero-profile state (ADR-0098), or a
+    /// dangling pointer a store's normalize has already nulled. A
+    /// not-yet-nulled dangling pointer comes back as-is and addresses an
+    /// orphan slot (`key-<id>`; ADR-0064 sanctions orphans) until the next
+    /// store's normalize nulls it. Each caller translates `None` (no slot to
+    /// address) per its own contract: honest no-key / typed refusal / no key.
+    fn active_profile_id(&self) -> Option<ProfileId> {
+        self.load().provider.active_profile
+    }
+
     /// Reads the ACTIVE profile's keychain slot (`key-<active_profile_id>`,
     /// ADR-0064 per-profile slot) and propagates the outcome. `Ok(bool)` is the
     /// authoritative has-key state; `Err(detail)` means the OS keychain read
@@ -88,40 +101,38 @@ impl LiveProviderConfig {
     /// into [`crate::model::ProviderConfig::view`], which maps a fault onto the
     /// view's `keychain_fault` so the header indicator renders "keychain
     /// unavailable" instead of misreading the fault as "no key configured"
-    /// (issue #275). With no active profile (ADR-0098 zero-profile state) there
-    /// is no slot to read: `Ok(false)` -- the honest no-key state, not a fault.
+    /// (issue #275). With no active profile ([`Self::active_profile_id`]) there is no
+    /// slot to read: `Ok(false)` -- the honest no-key state, not a fault.
     pub fn has_key(&self) -> Result<bool, String> {
-        match self.load().provider.active_profile.as_ref() {
-            Some(id) => self.keychain.has_key_for(id),
+        match self.active_profile_id() {
+            Some(id) => self.keychain.has_key_for(&id),
             None => Ok(false),
         }
     }
 
     /// Store the API key for the ACTIVE profile (one-shot frontend -> Rust
     /// transfer, ADR-0029; ADR-0064 per-profile slot). With no active profile
-    /// (ADR-0098) there is no slot to write: an explicit typed refusal rather
-    /// than a silent success that would misread as "stored".
+    /// ([`Self::active_profile_id`]) there is no slot to write: an explicit typed
+    /// refusal rather than a silent success that would misread as "stored".
     pub fn set_key(&self, key: &str) -> Result<(), ActiveKeyError> {
-        match self.load().provider.active_profile.as_ref() {
-            Some(id) => self
-                .keychain
-                .set_key_for(id, key)
-                .map_err(ActiveKeyError::Keychain),
-            None => Err(ActiveKeyError::NoActiveProfile),
-        }
+        let id = self
+            .active_profile_id()
+            .ok_or(ActiveKeyError::NoActiveProfile)?;
+        self.keychain
+            .set_key_for(&id, key)
+            .map_err(ActiveKeyError::Keychain)
     }
 
     /// Remove the stored API key for the ACTIVE profile (idempotent). With no
-    /// active profile (ADR-0098) the operation has no referent: an explicit
-    /// typed refusal (the caller cannot have meant any specific slot).
+    /// active profile ([`Self::active_profile_id`]) the operation has no referent: an
+    /// explicit typed refusal (the caller cannot have meant any specific slot).
     pub fn clear_key(&self) -> Result<(), ActiveKeyError> {
-        match self.load().provider.active_profile.as_ref() {
-            Some(id) => self
-                .keychain
-                .clear_key_for(id)
-                .map_err(ActiveKeyError::Keychain),
-            None => Err(ActiveKeyError::NoActiveProfile),
-        }
+        let id = self
+            .active_profile_id()
+            .ok_or(ActiveKeyError::NoActiveProfile)?;
+        self.keychain
+            .clear_key_for(&id)
+            .map_err(ActiveKeyError::Keychain)
     }
 
     // --- Per-profile key (issue #153, ADR-0064) ------------------------------
@@ -483,12 +494,11 @@ impl ProviderConfigSource for LiveProviderConfig {
         // per-turn honest-degrade leaves a trail (mirrors the has_key_for log);
         // the signature stays Option<String> (per-turn cannot carry the error,
         // and test_profile is the diagnostic entry point).
-        let cfg = self.load();
-        // Zero-profile state (legal, ADR-0098) or a nulled dangling pointer: no
-        // slot to read, so no key (`?` returns None) -- the turn refuses as
-        // NotWired, the honest built-in-not-configured outcome.
-        let active_id = cfg.provider.active_profile.as_ref()?;
-        match self.keychain.fetch_key_for(active_id) {
+        // No active profile ([`Self::active_profile_id`]): no slot to read, so no key
+        // (`?` returns None) -- the turn refuses as NotWired, the honest
+        // built-in-not-configured outcome.
+        let active_id = self.active_profile_id()?;
+        match self.keychain.fetch_key_for(&active_id) {
             Ok(opt) => opt,
             Err(e) => {
                 log::warn!(
@@ -585,11 +595,10 @@ mod tests {
     fn store_persists_the_zero_profile_state_across_a_reload() {
         // ADR-0098: deleting every profile persists -- the store path must not
         // resurrect a skeleton (the pre-0098 normalize re-seeded), and a
-        // reload reads the same zero-profile state back.
+        // reload reads the same zero-profile state back. defaults() IS the
+        // zero-profile shape, so no setup teardown is needed.
         let (_dir, live) = live();
-        let mut cfg = AppConfig::defaults();
-        cfg.provider.profiles.clear();
-        cfg.provider.active_profile = None;
+        let cfg = AppConfig::defaults();
         let stored = live.store(cfg).expect("store");
         assert!(stored.provider.profiles.is_empty());
         assert_eq!(stored.provider.active_profile, None);

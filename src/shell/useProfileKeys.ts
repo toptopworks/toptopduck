@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { listProviderProfiles } from "../api";
+import { findActiveProfile } from "../lib/findActiveProfile";
 import { log } from "../lib/log";
 import type { ProfileKeyStatus, ProviderConfig } from "../types/provider";
 
@@ -85,8 +86,9 @@ export function useProfileKeys(
     };
   }, [epoch, profilesLen]);
 
-  const activeProfile =
-    provider?.profiles.find((p) => p.id === provider.active_profile) ?? null;
+  const activeProfile = provider
+    ? (findActiveProfile(provider) ?? null)
+    : null;
   const activeStatus = activeProfile
     ? snapshot.keys[activeProfile.id]
     : undefined;
