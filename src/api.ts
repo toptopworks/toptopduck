@@ -406,8 +406,9 @@ export async function setDefaultRuntime(runtime: DefaultRuntime): Promise<AppCon
 
 // --- Startup model posture backfill (ADR-0100, issue #581) ------------------
 //
-// Session-AGNOSTIC (ADR-0056): keyed by adapter id, not sessionId. The picker
-// wiring lands with #574; this slice ships the backend surface + wrappers.
+// Session-AGNOSTIC (ADR-0056): keyed by adapter id, not sessionId. The
+// composer bar reads the backfill entry via getLastModelPosture and clears
+// it via clearLastModelPosture.
 
 // Read one adapter's backfill posture: the model + thought-level a NEW session
 // on that adapter starts with (selected + injected). Never refuses -- no entry

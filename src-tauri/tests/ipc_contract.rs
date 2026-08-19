@@ -1263,6 +1263,44 @@ fn default_runtime_wire_shape() {
     );
 }
 
+/// ModelPosture (ADR-0100, issue #581) crosses IPC as the return of
+/// `get_last_model_posture` and nested inside `AppConfig.last_model_postures`
+/// (returned by `clear_last_model_posture` / `get_app_config` /
+/// `set_app_config`) -- flat snake_case, both fields Option, the shape
+/// `src/types/app-config.ts` mirrors. Pin the set form and the cleared /
+/// absent form (all-null: the "default (recommended)" unselected start) so a
+/// serde attribute change fails before the hand-mirror drifts.
+#[test]
+fn model_posture_wire_shape() {
+    use toptopduck_lib::app_config::ModelPosture;
+    assert_wire(
+        &ModelPosture {
+            model: Some("gemini-2.5-pro".into()),
+            thought_level: Some("high".into()),
+        },
+        r#"{"model":"gemini-2.5-pro","thought_level":"high"}"#,
+    );
+    assert_wire(
+        &ModelPosture::default(),
+        r#"{"model":null,"thought_level":null}"#,
+    );
+}
+
+/// `AppConfig.last_model_postures` serializes ALWAYS (no
+/// `skip_serializing_if`): the frontend mirror declares the field required,
+/// and an absent key would read as `undefined` through the hand-mirror. Pin
+/// the empty-map form on defaults.
+#[test]
+fn app_config_always_serializes_last_model_postures() {
+    use toptopduck_lib::app_config::AppConfig;
+    let value = serde_json::to_value(AppConfig::defaults()).expect("serialize");
+    assert_eq!(
+        value["last_model_postures"],
+        serde_json::json!({}),
+        "the map key is always present, empty by default"
+    );
+}
+
 /// AdapterEntry (issue #353/#489, ADR-0083) crosses IPC as a flat snake_case
 /// struct -- the shape `src/types/runtime.ts` mirrors. `binary_path` rides
 /// `Option<PathBuf>` (a JSON string when Some, null when None) with

@@ -203,16 +203,16 @@ pub fn create_session(
     let handle = store.get(&id)?;
     // ADR-0100 Decision 1 (issue #581): the fresh session's startup model /
     // thought-level = the startup adapter's backfill entry -- SELECTED +
-    // injected, not a display-only hint (`ask` mirrors the handle into the
-    // Session at turn top, the same path an explicit set takes). No entry
-    // (never chosen / cleared) or a degraded built-in start stays unselected.
-    // Resume never lands here: it restores the session's own posture
-    // (ADR-0095 Decision 6) and never consults the backfill map.
+    // injected, not a display-only hint. The pair lands on BOTH slots (the
+    // handle mirror the lock-light reads serve + the Session storage the
+    // recipe persists) BEFORE the initial bind -- see
+    // [`apply_startup_posture`] -- so the first recipe already carries it
+    // and a restart before the first turn resumes selected (ADR-0095
+    // Decision 6). No entry (never chosen / cleared) or a degraded built-in
+    // start stays unselected. Resume never lands here: it restores the
+    // session's own posture and never consults the backfill map.
     let posture = startup_model_posture(startup.as_ref(), live.inner());
     handle.set_runtime_choice(startup);
-    if posture != ModelPosture::default() {
-        handle.set_external_model_config(posture.model, posture.thought_level);
-    }
     // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
     // The UUID directory name is the stable identity; session.duck is the
     // fixed recipe filename.
@@ -230,6 +230,9 @@ pub fn create_session(
         // Bind immediately (ADR-0089 Decision 1): empty session_name is the
         // placeholder; the first terminal turn's auto-naming overwrites it.
         let handle = store.get(&id)?;
+        // Seat the backfill posture BEFORE the bind so the initial recipe
+        // persists it (ADR-0100 Decision 1; see the helper's doc).
+        apply_startup_posture(&handle, &posture)?;
         let mut s = handle.session_lock()?;
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
@@ -2694,11 +2697,32 @@ fn startup_model_posture(startup: Option<&AdapterSpec>, live: &LiveProviderConfi
     }
 }
 
+/// Seat the resolved startup posture on a fresh session (ADR-0100 Decision 1,
+/// issue #581): the pair lands on BOTH slots at once -- the handle-held slot
+/// the lock-light reads serve and the Session storage the recipe persists.
+/// Called before the initial `bind_duck`, so the first recipe already carries
+/// the posture: without the Session-side half the injection would reach the
+/// recipe only at the first turn top (the `ask` mirror), and a restart
+/// before then would resume the session unselected even though the backfill
+/// entry exists (ADR-0095 Decision 6 keeps only what the recipe holds).
+/// Unconditional: the empty posture rewrites the same (None, None) a fresh
+/// session starts with, so an absent / cleared entry keeps the session
+/// unselected without a guard.
+fn apply_startup_posture(
+    handle: &SessionHandle,
+    posture: &ModelPosture,
+) -> Result<(), SessionError> {
+    handle.set_external_model_config(posture.model.clone(), posture.thought_level.clone());
+    let mut s = handle.session_lock()?;
+    s.set_external_model_config(posture.model.clone(), posture.thought_level.clone());
+    Ok(())
+}
+
 /// Read one adapter's backfill posture entry (ADR-0100, issue #581): the
 /// startup model / thought-level a NEW session on that adapter starts with.
-/// The cold-start composer bar consumes it to seed its pending posture (the
-/// wiring lands with #574). Lock-light honest-degrade read; no entry (or a
-/// cleared one) reads as the empty posture -- this command never refuses.
+/// The cold-start composer bar seeds its pending posture from this entry.
+/// Lock-light honest-degrade read; no entry (or a cleared one) reads as the
+/// empty posture -- this command never refuses.
 #[tauri::command]
 pub fn get_last_model_posture(
     live: State<'_, LiveProviderConfig>,
@@ -3380,6 +3404,68 @@ mod tests {
         );
     }
 
+    /// A fresh session handle for the injection seam tests (the store is
+    /// returned alongside so it outlives the handle the test drives).
+    fn posture_handle() -> (SessionStore, Arc<SessionHandle>) {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        (store, handle)
+    }
+
+    #[test]
+    fn apply_startup_posture_seats_the_entry_on_both_slots() {
+        // The injection join (ADR-0100 Decision 1): the pair lands on the
+        // handle-held slot the lock-light reads serve AND the Session
+        // storage the recipe persists -- so the initial bind already
+        // carries the posture and a pre-first-turn restart resumes
+        // selected (ADR-0095 Decision 6).
+        let (_store, handle) = posture_handle();
+        apply_startup_posture(
+            &handle,
+            &ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
+        )
+        .expect("apply the startup posture");
+        assert_eq!(
+            handle.external_model_config(),
+            (Some("gemini-2.5-pro".into()), Some("high".into())),
+            "the handle slot serves the lock-light reads"
+        );
+        let s = handle.session_lock().expect("session lock");
+        assert_eq!(
+            s.runtime_model_config().model.as_deref(),
+            Some("gemini-2.5-pro"),
+            "the Session storage feeds the recipe"
+        );
+        assert_eq!(
+            s.runtime_model_config().thought_level.as_deref(),
+            Some("high"),
+            "the Session storage feeds the recipe"
+        );
+    }
+
+    #[test]
+    fn apply_startup_posture_empty_entry_keeps_the_session_unselected() {
+        // An absent / cleared entry applies the empty posture, which
+        // rewrites the fresh session's own (None, None) -- the session
+        // starts unselected without a guard (the "default (recommended)"
+        // start).
+        let (_store, handle) = posture_handle();
+        apply_startup_posture(&handle, &ModelPosture::default()).expect("apply the empty posture");
+        assert_eq!(handle.external_model_config(), (None, None));
+        let s = handle.session_lock().expect("session lock");
+        assert!(s.runtime_model_config().model.is_none());
+        assert!(s.runtime_model_config().thought_level.is_none());
+    }
+
     #[test]
     fn record_last_model_posture_lands_the_pair_under_the_adapter() {
         // The single write point: the post-set pair lands on the runtime
@@ -3407,6 +3493,33 @@ mod tests {
         // posture is a no-op there, ADR-0095) -- nothing is written at all.
         let (_dir, live) = posture_live();
         record_last_model_posture(&live, None, Some("some-model".into()), None);
+        assert!(live.load().last_model_postures.is_empty());
+    }
+
+    #[test]
+    fn record_last_model_posture_never_fails_the_set_on_config_write_failure() {
+        // The best-effort contract (ADR-0100 Decision 3): the session
+        // posture already landed, so a config-write failure only costs the
+        // NEXT startup's convenience injection -- warn, never fail the set.
+        // A config path under a nonexistent parent directory makes write_at
+        // fail deterministically on every platform; the helper must return
+        // normally. The `-> ()` signature is the compile-time pin: error
+        // propagation would need a signature change that turns this call
+        // red.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore::new(),
+            dir.path().join("nonexistent").join("config.json"),
+        );
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        record_last_model_posture(
+            &live,
+            Some(gemini),
+            Some("gemini-2.5-pro".into()),
+            Some("high".into()),
+        );
+        // The failed write landed nothing: the honest-degrade read sees no
+        // map at all.
         assert!(live.load().last_model_postures.is_empty());
     }
 
