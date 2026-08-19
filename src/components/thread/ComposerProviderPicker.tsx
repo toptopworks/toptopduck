@@ -32,6 +32,7 @@ import type {
 import { RUNTIME_CHOICE_DEFAULT } from "../../types/runtime";
 import {
   ComposerPostureTrigger,
+  type CatalogNote,
   type PostureCatalog,
 } from "./ComposerPostureTrigger";
 
@@ -308,6 +309,15 @@ export function ComposerProviderPicker({
   // replaces it after this runtime's next turn).
   const acpCatalogFromProbe =
     acpCatalog != null && discovered == null && probeEntry != null;
+
+  // The one provenance note the posture trigger renders: the two predicates
+  // are complementary over `discovered` (stale requires a session-owned
+  // discovery, probe-fed requires none), so at most one ever fires.
+  const catalogNote: CatalogNote = catalogProvenanceStale
+    ? "stale-runtime"
+    : acpCatalogFromProbe
+      ? "from-probe"
+      : null;
 
   const perModelCatalog =
     isPerModelCatalogAdapter && probeEntry
@@ -725,8 +735,7 @@ export function ComposerProviderPicker({
         setFault={modelSetError}
         persistFault={modelPersistFault}
         persistSuspended={modelPersistSuspended}
-        staleCatalogNote={catalogProvenanceStale}
-        catalogFromProbeNote={acpCatalogFromProbe}
+        catalogNote={catalogNote}
         disabled={modelSwitching}
       />
       <Popover open={open} onOpenChange={setOpen}>
