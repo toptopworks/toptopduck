@@ -672,6 +672,66 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     }
   });
 
+  it("an unmodified submit on a detected external default bypasses the key gate even with a keyless profile (issue #572)", async () => {
+    // The gate's keyless redirect fires only on the built-in KIND, and with
+    // an external default_runtime the UNMODIFIED posture is already external:
+    // has_key:false must not open Settings — the backend resolves the startup
+    // runtime itself, so the submit mints with no runtime write. This is the
+    // cell the factory's has_key:true default leaves unpinned: the gate is
+    // under real tension here and only here.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    // No key — the gate would fire if the effective runtime were built-in.
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: null },
+    ]);
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // The trigger opens on the resolved external default...
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // ...and the keyless overlay settles BEFORE the submit, so the gate
+      // state is real when the submit fires (useProfileKeys fetches it too).
+      await waitFor(() => expect(listProviderProfiles).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      // Submit straight away: the external effective runtime keeps the gate
+      // shut — no Settings redirect, the session mints with no runtime write.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      // The queued one-time rejection must be consumed before the test ends:
+      // the once queue survives clearAllMocks, and a leaked reject would
+      // settle the NEXT test's first turn mid-flight (#501 leak shape). The
+      // ask call itself is the dequeue point, so wait for it directly — a
+      // "submit button back" wait can pass before the turn even starts.
+      await waitFor(() =>
+        expect(vi.mocked(askQuestion).mock.calls.length).toBe(1),
+      );
+      expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument();
+      expect(setSessionRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
   it("an explicit built-in pick on an external default overwrites the startup resolution (issue #572)", async () => {
     // The unset/explicit distinction survives the mint: with default_runtime
     // = external(detected), picking Built-in on the cold-start picker and
@@ -709,6 +769,84 @@ describe("App multi-session shell (issue #81 ACs)", () => {
           kind: "built_in",
         }),
       );
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("the consumed posture resets: a revisit to the cold-start bar re-seeds from the resolved default (issue #572)", async () => {
+    // ADR-0092 D4 / ADR-0098 D4: minting consumes the pending posture, so the
+    // explicit built-in pick from the previous visit must NOT survive — back
+    // on the cold-start bar the trigger re-reads the resolved external
+    // default, and an unmodified second submit writes no runtime (a stale
+    // pick would otherwise display, silently write built_in, and re-arm the
+    // key gate).
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    // The creation turn rejects so it settles immediately (openSession
+    // pattern). Only visit 1's mint needs one: visit 2 mints the SAME session
+    // id (the mock always returns sess-1), so the keep-alive pane is reused
+    // and no second creation turn ever fires.
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // Visit 1: explicitly pick built-in against the external default and
+      // mint — the pick lands as one setSessionRuntime write.
+      fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
+      const builtinHeader = await screen.findByRole("button", { name: "内置" });
+      fireEvent.click(builtinHeader);
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "first question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "built_in",
+        }),
+      );
+      // Let the mint settle: the posture reset lands in the mint's .then,
+      // before the bar returns to idle.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+      );
+      // Navigate back to the centered cold-start bar (sidebar "+").
+      fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+      await waitFor(() => expect(screen.getByText(/你想分析什么/)).toBeInTheDocument());
+      // The trigger re-seeds from the resolved default — the consumed
+      // built-in pick is gone.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      expect(
+        screen.queryByRole("button", { name: "运行时：Anthropic" }),
+      ).not.toBeInTheDocument();
+      // Visit 2: an unmodified submit mints again WITHOUT a runtime write —
+      // setSessionRuntime stays at the single visit-1 call.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "second question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+      // Visit 2's runtime write decision happens inside its mint (before the
+      // register), so let the mint's promise chain flush before pinning the
+      // count — setSessionRuntime stays at the single visit-1 call.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(setSessionRuntime).toHaveBeenCalledTimes(1);
     } finally {
       vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
       vi.mocked(listAdapters).mockResolvedValue([]);

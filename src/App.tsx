@@ -529,10 +529,9 @@ export default function App() {
   // app-level state (active profile + writes + the settings-open path)
   // rendered at the bar's trailing slot in BOTH positions — session-active
   // and cold start (sessionId null reads the resolved default_runtime seed
-  // and writes to
-  // the shell-level pending state, Decision 6 no-degraded-controls). Absent
-  // until app-config resolves. Explicitly typed so the render site spreads it
-  // without an assertion.
+  // and writes to the shell-level pending state, Decision 6
+  // no-degraded-controls). Absent until app-config resolves. Explicitly
+  // typed so the render site spreads it without an assertion.
   const providerPicker: Omit<ComposerProviderPickerProps, "sessionId" | "onPendingRuntimeChange"> | undefined = appConfig
     ? {
         provider: appConfig.provider,
