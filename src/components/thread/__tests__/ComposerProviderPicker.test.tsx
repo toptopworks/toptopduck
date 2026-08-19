@@ -506,13 +506,34 @@ async function renderExternalPicker(
   await screen.findByRole("button", { name: /Runtime: qwen-code/ });
 }
 
-describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3)", () => {
+describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3, issue #573)", () => {
   it("shows the active profile's model as a static label on the built-in runtime", () => {
     renderPicker(pickerJsx());
     // Static: the four-state label renders, but NOT as a button (no arrow,
     // no menu -- profile.model is configured in Settings, ADR-0099).
     expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
+  });
+
+  it("switches the label with the runtime within one popover visit", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    renderPicker(pickerJsx());
+    // Built-in: the label is the active profile's model.
+    expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
+    await openPopover();
+    await selectOption(
+      screen.getByRole("combobox", { name: CLI_SELECT }),
+      /qwen-code/,
+    );
+    // External with no catalog: the label switches to the CLI default and
+    // the profile model readout is gone.
+    expect(await screen.findByText("Default (recommended)")).toBeTruthy();
+    expect(screen.queryByText("claude-sonnet-4-6")).toBeNull();
+    // Back to built-in via the level-1 row: the label returns to the
+    // profile model and the CLI default readout is gone.
+    fireEvent.click(screen.getByRole("button", { name: "API Access" }));
+    expect(await screen.findByText("claude-sonnet-4-6")).toBeTruthy();
+    expect(screen.queryByText("Default (recommended)")).toBeNull();
   });
 
   it("shows an em dash when the active profile has no model", () => {
@@ -525,12 +546,36 @@ describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3)",
       pickerJsx({ provider: { profiles: [], active_profile: null } }),
     );
     expect(screen.getByText("Not configured")).toBeTruthy();
+    // "Default (recommended)" is the CLI unselected state's copy: the
+    // built-in zero-profile state must never borrow it (ADR-0100 anchor).
+    expect(screen.queryByText("Default (recommended)")).toBeNull();
   });
 
   it("shows Default (recommended) as a static label on a catalog-less external runtime", async () => {
     await renderExternalPicker();
     expect(screen.getByText("Default (recommended)")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
+  });
+
+  it("shows Default (recommended), not the CLI current, when a catalog exists but nothing is selected", async () => {
+    await renderExternalPicker({}, { cached_discovered: CATALOG });
+    // The label must not adopt the CLI-reported current (fake-opus): with
+    // nothing held, the unselected state reads as the CLI default and the
+    // directory stays a pick-list, not an auto-selection.
+    expect(
+      screen.getByRole("button", { name: "Model: Default (recommended)" }),
+    ).toBeTruthy();
+  });
+
+  it("places no check on any catalog item while nothing is selected", async () => {
+    await renderExternalPicker({}, { cached_discovered: CATALOG });
+    // Neither dimension auto-selects its CLI-reported current: no
+    // data-selected lands on any menu row (clearing rows carry none).
+    const items = screen.getAllByRole("menuitem");
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item.getAttribute("data-selected")).not.toBe("true");
+    }
   });
 
   it("shows the held pair when a posture is selected", async () => {
@@ -552,6 +597,17 @@ describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3)",
     );
     expect(
       screen.getByRole("button", { name: "Model: fake-opus" }),
+    ).toBeTruthy();
+  });
+
+  it("updates the label in place when a model is picked from the catalog", async () => {
+    await renderExternalPicker({}, { cached_discovered: CATALOG });
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    // The optimistic cache seed flips the label in the same gesture -- the
+    // "this pick" source of the selected state (ADR-0100 Decision 1), with
+    // no refetch round-trip.
+    expect(
+      await screen.findByRole("button", { name: "Model: fake-sonnet" }),
     ).toBeTruthy();
   });
 
