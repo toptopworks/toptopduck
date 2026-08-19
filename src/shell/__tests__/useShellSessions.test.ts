@@ -96,14 +96,15 @@ import { mountComposerBarStub } from "../../__tests__/setup/barRectStub";
 import { useShellSessions } from "../useShellSessions";
 import type { PendingComposerPosture } from "../useShellSessions";
 import { AUTH_MODE_DEFAULT } from "../../types/approval";
-import { RUNTIME_CHOICE_DEFAULT } from "../../types/runtime";
 
 const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
 
 // The backend-default composer posture. Passing it to the cold-start mint
-// paths exercises the no-op posture branch (no runtime / auth-mode IPC).
+// paths exercises the no-op posture branch (no runtime / auth-mode IPC):
+// runtime null = the user never picked (the backend's own startup
+// resolution already applies, issue #572).
 const DEFAULT_POSTURE: PendingComposerPosture = {
-  runtime: RUNTIME_CHOICE_DEFAULT,
+  runtime: null,
   authMode: AUTH_MODE_DEFAULT,
   skills: [],
   mcpServers: [],
@@ -206,6 +207,30 @@ describe("useShellSessions", () => {
     expect(toggleMcpServer).not.toHaveBeenCalled();
   });
 
+  it("createSessionWithQuestion writes an explicit built-in pick while null stays unwritten (issue #572)", async () => {
+    // The unset marker is null, NOT the built-in value: with an external
+    // default_runtime the backend already started the session externally, so
+    // null skips the write -- while an EXPLICIT built-in pick must overwrite
+    // that start (value equality against a constant cannot tell the two
+    // apart, unlike authMode whose default is a true constant).
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "q",
+        {
+          runtime: { kind: "built_in" },
+          authMode: AUTH_MODE_DEFAULT,
+          skills: [],
+          mcpServers: [],
+        },
+        [],
+      );
+    });
+    expect(setSessionRuntime).toHaveBeenCalledWith("s1", { kind: "built_in" });
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
   it("createSessionWithQuestion mounts pending skills then enables pending MCP servers BEFORE registering (#500)", async () => {
     // Draft-mode picks land as one IPC per entry, skills BEFORE MCP enables (a
     // skill-declared server the user also picked lands either way), and all of
@@ -220,7 +245,7 @@ describe("useShellSessions", () => {
       await result.current.createSessionWithQuestion(
         "q",
         {
-          runtime: RUNTIME_CHOICE_DEFAULT,
+          runtime: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["data-cleaning", "charting"],
           mcpServers: ["srv-a"],
@@ -253,7 +278,7 @@ describe("useShellSessions", () => {
       created = await result.current.createSessionWithQuestion(
         "q",
         {
-          runtime: RUNTIME_CHOICE_DEFAULT,
+          runtime: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["broken", "charting"],
           mcpServers: ["srv-a"],

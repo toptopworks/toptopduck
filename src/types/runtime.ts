@@ -5,6 +5,8 @@
 // via `set_session_runtime`; the next turn dispatches on the selection
 // (built-in BYOK loop vs external ACP engine) at the turn boundary.
 
+import type { DefaultRuntime } from "./app-config";
+
 // The session's runtime choice for the next turn. Adjacently-tagged
 // (`tag="kind", content="data"`, `rename_all="snake_case"`): a unit
 // `built_in` (no content key) or an `external` carrying the adapter id under
@@ -43,6 +45,26 @@ export interface AdapterEntry {
 export const RUNTIME_CHOICE_DEFAULT = {
   kind: "built_in",
 } as const satisfies SessionRuntimeChoice;
+
+// Resolve the runtime a cold start opens on, from the persisted default + the
+// detected adapter table (ADR-0098 Decisions 2/3, issue #572) -- the frontend
+// mirror of the Rust `commands::resolve_default_runtime`. Degrades to
+// built-in when the default names an adapter that is undetected, outside the
+// table, or when the table has not loaded yet (an unloaded table is
+// deliberately indistinguishable from an empty one: the cold-start picker
+// renders the degraded built-in form until it lands). The backend's own
+// create_session resolution stays the startup truth -- this projection only
+// drives the cold-start display + the submit-time gate.
+export function resolveStartupRuntime(
+  defaultRuntime: DefaultRuntime | undefined,
+  adapters: AdapterEntry[] | undefined,
+): SessionRuntimeChoice {
+  if (defaultRuntime?.kind !== "external") return RUNTIME_CHOICE_DEFAULT;
+  const named = adapters?.find((a) => a.id === defaultRuntime.data);
+  return named?.detected
+    ? { kind: "external", data: defaultRuntime.data }
+    : RUNTIME_CHOICE_DEFAULT;
+}
 
 // The discovered model + thought-level catalog an ACP handshake reported
 // (ADR-0095). Mirrors the Rust `DiscoveredRuntime` (snake_case serde), pinned

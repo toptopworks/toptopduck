@@ -627,6 +627,28 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     expect(setSessionRuntime).not.toHaveBeenCalled();
   });
 
+  it("renders the pendingRuntime prop in the trigger name when sessionId is null (issue #572)", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([
+      adapter("qwen-code", "qwen-code", true),
+    ]);
+    renderPicker(
+      <ComposerProviderPicker
+        sessionId={null}
+        provider={pickerProvider()}
+        onSwitchActive={() => {}}
+        onSwitchModel={() => {}}
+        onOpenSettings={vi.fn()}
+        onPendingRuntimeChange={vi.fn()}
+        pendingRuntime={{ kind: "external", data: "qwen-code" }}
+      />,
+    );
+    // The trigger carries the shell-held pending value from the start: the
+    // resolved default_runtime before any pick, the pick after it.
+    expect(
+      await screen.findByRole("button", { name: "Runtime: qwen-code" }),
+    ).toBeInTheDocument();
+  });
+
   it("selecting the built-in header writes the built-in choice via setSessionRuntime", async () => {
     // Start on the external runtime so reverting to built-in is a real switch.
     const external: SessionRuntimeChoice = { kind: "external", data: "qwen-code" };
