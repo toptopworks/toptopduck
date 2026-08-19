@@ -79,13 +79,15 @@ impl LiveProviderConfig {
 
     // --- Key (delegated to the OS keychain, ADR-0029) ------------------------
 
-    /// The active profile id for the key paths: one load + pointer extract
-    /// shared by `has_key` / `set_key` / `clear_key` and the per-turn
-    /// `api_key`. `None` means there is no keychain slot to address -- either
-    /// the legal zero-profile state (ADR-0098) or a dangling pointer (a null
-    /// pointer never matches any profile id; normalize nulls it on the next
-    /// store). Each caller translates that no-slot outcome per its own
-    /// contract: `Ok(false)` / [`ActiveKeyError::NoActiveProfile`] / `None`.
+    /// The bare `active_profile` pointer behind the key paths: one load +
+    /// field extract, no resolution against the profile list (that is
+    /// [`crate::model::ProviderConfig::active`]'s job). `None` iff the
+    /// pointer is null: the legal zero-profile state (ADR-0098), or a
+    /// dangling pointer a store's normalize has already nulled. A
+    /// not-yet-nulled dangling pointer comes back as-is and addresses an
+    /// orphan slot (`key-<id>`; ADR-0064 sanctions orphans) until the next
+    /// store's normalize nulls it. Each caller translates `None` (no slot to
+    /// address) per its own contract: honest no-key / typed refusal / no key.
     fn active_id(&self) -> Option<ProfileId> {
         self.load().provider.active_profile
     }
