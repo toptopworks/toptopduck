@@ -88,7 +88,7 @@ impl LiveProviderConfig {
     /// orphan slot (`key-<id>`; ADR-0064 sanctions orphans) until the next
     /// store's normalize nulls it. Each caller translates `None` (no slot to
     /// address) per its own contract: honest no-key / typed refusal / no key.
-    fn active_id(&self) -> Option<ProfileId> {
+    fn active_profile_id(&self) -> Option<ProfileId> {
         self.load().provider.active_profile
     }
 
@@ -101,10 +101,10 @@ impl LiveProviderConfig {
     /// into [`crate::model::ProviderConfig::view`], which maps a fault onto the
     /// view's `keychain_fault` so the header indicator renders "keychain
     /// unavailable" instead of misreading the fault as "no key configured"
-    /// (issue #275). With no active profile ([`Self::active_id`]) there is no
+    /// (issue #275). With no active profile ([`Self::active_profile_id`]) there is no
     /// slot to read: `Ok(false)` -- the honest no-key state, not a fault.
     pub fn has_key(&self) -> Result<bool, String> {
-        match self.active_id() {
+        match self.active_profile_id() {
             Some(id) => self.keychain.has_key_for(&id),
             None => Ok(false),
         }
@@ -112,20 +112,24 @@ impl LiveProviderConfig {
 
     /// Store the API key for the ACTIVE profile (one-shot frontend -> Rust
     /// transfer, ADR-0029; ADR-0064 per-profile slot). With no active profile
-    /// ([`Self::active_id`]) there is no slot to write: an explicit typed
+    /// ([`Self::active_profile_id`]) there is no slot to write: an explicit typed
     /// refusal rather than a silent success that would misread as "stored".
     pub fn set_key(&self, key: &str) -> Result<(), ActiveKeyError> {
-        let id = self.active_id().ok_or(ActiveKeyError::NoActiveProfile)?;
+        let id = self
+            .active_profile_id()
+            .ok_or(ActiveKeyError::NoActiveProfile)?;
         self.keychain
             .set_key_for(&id, key)
             .map_err(ActiveKeyError::Keychain)
     }
 
     /// Remove the stored API key for the ACTIVE profile (idempotent). With no
-    /// active profile ([`Self::active_id`]) the operation has no referent: an
+    /// active profile ([`Self::active_profile_id`]) the operation has no referent: an
     /// explicit typed refusal (the caller cannot have meant any specific slot).
     pub fn clear_key(&self) -> Result<(), ActiveKeyError> {
-        let id = self.active_id().ok_or(ActiveKeyError::NoActiveProfile)?;
+        let id = self
+            .active_profile_id()
+            .ok_or(ActiveKeyError::NoActiveProfile)?;
         self.keychain
             .clear_key_for(&id)
             .map_err(ActiveKeyError::Keychain)
@@ -490,10 +494,10 @@ impl ProviderConfigSource for LiveProviderConfig {
         // per-turn honest-degrade leaves a trail (mirrors the has_key_for log);
         // the signature stays Option<String> (per-turn cannot carry the error,
         // and test_profile is the diagnostic entry point).
-        // No active profile ([`Self::active_id`]): no slot to read, so no key
+        // No active profile ([`Self::active_profile_id`]): no slot to read, so no key
         // (`?` returns None) -- the turn refuses as NotWired, the honest
         // built-in-not-configured outcome.
-        let active_id = self.active_id()?;
+        let active_id = self.active_profile_id()?;
         match self.keychain.fetch_key_for(&active_id) {
             Ok(opt) => opt,
             Err(e) => {
