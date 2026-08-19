@@ -63,6 +63,7 @@ const { appConfigWith } = vi.hoisted(() => {
       mcp_servers: { servers: [] },
       sessions_dir: null,
       default_runtime: { kind: "built_in" },
+      last_model_postures: {},
     };
   }
   return { appConfigWith };

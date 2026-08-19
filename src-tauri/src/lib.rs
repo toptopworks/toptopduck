@@ -425,6 +425,8 @@ pub fn run() {
             commands::get_session_model_config,
             commands::set_session_model,
             commands::set_session_thought_level,
+            commands::get_last_model_posture,
+            commands::clear_last_model_posture,
             commands::list_skills,
             commands::create_skill,
             commands::update_skill,

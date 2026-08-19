@@ -10,6 +10,8 @@
 //! [`crate::app_config::io`]), so a hand-edited file cannot smuggle a key past
 //! the type system into a plaintext-on-disk state.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::guardrail::{DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT};
@@ -95,6 +97,26 @@ pub enum DefaultRuntime {
     #[default]
     BuiltIn,
     External(String),
+}
+
+/// One adapter's last-selected model + thought-level posture (ADR-0100, issue
+/// #581): the startup posture a NEW session on that adapter starts with --
+/// selected + injected at creation, not a display-only hint. `None` on a field
+/// = the last set cleared it; both `None` (or no entry at all) = the
+/// "default (recommended)" unselected start. Stored keyed by adapter id in
+/// [`AppConfig::last_model_postures`] -- the model id is adapter-namespaced,
+/// so entries never migrate across CLIs. Ids are NOT validated against the
+/// live catalog at rest: a dangling entry (adapter undetected, model gone
+/// from the catalog) is KEPT and re-enables automatically once the
+/// environment returns (ADR-0100 Decision 4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModelPosture {
+    /// The model id exactly as the picker set it.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The thought-level id exactly as the picker set it.
+    #[serde(default)]
+    pub thought_level: Option<String>,
 }
 
 /// Engine default parameters (ADR-0005 L3). Persisted so a user's preferred
@@ -297,6 +319,16 @@ pub struct AppConfig {
     /// new field is additive (same pattern as `sessions_dir`).
     #[serde(default)]
     pub default_runtime: DefaultRuntime,
+    /// Per-adapter last-selected model postures (ADR-0100, issue #581): the
+    /// `{model, thought_level}` a new session on that adapter starts with,
+    /// keyed by adapter id. Forward-compat: a pre-#581 file has no
+    /// `last_model_postures` key, so serde(default) fills an empty map rather
+    /// than rejecting the whole document. The format_version is NOT bumped —
+    /// the new field is additive (same pattern as `default_runtime`).
+    /// `BTreeMap` (not `HashMap`) so serialization is deterministic (the
+    /// `McpServerConfig.env` precedent).
+    #[serde(default)]
+    pub last_model_postures: BTreeMap<String, ModelPosture>,
 }
 
 impl AppConfig {
@@ -317,6 +349,7 @@ impl AppConfig {
             mcp_servers: McpServerRegistry::default(),
             sessions_dir: None,
             default_runtime: DefaultRuntime::default(),
+            last_model_postures: BTreeMap::new(),
         }
     }
 
@@ -335,7 +368,12 @@ impl AppConfig {
     ///   endpoint);
     /// - `threads` clamped to >= 1 (DuckDB rejects `PRAGMA threads=0`);
     /// - `window_turns` clamped to >= 1 (0 would summarize every turn, which is
-    ///   nonsensical rather than dangerous).
+    ///   nonsensical rather than dangerous);
+    /// - `last_model_postures` shape-repaired only (whitespace trimmed, an
+    ///   empty value -> None, a blank adapter key dropped): a dangling entry
+    ///   -- an adapter the build no longer detects, or a model the catalog no
+    ///   longer carries -- is KEPT (ADR-0100 Decision 4), and an all-empty
+    ///   entry is the explicit "cleared" form, not garbage.
     pub fn normalize(&mut self) {
         self.format_version = APP_CONFIG_FORMAT_VERSION;
         // ADR-0098: an empty profile list stays empty -- the zero-profile state
@@ -387,6 +425,35 @@ impl AppConfig {
                 self.sessions_dir = None;
             }
         }
+        // ADR-0100 Decision 4 (issue #581): repair posture SHAPE only -- trim
+        // whitespace, an empty value -> None, a blank adapter key drops --
+        // while keeping dangling entries (undetected adapter / catalog-drifted
+        // model: they re-enable automatically once the environment returns)
+        // and the all-empty "cleared" entry (the explicit "back to default"
+        // form). Clearing anything here would silently destroy the recorded
+        // startup preference.
+        let postures = std::mem::take(&mut self.last_model_postures);
+        self.last_model_postures = postures
+            .into_iter()
+            .filter_map(|(id, posture)| {
+                let id = id.trim().to_string();
+                if id.is_empty() {
+                    return None;
+                }
+                let trim_value = |value: Option<String>| {
+                    value
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                };
+                Some((
+                    id,
+                    ModelPosture {
+                        model: trim_value(posture.model),
+                        thought_level: trim_value(posture.thought_level),
+                    },
+                ))
+            })
+            .collect();
     }
 }
 
@@ -984,5 +1051,116 @@ mod tests {
             back.default_runtime,
             DefaultRuntime::External("gemini-cli".into())
         );
+    }
+
+    // --- last_model_postures (issue #581, ADR-0100) ---------------------------
+
+    #[test]
+    fn last_model_postures_default_to_an_empty_map() {
+        // The fresh-install default is empty: no adapter has a recorded
+        // posture, so every new session starts unselected (issue #581 AC1).
+        assert!(AppConfig::defaults().last_model_postures.is_empty());
+    }
+
+    #[test]
+    fn last_model_postures_absent_fill_empty_map_for_forward_compat() {
+        // A pre-#581 config file has no `last_model_postures` key.
+        // serde(default) fills an empty map rather than rejecting the document
+        // (same forward-compat pattern as `default_runtime` / `sessions_dir`).
+        let json = r#"{"format_version":2,"theme":"dark"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("partial deserialize");
+        assert!(cfg.last_model_postures.is_empty());
+    }
+
+    #[test]
+    fn last_model_postures_round_trip_dangling_entries_verbatim() {
+        // A posture naming an adapter that is not detected (or a model the
+        // catalog no longer carries) round-trips verbatim -- ADR-0100
+        // Decision 4: nothing validates ids at rest, so the entry
+        // re-enables automatically once the environment returns.
+        let mut cfg = AppConfig::defaults();
+        cfg.last_model_postures.insert(
+            "gemini-cli".into(),
+            ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
+        );
+        cfg.last_model_postures.insert(
+            "uninstalled-cli".into(),
+            ModelPosture {
+                model: Some("gone-model".into()),
+                thought_level: None,
+            },
+        );
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.last_model_postures, cfg.last_model_postures);
+    }
+
+    #[test]
+    fn normalize_repairs_posture_shape_but_keeps_dangling_and_cleared_entries() {
+        // Shape-repair only (ADR-0100 Decision 4): a blank adapter key drops,
+        // whitespace trims, an all-whitespace value reads as None. A dangling
+        // adapter id and the all-empty "cleared" entry survive normalize --
+        // clearing them would silently destroy the recorded startup
+        // preference (issue #581 AC5).
+        let mut cfg = AppConfig::defaults();
+        cfg.last_model_postures.insert(
+            "  gemini-cli  ".into(),
+            ModelPosture {
+                model: Some("  gemini-2.5-pro  ".into()),
+                thought_level: Some("   ".into()),
+            },
+        );
+        cfg.last_model_postures.insert(
+            "   ".into(),
+            ModelPosture {
+                model: Some("orphaned-by-blank-key".into()),
+                thought_level: None,
+            },
+        );
+        cfg.last_model_postures.insert(
+            "uninstalled-cli".into(),
+            ModelPosture {
+                model: Some("gone-model".into()),
+                thought_level: None,
+            },
+        );
+        cfg.last_model_postures.insert(
+            "codex".into(),
+            ModelPosture {
+                model: None,
+                thought_level: None,
+            },
+        );
+        cfg.normalize();
+        let expected: BTreeMap<String, ModelPosture> = [
+            (
+                "gemini-cli",
+                ModelPosture {
+                    model: Some("gemini-2.5-pro".into()),
+                    thought_level: None,
+                },
+            ),
+            (
+                "uninstalled-cli",
+                ModelPosture {
+                    model: Some("gone-model".into()),
+                    thought_level: None,
+                },
+            ),
+            (
+                "codex",
+                ModelPosture {
+                    model: None,
+                    thought_level: None,
+                },
+            ),
+        ]
+        .into_iter()
+        .map(|(id, posture)| (id.to_string(), posture))
+        .collect();
+        assert_eq!(cfg.last_model_postures, expected);
     }
 }

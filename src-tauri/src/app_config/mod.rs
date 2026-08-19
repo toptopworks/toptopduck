@@ -15,6 +15,6 @@ pub mod model;
 
 pub use io::{read_at, write_at, WriteError};
 pub use model::{
-    AppConfig, DefaultRuntime, EngineDefaults, ExportDefaults, LocalePreference, PrivacyDefaults,
-    Theme, Tunables, APP_CONFIG_FORMAT_VERSION,
+    AppConfig, DefaultRuntime, EngineDefaults, ExportDefaults, LocalePreference, ModelPosture,
+    PrivacyDefaults, Theme, Tunables, APP_CONFIG_FORMAT_VERSION,
 };

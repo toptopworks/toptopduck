@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::app_config::{self, AppConfig, DefaultRuntime, LocalePreference};
+use crate::app_config::{self, AppConfig, DefaultRuntime, LocalePreference, ModelPosture};
 use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::model::{ProfileId, Protocol};
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
@@ -408,6 +408,43 @@ impl LiveProviderConfig {
         let mut cfg = self.load();
         cfg.default_runtime = runtime;
         self.store_inner(cfg)
+    }
+
+    /// Set one adapter's backfill posture entry (ADR-0100 Decision 3, issue
+    /// #581). Read-modify-write under [`Self::write_lock`] (same pattern as
+    /// default-runtime): the posture lands on ONE map entry, every sibling
+    /// field survives. The default posture (`None`/`None`) IS the explicit
+    /// cleared form -- the entry stays in the map rather than being removed,
+    /// per the ADR's "clear empties the entry" wording. Like
+    /// `set_default_runtime`, no referential validation: a dangling adapter id
+    /// persists verbatim (Decision 4) and the command boundary owns the
+    /// id-names-a-v1-adapter check.
+    pub fn set_last_model_posture(
+        &self,
+        adapter_id: &str,
+        posture: ModelPosture,
+    ) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load();
+        cfg.last_model_postures
+            .insert(adapter_id.to_string(), posture);
+        self.store_inner(cfg)
+    }
+
+    /// Read one adapter's backfill posture (ADR-0100, issue #581).
+    /// Lock-light: an honest-degrade [`Self::load`] read, no write lock -- the
+    /// same contract as every other read here. No entry = the empty posture
+    /// (unselected startup), so the read never distinguishes "cleared" from
+    /// "never chosen": both start the next session unselected.
+    pub fn last_model_posture(&self, adapter_id: &str) -> ModelPosture {
+        self.load()
+            .last_model_postures
+            .get(adapter_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -942,6 +979,102 @@ mod tests {
             .expect("set_default_runtime built-in");
         assert_eq!(reset.default_runtime, DefaultRuntime::BuiltIn);
         assert_eq!(live.load().default_runtime, DefaultRuntime::BuiltIn);
+    }
+
+    // --- last model posture (issue #581, ADR-0100) --------------------------
+
+    #[test]
+    fn set_last_model_posture_round_trips_and_keeps_siblings() {
+        // The write lands on ONE map entry; a sibling adapter's entry and an
+        // unrelated pref (default_runtime) survive the read-modify-write.
+        // gemini-cli is NOT installed on CI, which is the point: the store
+        // path has no detection validation (ADR-0100 Decision 4 keeps
+        // dangling entries).
+        let (_dir, live) = live();
+        live.set_default_runtime(DefaultRuntime::External("gemini-cli".into()))
+            .expect("seed default_runtime");
+        live.set_last_model_posture(
+            "codex",
+            ModelPosture {
+                model: Some("gpt-5.3-codex".into()),
+                thought_level: None,
+            },
+        )
+        .expect("set codex posture");
+        let stored = live
+            .set_last_model_posture(
+                "gemini-cli",
+                ModelPosture {
+                    model: Some("gemini-2.5-pro".into()),
+                    thought_level: Some("high".into()),
+                },
+            )
+            .expect("set gemini-cli posture");
+        assert_eq!(
+            stored.last_model_postures.get("gemini-cli"),
+            Some(&ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            }),
+            "the returned config carries the entry just written"
+        );
+        let back = live.load();
+        assert_eq!(
+            back.last_model_postures.len(),
+            2,
+            "the sibling entry survives"
+        );
+        assert_eq!(
+            back.last_model_postures
+                .get("codex")
+                .map(|p| p.model.clone()),
+            Some(Some("gpt-5.3-codex".into())),
+            "the sibling entry round-trips untouched"
+        );
+        assert_eq!(
+            back.default_runtime,
+            DefaultRuntime::External("gemini-cli".into()),
+            "an unrelated pref survives the read-modify-write"
+        );
+    }
+
+    #[test]
+    fn setting_the_default_posture_persists_the_cleared_entry() {
+        // Clear = the empty posture entry, NOT a removed key (ADR-0100
+        // Decision 3): the map keeps the adapter's row with both fields None,
+        // so a later read returns "unselected" without a missing-key branch.
+        let (_dir, live) = live();
+        live.set_last_model_posture(
+            "gemini-cli",
+            ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
+        )
+        .expect("seed posture");
+        live.set_last_model_posture("gemini-cli", ModelPosture::default())
+            .expect("clear posture");
+        assert_eq!(
+            live.load().last_model_postures.get("gemini-cli"),
+            Some(&ModelPosture::default()),
+            "the cleared entry stays in the map"
+        );
+        assert_eq!(
+            live.last_model_posture("gemini-cli"),
+            ModelPosture::default(),
+            "a cleared entry reads back unselected"
+        );
+    }
+
+    #[test]
+    fn last_model_posture_absent_entry_reads_as_the_default() {
+        // No entry (never chosen) reads as the empty posture -- identical to
+        // the cleared form, both mean an unselected startup.
+        let (_dir, live) = live();
+        assert_eq!(
+            live.last_model_posture("gemini-cli"),
+            ModelPosture::default()
+        );
     }
 
     // --- MCP server CRUD (issue #301 slice B) -------------------------------

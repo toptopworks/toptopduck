@@ -85,6 +85,19 @@ export interface ShellPrefs {
 // (ADR-0098 Decision 3).
 export type DefaultRuntime = { kind: "built_in" } | { kind: "external"; data: string };
 
+// One adapter's last-selected model posture (ADR-0100, issue #581): the
+// startup model + thought-level a NEW session on that adapter starts with --
+// selected + injected, not a display-only hint. Both null = the explicit
+// cleared form (or never chosen): the "default (recommended)" unselected
+// start. Mirrors the Rust `ModelPosture`.
+export interface ModelPosture {
+  // The model id exactly as the picker set it (adapter-namespaced, never
+  // validated against the live catalog at rest -- dangling entries are kept).
+  model: string | null;
+  // The thought-level id exactly as the picker set it.
+  thought_level: string | null;
+}
+
 // The full app-config document. Lives in the OS app-data directory; all
 // non-secret, so it crosses IPC verbatim (no separate "view" type).
 export interface AppConfig {
@@ -110,4 +123,11 @@ export interface AppConfig {
   // The default runtime new sessions + resumes start on (ADR-0098 Decision 2,
   // issue #569). serde(default) fills built_in for a pre-#569 file.
   default_runtime: DefaultRuntime;
+  // Per-adapter last-selected model postures (ADR-0100, issue #581), keyed by
+  // adapter id. serde(default) fills an empty map for a pre-#581 file, but
+  // serialization ALWAYS carries the field, so the wire shape is non-optional
+  // here too. Dangling entries (adapter undetected / model gone from the
+  // catalog) are kept -- they re-enable automatically on re-detection
+  // (ADR-0100 Decision 4).
+  last_model_postures: Record<string, ModelPosture>;
 }
