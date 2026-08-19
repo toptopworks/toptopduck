@@ -11,6 +11,7 @@ import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import { listProviderProfiles } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
+import { findActiveProfile } from "../../lib/findActiveProfile";
 import type { AppConfig } from "../../types/app-config";
 import type {
   ProfileKeyStatus,
@@ -169,9 +170,7 @@ function pickInitialSelectedId(
     return initialEditProfileId;
   }
   return (
-    provider.profiles.find((p) => p.id === provider.active_profile)?.id ??
-    provider.profiles[0]?.id ??
-    null
+    findActiveProfile(provider)?.id ?? provider.profiles[0]?.id ?? null
   );
 }
 

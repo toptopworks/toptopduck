@@ -6,6 +6,7 @@ import { Brain, Check, ChevronRight } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
+import { findActiveProfile } from "../../lib/findActiveProfile";
 import { log } from "../../lib/log";
 import {
   clearLastModelPosture,
@@ -585,9 +586,7 @@ export function ComposerProviderPicker({
     if (first) void selectRuntime({ kind: "external", data: first.id });
   }
 
-  const activeProfile = provider.profiles.find(
-    (p) => p.id === provider.active_profile,
-  );
+  const activeProfile = findActiveProfile(provider);
   const unnamed = intl.formatMessage({
     id: "settings.profiles.unnamed",
     defaultMessage: "Unnamed profile",

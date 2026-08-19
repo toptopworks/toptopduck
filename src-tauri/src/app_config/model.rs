@@ -382,12 +382,9 @@ impl AppConfig {
         // profile", not "the first profile"): the write is a hand-edit / race
         // artifact, and silently activating a profile the user did not choose
         // would point the live provider and the keychain read at the wrong slot.
-        let active_points_nowhere = !self
-            .provider
-            .profiles
-            .iter()
-            .any(|p| Some(&p.id) == self.provider.active_profile.as_ref());
-        if active_points_nowhere {
+        // `active()` IS the dangling check (a pointer that resolves to no
+        // profile is `None`), so a `None` pointer is an idempotent no-op.
+        if self.provider.active().is_none() {
             self.provider.active_profile = None;
         }
         // Normalize the active profile's endpoint fields (mirrors the legacy
@@ -599,10 +596,9 @@ mod tests {
         // ADR-0098: zero profiles is a legal persistent state. normalize must
         // NOT re-seed the skeleton -- deleting every profile and restarting
         // stays at zero profiles (the pre-0098 behavior resurrected a keyless
-        // skeleton and masked "not configured").
+        // skeleton and masked "not configured"). defaults() IS the zero-profile
+        // shape, so no setup teardown is needed.
         let mut cfg = AppConfig::defaults();
-        cfg.provider.profiles.clear();
-        cfg.provider.active_profile = None;
         cfg.normalize();
         assert!(cfg.provider.profiles.is_empty());
         assert_eq!(cfg.provider.active_profile, None);
