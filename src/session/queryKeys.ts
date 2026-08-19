@@ -64,6 +64,13 @@ export const adapterKeys = {
    *  probe writes the entry back via setQueryData (the backend cache write
    *  and this key update are the same event). */
   catalogs: () => ["adapters", "catalogs"] as const,
+  /** One adapter's startup model-posture backfill entry (ADR-0100, issue
+   *  #581): the model + thought-level a NEW session on that adapter starts
+   *  with. Keyed per adapter id (postures are adapter-namespaced, Decision
+   *  2); read by the cold-start composer bar, wiped by the posture
+   *  cascade's clearing row via the #581 clear IPC. Not under the session
+   *  prefix: the entry is process-global, like the adapter table. */
+  posture: (adapterId: string) => ["adapters", "posture", adapterId] as const,
 } as const;
 
 /** Session-AGNOSTIC skills registry (issue #362, ADR-0086) -- the settings
