@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { AppConfig, DefaultRuntime } from "./types/app-config";
+import type { AppConfig, DefaultRuntime, ModelPosture } from "./types/app-config";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -402,6 +402,29 @@ export async function setSessionsDir(path: string | null): Promise<AppConfig> {
 // per-start (ADR-0098 Decision 3).
 export async function setDefaultRuntime(runtime: DefaultRuntime): Promise<AppConfig> {
   return invoke<AppConfig>("set_default_runtime", { runtime });
+}
+
+// --- Startup model posture backfill (ADR-0100, issue #581) ------------------
+//
+// Session-AGNOSTIC (ADR-0056): keyed by adapter id, not sessionId. The picker
+// wiring lands with #574; this slice ships the backend surface + wrappers.
+
+// Read one adapter's backfill posture: the model + thought-level a NEW session
+// on that adapter starts with (selected + injected). Never refuses -- no entry
+// (never chosen) and a cleared entry both read as the empty posture
+// (null/null), i.e. an unselected "default (recommended)" start.
+export async function getLastModelPosture(adapterId: string): Promise<ModelPosture> {
+  return invoke<ModelPosture>("get_last_model_posture", { adapterId });
+}
+
+// Clear one adapter's backfill posture (ADR-0100 Decision 3): the posture
+// cascade's "default (recommended)" row -- the next new session on that
+// adapter starts unselected again, so the backfill never makes an explicit
+// clear pointless. The id must name a `listAdapters` adapter (the same
+// table-membership contract as setDefaultRuntime; detection not required).
+// Returns the updated AppConfig so the caller syncs state without a re-fetch.
+export async function clearLastModelPosture(adapterId: string): Promise<AppConfig> {
+  return invoke<AppConfig>("clear_last_model_posture", { adapterId });
 }
 
 // Read the current sessions directory's resolved path string. Used for the

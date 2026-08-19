@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager, State};
 
-use crate::app_config::{AppConfig, DefaultRuntime};
+use crate::app_config::{AppConfig, DefaultRuntime, ModelPosture};
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ToolKey};
 use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
@@ -200,7 +200,19 @@ pub fn create_session(
     // startup points share one degrade rule (undetected default -> built-in
     // for this session only, config field untouched).
     let startup = startup_runtime_choice(live.inner());
-    store.get(&id)?.set_runtime_choice(startup);
+    let handle = store.get(&id)?;
+    // ADR-0100 Decision 1 (issue #581): the fresh session's startup model /
+    // thought-level = the startup adapter's backfill entry -- SELECTED +
+    // injected, not a display-only hint (`ask` mirrors the handle into the
+    // Session at turn top, the same path an explicit set takes). No entry
+    // (never chosen / cleared) or a degraded built-in start stays unselected.
+    // Resume never lands here: it restores the session's own posture
+    // (ADR-0095 Decision 6) and never consults the backfill map.
+    let posture = startup_model_posture(startup.as_ref(), live.inner());
+    handle.set_runtime_choice(startup);
+    if posture != ModelPosture::default() {
+        handle.set_external_model_config(posture.model, posture.thought_level);
+    }
     // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
     // The UUID directory name is the stable identity; session.duck is the
     // fixed recipe filename.
@@ -2669,6 +2681,53 @@ pub fn set_default_runtime(
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 
+// --- Startup model posture backfill (ADR-0100, issue #581) ------------------
+
+/// The startup model posture for a fresh session (ADR-0100 Decision 1, issue
+/// #581): the startup adapter's backfill entry, or the empty posture when the
+/// start is built-in (or degraded to it) -- unselected, the CLI's own
+/// defaults. Lock-light: one honest-degrade config read.
+fn startup_model_posture(startup: Option<&AdapterSpec>, live: &LiveProviderConfig) -> ModelPosture {
+    match startup {
+        None => ModelPosture::default(),
+        Some(spec) => live.last_model_posture(spec.id.as_str()),
+    }
+}
+
+/// Read one adapter's backfill posture entry (ADR-0100, issue #581): the
+/// startup model / thought-level a NEW session on that adapter starts with.
+/// The cold-start composer bar consumes it to seed its pending posture (the
+/// wiring lands with #574). Lock-light honest-degrade read; no entry (or a
+/// cleared one) reads as the empty posture -- this command never refuses.
+#[tauri::command]
+pub fn get_last_model_posture(
+    live: State<'_, LiveProviderConfig>,
+    adapter_id: String,
+) -> ModelPosture {
+    live.last_model_posture(&adapter_id)
+}
+
+/// Clear one adapter's backfill posture (ADR-0100 Decision 3, issue #581):
+/// the posture cascade's "default (recommended)" row -- the NEXT new session
+/// on that adapter starts unselected again, so the backfill never makes an
+/// explicit clear pointless. The `adapter_id` must name a v1 adapter (the
+/// picker contract, the same table-membership check as `set_default_runtime`);
+/// detection is NOT required -- an installed-but-absent CLI's entry is exactly
+/// the dangling case the ADR keeps. Returns the updated AppConfig so the
+/// frontend syncs state without a re-fetch (same shape as
+/// `set_default_runtime`).
+#[tauri::command]
+pub fn clear_last_model_posture(
+    live: State<'_, LiveProviderConfig>,
+    adapter_id: String,
+) -> Result<AppConfig, StoreCommandError> {
+    if resolve_adapter(&adapter_id).is_none() {
+        return Err(StoreCommandError::UnknownAdapter(adapter_id));
+    }
+    live.set_last_model_posture(&adapter_id, ModelPosture::default())
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
+}
+
 // --- External-runtime model + thought level (ADR-0095, issue #527) ---------
 
 /// The wire read shape for the session's external-runtime model config: the
@@ -2752,12 +2811,18 @@ pub fn get_session_model_config(
 /// session-mutating command has); on pass, the session lock is taken only
 /// briefly for the small atomic write.
 ///
+/// Backfill (ADR-0100 Decision 3, issue #581): a successful set also lands
+/// the new pair on the session's runtime adapter's app-config entry (the
+/// single write point shared with the cold-start pre-selection) via
+/// [`record_last_model_posture`] -- best-effort, never fails this command.
+///
 /// Returns the persist-now verdict (issue #529): the write failure or the
 /// ADR-0035 suspension read in-process right after the persist, so the
 /// picker can warn without a second IPC racing the banner poll.
 #[tauri::command]
 pub fn set_session_model(
     store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
     session_id: String,
     model: Option<String>,
 ) -> Result<SetModelPersistOutcome, SessionError> {
@@ -2770,7 +2835,7 @@ pub fn set_session_model(
     // interleave with a concurrent write of the other. `model` passes
     // through as-is: `None` is the explicit user clear.
     let (_, thought_level) = handle.external_model_config();
-    s.set_external_model_config(model, thought_level);
+    s.set_external_model_config(model.clone(), thought_level.clone());
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();
@@ -2782,16 +2847,21 @@ pub fn set_session_model(
         s.runtime_model_config().model.clone(),
         s.runtime_model_config().thought_level.clone(),
     );
+    // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
+    // adapter's startup backfill entry (see set_session_model's doc).
+    record_last_model_posture(live.inner(), handle.runtime_choice(), model, thought_level);
     Ok(outcome)
 }
 
 /// Set the session's thought-level selection for the next external-runtime
 /// turn (ADR-0095). `None` clears. Same turn-boundary / resume-reject /
-/// persist-now semantics as [`set_session_model`]; a no-op posture on the
-/// built-in runtime (BYOK thought levels are a separate future ADR).
+/// persist-now + backfill-write semantics as [`set_session_model`]; a no-op
+/// posture on the built-in runtime (BYOK thought levels are a separate
+/// future ADR).
 #[tauri::command]
 pub fn set_session_thought_level(
     store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
     session_id: String,
     thought_level: Option<String>,
 ) -> Result<SetModelPersistOutcome, SessionError> {
@@ -2804,7 +2874,7 @@ pub fn set_session_thought_level(
     // interleave with a concurrent write of the other. `thought_level`
     // passes through as-is: `None` is the explicit user clear.
     let (model, _) = handle.external_model_config();
-    s.set_external_model_config(model, thought_level);
+    s.set_external_model_config(model.clone(), thought_level.clone());
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();
@@ -2814,7 +2884,43 @@ pub fn set_session_thought_level(
         s.runtime_model_config().model.clone(),
         s.runtime_model_config().thought_level.clone(),
     );
+    // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
+    // adapter's startup backfill entry (see set_session_model's doc).
+    record_last_model_posture(live.inner(), handle.runtime_choice(), model, thought_level);
     Ok(outcome)
+}
+
+/// The single backfill write point (ADR-0100 Decision 3, issue #581): every
+/// successful posture set lands the new pair on the session's runtime
+/// adapter's app-config entry, so a session-level selection and the
+/// cold-start pre-selection (which reaches the set IPCs right after session
+/// creation) share one writer. A built-in session has no adapter namespace
+/// to record under -- the posture is a no-op there (ADR-0095) -- so the write
+/// is skipped, not refused. Best-effort: the session posture itself already
+/// landed and was persisted per its own verdict, so a config-write failure
+/// only costs the NEXT startup's convenience injection -- warn, never fail
+/// the set.
+fn record_last_model_posture(
+    live: &LiveProviderConfig,
+    runtime: Option<AdapterSpec>,
+    model: Option<String>,
+    thought_level: Option<String>,
+) {
+    let Some(spec) = runtime else {
+        return;
+    };
+    if let Err(e) = live.set_last_model_posture(
+        spec.id.as_str(),
+        ModelPosture {
+            model,
+            thought_level,
+        },
+    ) {
+        log::warn!(
+            "failed to persist the {} model-posture backfill entry: {e}",
+            spec.id
+        );
+    }
 }
 
 // --- Skills registry (issue #362, ADR-0086) ---------------------------------
@@ -3218,6 +3324,90 @@ mod tests {
             DefaultRuntime::External("no-such-cli".into()),
             "resolution never rewrites the config field"
         );
+    }
+
+    // --- startup model posture backfill (issue #581, ADR-0100) ---------------
+
+    /// A LiveProviderConfig bound to a temp-dir config path (the same fixture
+    /// shape as the startup-resolution test above).
+    fn posture_live() -> (tempfile::TempDir, LiveProviderConfig) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore::new(),
+            dir.path().join("config.json"),
+        );
+        (dir, live)
+    }
+
+    #[test]
+    fn startup_model_posture_built_in_start_stays_unselected() {
+        // A built-in start (fresh install, or an external default degraded
+        // for this start) has no adapter namespace, so the startup posture is
+        // the empty one -- the session begins unselected (issue #581 AC3's
+        // degrade clause).
+        let (_dir, live) = posture_live();
+        assert_eq!(startup_model_posture(None, &live), ModelPosture::default());
+    }
+
+    #[test]
+    fn startup_model_posture_reads_the_startup_adapters_entry() {
+        // The posture map is keyed by adapter id, so the read follows the
+        // STARTUP adapter exactly: an entry on it injects, an entry on a
+        // sibling adapter never leaks across namespaces (ADR-0100 Decision 2).
+        let (_dir, live) = posture_live();
+        live.set_last_model_posture(
+            "gemini-cli",
+            ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
+        )
+        .expect("seed gemini-cli posture");
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        assert_eq!(
+            startup_model_posture(Some(&gemini), &live),
+            ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
+            "the startup adapter's entry injects"
+        );
+        let codex = resolve_adapter("codex").expect("v1 adapter");
+        assert_eq!(
+            startup_model_posture(Some(&codex), &live),
+            ModelPosture::default(),
+            "a sibling adapter's entry does not leak"
+        );
+    }
+
+    #[test]
+    fn record_last_model_posture_lands_the_pair_under_the_adapter() {
+        // The single write point: the post-set pair lands on the runtime
+        // adapter's entry and survives a reload (issue #581 AC2).
+        let (_dir, live) = posture_live();
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        record_last_model_posture(
+            &live,
+            Some(gemini),
+            Some("gemini-2.5-pro".into()),
+            Some("high".into()),
+        );
+        assert_eq!(
+            live.last_model_posture("gemini-cli"),
+            ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn record_last_model_posture_skips_the_built_in_runtime() {
+        // A built-in session has no adapter to key the entry under (the
+        // posture is a no-op there, ADR-0095) -- nothing is written at all.
+        let (_dir, live) = posture_live();
+        record_last_model_posture(&live, None, Some("some-model".into()), None);
+        assert!(live.load().last_model_postures.is_empty());
     }
 
     /// The per-session resume guard rejects a mutating command while THAT
