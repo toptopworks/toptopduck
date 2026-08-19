@@ -6,7 +6,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ComposerProviderPicker } from "../ComposerProviderPicker";
 import {
+  clearLastModelPosture,
   getAdapterCatalogs,
+  getLastModelPosture,
   getSessionModelConfig,
   getSessionRuntime,
   listAdapters,
@@ -16,25 +18,26 @@ import {
   setSessionThoughtLevel,
   type SetModelPersistOutcome,
 } from "../../../api";
-import { sessionKeys } from "../../../session/queryKeys";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
-import type {
-  AdapterEntry,
-  AdapterCatalogs,
-  CatalogModel,
-  DiscoveredRuntime,
-  SessionRuntimeChoice,
-} from "../../../types/runtime";
+import type { AdapterEntry, AdapterCatalogs } from "../../../types/runtime";
 
-// ComposerProviderPicker routes its chrome through react-intl (ADR-0052) +
-// needs a Radix TooltipProvider ancestor for the hover Tooltip + a
-// QueryClientProvider for its runtime + adapter reads (issue #353). Rendered
-// inside an empty-catalog English IntlProvider so FormattedMessage / useIntl
-// fall back to the defaultMessage -- the canonical English source (ADR-0052)
-// -- and assertions anchor on stable English strings. onError silences the
-// expected missing-message warnings. The IPC pair is mocked so the view never
-// hits Tauri (ADR-0029 one-shot keychain surface).
+// ComposerProviderPicker tests (ADR-0099, issue #574): the two-level
+// runtime popover + the brain-icon trigger + the posture text button's
+// integration (four-state label, set-IPC writes, cold-start pending
+// channel). Rendered inside an empty-catalog English IntlProvider so
+// assertions anchor on stable English strings. The IPC surface is mocked so
+// the view never hits Tauri.
+//
+// The dropdown-menu module is mocked as always-open controlled components
+// (cf. SessionHeaderMenu.test.tsx -- Radix menu pointer handling recurses
+// under jsdom), so the posture cascade's second-level rows are directly
+// clickable without opening animations.
+
+vi.mock("@/components/ui/dropdown-menu", async () =>
+  (await import("./dropdownMenuMock")).dropdownMenuMockModule,
+);
+
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
   return {
@@ -47,6 +50,8 @@ vi.mock("../../../api", async (importOriginal) => {
     setSessionModel: vi.fn(async () => PERSIST_OK),
     setSessionThoughtLevel: vi.fn(async () => PERSIST_OK),
     getAdapterCatalogs: vi.fn(async () => ({})),
+    getLastModelPosture: vi.fn(async () => EMPTY_POSTURE),
+    clearLastModelPosture: vi.fn(async () => ({})),
   };
 });
 
@@ -56,10 +61,16 @@ const PERSIST_OK: SetModelPersistOutcome = {
   persist_suspended: false,
 };
 
-// Build the provider tree around `ui` with a fresh QueryClient (retry off so
-// a rejected query does not retry under waitFor). Exposed so a rerender
-// reuses the SAME client -- the picker's runtime query must survive a
-// profileKeyEpoch rerender without remounting its cache.
+const EMPTY_POSTURE = { model: null, thought_level: null };
+
+// The shared ACP handshake catalog fixture (issue #527).
+const CATALOG = {
+  models: ["fake-opus", "fake-sonnet"],
+  current_model: "fake-opus",
+  thought_levels: ["low", "medium", "high"],
+  current_thought_level: "medium",
+};
+
 function wrap(ui: ReactElement, queryClient: QueryClient): ReactElement {
   return (
     <QueryClientProvider client={queryClient}>
@@ -77,9 +88,6 @@ function renderPicker(ui: ReactElement) {
   return { queryClient, ...render(wrap(ui, queryClient)) };
 }
 
-// A two-profile provider config: Anthropic (a named preset, has a default_model
-// in the catalog) active by default, GLM as the alternate. Parameterized so the
-// active-profile / has_key tests can seed any state.
 function pickerProvider(activeId: string = "anthropic"): ProviderConfig {
   return {
     profiles: [
@@ -95,7 +103,7 @@ function pickerProvider(activeId: string = "anthropic"): ProviderConfig {
         display_name: "GLM",
         protocol: "openai",
         base_url: "https://open.bigmodel.cn/api/paas/v4",
-        model: "glm-4",
+        model: "",
       },
     ],
     active_profile: activeId,
@@ -110,7 +118,6 @@ function keyStatus(rows: Array<[string, boolean, string?]>): ProfileKeyStatus[] 
   }));
 }
 
-// One v1 adapter row for the external-section fixture (issue #353).
 function adapter(
   id: string,
   display_name: string = id,
@@ -125,453 +132,218 @@ function adapter(
   };
 }
 
+function codexAdapter(id: string): AdapterEntry {
+  return { ...adapter(id), stream_format: "codex_event_stream" };
+}
+
+// The probe-cache entry fixture for an ACP adapter (issue #537).
+function acpProbeEntry(catalog: typeof CATALOG): AdapterCatalogs {
+  return {
+    "qwen-code": {
+      probe_kind: "acp",
+      outcome: { acp: { discovered: { ...catalog, adapter_id: "qwen-code" } } },
+      probed_at_millis: 0,
+    },
+  };
+}
+
 // The built-in runtime is the default; the trigger's accessible name carries
-// the active provider (ADR-0071 readout) so the chip reads which runtime the
-// next turn uses without opening the popover.
+// the active provider (ADR-0071 readout).
 const BUILTIN_TRIGGER = "Runtime: Anthropic";
 
-describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(listProviderProfiles).mockResolvedValue([]);
-    // The built-in runtime is the honest default (ADR-0081).
-    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
-    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
-    vi.mocked(listAdapters).mockResolvedValue([]);
-    // ADR-0095: the honest model-config default (no selection, no cache).
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-  });
+type PickerOverrides = Partial<Parameters<typeof ComposerProviderPicker>[0]>;
 
+function pickerJsx(overrides: PickerOverrides = {}) {
+  return (
+    <ComposerProviderPicker
+      sessionId="sess-1"
+      provider={pickerProvider()}
+      onSwitchActive={vi.fn()}
+      onOpenSettings={vi.fn()}
+      {...overrides}
+    />
+  );
+}
+
+async function openPopover() {
+  fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+  await screen.findByText("API Access");
+}
+
+// The level-2 selects' aria labels (stable anchors for the combobox queries).
+const PROFILE_SELECT = "API profile";
+const CLI_SELECT = "Local CLI";
+
+/** Opens a Radix Select (pointerDown + click, the jsdom-verified sequence). */
+async function openSelect(trigger: Element) {
+  fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+  fireEvent.click(trigger);
+  // A wildcard findByRole("option") throws on multiple matches; wait on the
+  // count instead.
+  await waitFor(() =>
+    expect(screen.getAllByRole("option").length).toBeGreaterThan(0),
+  );
+}
+
+/** Opens a Radix Select and clicks the option matching the given text. */
+async function selectOption(trigger: Element, optionText: RegExp): Promise<void> {
+  await openSelect(trigger);
+  const option = screen.getByRole("option", { name: optionText });
+  fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
+  fireEvent.click(option);
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(listProviderProfiles).mockResolvedValue([]);
+  // The built-in runtime is the honest default (ADR-0081).
+  vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+  vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+  vi.mocked(listAdapters).mockResolvedValue([]);
+  // ADR-0095: the honest model-config default (no selection, no cache).
+  vi.mocked(getSessionModelConfig).mockResolvedValue({
+    model: null,
+    thought_level: null,
+    cached_discovered: null,
+  });
+  vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+  vi.mocked(getLastModelPosture).mockResolvedValue(EMPTY_POSTURE);
+});
+
+// ---------------------------------------------------------------------------
+// Trigger + two-level popover (ADR-0099 Decisions 1/2)
+// ---------------------------------------------------------------------------
+
+describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
   it("renders the icon trigger with an accessible name carrying the active provider", () => {
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    // The trigger is a real <button> so its implicit role + aria-label are
-    // stable for black-box queries (Radix asChild forwards both).
-    expect(
-      screen.getByRole("button", { name: BUILTIN_TRIGGER }),
-    ).toBeInTheDocument();
+    renderPicker(pickerJsx());
+    expect(screen.getByRole("button", { name: BUILTIN_TRIGGER })).toBeTruthy();
   });
 
-  it("opens the popover with the built-in + external sections on click", async () => {
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // Built-in section: header + profile label + model field + hint.
-    expect(await screen.findByText("Built-in")).toBeInTheDocument();
-    expect(screen.getByText("Profile")).toBeInTheDocument();
-    expect(screen.getByText("Model")).toBeInTheDocument();
-    expect(
-      screen.getByText("Type a model id, or pick the preset default."),
-    ).toBeInTheDocument();
-    // External section: header + the "Manage external runtimes" link.
-    expect(screen.getByText("External")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Manage external runtimes/ }),
-    ).toBeInTheDocument();
-    // Open-settings entry (built-in section).
-    expect(
-      screen.getByRole("button", { name: "Open settings" }),
-    ).toBeInTheDocument();
+  it("opens the popover with the two level-1 radio groups mirroring the settings tab names", async () => {
+    renderPicker(pickerJsx());
+    await openPopover();
+    expect(screen.getByText("API Access")).toBeTruthy();
+    expect(screen.getByText("Local CLI")).toBeTruthy();
   });
 
-  it("lists every profile in the provider dropdown", async () => {
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    await screen.findByDisplayValue("Anthropic");
-    const options = screen.getAllByRole("option");
-    expect(options.map((o) => (o as HTMLOptionElement).value)).toEqual([
-      "anthropic",
-      "glm",
-    ]);
+  it("retires the configuration surfaces from the popover (model input, key block, open-settings)", async () => {
+    renderPicker(pickerJsx());
+    await openPopover();
+    // ADR-0099 Decision 1: the popover is a pure selector -- configuration
+    // lives in Settings.
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByText("Key set")).toBeNull();
+    expect(screen.queryByText("No key")).toBeNull();
+    expect(screen.queryByText("Open settings")).toBeNull();
   });
 
-  it("renders the not-configured state when the profile set is empty (issue #570, ADR-0098)", async () => {
-    // Zero profiles is a legal persisted state: the built-in readout says
-    // "Not configured" (never "Unnamed profile"), the profile select holds a
-    // disabled placeholder, and the key-missing hint is replaced by the
-    // zero-profile guidance (the plain no-key display stays for the
-    // profiles-exist-but-key-missing case).
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={{ profiles: [], active_profile: null }}
-        onSwitchActive={vi.fn()}
-        onSwitchModel={vi.fn()}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    const trigger = screen.getByRole("button", { name: "Runtime: Not configured" });
-    fireEvent.click(trigger);
-    expect(await screen.findByText("Built-in")).toBeInTheDocument();
-    // The select is disabled with a single placeholder option -- there is
-    // nothing to switch and no profile name to show.
-    const select = screen.getByLabelText("Profile") as HTMLSelectElement;
-    expect(select).toBeDisabled();
-    expect(select.value).toBe("");
-    expect(
-      screen.getByRole("option", { name: "Not configured" }),
-    ).toBeInTheDocument();
-    // The model input is disabled too (its commit would be a no-op). Role
-    // query: input[list] maps to combobox, and its wrapping label folds the
-    // hint span into the accessible name, so anchor on the /^Model/ prefix.
-    expect(screen.getByRole("combobox", { name: /^Model/ })).toBeDisabled();
-    // No "this profile" no-key hint (no profile exists); the zero-profile
-    // hint points at Settings instead. The "No key" badge stays (true).
-    expect(screen.getByText("No key")).toBeInTheDocument();
-    expect(
-      screen.queryByText(/No key saved for this profile/),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText("No access profile yet. Create one in Settings."),
-    ).toBeInTheDocument();
-    // The tooltip doubles as the trigger's aria-describedby content: with no
-    // profiles it reads the plain notConfigured text, never the summary
-    // shape carrying the "no key" suffix (that is what SR users hear on
-    // focus).
-    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
-    fireEvent.pointerMove(trigger, { pointerType: "mouse" });
-    const tooltip = await screen.findByRole("tooltip");
-    expect(tooltip.textContent).toContain("Not configured");
-    expect(tooltip.textContent).not.toContain("no key");
+  it("echoes the active profile in the level-2 profile select and lists every profile", async () => {
+    renderPicker(pickerJsx());
+    await openPopover();
+    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
+    expect(trigger.textContent).toContain("Anthropic");
+    await openSelect(trigger);
+    expect(screen.getByRole("option", { name: "Anthropic" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "GLM" })).toBeTruthy();
   });
 
-  it("commits active_profile when the provider dropdown changes", async () => {
+  it("switches active_profile when a profile option is picked", async () => {
     const onSwitchActive = vi.fn();
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={onSwitchActive}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
+    renderPicker(pickerJsx({ onSwitchActive }));
+    await openPopover();
+    await selectOption(
+      screen.getByRole("combobox", { name: PROFILE_SELECT }),
+      /GLM/,
     );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const select = await screen.findByDisplayValue("Anthropic");
-    fireEvent.change(select, { target: { value: "glm" } });
     expect(onSwitchActive).toHaveBeenCalledWith("glm");
+    // Already on the built-in runtime: no runtime write fires.
+    expect(setSessionRuntime).not.toHaveBeenCalled();
   });
 
-  it("commits the model on blur (not per keystroke)", async () => {
-    const onSwitchModel = vi.fn();
+  it("reverts the runtime to built-in when a profile option is picked while external", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "qwen-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
+    await screen.findByText("Local CLI");
+    await selectOption(
+      screen.getByRole("combobox", { name: PROFILE_SELECT }),
+      /GLM/,
+    );
+    await waitFor(() =>
+      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", { kind: "built_in" }),
+    );
+  });
+
+  it("renders the not-configured placeholder when the profile set is empty (issue #570)", async () => {
     renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={onSwitchModel}
-        onOpenSettings={vi.fn()}
-      />,
+      pickerJsx({ provider: { profiles: [], active_profile: null } }),
     );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // The model <input> holds the active profile's current model.
-    const input = await screen.findByDisplayValue("claude-sonnet-4-6");
-    fireEvent.change(input, { target: { value: "claude-haiku-4-5" } });
-    // No commit yet -- per-keystroke writes would spam commitAppConfig.
-    expect(onSwitchModel).not.toHaveBeenCalled();
-    fireEvent.blur(input);
-    expect(onSwitchModel).toHaveBeenCalledWith("claude-haiku-4-5");
+    // Zero profiles: the trigger's readout is itself "Not configured".
+    fireEvent.click(screen.getByRole("button", { name: "Runtime: Not configured" }));
+    await screen.findByText("API Access");
+    // The popover's level-2 placeholder + the posture label both read
+    // "Not configured"; the assertion pins that no profile select renders.
+    expect(screen.getAllByText("Not configured").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole("combobox", { name: PROFILE_SELECT })).toBeNull();
   });
 
-  it("commits the model on Enter", async () => {
-    const onSwitchModel = vi.fn();
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={onSwitchModel}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const input = await screen.findByDisplayValue("claude-sonnet-4-6");
-    fireEvent.change(input, { target: { value: "claude-opus" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(onSwitchModel).toHaveBeenCalledWith("claude-opus");
-  });
-
-  it("does not commit a no-op model (unchanged value)", async () => {
-    const onSwitchModel = vi.fn();
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={onSwitchModel}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const input = await screen.findByDisplayValue("claude-sonnet-4-6");
-    // Blur without changing -> no pointless app-config write.
-    fireEvent.blur(input);
-    expect(onSwitchModel).not.toHaveBeenCalled();
-  });
-
-  it("re-syncs the model draft when the active profile's model changes externally", async () => {
-    // A Settings Save (or any external commitAppConfig) rewrites the active
-    // profile's model; the popover must not show a stale draft on the next open.
-    // The parent feeds a new provider prop with the updated model; the draft
-    // re-syncs because the (active_profile, model) seed changed.
-    function View({ model }: { model: string }) {
-      return (
-        <ComposerProviderPicker
-          sessionId="sess-1"
-          provider={{
-            ...pickerProvider(),
-            profiles: [
-              { ...pickerProvider().profiles[0], model },
-              pickerProvider().profiles[1],
-            ],
-          }}
-          onSwitchActive={() => {}}
-          onSwitchModel={() => {}}
-          onOpenSettings={vi.fn()}
-        />
-      );
-    }
-    const { queryClient, rerender } = renderPicker(<View model="claude-sonnet-4-6" />);
-    // Mount + initial draft = the seeded model.
-    expect(() => screen.getAllByRole("button")).not.toThrow();
-
-    // External change: the active profile's model is now "claude-opus".
-    rerender(wrap(<View model="claude-opus" />, queryClient));
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // The input reflects the new model, not a stale draft.
-    expect(await screen.findByDisplayValue("claude-opus")).toBeInTheDocument();
-  });
-
-  it("refetches the key overlay when profileKeyEpoch bumps (settings-close)", async () => {
-    // App bumps profileKeyEpoch on settings-close so a Save that changed a
-    // keychain slot is reflected without a remount (ADR-0019 honest gate, #238).
-    vi.mocked(listProviderProfiles).mockResolvedValue([]);
-    const { queryClient, rerender } = renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-        profileKeyEpoch={0}
-      />,
-    );
-    // Mount-time fetch.
-    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
-
-    // A settings-close bumps the epoch -> the overlay refetches.
-    rerender(
-      wrap(
-        <ComposerProviderPicker
-          sessionId="sess-1"
-          provider={pickerProvider()}
-          onSwitchActive={() => {}}
-          onSwitchModel={() => {}}
-          onOpenSettings={vi.fn()}
-          profileKeyEpoch={1}
-        />,
-        queryClient,
-      ),
-    );
-    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(2));
-  });
-
-  it("shows the honest no-key badge + warning when the active profile has no key", async () => {
+  it("marks keyless profiles at the option level (ADR-0019/0099)", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(
       keyStatus([
         ["anthropic", false],
         ["glm", true],
       ]),
     );
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // Wait for the mount-time key overlay fetch to land before asserting.
-    await screen.findByText("No key");
-    expect(screen.getByText("No key")).toBeInTheDocument();
-    // ADR-0019 honest gate: the explicit "asking will fail" line.
-    expect(screen.getByText(/No key saved for this profile/)).toBeInTheDocument();
+    renderPicker(pickerJsx());
+    await openPopover();
+    // The mark lands on the Anthropic option (await: the key overlay fetch
+    // is a mount-time effect), never on the keyed GLM option.
+    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
+    await openSelect(trigger);
+    const mark = await screen.findByText("no key");
+    expect(mark.closest("[role=\"option\"]")?.textContent).toContain("Anthropic");
+    const glmOption = screen.getByRole("option", { name: /GLM/ });
+    expect(glmOption.textContent).not.toContain("no key");
   });
 
-  it("shows Key set and no warning when the active profile has a key", async () => {
-    vi.mocked(listProviderProfiles).mockResolvedValue(keyStatus([["anthropic", true]]));
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    await screen.findByText("Key set");
-    expect(screen.getByText("Key set")).toBeInTheDocument();
-    expect(
-      screen.queryByText(/No key saved for this profile/),
-    ).not.toBeInTheDocument();
-  });
-
-  it("opens settings and closes the popover on the Open settings entry", async () => {
-    const onOpenSettings = vi.fn();
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={onOpenSettings}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const openBtn = await screen.findByRole("button", { name: "Open settings" });
-    fireEvent.click(openBtn);
-    expect(onOpenSettings).toHaveBeenCalledWith("api-access");
-    // The popover must close (its portaled content would otherwise linger
-    // atop the settings overlay, ADR-0065 hides the shell via CSS not the host).
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("button", { name: "Open settings" }),
-      ).not.toBeInTheDocument();
-    });
-  });
-
-  it("surfaces the provider . model preview in the hover tooltip (+ no-key mark)", async () => {
-    vi.mocked(listProviderProfiles).mockResolvedValue(keyStatus([["anthropic", false]]));
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
-    // Radix Tooltip opens on pointer hover with pointerType mouse (jsdom needs
-    // the pointerType set explicitly; bare mouseEnter does not trigger it).
-    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
-    fireEvent.pointerMove(trigger, { pointerType: "mouse" });
-    const tooltip = await screen.findByRole("tooltip");
-    // The tooltip carries "{provider} . {model} . no key" (ADR-0019 mark).
-    expect(tooltip.textContent).toContain("Anthropic");
-    expect(tooltip.textContent).toContain("claude-sonnet-4-6");
-    expect(tooltip.textContent).toContain("no key");
-  });
-
-  it("omits the no-key mark from the tooltip when the active profile has a key", async () => {
-    vi.mocked(listProviderProfiles).mockResolvedValue(keyStatus([["anthropic", true]]));
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
-    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
-    fireEvent.pointerMove(trigger, { pointerType: "mouse" });
-    const tooltip = await screen.findByRole("tooltip");
-    expect(tooltip.textContent).toContain("claude-sonnet-4-6");
-    // The tooltip text never carries the "no key" suffix when a key is set.
-    expect(tooltip.textContent).not.toContain("no key");
-  });
-
-  it("shows the keychain-unavailable badge when the active profile's keychain read failed (issue #275)", async () => {
+  it("marks a profile whose keychain read failed", async () => {
     vi.mocked(listProviderProfiles).mockResolvedValue(
-      keyStatus([["anthropic", false, "keychain access failed: locked"]]),
+      keyStatus([["anthropic", false, "keychain locked"]]),
     );
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    await screen.findByText("Keychain unavailable");
-    expect(screen.getByText("Keychain unavailable")).toBeInTheDocument();
-    expect(screen.queryByText("No key")).not.toBeInTheDocument();
+    renderPicker(pickerJsx());
+    await openPopover();
+    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
+    await openSelect(trigger);
+    const mark = await screen.findByText("Keychain unavailable");
+    expect(mark.closest("[role=\"option\"]")?.textContent).toContain("Anthropic");
   });
 
-  // --- Runtime selection (issue #353) ---------------------------------------
-
-  it("renders only detected external adapters from listAdapters", async () => {
-    // Issue #490: undetected adapters are filtered out (the group is a pure
-    // selector; management moved to Settings → Runtime → Local CLI).
+  it("offers only detected external adapters as level-2 CLI options", async () => {
     vi.mocked(listAdapters).mockResolvedValue([
       adapter("qwen-code", "qwen-code", true),
       adapter("gemini-cli", "gemini-cli", false),
     ]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // Only the detected adapter renders.
-    expect(await screen.findByText("qwen-code")).toBeInTheDocument();
-    expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
-    // No "Not installed" mark -- the group is a pure selector.
-    expect(screen.queryByText("Not installed")).not.toBeInTheDocument();
+    renderPicker(pickerJsx());
+    await openPopover();
+    await openSelect(screen.getByRole("combobox", { name: CLI_SELECT }));
+    expect(screen.getByRole("option", { name: /qwen-code/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /gemini-cli/ })).toBeNull();
   });
 
-  it("selecting an external adapter writes the external choice via setSessionRuntime", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "qwen-code", true)]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
+  it("writes the external choice when a detected CLI option is picked", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    renderPicker(pickerJsx());
+    await openPopover();
+    await selectOption(
+      screen.getByRole("combobox", { name: CLI_SELECT }),
+      /qwen-code/,
     );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const row = await screen.findByRole("button", { name: /qwen-code/ });
-    fireEvent.click(row);
     await waitFor(() =>
       expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
         kind: "external",
@@ -580,46 +352,85 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
     );
   });
 
-  // --- Null sessionId (ADR-0092 cold-start bar) ----------------------------
+  it("selects the first detected CLI when the Local CLI level-1 row is picked from built-in", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([
+      adapter("qwen-code"),
+      adapter("codex"),
+    ]);
+    renderPicker(pickerJsx());
+    await openPopover();
+    fireEvent.click(screen.getByRole("button", { name: "Local CLI" }));
+    await waitFor(() =>
+      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+        kind: "external",
+        data: "qwen-code",
+      }),
+    );
+  });
+
+  it("shows a stale-adapter warning when the held CLI is no longer detected", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "gemini-cli",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: gemini-cli/ });
+    fireEvent.click(screen.getByRole("button", { name: /Runtime: gemini-cli/ }));
+    expect(
+      await screen.findByText(/Selected adapter is no longer detected/),
+    ).toBeTruthy();
+    // The closed CLI select still echoes the held (undetected) adapter via
+    // the disabled synthetic option -- a blank echo would hide the breakage.
+    const cliTrigger = screen.getByRole("combobox", { name: CLI_SELECT });
+    expect(cliTrigger.textContent).toContain("gemini-cli");
+  });
+
+  it("retires the settings-test guidance from the popover when the active CLI has no catalog", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "qwen-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
+    await screen.findByText("Manage runtimes");
+    expect(
+      screen.queryByText(/Test the runtime in settings/),
+    ).toBeNull();
+  });
+
+  it("opens settings from the Manage link and closes the popover", async () => {
+    const onOpenSettings = vi.fn();
+    renderPicker(pickerJsx({ onOpenSettings }));
+    await openPopover();
+    fireEvent.click(screen.getByText("Manage runtimes"));
+    expect(onOpenSettings).toHaveBeenCalledWith();
+  });
 
   it("does not call getSessionRuntime when sessionId is null", () => {
     renderPicker(
-      <ComposerProviderPicker
-        sessionId={null}
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-        onPendingRuntimeChange={vi.fn()}
-      />,
+      pickerJsx({ sessionId: null, onPendingRuntimeChange: vi.fn() }),
     );
-    // The query is disabled — no IPC fires for a null session.
     expect(getSessionRuntime).not.toHaveBeenCalled();
-    // The trigger renders with the built-in default (RUNTIME_CHOICE_DEFAULT).
     expect(
       screen.getByRole("button", { name: BUILTIN_TRIGGER }),
-    ).toBeInTheDocument();
+    ).toBeTruthy();
   });
 
-  it("routes runtime selection to onPendingRuntimeChange when sessionId is null", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([
-      adapter("qwen-code", "qwen-code", true),
-    ]);
+  it("routes a runtime selection to onPendingRuntimeChange when sessionId is null", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     const onPendingRuntimeChange = vi.fn();
     renderPicker(
-      <ComposerProviderPicker
-        sessionId={null}
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-        onPendingRuntimeChange={onPendingRuntimeChange}
-      />,
+      pickerJsx({ sessionId: null, onPendingRuntimeChange }),
     );
     fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const row = await screen.findByRole("button", { name: /qwen-code/ });
-    fireEvent.click(row);
-    // Selection routes to the pending callback, not the per-session IPC.
+    await screen.findByText("Local CLI");
+    await selectOption(
+      screen.getByRole("combobox", { name: CLI_SELECT }),
+      /qwen-code/,
+    );
     expect(onPendingRuntimeChange).toHaveBeenCalledWith({
       kind: "external",
       data: "qwen-code",
@@ -628,1243 +439,326 @@ describe("ComposerProviderPicker (issue #238 / #353, ADR-0071/0081/0083)", () =>
   });
 
   it("renders the pendingRuntime prop in the trigger name when sessionId is null (issue #572)", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([
-      adapter("qwen-code", "qwen-code", true),
-    ]);
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(
-      <ComposerProviderPicker
-        sessionId={null}
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-        onPendingRuntimeChange={vi.fn()}
-        pendingRuntime={{ kind: "external", data: "qwen-code" }}
-      />,
-    );
-    // The trigger carries the shell-held pending value from the start: the
-    // resolved default_runtime before any pick, the pick after it.
-    expect(
-      await screen.findByRole("button", { name: "Runtime: qwen-code" }),
-    ).toBeInTheDocument();
-  });
-
-  it("selecting the built-in header writes the built-in choice via setSessionRuntime", async () => {
-    // Start on the external runtime so reverting to built-in is a real switch.
-    const external: SessionRuntimeChoice = { kind: "external", data: "qwen-code" };
-    vi.mocked(getSessionRuntime).mockResolvedValue(external);
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "qwen-code", true)]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    // The trigger name carries the external adapter while external is active.
-    const trigger = await screen.findByRole("button", { name: "Runtime: qwen-code" });
-    fireEvent.click(trigger);
-    // The built-in header reverts to the built-in runtime.
-    const builtinHeader = screen.getByRole("button", { name: /^Built-in$/ });
-    fireEvent.click(builtinHeader);
-    await waitFor(() =>
-      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
-        kind: "built_in",
+      pickerJsx({
+        sessionId: null,
+        onPendingRuntimeChange: vi.fn(),
+        pendingRuntime: { kind: "external", data: "qwen-code" },
       }),
     );
-  });
-
-  it("renders the external runtime in the trigger name + tooltip when external is active", async () => {
-    const external: SessionRuntimeChoice = { kind: "external", data: "qwen-code" };
-    vi.mocked(getSessionRuntime).mockResolvedValue(external);
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "qwen-code", true)]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    const trigger = await screen.findByRole("button", { name: "Runtime: qwen-code" });
-    // The hover tooltip names the external runtime (the closed chip's Cpu
-    // glyph is unified; the tooltip is where the user reads WHICH runtime).
-    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
-    fireEvent.pointerMove(trigger, { pointerType: "mouse" });
-    const tooltip = await screen.findByRole("tooltip");
-    expect(tooltip.textContent).toContain("External runtime: qwen-code");
-  });
-
-  // --- Issue #490: external group slimmed to a pure selector ---------------
-
-  it("the Manage external runtimes link opens settings on the local-cli tab", async () => {
-    const onOpenSettings = vi.fn();
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={onOpenSettings}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    const link = await screen.findByRole("button", { name: /Manage external runtimes/ });
-    fireEvent.click(link);
-    expect(onOpenSettings).toHaveBeenCalledWith("local-cli");
-    // The popover closes (same close-before-open contract as the built-in
-    // entry, ADR-0065).
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("button", { name: /Manage external runtimes/ }),
-      ).not.toBeInTheDocument();
-    });
-  });
-
-  it("shows a stale-adapter warning when the active external adapter is undetected", async () => {
-    // The session's runtime is an external adapter whose detected flag is false
-    // (CLI was uninstalled after selection). The filtered list drops it, and the
-    // picker surfaces a destructive warning so the user knows their pick is
-    // broken before the next turn fails in the backend.
-    const external: SessionRuntimeChoice = { kind: "external", data: "gemini-cli" };
-    vi.mocked(getSessionRuntime).mockResolvedValue(external);
-    vi.mocked(listAdapters).mockResolvedValue([
-      adapter("qwen-code", "qwen-code", true),
-      adapter("gemini-cli", "gemini-cli", false),
-    ]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    expect(
-      await screen.findByText("Selected adapter is no longer detected — pick another or manage in settings."),
-    ).toBeInTheDocument();
-    // The undetected adapter does NOT appear as a selectable row.
-    expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
   });
 });
 
-// --- ADR-0095 model + thought-level selectors (issue #527) ------------------
+// ---------------------------------------------------------------------------
+// Posture text button integration (ADR-0099 D3 / ADR-0100, issues #573/#574)
+// ---------------------------------------------------------------------------
 
-describe("ComposerProviderPicker model config selectors (ADR-0095)", () => {
-  beforeEach(() => {
-    // Self-contained seeding: this describe must not rely on implementations
-    // leaking from the sibling describe (vi.clearAllMocks clears calls, not
-    // implementations -- the PR #507 leakage class).
-    vi.clearAllMocks();
-    vi.mocked(listProviderProfiles).mockResolvedValue([]);
-    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
-    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
-    vi.mocked(listAdapters).mockResolvedValue([]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+// Seed an external ACP runtime with the given model config + adapter table,
+// render, and wait for the posture surface to settle.
+async function renderExternalPicker(
+  overrides: PickerOverrides = {},
+  modelConfig: {
+    model?: string | null;
+    thought_level?: string | null;
+    cached_discovered?: typeof CATALOG | null;
+  } = {},
+) {
+  vi.mocked(getSessionRuntime).mockResolvedValue({
+    kind: "external",
+    data: "qwen-code",
+  });
+  vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+  vi.mocked(getSessionModelConfig).mockResolvedValue({
+    model: modelConfig.model ?? null,
+    thought_level: modelConfig.thought_level ?? null,
+    cached_discovered: modelConfig.cached_discovered ?? null,
+  });
+  renderPicker(pickerJsx(overrides));
+  // The posture trigger renders once the runtime query lands.
+  await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+}
+
+describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3)", () => {
+  it("shows the active profile's model as a static label on the built-in runtime", () => {
+    renderPicker(pickerJsx());
+    // Static: the four-state label renders, but NOT as a button (no arrow,
+    // no menu -- profile.model is configured in Settings, ADR-0099).
+    expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
   });
 
-  const CATALOG = {
-    models: ["fake-opus", "fake-sonnet"],
-    current_model: "fake-opus",
-    thought_levels: ["low", "medium", "high"],
-    current_thought_level: "medium",
-  };
+  it("shows an em dash when the active profile has no model", () => {
+    renderPicker(pickerJsx({ provider: pickerProvider("glm") }));
+    expect(screen.getByText("—")).toBeTruthy();
+  });
 
-  async function openExternalPopover() {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "qwen-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
+  it("shows Not configured on the built-in runtime with zero profiles (issue #570)", () => {
     renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
+      pickerJsx({ provider: { profiles: [], active_profile: null } }),
     );
-    // Wait for the external runtime query to land (the trigger label flips
-    // from the built-in readout to the adapter name), then open the popover.
-    const trigger = await screen.findByRole("button", {
-      name: /Runtime: qwen-code/,
-    });
-    fireEvent.click(trigger);
-  }
-
-  it("renders dropdowns from the discovered catalog on an ACP runtime", async () => {
-    await openExternalPopover();
-    const modelSelect = await screen.findByLabelText("Model");
-    expect(modelSelect).toBeInTheDocument();
-    // The discovered ids + the CLI-default row are offered.
-    const options = modelSelect.querySelectorAll("option");
-    expect(Array.from(options).map((o) => o.textContent)).toEqual([
-      "CLI default (fake-opus)",
-      // The CLI's reported current value is annotated as the effective
-      // default while no explicit selection is set.
-      "fake-opus (CLI default)",
-      "fake-sonnet",
-    ]);
-    // The thought-level selector offers its own catalog.
-    const thinkSelect = screen.getByLabelText("Thinking");
-    expect(
-      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
-    ).toEqual(["", "low", "medium", "high"]);
+    expect(screen.getByText("Not configured")).toBeTruthy();
   });
 
-  it("writes the selection through setSessionModel", async () => {
-    await openExternalPopover();
-    const modelSelect = await screen.findByLabelText("Model");
-    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
-    await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
-    );
-    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+  it("shows Default (recommended) as a static label on a catalog-less external runtime", async () => {
+    await renderExternalPicker();
+    expect(screen.getByText("Default (recommended)")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
   });
 
-  it("writes a thought-level selection through setSessionThoughtLevel", async () => {
-    await openExternalPopover();
-    const thinkSelect = await screen.findByLabelText("Thinking");
-    fireEvent.change(thinkSelect, { target: { value: "high" } });
-    await waitFor(() =>
-      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", "high"),
-    );
-  });
-
-  it("shows the pending hint when the external runtime has no discovery cache yet", async () => {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "qwen-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    // No cached_discovered (before the first ACP turn).
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: qwen-code/ }),
-    );
-    expect(
-      await screen.findByText(/Model options appear after the first turn/),
-    ).toBeInTheDocument();
-    // No dropdowns render in this state.
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
-  });
-
-  it("renders read-only CLI-default labels on the codex (CodexEventStream) runtime", async () => {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "codex",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "codex_event_stream" },
-    ]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: codex/ }),
-    );
-    // Two CLI-default labels render (model + thinking), no dropdowns.
-    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
-  });
-
-  it("renders no selectors on the built-in runtime", async () => {
-    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    // Give the queries a beat to settle, then assert absence.
-    await screen.findByText("Built-in");
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Thinking")).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/Model options appear after the first turn/),
-    ).not.toBeInTheDocument();
-  });
-});
-
-// --- #529: honest rendering of unrepresentable values + failure feedback ----
-
-describe("ComposerProviderPicker honest selector states (issue #529)", () => {
-  beforeEach(() => {
-    // Self-contained seeding (same isolation contract as the ADR-0095
-    // describe above).
-    vi.clearAllMocks();
-    vi.mocked(listProviderProfiles).mockResolvedValue([]);
-    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
-    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
-    vi.mocked(listAdapters).mockResolvedValue([]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
-    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
-  });
-
-  const CATALOG = {
-    models: ["fake-opus", "fake-sonnet"],
-    current_model: "fake-opus",
-    thought_levels: ["low", "medium", "high"],
-    current_thought_level: "medium",
-    adapter_id: "qwen-code",
-  } satisfies DiscoveredRuntime;
-
-  // Seed an external ACP runtime + open the popover. `config` overrides the
-  // model-config read; `adapterId` defaults to the catalog's adapter so the
-  // cache reads as fresh.
-  async function openExternal(
-    config: Awaited<ReturnType<typeof getSessionModelConfig>>,
-    adapterId = "qwen-code",
-  ) {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: adapterId,
-    });
-    vi.mocked(listAdapters).mockResolvedValue([adapter(adapterId)]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue(config);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    const trigger = await screen.findByRole("button", {
-      name: new RegExp(`Runtime: ${adapterId}`),
-    });
-    fireEvent.click(trigger);
-  }
-
-  it("renders a fallback option for a selected model not in the catalog", async () => {
-    // Catalog drift: the session holds "fake-o3" but the refreshed catalog no
-    // longer offers it. The select must still SHOW it (never blank).
-    await openExternal({
-      model: "fake-o3",
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    const modelSelect = await screen.findByLabelText("Model");
-    const fallback = modelSelect.querySelector(
-      "option[value=\"fake-o3\"]",
-    ) as HTMLOptionElement;
-    expect(fallback).toBeInTheDocument();
-    expect(fallback.textContent).toContain("fake-o3");
-    expect(fallback.textContent).toContain("not offered");
-    // The controlled value resolves -- the select shows the backend posture.
-    expect((modelSelect as HTMLSelectElement).value).toBe("fake-o3");
-  });
-
-  it("renders a fallback option for a CLI current value not in the catalog", async () => {
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: {
-        ...CATALOG,
-        current_model: "ghost-model",
-      },
-    });
-    const modelSelect = await screen.findByLabelText("Model");
-    expect(
-      modelSelect.querySelector("option[value=\"ghost-model\"]"),
-    ).toBeInTheDocument();
-    expect((modelSelect as HTMLSelectElement).value).toBe("ghost-model");
-  });
-
-  it("renders a fallback option for a selected thought level not in the catalog", async () => {
-    // Thought-level mirror of the model fallback: the session holds "ultra"
-    // but the catalog does not offer it -- the select must still SHOW it.
-    await openExternal({
-      model: null,
-      thought_level: "ultra",
-      cached_discovered: CATALOG,
-    });
-    const thinkSelect = await screen.findByLabelText("Thinking");
-    const fallback = thinkSelect.querySelector(
-      "option[value=\"ultra\"]",
-    ) as HTMLOptionElement;
-    expect(fallback).toBeInTheDocument();
-    expect(fallback.textContent).toContain("ultra");
-    expect(fallback.textContent).toContain("not offered");
-    expect((thinkSelect as HTMLSelectElement).value).toBe("ultra");
-  });
-
-  it("renders a fallback option for a CLI current thought level not in the catalog", async () => {
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: {
-        ...CATALOG,
-        current_thought_level: "ghost-level",
-      },
-    });
-    const thinkSelect = await screen.findByLabelText("Thinking");
-    expect(
-      thinkSelect.querySelector("option[value=\"ghost-level\"]"),
-    ).toBeInTheDocument();
-    expect((thinkSelect as HTMLSelectElement).value).toBe("ghost-level");
-  });
-
-  it("flags a catalog cached under a different adapter and lets the user clear the model", async () => {
-    // The runtime switched to gemini-cli but the cache still holds the
-    // qwen-code catalog (replace-on-Some only updates after gemini's first
-    // turn). A stale marker renders + the residual selection stays visible.
-    await openExternal(
+  it("shows the held pair when a posture is selected", async () => {
+    await renderExternalPicker(
+      {},
       {
         model: "fake-opus",
-        thought_level: null,
+        thought_level: "medium",
         cached_discovered: CATALOG,
       },
-      "gemini-cli",
     );
-    expect(
-      await screen.findByText(/discovered on a different runtime/),
-    ).toBeInTheDocument();
-    // The residual selection renders (via the catalog options) and clearing
-    // it writes null (the "" -> null boundary).
-    const modelSelect = await screen.findByLabelText("Model");
-    expect((modelSelect as HTMLSelectElement).value).toBe("fake-opus");
-    fireEvent.change(modelSelect, { target: { value: "" } });
-    await waitFor(() => expect(setSessionModel).toHaveBeenCalledWith("sess-1", null));
+    expect(screen.getByText("fake-opus · medium")).toBeTruthy();
   });
 
-  it("treats a pre-stamp catalog (no adapter_id) as usable without a stale flag", async () => {
-    // Old recipes carry no adapter_id -- the catalog still renders, no stale
-    // marker (no provenance is not a mismatch).
-    const preStamp = { ...CATALOG, adapter_id: undefined };
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: preStamp,
-    });
-    const modelSelect = await screen.findByLabelText("Model");
-    expect(modelSelect).toBeInTheDocument();
+  it("shows the model alone when the strength is unset", async () => {
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
     expect(
-      screen.queryByText(/discovered on a different runtime/),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Model: fake-opus" }),
+    ).toBeTruthy();
   });
 
-  it("does not flag the stale catalog on a CodexEventStream runtime (never refreshed)", async () => {
-    // A JES runtime (codex) never reports a catalog, so its turns would
-    // never replace an ACP-produced cache -- the "refreshes after the next
-    // turn" promise would be a permanent lie. The read-only CLI-default
-    // surface renders with no stale marker.
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "codex",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "codex_event_stream" },
-    ]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: codex/ }),
-    );
-    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
-    expect(
-      screen.queryByText(/discovered on a different runtime/),
-    ).not.toBeInTheDocument();
-  });
-
-  it("renders an inline error when the model-config read fails (not the pending hint)", async () => {
+  it("renders the read failure as an inline status line instead of a default label (issue #529)", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "qwen-code",
     });
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     vi.mocked(getSessionModelConfig).mockRejectedValue(new Error("ipc down"));
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: qwen-code/ }),
-    );
-    // The honest error line, NOT the discovery-pending hint masquerading as
-    // "no catalog yet".
-    expect(
-      await screen.findByText(/Could not load model options/),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/Model options appear after the first turn/),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
-  });
-
-  it("renders an inline error and resyncs when the set-model IPC rejects", async () => {
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    vi.mocked(setSessionModel).mockRejectedValue(new Error("write refused"));
-    const modelSelect = await screen.findByLabelText("Model");
-    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
-    expect(
-      await screen.findByText(/Could not apply the selection/),
-    ).toBeInTheDocument();
-    // The refetch-on-reject bounces the select back to the backend posture:
-    // no selection held -> the CLI's current default (not the rejected
-    // "fake-sonnet" the optimistic write never granted).
-    await waitFor(() =>
-      expect((screen.getByLabelText("Model") as HTMLSelectElement).value).toBe(
-        "fake-opus",
-      ),
-    );
-  });
-
-  it("renders an inline error when the set-thought-level IPC rejects", async () => {
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    vi.mocked(setSessionThoughtLevel).mockRejectedValue(
-      new Error("write refused"),
-    );
-    const thinkSelect = await screen.findByLabelText("Thinking");
-    fireEvent.change(thinkSelect, { target: { value: "high" } });
-    expect(
-      await screen.findByText(/Could not apply the selection/),
-    ).toBeInTheDocument();
-    // The refetch-on-reject bounces the select back to the backend posture:
-    // no selection held -> the CLI's current default (not the rejected
-    // "high" the optimistic write never granted).
-    await waitFor(() =>
-      expect((screen.getByLabelText("Thinking") as HTMLSelectElement).value).toBe(
-        "medium",
-      ),
-    );
-  });
-
-  it("surfaces a persistence failure returned by a successful set", async () => {
-    // The set IPC resolves, but the returned persist verdict carries a typed
-    // write failure -- the selector says the selection was NOT saved to disk.
-    vi.mocked(setSessionModel).mockResolvedValue({
-      persist_error: { kind: "Io", data: "disk full" },
-      persist_suspended: false,
-    });
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    const modelSelect = await screen.findByLabelText("Model");
-    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
-    expect(
-      await screen.findByText(/Selection not saved: Failed to write/),
-    ).toBeInTheDocument();
-  });
-
-  it("surfaces a persist suspension (ADR-0035 conflict) returned by a successful set", async () => {
-    // The set IPC resolves, but the persist was WITHHELD: the .duck changed
-    // externally, so the auto-write is suspended. The old shared-slot read
-    // could not see this path at all (no persist_error is set on it).
-    vi.mocked(setSessionModel).mockResolvedValue({
-      persist_error: null,
-      persist_suspended: true,
-    });
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    const modelSelect = await screen.findByLabelText("Model");
-    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
-    expect(
-      await screen.findByText(/changed outside the app/),
-    ).toBeInTheDocument();
-  });
-
-  it("clears the failure lines on the next successful selection", async () => {
-    vi.mocked(setSessionModel)
-      .mockResolvedValueOnce({
-        persist_error: { kind: "Io", data: "disk full" },
-        persist_suspended: false,
-      })
-      .mockResolvedValue(PERSIST_OK);
-    await openExternal({
-      model: null,
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    const modelSelect = await screen.findByLabelText("Model");
-    fireEvent.change(modelSelect, { target: { value: "fake-sonnet" } });
-    expect(
-      await screen.findByText(/Selection not saved/),
-    ).toBeInTheDocument();
-    // The next attempt succeeds -- both fault lines must clear.
-    fireEvent.change(modelSelect, { target: { value: "fake-opus" } });
-    await waitFor(() =>
-      expect(
-        screen.queryByText(/Selection not saved/),
-      ).not.toBeInTheDocument(),
-    );
-  });
-});
-// --- #537: selector directory priority chain + codex per-model linkage ----
-
-describe("ComposerProviderPicker catalog priority chain (issue #537)", () => {
-  beforeEach(() => {
-    // Self-contained seeding (same isolation contract as the sibling
-    // describes: vi.clearAllMocks clears calls, not implementations).
-    vi.clearAllMocks();
-    vi.mocked(listProviderProfiles).mockResolvedValue([]);
-    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
-    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
-    vi.mocked(listAdapters).mockResolvedValue([]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
-    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
-  });
-
-  const SESSION_CATALOG = {
-    models: ["session-opus", "session-sonnet"],
-    current_model: "session-opus",
-    thought_levels: ["low", "high"],
-    current_thought_level: "low",
-    adapter_id: "qwen-code",
-  } satisfies DiscoveredRuntime;
-
-  const PROBE_CATALOG = {
-    models: ["probe-opus", "probe-haiku"],
-    current_model: "probe-opus",
-    thought_levels: ["minimal", "high"],
-    current_thought_level: "high",
-  } satisfies DiscoveredRuntime;
-
-  // A probe-cache document holding an ACP entry for the named adapter.
-  const probeCatalogs = (adapterId: string): AdapterCatalogs => ({
-    [adapterId]: {
-      probe_kind: "acp",
-      outcome: { acp: { discovered: PROBE_CATALOG } },
-      probed_at_millis: 1_700_000_000_000,
-    },
-  });
-
-  async function openExternal(
-    catalogs: AdapterCatalogs,
-    cached_discovered: DiscoveredRuntime | null,
-  ) {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "qwen-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue(catalogs);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: qwen-code/ }),
-    );
-  }
-
-  it("prefers the session catalog over the probe cache when both exist", async () => {
-    await openExternal(probeCatalogs("qwen-code"), SESSION_CATALOG);
-    const modelSelect = await screen.findByLabelText("Model");
-    expect(
-      Array.from(modelSelect.querySelectorAll("option")).map(
-        (o) => o.textContent,
-      ),
-    ).toEqual([
-      "CLI default (session-opus)",
-      "session-opus (CLI default)",
-      "session-sonnet",
-    ]);
-    // The probe-fed provenance note must NOT render -- this is the
-    // session's own live discovery.
-    expect(screen.queryByText(/last settings test/)).not.toBeInTheDocument();
-  });
-
-  it("falls back to the probe cache when the session has no catalog", async () => {
-    await openExternal(probeCatalogs("qwen-code"), null);
-    const modelSelect = await screen.findByLabelText("Model");
-    expect(
-      Array.from(modelSelect.querySelectorAll("option")).map(
-        (o) => o.textContent,
-      ),
-    ).toEqual([
-      "CLI default (probe-opus)",
-      "probe-opus (CLI default)",
-      "probe-haiku",
-    ]);
-    // Honest provenance: the options are the user's last settings test, and
-    // the session's own list replaces them after the next turn.
-    expect(await screen.findByText(/last settings test/)).toBeInTheDocument();
-  });
-
-  it("renders the empty state with a settings-test entry when no source has a catalog", async () => {
-    await openExternal({}, null);
-    expect(
-      await screen.findByText(/Model options appear after the first turn/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Test the runtime in settings/ }),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
-  });
-
-  it("does not fall back to another adapter's probe-cache entry", async () => {
-    // The cache holds an entry keyed by a DIFFERENT adapter id -- the
-    // fallback must not render that runtime's catalog.
-    await openExternal(probeCatalogs("some-other-adapter"), null);
-    expect(
-      await screen.findByText(/Model options appear after the first turn/),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+    renderPicker(pickerJsx());
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.queryByText("Default (recommended)")).toBeNull();
   });
 });
 
-describe("ComposerProviderPicker codex dropdowns (issue #537)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(listProviderProfiles).mockResolvedValue([]);
-    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
-    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
-    vi.mocked(listAdapters).mockResolvedValue([]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
-    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
+describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () => {
+  it("seeds the catalog from the probe cache when the session has none (ADR-0096 D6)", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
+    await renderExternalPicker();
+    expect(
+      screen.getByRole("button", { name: "Model: Default (recommended)" }),
+    ).toBeTruthy();
   });
 
-  // Two codex models with different supported effort sets (overlapping:
-  // "low" is shared) -- pins the per-model linkage (a union would offer
-  // every effort on every model).
-  const CODEX_MODELS: CatalogModel[] = [
-    {
-      id: "gpt-5-codex",
-      display_name: "GPT-5 Codex",
-      is_default: true,
-      default_reasoning_effort: "medium",
-      supported_reasoning_efforts: ["low", "medium", "high"],
-    },
-    {
-      id: "o3-mini",
-      display_name: "o3-mini",
-      is_default: false,
-      default_reasoning_effort: "minimal",
-      supported_reasoning_efforts: ["minimal", "low"],
-    },
-  ];
-
-  const codexCatalogs = (): AdapterCatalogs => ({
-    codex: {
-      probe_kind: "codex_event_stream",
-      outcome: { codex_event_stream: { models: CODEX_MODELS } },
-      probed_at_millis: 1_700_000_000_000,
-    },
-  });
-
-  async function openCodex(config?: {
-    model?: string | null;
-    thought_level?: string | null;
-  }) {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "codex",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "codex_event_stream" },
-    ]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: config?.model ?? null,
-      thought_level: config?.thought_level ?? null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue(codexCatalogs());
-    const rendered = renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
+  it("writes a model selection through setSessionModel", async () => {
+    await renderExternalPicker({}, { cached_discovered: CATALOG });
     fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: codex/ }),
-    );
-    return rendered;
-  }
-
-  it("renders real dropdowns from the probe cache per-model catalog", async () => {
-    await openCodex();
-    const modelSelect = await screen.findByLabelText("Model");
-    // The model rows come from the cached catalog; the CLI-default row is
-    // annotated with the catalog flagged default.
-    expect(
-      Array.from(modelSelect.querySelectorAll("option")).map((o) => o.value),
-    ).toEqual(["", "gpt-5-codex", "o3-mini"]);
-    // With no model picked the level surface is a hint, not a dropdown
-    // (there is no honest effort list to offer).
-    expect(
-      await screen.findByText(/Pick a model to choose a thinking level/),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText("Thinking")).not.toBeInTheDocument();
-  });
-
-  it("shows the selected model efforts in the CLI declared order", async () => {
-    await openCodex({ model: "gpt-5-codex" });
-    const thinkSelect = await screen.findByLabelText("Thinking");
-    expect(
-      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
-    ).toEqual(["", "low", "medium", "high"]);
-  });
-
-  it("refreshes the effort list when the model changes", async () => {
-    await openCodex({ model: "gpt-5-codex" });
-    // Switch to o3-mini -- its supported set differs from gpt-5-codex's.
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "o3-mini" },
-    });
-    await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
-    );
-    const thinkSelect = await screen.findByLabelText("Thinking");
-    expect(
-      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
-    ).toEqual(["", "minimal", "low"]);
-  });
-
-  it("clears a held effort that the newly picked model does not support", async () => {
-    // The session holds "high" (supported by gpt-5-codex only); switching
-    // to o3-mini must clear it via the existing set IPC in the same
-    // gesture.
-    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "o3-mini" },
-    });
-    await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
+      screen.getByRole("menuitem", { name: "fake-sonnet" }),
     );
     await waitFor(() =>
-      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
     );
   });
 
-  it("keeps the effort when the model write itself rejects", async () => {
-    // A rejected model write must not clear the effort -- it stays against
-    // the still-held model (the server posture wins).
-    vi.mocked(setSessionModel).mockRejectedValueOnce(new Error("boom"));
-    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "o3-mini" },
-    });
+  it("writes a thought-level selection through setSessionThoughtLevel", async () => {
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: /^low$/ }));
     await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", "low"),
     );
-    expect(
-      await screen.findByText(/Could not apply the selection/),
-    ).toBeInTheDocument();
-    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
   });
 
-  it("clears the effort when the model selection is cleared", async () => {
-    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "" },
+  it("clears via the Default (recommended) row with a null write, without the backfill-clear IPC (single write point)", async () => {
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
+    const clearingRows = screen.getAllByRole("menuitem", {
+      name: "Default (recommended)",
     });
+    fireEvent.click(clearingRows[0]);
     await waitFor(() =>
       expect(setSessionModel).toHaveBeenCalledWith("sess-1", null),
     );
-    await waitFor(() =>
-      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
-    );
-    // The level surface collapses back to the pick-a-model hint.
-    expect(
-      await screen.findByText(/Pick a model to choose a thinking level/),
-    ).toBeInTheDocument();
+    expect(clearLastModelPosture).not.toHaveBeenCalled();
   });
 
-  it("shows the set failure when the chained effort clear itself rejects", async () => {
-    // The distinct second-write failure mode: the model write is GRANTED
-    // (the session now runs o3-mini) but the chained effort clear rejects.
-    // The failure must surface (the held "high" is now unsupported) and the
-    // refetch restores the server truth: new model, still-held effort.
-    vi.mocked(setSessionThoughtLevel).mockRejectedValueOnce(
-      new Error("clear boom"),
-    );
-    await openCodex({ model: "gpt-5-codex", thought_level: "high" });
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "o3-mini" },
-    });
-    await waitFor(() =>
-      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
-    );
-    expect(
-      await screen.findByText(/Could not apply the selection/),
-    ).toBeInTheDocument();
-    // Server truth after the refetch: the new model landed, the effort
-    // write never did.
-    expect(getSessionModelConfig).toHaveBeenLastCalledWith("sess-1");
-  });
-
-  it("keeps the model patch when the chained clear patches the cache", async () => {
-    // The functional setQueryData hardening: the chained effort clear runs
-    // in the same gesture as the model write, and both patch the cache
-    // functionally -- a snapshot form would have the clear's closure
-    // restore the OLD model id. Pin the cache directly.
-    const { queryClient } = await openCodex({
-      model: "gpt-5-codex",
-      thought_level: "high",
-    });
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "o3-mini" },
-    });
-    await waitFor(() =>
-      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
-    );
-    // The model patch survives the chained clear's cache patch.
-    expect(
-      queryClient.getQueryData(sessionKeys.modelConfig("sess-1")),
-    ).toMatchObject({ model: "o3-mini", thought_level: null });
-  });
-
-  it("keeps a supported effort when switching to a model that also supports it", async () => {
-    // "low" sits in BOTH models sets -- switching models must NOT clear it.
-    await openCodex({ model: "gpt-5-codex", thought_level: "low" });
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "o3-mini" },
-    });
-    await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "o3-mini"),
-    );
-    // The select re-renders on the o3-mini effort list still holding "low".
-    await waitFor(() => {
-      expect(screen.getByLabelText("Thinking")).toHaveValue("low");
-    });
-    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
-  });
-
-  it("keeps the read-only CLI-default labels when no cache entry exists", async () => {
-    // Inline seeding (openCodex would re-seed the catalogs mock with a
-    // codex entry; this state needs it EMPTY).
+  it("clears a held effort the newly picked model does not support (codex linkage, issue #537)", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "codex",
     });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "codex_event_stream" },
-    ]);
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: codex/ }),
-    );
-    // Two CLI-default labels render (model + thinking), no dropdowns.
-    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
-  });
-
-  it("routes the codex empty-state entry to the settings local-cli tab", async () => {
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    const onOpenSettings = vi.fn();
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "codex",
+    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      // Held level "medium" is not in gpt-5-codex's supported set.
+      model: "gpt-5",
+      thought_level: "medium",
+      cached_discovered: null,
     });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("codex"), stream_format: "codex_event_stream" },
-    ]);
-    renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={onOpenSettings}
-      />,
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      codex: {
+        probe_kind: "codex_event_stream",
+        outcome: {
+          codex_event_stream: {
+            models: [
+              {
+                id: "gpt-5",
+                display_name: "GPT-5",
+                is_default: true,
+                default_reasoning_effort: "medium",
+                supported_reasoning_efforts: ["low", "medium", "high"],
+              },
+              {
+                id: "gpt-5-codex",
+                display_name: "GPT-5 Codex",
+                is_default: false,
+                default_reasoning_effort: "low",
+                supported_reasoning_efforts: ["low"],
+              },
+            ],
+          },
+        },
+        probed_at_millis: 0,
+      },
+    });
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: codex/ });
+    fireEvent.click(screen.getByRole("menuitem", { name: "gpt-5-codex" }));
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "gpt-5-codex"),
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: codex/ }),
+    // The chained clear lands through the SAME gesture (issue #537).
+    await waitFor(() =>
+      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
     );
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Test the runtime in settings/,
-      }),
-    );
-    expect(onOpenSettings).toHaveBeenCalledWith("local-cli");
   });
 });
 
-describe("ComposerProviderPicker claude-code dropdowns (issue #561, ADR-0097)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    vi.mocked(setSessionModel).mockResolvedValue(PERSIST_OK);
-    vi.mocked(setSessionThoughtLevel).mockResolvedValue(PERSIST_OK);
-  });
-
-  // Two claude models with DIFFERENT supported effort sets -- pins the
-  // per-model filtering AC on the claude format (a union would offer every
-  // effort on every model).
-  const CLAUDE_MODELS: CatalogModel[] = [
-    {
-      id: "claude-sonnet-4",
-      display_name: "Claude Sonnet 4",
-      is_default: true,
-      default_reasoning_effort: "medium",
-      supported_reasoning_efforts: ["low", "medium", "high"],
-    },
-    {
-      id: "claude-opus-4",
-      display_name: "claude-opus-4-20250514",
-      is_default: false,
-      default_reasoning_effort: "",
-      supported_reasoning_efforts: ["high"],
-    },
-  ];
-
-  const claudeCatalogs = (): AdapterCatalogs => ({
-    "claude-code": {
-      probe_kind: "claude_stream_json",
-      outcome: { claude_stream_json: { models: CLAUDE_MODELS } },
-      probed_at_millis: 1_700_000_000_000,
-    },
-  });
-
-  async function openClaude(config?: {
-    model?: string | null;
-    thought_level?: string | null;
-    cached_discovered?: DiscoveredRuntime | null;
-    catalogs?: AdapterCatalogs;
-  }) {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "claude-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
-    ]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: config?.model ?? null,
-      thought_level: config?.thought_level ?? null,
-      cached_discovered: config?.cached_discovered ?? null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue(
-      config?.catalogs ?? claudeCatalogs(),
-    );
-    const rendered = renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={vi.fn()}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
-    );
-    return rendered;
-  }
-
-  it("renders real dropdowns from the probe cache per-model catalog", async () => {
-    await openClaude();
-    const modelSelect = await screen.findByLabelText("Model");
-    expect(
-      Array.from(modelSelect.querySelectorAll("option")).map((o) => o.value),
-    ).toEqual(["", "claude-sonnet-4", "claude-opus-4"]);
-    // With no model picked the level surface is a hint, not a dropdown.
-    expect(
-      await screen.findByText(/Pick a model to choose a thinking level/),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText("Thinking")).not.toBeInTheDocument();
-  });
-
-  it("filters thought levels by the selected model's supported efforts", async () => {
-    // The per-model filtering AC: sonnet offers three efforts, opus only
-    // "high" -- the dropdown must follow the SELECTED model, never a union.
-    await openClaude({ model: "claude-sonnet-4" });
-    let thinkSelect = await screen.findByLabelText("Thinking");
-    expect(
-      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
-    ).toEqual(["", "low", "medium", "high"]);
-    fireEvent.change(await screen.findByLabelText("Model"), {
-      target: { value: "claude-opus-4" },
-    });
-    await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "claude-opus-4"),
-    );
-    thinkSelect = await screen.findByLabelText("Thinking");
-    expect(
-      Array.from(thinkSelect.querySelectorAll("option")).map((o) => o.value),
-    ).toEqual(["", "high"]);
-  });
-
-  it("renders the empty-directory guidance before any probe", async () => {
-    // AC: 未探测时空目录引导 -- no cache entry keeps the read-only CLI
-    // default labels + the settings-test entry.
-    const onOpenSettings = vi.fn();
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "claude-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
-    ]);
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #574)", () => {
+  async function renderColdStartPicker(overrides: PickerOverrides = {}) {
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
     renderPicker(
-      <ComposerProviderPicker
-        sessionId="sess-1"
-        provider={pickerProvider()}
-        onSwitchActive={() => {}}
-        onSwitchModel={() => {}}
-        onOpenSettings={onOpenSettings}
-      />,
-    );
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Runtime: claude-code/ }),
-    );
-    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
-    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Test the runtime in settings/,
+      pickerJsx({
+        sessionId: null,
+        onPendingRuntimeChange: vi.fn(),
+        pendingRuntime: { kind: "external", data: "qwen-code" },
+        ...overrides,
       }),
     );
-    expect(onOpenSettings).toHaveBeenCalledWith("local-cli");
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+  }
+
+  it("seeds the label from the backfill entry (initial pending = the entry)", async () => {
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    await renderColdStartPicker();
+    expect(screen.getByText("fake-opus · medium")).toBeTruthy();
+    expect(getLastModelPosture).toHaveBeenCalledWith("qwen-code");
   });
 
-  it("annotates the CLI default with the last turn's system{init} current model", async () => {
-    // Honest rendering (ADR-0097 Decision 5): before any probe the claude
-    // turn still reports the model it ran -- the label names it instead of
-    // a bare "CLI default".
-    await openClaude({
-      catalogs: {},
-      cached_discovered: {
-        models: [],
-        current_model: "claude-fake-4",
-        thought_levels: [],
-        current_thought_level: null,
-        adapter_id: "claude-code",
-      },
+  it("routes a pick to onPendingModelPostureChange seeded from the backfill (no set IPCs)", async () => {
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
     });
-    expect(
-      await screen.findByText("CLI default (claude-fake-4)"),
-    ).toBeInTheDocument();
+    const onPendingModelPostureChange = vi.fn();
+    await renderColdStartPicker({ onPendingModelPostureChange });
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
+      model: "fake-sonnet",
+      thought_level: "medium",
+    });
+    expect(setSessionModel).not.toHaveBeenCalled();
   });
 
-  it("keeps a bare CLI default when the discovered catalog is another runtime's", async () => {
-    // The annotation's provenance guard: a residual cached_discovered from
-    // a DIFFERENT runtime (reachable after an ACP -> claude-code switch,
-    // before this runtime's first turn) must not annotate this runtime's
-    // label with the other runtime's current model.
-    await openClaude({
-      catalogs: {},
-      cached_discovered: {
-        models: [],
-        current_model: "ghost-model",
-        thought_levels: [],
-        current_thought_level: null,
-        adapter_id: "qwen-code",
+  it("clears the dimension AND wipes the backfill entry via the #581 IPC (ADR-0100 D3)", async () => {
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    const onPendingModelPostureChange = vi.fn();
+    await renderColdStartPicker({ onPendingModelPostureChange });
+    const clearingRows = screen.getAllByRole("menuitem", {
+      name: "Default (recommended)",
+    });
+    fireEvent.click(clearingRows[0]);
+    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
+      model: null,
+      thought_level: "medium",
+    });
+    expect(clearLastModelPosture).toHaveBeenCalledWith("qwen-code");
+    expect(setSessionModel).not.toHaveBeenCalled();
+  });
+
+  it("clears an unsupported held level in the same pending patch (cold-start #537 linkage)", async () => {
+    // perModel catalog: the backfilled level "medium" is not in gpt-5-codex's
+    // supported set, so picking that model patches the pair with level null
+    // in one gesture -- no set IPCs on the cold-start bar.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "gpt-5",
+      thought_level: "medium",
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      codex: {
+        probe_kind: "codex_event_stream",
+        outcome: {
+          codex_event_stream: {
+            models: [
+              {
+                id: "gpt-5",
+                display_name: "GPT-5",
+                is_default: true,
+                default_reasoning_effort: "medium",
+                supported_reasoning_efforts: ["low", "medium", "high"],
+              },
+              {
+                id: "gpt-5-codex",
+                display_name: "GPT-5 Codex",
+                is_default: false,
+                default_reasoning_effort: "low",
+                supported_reasoning_efforts: ["low"],
+              },
+            ],
+          },
+        },
+        probed_at_millis: 0,
       },
     });
+    const onPendingModelPostureChange = vi.fn();
+    renderPicker(
+      pickerJsx({
+        sessionId: null,
+        onPendingRuntimeChange: vi.fn(),
+        pendingRuntime: { kind: "external", data: "codex" },
+        onPendingModelPostureChange,
+      }),
+    );
+    await screen.findByRole("button", { name: /Runtime: codex/ });
+    fireEvent.click(screen.getByRole("menuitem", { name: "gpt-5-codex" }));
+    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
+      model: "gpt-5-codex",
+      thought_level: null,
+    });
+    expect(setSessionModel).not.toHaveBeenCalled();
+    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+  });
+
+  it("renders Default (recommended) when the backfill entry is empty", async () => {
+    await renderColdStartPicker();
     expect(
-      screen.queryByText("CLI default (ghost-model)"),
-    ).not.toBeInTheDocument();
-    // Both labels stay bare (model + thinking).
-    expect(await screen.findAllByText("CLI default")).toHaveLength(2);
+      screen.getByRole("button", { name: "Model: Default (recommended)" }),
+    ).toBeTruthy();
   });
 });

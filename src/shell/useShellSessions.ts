@@ -42,12 +42,15 @@ import {
   renamePersistedSession,
   renameSession,
   setAuthorizationMode,
+  setSessionModel,
   setSessionRuntime,
+  setSessionThoughtLevel,
   toggleMcpServer,
 } from "../api";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import type { AppError } from "../types/error";
+import type { ModelPosture } from "../types/app-config";
 import type { AuthMode } from "../types/approval";
 import { AUTH_MODE_DEFAULT } from "../types/approval";
 import type { SessionRuntimeChoice } from "../types/runtime";
@@ -64,11 +67,19 @@ import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
  *  marker is null for the same skip (issue #572: the backend's own
  *  create_session resolution already started the session on the resolved
  *  default_runtime), while an EXPLICIT pick -- including a built-in pick
- *  against an external default -- always applies. The two lists are empty by
- *  default; each entry lands one mount / enable IPC. */
+ *  against an external default -- always applies. modelPosture follows the
+ *  same null-sentinel shape (ADR-0099/0100, issue #574): null = untouched
+ *  (the backend's create_session startup backfill applies); a non-null pair
+ *  is EXPLICIT -- null fields are real clears -- and lands via the two model
+ *  set IPCs. The two lists are empty by default; each entry lands one mount /
+ *  enable IPC. */
 export interface PendingComposerPosture {
   runtime: SessionRuntimeChoice | null;
   authMode: AuthMode;
+  /** Model posture picked on the cold-start bar's cascade menu (ADR-0100,
+   *  issue #574): applied to the minted session AFTER the runtime write so
+   *  the pair lands on the chosen external adapter. */
+  modelPosture: ModelPosture | null;
   /** Skill spec names picked on the cold-start Skills trigger (draft mode,
    *  #500): mounted onto the minted session one by one, in pick order. */
   skills: string[];
@@ -329,7 +340,7 @@ export function useShellSessions({
           // semantics). The four facets share this helper so the catch
           // contract lives in one place.
           const applyPostureWrite = async (
-            write: () => Promise<void>,
+            write: () => Promise<unknown>,
             facet: string,
             ...labels: unknown[]
           ): Promise<void> => {
@@ -352,6 +363,22 @@ export function useShellSessions({
             await applyPostureWrite(
               () => setSessionRuntime(sid, runtimePick),
               "runtime",
+            );
+          }
+          if (posture.modelPosture !== null) {
+            // ADR-0100 (issue #574): the cold-start cascade menu's explicit
+            // pair -- AFTER the runtime write so the model / thought level
+            // land on the chosen external adapter. Both dimensions always
+            // write: null fields are explicit clears the user made on the
+            // bar, not "leave whatever the startup backfill seated".
+            const modelPick = posture.modelPosture;
+            await applyPostureWrite(
+              () => setSessionModel(sid, modelPick.model),
+              "model",
+            );
+            await applyPostureWrite(
+              () => setSessionThoughtLevel(sid, modelPick.thought_level),
+              "thought level",
             );
           }
           if (posture.authMode !== AUTH_MODE_DEFAULT) {

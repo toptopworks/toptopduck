@@ -610,10 +610,15 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await waitFor(() =>
         expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
       );
-      // Open the picker popover and select the external adapter.
+      // Open the picker popover and select the external adapter from the
+      // level-2 CLI select.
       fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
-      const adapterBtn = await screen.findByRole("button", { name: "gemini-cli" });
-      fireEvent.click(adapterBtn);
+      const cliTrigger = await screen.findByRole("combobox", { name: "本机 CLI" });
+      fireEvent.pointerDown(cliTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliTrigger);
+      const cliOption = await screen.findByRole("option", { name: "gemini-cli" });
+      fireEvent.pointerUp(cliOption, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliOption);
       // Type and submit from the centered bar.
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
       fireEvent.click(screen.getByRole("button", { name: "提问" }));
@@ -758,7 +763,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       );
       // ...then the user explicitly reverts to built-in.
       fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
-      const builtinHeader = await screen.findByRole("button", { name: "内置" });
+      const builtinHeader = await screen.findByRole("button", { name: "API 接入配置" });
       fireEvent.click(builtinHeader);
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
       fireEvent.click(screen.getByRole("button", { name: "提问" }));
@@ -807,7 +812,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       // Visit 1: explicitly pick built-in against the external default and
       // mint — the pick lands as one setSessionRuntime write.
       fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
-      const builtinHeader = await screen.findByRole("button", { name: "内置" });
+      const builtinHeader = await screen.findByRole("button", { name: "API 接入配置" });
       fireEvent.click(builtinHeader);
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "first question" } });
       fireEvent.click(screen.getByRole("button", { name: "提问" }));
@@ -2469,10 +2474,14 @@ describe("App composer refactor follow-ups (issue #504)", () => {
       await waitFor(() =>
         expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
       );
-      // Pick the external adapter.
+      // Pick the external adapter from the level-2 CLI select.
       fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
-      const adapterBtn = await screen.findByRole("button", { name: "gemini-cli" });
-      fireEvent.click(adapterBtn);
+      const cliTrigger = await screen.findByRole("combobox", { name: "本机 CLI" });
+      fireEvent.pointerDown(cliTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliTrigger);
+      const cliOption = await screen.findByRole("option", { name: "gemini-cli" });
+      fireEvent.pointerUp(cliOption, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliOption);
       // Type and submit — the gate is bypassed (external kind).
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
       fireEvent.click(screen.getByRole("button", { name: "提问" }));

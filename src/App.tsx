@@ -25,7 +25,7 @@ import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
 } from "./components/thread/ComposerProviderPicker";
-import type { AppConfig } from "./types/app-config";
+import type { AppConfig, ModelPosture } from "./types/app-config";
 import type { AuthMode } from "./types/approval";
 import { AUTH_MODE_DEFAULT } from "./types/approval";
 import type { SessionRuntimeChoice } from "./types/runtime";
@@ -172,7 +172,6 @@ export default function App() {
     commitAppConfig,
     replaceAppConfig,
     switchActiveProfile,
-    switchActiveProfileModel,
     sidebarCollapsed,
     toggleSidebarCollapse,
     sidebarGrouping,
@@ -320,6 +319,22 @@ export default function App() {
   // consumed).
   const [pendingRuntime, setPendingRuntime] =
     useState<SessionRuntimeChoice | null>(null);
+  // ADR-0099/0100 (issue #574): the cold-start posture cascade's pending
+  // pair, same null-sentinel shape as pendingRuntime -- null = untouched
+  // (the picker displays the adapter's backfill entry and the backend's
+  // create_session startup posture applies); a non-null pair is the user's
+  // explicit posture (null fields = real clears) applied to the minted
+  // session via the two model set IPCs.
+  const [pendingModelPosture, setPendingModelPosture] =
+    useState<ModelPosture | null>(null);
+  // A runtime switch on the cold-start bar resets the pending posture:
+  // model ids are adapter-namespaced (ADR-0100 Decision 2), so a posture
+  // picked under one CLI must not leak into another (or into the built-in
+  // runtime, whose posture is the active profile's model).
+  const handlePendingRuntimeChange = useCallback((runtime: SessionRuntimeChoice) => {
+    setPendingRuntime(runtime);
+    setPendingModelPosture(null);
+  }, []);
   const [pendingAuthMode, setPendingAuthMode] = useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingSkills, setPendingSkills] = useState<string[]>([]);
   const [pendingMcpServers, setPendingMcpServers] = useState<string[]>([]);
@@ -377,19 +392,22 @@ export default function App() {
       // backend's create_session resolution is the startup truth and already
       // started the session on the resolved runtime. An explicit pick --
       // including a built-in pick against an external default -- always
-      // applies.
+      // applies. modelPosture follows the same null-skip / explicit-apply
+      // shape (issue #574).
       const runtime = pendingRuntime;
+      const modelPosture = pendingModelPosture;
       const authMode = pendingAuthMode;
       const skills = pendingSkills;
       const mcpServers = pendingMcpServers;
       const files = pendingFiles;
       void createSessionWithQuestion(
         question,
-        { runtime, authMode, skills, mcpServers },
+        { runtime, modelPosture, authMode, skills, mcpServers },
         files,
       ).then((created) => {
         if (created) {
           setPendingRuntime(null);
+          setPendingModelPosture(null);
           setPendingAuthMode(AUTH_MODE_DEFAULT);
           setPendingSkills([]);
           setPendingMcpServers([]);
@@ -403,6 +421,7 @@ export default function App() {
       createSessionWithQuestion,
       effectivePendingRuntime,
       pendingRuntime,
+      pendingModelPosture,
       pendingAuthMode,
       pendingSkills,
       pendingMcpServers,
@@ -532,16 +551,19 @@ export default function App() {
   // and writes to the shell-level pending state, Decision 6
   // no-degraded-controls). Absent until app-config resolves. Explicitly
   // typed so the render site spreads it without an assertion.
-  const providerPicker: Omit<ComposerProviderPickerProps, "sessionId" | "onPendingRuntimeChange"> | undefined = appConfig
-    ? {
-        provider: appConfig.provider,
-        onSwitchActive: (id: string) => void switchActiveProfile(id),
-        onSwitchModel: (model: string) => void switchActiveProfileModel(model),
-        onOpenSettings: (tab: RuntimeTab) =>
-          openSettings({ section: "runtime", runtimeTab: tab }),
-        profileKeyEpoch,
-      }
-    : undefined;
+  const providerPicker:
+    | Omit<
+      ComposerProviderPickerProps,
+        "sessionId" | "onPendingRuntimeChange" | "onPendingModelPostureChange"
+    >
+    | undefined = appConfig
+      ? {
+          provider: appConfig.provider,
+          onSwitchActive: (id: string) => void switchActiveProfile(id),
+          onOpenSettings: () => openSettings({ section: "runtime" }),
+          profileKeyEpoch,
+        }
+      : undefined;
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -803,11 +825,25 @@ export default function App() {
                           providerPicker ? (
                             <ComposerProviderPicker
                               sessionId={activeSessionId}
-                              onPendingRuntimeChange={setPendingRuntime}
+                              onPendingRuntimeChange={
+                                activeSessionId === null
+                                  ? handlePendingRuntimeChange
+                                  : undefined
+                              }
                               pendingRuntime={
                                 activeSessionId === null
                                   ? effectivePendingRuntime
                                   : undefined
+                              }
+                              onPendingModelPostureChange={
+                                activeSessionId === null
+                                  ? setPendingModelPosture
+                                  : undefined
+                              }
+                              pendingModelPosture={
+                                activeSessionId === null
+                                  ? pendingModelPosture
+                                  : null
                               }
                               {...providerPicker}
                             />

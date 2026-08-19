@@ -62,7 +62,6 @@ export function useAppConfigState({
    *  the caller just needs the frontend state to reflect the disk truth. */
   replaceAppConfig: (cfg: AppConfig) => void;
   switchActiveProfile: (id: string) => Promise<void>;
-  switchActiveProfileModel: (model: string) => Promise<void>;
   sidebarCollapsed: boolean;
   toggleSidebarCollapse: () => void;
   sidebarGrouping: SidebarGrouping;
@@ -167,37 +166,6 @@ export function useAppConfigState({
   // model is per-profile, NOT a global -- different providers support
   // different model sets, so a global active model is meaningless). The
   // switch is one commitAppConfig write that patches ONLY the active
-  // profile's model field (immutable map over profiles), so live_config
-  // reads the new model on the next turn without touching the keychain slot
-  // (the profile id is unchanged -> ADR-0029 key indicator stays). The
-  // contract is commitAppConfig's (optimistic + no-rollback); a reject is
-  // caught into setShellError, mirroring switchActiveProfile. No draft -- the
-  // composer commit is immediate (a one-field swap), so the next ask picks it
-  // up; the Settings stage + Save remains the bulk-edit path.
-  const switchActiveProfileModel = useCallback(
-    async (model: string): Promise<void> => {
-      if (!appConfig) return;
-      const { provider } = appConfig;
-      const active = provider.profiles.find((p) => p.id === provider.active_profile);
-      // No active profile (the legal zero-profile state, ADR-0098) OR a no-op
-      // model: skip the pointless write.
-      if (!active || model === active.model) return;
-      try {
-        await commitAppConfig({
-          ...appConfig,
-          provider: {
-            ...provider,
-            profiles: provider.profiles.map((p) =>
-              p.id === active.id ? { ...p, model } : p,
-            ),
-          },
-        });
-      } catch (e) {
-        setShellError(toAppError(e, intl, "shell"));
-      }
-    },
-    [appConfig, commitAppConfig, intl, setShellError],
-  );
 
   // Commit the three shell prefs (two collapses + the sidebar grouping mode) as
   // ONE app-config write (ADR-0038/0054, issue #84; ADR-0072, issue #251).
@@ -264,7 +232,6 @@ export function useAppConfigState({
     commitAppConfig,
     replaceAppConfig,
     switchActiveProfile,
-    switchActiveProfileModel,
     sidebarCollapsed,
     toggleSidebarCollapse,
     sidebarGrouping,

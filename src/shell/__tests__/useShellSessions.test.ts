@@ -105,6 +105,7 @@ const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
 // resolution already applies, issue #572).
 const DEFAULT_POSTURE: PendingComposerPosture = {
   runtime: null,
+  modelPosture: null,
   authMode: AUTH_MODE_DEFAULT,
   skills: [],
   mcpServers: [],
@@ -184,6 +185,7 @@ describe("useShellSessions", () => {
     await act(async () => {
       await result.current.createSessionWithQuestion("q", {
         runtime: { kind: "external", data: "gemini" },
+        modelPosture: null,
         authMode: "no_confirmation",
         skills: [],
         mcpServers: [],
@@ -220,6 +222,7 @@ describe("useShellSessions", () => {
         "q",
         {
           runtime: { kind: "built_in" },
+          modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
           mcpServers: [],
@@ -246,6 +249,7 @@ describe("useShellSessions", () => {
         "q",
         {
           runtime: null,
+          modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["data-cleaning", "charting"],
           mcpServers: ["srv-a"],
@@ -279,6 +283,7 @@ describe("useShellSessions", () => {
         "q",
         {
           runtime: null,
+          modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["broken", "charting"],
           mcpServers: ["srv-a"],
