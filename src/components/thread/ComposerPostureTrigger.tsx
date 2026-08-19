@@ -5,12 +5,7 @@ import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
 import type { SaveError } from "../../types/session";
 import type { CatalogModel } from "../../types/runtime";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "../ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,9 +50,14 @@ export type ComposerPostureTriggerProps = {
   setFault: unknown;
   persistFault: SaveError | null;
   persistSuspended: boolean;
-  // Honest provenance notes (issue #529) rendered at the top of the menu.
-  staleCatalogNote: boolean;
-  catalogFromProbeNote: boolean;
+  // The honest provenance note (issue #529) for the ACP catalog's source.
+  // The two states are complementary predicates over the picker's
+  // `discovered` cache (stale requires a session-owned discovery, probe-fed
+  // requires none), so they ride one prop: "stale-runtime" renders the
+  // inline warning line at the top of the menu; "from-probe" renders the
+  // info-icon tooltip on the bar row before the trigger button; null
+  // renders nothing.
+  catalogNote: CatalogNote;
   disabled: boolean;
 };
 
@@ -76,6 +76,10 @@ export type PostureCatalog =
   }
   | { kind: "perModel"; models: CatalogModel[] };
 
+// The catalog provenance note kind (see ComposerPostureTriggerProps):
+// which of the two honest-source explanations, if any, applies.
+export type CatalogNote = "stale-runtime" | "from-probe" | null;
+
 export function ComposerPostureTrigger({
   label,
   catalog,
@@ -87,8 +91,7 @@ export function ComposerPostureTrigger({
   setFault,
   persistFault,
   persistSuspended,
-  staleCatalogNote,
-  catalogFromProbeNote,
+  catalogNote,
   disabled,
 }: ComposerPostureTriggerProps) {
   const intl = useIntl();
@@ -181,7 +184,7 @@ export function ComposerPostureTrigger({
 
   return (
     <>
-      {catalogFromProbeNote && <ProbeCatalogInfoIcon />}
+      {catalogNote === "from-probe" && <ProbeCatalogInfoIcon />}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
@@ -200,7 +203,7 @@ export function ComposerPostureTrigger({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-60">
-          {staleCatalogNote && (
+          {catalogNote === "stale-runtime" && (
             <p className="text-warning px-2 py-1 text-xs">
               <FormattedMessage
                 id="composer.runtimePicker.staleCatalog"
@@ -294,33 +297,31 @@ export function ComposerPostureTrigger({
 
 // The probe-catalog provenance glyph seated BEFORE the posture trigger
 // button on the bar row: hover (or focus) the info icon to read why the
-// directory lists the settings-test catalog. Its own TooltipProvider keeps
-// the trigger test tree provider-free (nested providers are legal).
+// directory lists the settings-test catalog. Mounts bare under the
+// app-wide TooltipProvider (App.tsx), like every other tooltip site.
 function ProbeCatalogInfoIcon() {
   const intl = useIntl();
   return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label={intl.formatMessage({
-              id: "composer.runtimePicker.catalogFromProbeAria",
-              defaultMessage: "Catalog source explanation",
-            })}
-            className="text-muted-foreground mr-1 flex shrink-0 cursor-default"
-          >
-            <Info className="size-3.5" aria-hidden />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" align="start" className="max-w-64">
-          <FormattedMessage
-            id="composer.runtimePicker.catalogFromProbe"
-            defaultMessage="Options from your last settings test — this runtime's live list appears after its next turn."
-          />
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={intl.formatMessage({
+            id: "composer.runtimePicker.catalogFromProbeAria",
+            defaultMessage: "Catalog source explanation",
+          })}
+          className="text-muted-foreground mr-1 flex shrink-0 cursor-default"
+        >
+          <Info className="size-3.5" aria-hidden />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="start" className="max-w-64">
+        <FormattedMessage
+          id="composer.runtimePicker.catalogFromProbe"
+          defaultMessage="Options from your last settings test — this runtime's live list appears after its next turn."
+        />
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -332,7 +333,7 @@ function ProbeCatalogInfoIcon() {
 function InlineValue({ value }: { value: string | null }) {
   if (value == null) return null;
   return (
-    <span className="ml-auto flex min-w-0 flex-1 justify-end">
+    <span className="flex min-w-0 flex-1 justify-end">
       <span className="text-muted-foreground max-w-36 truncate text-xs">
         {value}
       </span>

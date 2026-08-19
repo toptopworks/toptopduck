@@ -4,6 +4,7 @@ import { IntlProvider } from "react-intl";
 
 import { ComposerPostureTrigger } from "../ComposerPostureTrigger";
 import type { PostureCatalog } from "../ComposerPostureTrigger";
+import { TooltipProvider } from "../../ui/tooltip";
 import type { CatalogModel } from "../../../types/runtime";
 
 // ComposerPostureTrigger tests (ADR-0099 Decision 3, issues #574/#573): the
@@ -55,22 +56,26 @@ function renderTrigger(overrides: TriggerOverrides = {}) {
   const onSelectThoughtLevel = vi.fn();
   render(
     <IntlProvider locale="en" messages={{}} onError={() => {}}>
-      <ComposerPostureTrigger
-        label="Default (recommended)"
-        catalog={ACP_CATALOG}
-        model={null}
-        thoughtLevel={null}
-        onSelectModel={onSelectModel}
-        onSelectThoughtLevel={onSelectThoughtLevel}
-        configFault={null}
-        setFault={null}
-        persistFault={null}
-        persistSuspended={false}
-        staleCatalogNote={false}
-        catalogFromProbeNote={false}
-        disabled={false}
-        {...overrides}
-      />
+      {/* Mirrors the app-wide TooltipProvider the trigger mounts under in
+          production (App.tsx) -- like every other tooltip site, the trigger
+          mounts bare rather than carrying its own provider. */}
+      <TooltipProvider delayDuration={0}>
+        <ComposerPostureTrigger
+          label="Default (recommended)"
+          catalog={ACP_CATALOG}
+          model={null}
+          thoughtLevel={null}
+          onSelectModel={onSelectModel}
+          onSelectThoughtLevel={onSelectThoughtLevel}
+          configFault={null}
+          setFault={null}
+          persistFault={null}
+          persistSuspended={false}
+          catalogNote={null}
+          disabled={false}
+          {...overrides}
+        />
+      </TooltipProvider>
     </IntlProvider>,
   );
   return { onSelectModel, onSelectThoughtLevel };
@@ -227,11 +232,23 @@ describe("ComposerPostureTrigger per-model catalog (issue #537)", () => {
 });
 
 describe("ComposerPostureTrigger honest fault surfaces (issue #529)", () => {
-  it("keeps the probe-catalog note in a tooltip and the stale note inline", async () => {
-    renderTrigger({ staleCatalogNote: true, catalogFromProbeNote: true });
-    // The stale-catalog warning stays an inline line; the informational
-    // probe-catalog note collapses into a hover tooltip behind an info icon.
+  it("renders the stale note inline with no probe icon", () => {
+    renderTrigger({ catalogNote: "stale-runtime" });
+    // The stale-catalog warning stays an inline line inside the menu; the
+    // probe-fed icon must not appear for a session-owned discovery.
     expect(screen.getByText(/discovered on a different runtime/)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Catalog source explanation" }),
+    ).toBeNull();
+  });
+
+  it("keeps the probe-catalog note in a tooltip behind the info icon", async () => {
+    renderTrigger({ catalogNote: "from-probe" });
+    // The informational probe-catalog note collapses into a hover tooltip
+    // behind an info icon, and the stale warning does not render.
+    expect(
+      screen.queryByText(/discovered on a different runtime/),
+    ).toBeNull();
     // Radix Tooltip's trigger opens on pointerMove (not pointerEnter), so the
     // hover is simulated with a pointer move over the info button.
     fireEvent.pointerMove(
