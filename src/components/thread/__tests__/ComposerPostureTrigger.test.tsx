@@ -216,7 +216,7 @@ describe("ComposerPostureTrigger per-model catalog (issue #537)", () => {
     renderTrigger({ catalog: PER_MODEL_CATALOG, model: null });
     const rows = screen.getAllByTestId("sub-trigger");
     expect(rows[1].getAttribute("aria-disabled")).toBe("true");
-    expect(rows[1].textContent).toContain("Pick a model to choose a thinking level.");
+    expect(rows[1].textContent).toContain("Pick a model first.");
   });
 
   it("offers no level rows while the Thinking row is unavailable", () => {
@@ -227,12 +227,19 @@ describe("ComposerPostureTrigger per-model catalog (issue #537)", () => {
 });
 
 describe("ComposerPostureTrigger honest fault surfaces (issue #529)", () => {
-  it("renders the provenance notes when flagged", () => {
+  it("keeps the probe-catalog note in a tooltip and the stale note inline", async () => {
     renderTrigger({ staleCatalogNote: true, catalogFromProbeNote: true });
-    expect(
-      screen.getByText(/Options from your last settings test/),
-    ).toBeTruthy();
+    // The stale-catalog warning stays an inline line; the informational
+    // probe-catalog note collapses into a hover tooltip behind an info icon.
     expect(screen.getByText(/discovered on a different runtime/)).toBeTruthy();
+    // Radix Tooltip's trigger opens on pointerMove (not pointerEnter), so the
+    // hover is simulated with a pointer move over the info button.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Catalog source explanation" }),
+    );
+    expect(
+      await screen.findByText(/Options from your last settings test/),
+    ).toBeTruthy();
   });
 
   it("renders the set failure, persist fault, and suspension lines", () => {

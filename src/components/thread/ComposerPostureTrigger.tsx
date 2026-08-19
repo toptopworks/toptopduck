@@ -1,10 +1,16 @@
 import { FormattedMessage, useIntl } from "react-intl";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Info } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
 import type { SaveError } from "../../types/session";
 import type { CatalogModel } from "../../types/runtime";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -174,125 +180,162 @@ export function ComposerPostureTrigger({
       : defaultLabel;
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          disabled={disabled}
-          aria-label={ariaLabel}
-          className="composer-posture-trigger inline-flex h-9 max-w-52 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
-        >
-          <span className="truncate">{label}</span>
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-60">
-        {catalogFromProbeNote && (
-          <p className="text-muted-foreground px-2 py-1 text-xs">
-            <FormattedMessage
-              id="composer.runtimePicker.catalogFromProbe"
-              defaultMessage="Options from your last settings test — this runtime's live list appears after its next turn."
-            />
-          </p>
-        )}
-        {staleCatalogNote && (
-          <p className="text-warning px-2 py-1 text-xs">
-            <FormattedMessage
-              id="composer.runtimePicker.staleCatalog"
-              defaultMessage="These options were discovered on a different runtime — they will refresh after this runtime's next turn."
-            />
-          </p>
-        )}
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <FormattedMessage
-              id="composer.runtimePicker.modelLabel"
-              defaultMessage="Model"
-            />
-            <InlineValue value={modelRowValue} />
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <ClearingItem label={modelClearLabel} onClear={() => onSelectModel(null)} />
-            {unrepresentedModelId != null && (
-              <OptionItem
-                id={unrepresentedModelId}
-                selected={model === unrepresentedModelId}
-                onSelect={() => onSelectModel(unrepresentedModelId)}
-                unrepresented
+    <>
+      {catalogFromProbeNote && <ProbeCatalogInfoIcon />}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            disabled={disabled}
+            aria-label={ariaLabel}
+            className="composer-posture-trigger inline-flex h-9 max-w-52 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
+          >
+            {/* Hides the four-state label when the question-bar @container
+                drops below the narrow-rail threshold, leaving the
+                chevron-only button (aria-label keeps the full readout) --
+                the same collapse the auth-mode chip's label performs
+                (LABEL_HIDE_NARROW). */}
+            <span className="@max-[320px]:hidden truncate">{label}</span>
+            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-60">
+          {staleCatalogNote && (
+            <p className="text-warning px-2 py-1 text-xs">
+              <FormattedMessage
+                id="composer.runtimePicker.staleCatalog"
+                defaultMessage="These options were discovered on a different runtime — they will refresh after this runtime's next turn."
               />
-            )}
-            {modelIds.map((id) => (
-              <OptionItem
-                key={id}
-                id={id}
-                selected={model === id}
-                onSelect={() => onSelectModel(id)}
+            </p>
+          )}
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <FormattedMessage
+                id="composer.runtimePicker.modelLabel"
+                defaultMessage="Model"
               />
-            ))}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger disabled={levelUnavailable}>
-            <FormattedMessage
-              id="composer.runtimePicker.thoughtLevelLabel"
-              defaultMessage="Thinking"
-            />
-            {levelUnavailable ? (
-              <span className="text-muted-foreground ml-auto truncate text-xs">
-                <FormattedMessage
-                  id="composer.runtimePicker.pickModelFirst"
-                  defaultMessage="Pick a model to choose a thinking level."
+              <InlineValue value={modelRowValue} />
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <ClearingItem label={modelClearLabel} onClear={() => onSelectModel(null)} />
+              {unrepresentedModelId != null && (
+                <OptionItem
+                  id={unrepresentedModelId}
+                  selected={model === unrepresentedModelId}
+                  onSelect={() => onSelectModel(unrepresentedModelId)}
+                  unrepresented
                 />
-              </span>
-            ) : (
-              <InlineValue value={levelRowValue} />
-            )}
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            {!levelUnavailable && (
-              <>
-                <ClearingItem
-                  label={levelClearLabel}
-                  onClear={() => onSelectThoughtLevel(null)}
+              )}
+              {modelIds.map((id) => (
+                <OptionItem
+                  key={id}
+                  id={id}
+                  selected={model === id}
+                  onSelect={() => onSelectModel(id)}
                 />
-                {unrepresentedLevelId != null && (
-                  <OptionItem
-                    id={unrepresentedLevelId}
-                    selected={thoughtLevel === unrepresentedLevelId}
-                    onSelect={() => onSelectThoughtLevel(unrepresentedLevelId)}
-                    unrepresented
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger disabled={levelUnavailable}>
+              <FormattedMessage
+                id="composer.runtimePicker.thoughtLevelLabel"
+                defaultMessage="Thinking"
+              />
+              {levelUnavailable ? (
+                <span className="text-muted-foreground min-w-0 flex-1 truncate text-right text-xs">
+                  <FormattedMessage
+                    id="composer.runtimePicker.pickModelFirst"
+                    defaultMessage="Pick a model first."
                   />
-                )}
-                {levelIds.map((id) => (
-                  <OptionItem
-                    key={id}
-                    id={id}
-                    selected={thoughtLevel === id}
-                    onSelect={() => onSelectThoughtLevel(id)}
+                </span>
+              ) : (
+                <InlineValue value={levelRowValue} />
+              )}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {!levelUnavailable && (
+                <>
+                  <ClearingItem
+                    label={levelClearLabel}
+                    onClear={() => onSelectThoughtLevel(null)}
                   />
-                ))}
-              </>
-            )}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <SelectorFaultLines
-          setFault={setFault}
-          persistFault={persistFault}
-          persistSuspended={persistSuspended}
-          intl={intl}
-        />
-      </DropdownMenuContent>
-    </DropdownMenu>
+                  {unrepresentedLevelId != null && (
+                    <OptionItem
+                      id={unrepresentedLevelId}
+                      selected={thoughtLevel === unrepresentedLevelId}
+                      onSelect={() => onSelectThoughtLevel(unrepresentedLevelId)}
+                      unrepresented
+                    />
+                  )}
+                  {levelIds.map((id) => (
+                    <OptionItem
+                      key={id}
+                      id={id}
+                      selected={thoughtLevel === id}
+                      onSelect={() => onSelectThoughtLevel(id)}
+                    />
+                  ))}
+                </>
+              )}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <SelectorFaultLines
+            setFault={setFault}
+            persistFault={persistFault}
+            persistSuspended={persistSuspended}
+            intl={intl}
+          />
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
+  );
+}
+
+// The probe-catalog provenance glyph seated BEFORE the posture trigger
+// button on the bar row: hover (or focus) the info icon to read why the
+// directory lists the settings-test catalog. Its own TooltipProvider keeps
+// the trigger test tree provider-free (nested providers are legal).
+function ProbeCatalogInfoIcon() {
+  const intl = useIntl();
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={intl.formatMessage({
+              id: "composer.runtimePicker.catalogFromProbeAria",
+              defaultMessage: "Catalog source explanation",
+            })}
+            className="text-muted-foreground mr-1 flex shrink-0 cursor-default"
+          >
+            <Info className="size-3.5" aria-hidden />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" align="start" className="max-w-64">
+          <FormattedMessage
+            id="composer.runtimePicker.catalogFromProbe"
+            defaultMessage="Options from your last settings test — this runtime's live list appears after its next turn."
+          />
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
 // The current-value tail on a first-level row (muted, right-aligned inside
-// the sub trigger).
+// the sub trigger). Two layers: the wrapper takes the row's remaining width
+// (so the value hugs the chevron at the right edge), the inner span caps the
+// value's own width -- a long model id ellipsizes instead of stretching to
+// the row's end.
 function InlineValue({ value }: { value: string | null }) {
   if (value == null) return null;
   return (
-    <span className="text-muted-foreground ml-auto max-w-28 truncate text-xs">
-      {value}
+    <span className="ml-auto flex min-w-0 flex-1 justify-end">
+      <span className="text-muted-foreground max-w-36 truncate text-xs">
+        {value}
+      </span>
     </span>
   );
 }
