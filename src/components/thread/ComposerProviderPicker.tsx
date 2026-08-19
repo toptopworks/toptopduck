@@ -379,6 +379,7 @@ export function ComposerProviderPicker({
       );
       return;
     }
+    const prevPosture = posture;
     onPendingModelPostureChange({ ...posture, ...patch });
     if (clearsBackfill && activeAdapterId !== null) {
       const adapterId = activeAdapterId;
@@ -387,9 +388,16 @@ export function ComposerProviderPicker({
           queryClient.setQueryData(adapterKeys.posture(adapterId), EMPTY_POSTURE);
         })
         .catch((e) => {
+          // The entry survived -- roll the optimistic clear back so the bar
+          // keeps showing it. Otherwise the next cold start (the pending
+          // pair resets to null on a runtime switch / restart) re-seeds from
+          // the un-cleared entry and the posture silently "comes back" --
+          // precisely the backfill-defeats-clear outcome this IPC exists to
+          // prevent (ADR-0100 Decision 3).
+          onPendingModelPostureChange(prevPosture);
           log.warn(
             "ComposerProviderPicker",
-            "clear startup posture failed",
+            "clear startup posture failed; rolled the pending clear back",
             fmtError(e, intl),
           );
         });
@@ -428,6 +436,16 @@ export function ComposerProviderPicker({
       );
       setModelPersistFault(outcome.persist_error);
       setModelPersistSuspended(outcome.persist_suspended);
+      // The set lands the post-set pair in the startup backfill entry
+      // server-side (record_last_model_posture, the single write point).
+      // Invalidate so the NEXT return to cold start refetches the post-set
+      // entry instead of showing the pre-set one (staleTime: Infinity never
+      // auto-refetches, ADR-0051).
+      if (activeAdapterId !== null) {
+        void queryClient.invalidateQueries({
+          queryKey: adapterKeys.posture(activeAdapterId),
+        });
+      }
       return true;
     } catch (e) {
       setModelSetError(e);
@@ -778,8 +796,12 @@ export function ComposerProviderPicker({
                   {notConfigured}
                 </p>
               ) : (
+                // Permanently controlled ("" = the placeholder state):
+                // toggling between a value and undefined would flip Radix
+                // between controlled and uncontrolled, and a switch back
+                // would re-echo the stale internal value.
                 <Select
-                  value={provider.active_profile ?? undefined}
+                  value={provider.active_profile ?? ""}
                   onValueChange={(id) => {
                     onSwitchActive(id);
                     if (isExternal) void selectRuntime({ kind: "built_in" });
@@ -848,8 +870,13 @@ export function ComposerProviderPicker({
                   as a disabled synthetic option so the closed trigger's echo
                   stays honest (issue #490). No detected CLI: the honest
                   "None detected" placeholder. */}
+              {/* Permanently controlled ("" = the placeholder state): an
+                  undefined value would make Radix fall back to its internal
+                  (uncontrolled) state, so switching back to built-in within
+                  one popover visit would keep echoing the previous adapter
+                  while level 1 already shows API Access selected. */}
               <Select
-                value={activeAdapterId ?? undefined}
+                value={activeAdapterId ?? ""}
                 onValueChange={(id) =>
                   void selectRuntime({ kind: "external", data: id })}
                 disabled={switching}

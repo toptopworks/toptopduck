@@ -350,6 +350,27 @@ export default function App() {
   // explicit pick still applies via setSessionRuntime.
   const startupRuntime = useStartupRuntime(queryClient, appConfig?.default_runtime);
   const effectivePendingRuntime = pendingRuntime ?? startupRuntime;
+  // The effective runtime can move WITHOUT an explicit picker pick:
+  // default_runtime changes in Settings or an adapter-table refetch move the
+  // startup resolution. Postures are adapter-namespaced (ADR-0100 Decision
+  // 2), so a pending pair picked under the previous runtime must not ride
+  // into the new one -- reconcile identity changes here (the explicit-switch
+  // reset in handlePendingRuntimeChange covers the picker path; this one is
+  // the resolution-only path).
+  const prevEffectiveRuntimeRef = useRef(effectivePendingRuntime);
+  useEffect(() => {
+    const prev = prevEffectiveRuntimeRef.current;
+    const next = effectivePendingRuntime;
+    if (
+      prev.kind !== next.kind ||
+      (prev.kind === "external" &&
+        next.kind === "external" &&
+        prev.data !== next.data)
+    ) {
+      setPendingModelPosture(null);
+    }
+    prevEffectiveRuntimeRef.current = next;
+  }, [effectivePendingRuntime]);
 
   // ADR-0092 Decision 4 honest gate (submit-time). The centered bar is
   // always typeable; a cold-start submit on the built-in runtime requires a
@@ -396,6 +417,13 @@ export default function App() {
       // shape (issue #574).
       const runtime = pendingRuntime;
       const modelPosture = pendingModelPosture;
+      // The session starts on the effective runtime (the explicit pick or
+      // the startup resolution -- the backend resolves the same way), so
+      // this is the adapter an explicit posture's set IPCs record under.
+      const postureAdapter =
+        modelPosture !== null && effectivePendingRuntime.kind === "external"
+          ? effectivePendingRuntime.data
+          : null;
       const authMode = pendingAuthMode;
       const skills = pendingSkills;
       const mcpServers = pendingMcpServers;
@@ -412,6 +440,16 @@ export default function App() {
           setPendingSkills([]);
           setPendingMcpServers([]);
           setPendingFiles([]);
+          // The mint-time set IPCs landed the explicit pair in the startup
+          // backfill entry (record_last_model_posture, the single write
+          // point). Invalidate so a later return to cold start refetches the
+          // post-set entry (staleTime: Infinity never auto-refetches,
+          // ADR-0051).
+          if (postureAdapter !== null) {
+            void queryClient.invalidateQueries({
+              queryKey: adapterKeys.posture(postureAdapter),
+            });
+          }
         }
       });
     },
@@ -419,6 +457,7 @@ export default function App() {
       activeSessionId,
       composerFieldsMap,
       createSessionWithQuestion,
+      queryClient,
       effectivePendingRuntime,
       pendingRuntime,
       pendingModelPosture,

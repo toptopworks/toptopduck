@@ -56,6 +56,15 @@ vi.mock("../../api", async (importOriginal) => {
     // mounts + MCP enables, all before registerOpen). Default no-ops; the
     // posture tests assert calls.
     setSessionRuntime: vi.fn(async () => {}),
+    // The clean #529 persist verdict; fault-verdict tests override per case.
+    setSessionModel: vi.fn(async () => ({
+      persist_error: null,
+      persist_suspended: false,
+    })),
+    setSessionThoughtLevel: vi.fn(async () => ({
+      persist_error: null,
+      persist_suspended: false,
+    })),
     setAuthorizationMode: vi.fn(async () => {}),
     mountSkill: vi.fn(async () => {}),
     toggleMcpServer: vi.fn(async () => {}),
@@ -87,7 +96,9 @@ import {
   renamePersistedSession,
   renameSession,
   setAuthorizationMode,
+  setSessionModel,
   setSessionRuntime,
+  setSessionThoughtLevel,
   toggleMcpServer,
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -204,9 +215,93 @@ describe("useShellSessions", () => {
       await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     expect(setSessionRuntime).not.toHaveBeenCalled();
+    expect(setSessionModel).not.toHaveBeenCalled();
+    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
     expect(setAuthorizationMode).not.toHaveBeenCalled();
     expect(mountSkill).not.toHaveBeenCalled();
     expect(toggleMcpServer).not.toHaveBeenCalled();
+  });
+
+  it("createSessionWithQuestion writes an explicit model posture AFTER the runtime write (ADR-0100)", async () => {
+    // The backend namespaces the backfill entry by the session's runtime, so
+    // the model / thought-level writes must land AFTER setSessionRuntime --
+    // order is a correctness precondition, not an implementation detail.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "q",
+        {
+          runtime: { kind: "external", data: "qwen-code" },
+          modelPosture: { model: "fake-sonnet", thought_level: "high" },
+          authMode: AUTH_MODE_DEFAULT,
+          skills: [],
+          mcpServers: [],
+        },
+        [],
+      );
+    });
+    expect(setSessionModel).toHaveBeenCalledWith("s1", "fake-sonnet");
+    expect(setSessionThoughtLevel).toHaveBeenCalledWith("s1", "high");
+    expect(
+      vi.mocked(setSessionRuntime).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(setSessionModel).mock.invocationCallOrder[0]);
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
+  it("createSessionWithQuestion writes null posture fields as explicit clears", async () => {
+    // A non-null pair is EXPLICIT: null fields are real clears the user made
+    // on the bar, not "skip this dimension" -- both IPCs fire with null.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "q",
+        {
+          runtime: { kind: "external", data: "qwen-code" },
+          modelPosture: { model: "fake-sonnet", thought_level: null },
+          authMode: AUTH_MODE_DEFAULT,
+          skills: [],
+          mcpServers: [],
+        },
+        [],
+      );
+    });
+    expect(setSessionModel).toHaveBeenCalledWith("s1", "fake-sonnet");
+    expect(setSessionThoughtLevel).toHaveBeenCalledWith("s1", null);
+  });
+
+  it("createSessionWithQuestion surfaces a persist fault returned by a successful model set (#529)", async () => {
+    // The set IPC resolves, but the persist verdict carries a typed write
+    // failure: the verdict rides the resolved value (never a reject), so the
+    // mint path must surface it like the picker's fault lines -- a silent
+    // drop leaves the selection in memory only and a resume reverts it.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    vi.mocked(setSessionModel).mockResolvedValueOnce({
+      persist_error: { kind: "Io", data: "disk full" },
+      persist_suspended: false,
+    });
+    const { result, setShellError } = renderSessions();
+    let created = false;
+    await act(async () => {
+      created = await result.current.createSessionWithQuestion(
+        "q",
+        {
+          runtime: { kind: "external", data: "qwen-code" },
+          modelPosture: { model: "fake-sonnet", thought_level: "high" },
+          authMode: AUTH_MODE_DEFAULT,
+          skills: [],
+          mcpServers: [],
+        },
+        [],
+      );
+    });
+    expect(created).toBe(true);
+    expect(setShellError).toHaveBeenCalledTimes(1);
+    expect(setShellError.mock.calls[0][0].message).toMatch(/Selection not saved/);
+    // The fault is per-facet: the thought-level write still lands.
+    expect(setSessionThoughtLevel).toHaveBeenCalledWith("s1", "high");
+    expect(result.current.openSessions).toHaveLength(1);
   });
 
   it("createSessionWithQuestion writes an explicit built-in pick while null stays unwritten (issue #572)", async () => {

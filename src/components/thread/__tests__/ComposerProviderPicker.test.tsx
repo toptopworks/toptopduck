@@ -19,6 +19,7 @@ import {
   type SetModelPersistOutcome,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
+import { adapterKeys } from "../../../session/queryKeys";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
 import type { AdapterEntry, AdapterCatalogs } from "../../../types/runtime";
 
@@ -368,6 +369,31 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     );
   });
 
+  it("keeps the CLI select echo honest when switching back to built-in within one popover visit", async () => {
+    // The CLI Select must stay controlled across the runtime switch: an
+    // uncontrolled fallback would re-echo the previously picked adapter
+    // while level 1 already shows API Access selected.
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    renderPicker(pickerJsx());
+    await openPopover();
+    await selectOption(screen.getByLabelText(CLI_SELECT), /qwen-code/);
+    await waitFor(() =>
+      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+        kind: "external",
+        data: "qwen-code",
+      }),
+    );
+    // Switch back via the API Access level-1 row.
+    fireEvent.click(screen.getByRole("button", { name: "API Access" }));
+    await waitFor(() =>
+      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+        kind: "built_in",
+      }),
+    );
+    // The CLI trigger falls back to the placeholder, not the stale echo.
+    expect(screen.getByLabelText(CLI_SELECT).textContent).toBe("—");
+  });
+
   it("shows a stale-adapter warning when the held CLI is no longer detected", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
@@ -551,6 +577,51 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     ).toBeTruthy();
   });
 
+  it("renders the per-model catalog from a claude_stream_json probe entry (issue #561 parity)", async () => {
+    // The per-model dispatch enumerates claude_stream_json explicitly next
+    // to codex_event_stream; a field typo here would collapse claude-code
+    // users' posture menu into the static label with no test failing.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
+    ]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "claude_stream_json",
+        outcome: {
+          claude_stream_json: {
+            models: [
+              {
+                id: "opus",
+                display_name: "Opus",
+                is_default: true,
+                default_reasoning_effort: "medium",
+                supported_reasoning_efforts: ["low", "medium", "high"],
+              },
+              {
+                id: "sonnet",
+                display_name: "Sonnet",
+                is_default: false,
+                default_reasoning_effort: "low",
+                supported_reasoning_efforts: ["low"],
+              },
+            ],
+          },
+        },
+        probed_at_millis: 0,
+      },
+    });
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: claude-code/ });
+    fireEvent.click(screen.getByRole("menuitem", { name: "sonnet" }));
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "sonnet"),
+    );
+  });
+
   it("writes a model selection through setSessionModel", async () => {
     await renderExternalPicker({}, { cached_discovered: CATALOG });
     fireEvent.click(
@@ -634,6 +705,136 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     // The chained clear lands through the SAME gesture (issue #537).
     await waitFor(() =>
       expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+    );
+  });
+
+  it("keeps the held effort when the model write itself rejects (codex linkage granted gate)", async () => {
+    // The same codex fixture, but the model write rejects: the chained
+    // effort clear gates on the granted verdict, so the held level stays
+    // against the still-held model instead of being cleared for nothing.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: "gpt-5",
+      thought_level: "medium",
+      cached_discovered: null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      codex: {
+        probe_kind: "codex_event_stream",
+        outcome: {
+          codex_event_stream: {
+            models: [
+              {
+                id: "gpt-5",
+                display_name: "GPT-5",
+                is_default: true,
+                default_reasoning_effort: "medium",
+                supported_reasoning_efforts: ["low", "medium", "high"],
+              },
+              {
+                id: "gpt-5-codex",
+                display_name: "GPT-5 Codex",
+                is_default: false,
+                default_reasoning_effort: "low",
+                supported_reasoning_efforts: ["low"],
+              },
+            ],
+          },
+        },
+        probed_at_millis: 0,
+      },
+    });
+    vi.mocked(setSessionModel).mockRejectedValueOnce(new Error("write refused"));
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: codex/ });
+    fireEvent.click(screen.getByRole("menuitem", { name: "gpt-5-codex" }));
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "gpt-5-codex"),
+    );
+    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+  });
+});
+
+describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () => {
+  it("renders an inline fault and resyncs when the set-model IPC rejects", async () => {
+    vi.mocked(setSessionModel).mockRejectedValue(new Error("write refused"));
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeTruthy();
+    // The refetch-on-reject bounces the display back to the backend posture.
+    await waitFor(() => expect(getSessionModelConfig).toHaveBeenCalledTimes(2));
+  });
+
+  it("renders an inline fault when the set-thought-level IPC rejects", async () => {
+    vi.mocked(setSessionThoughtLevel).mockRejectedValue(
+      new Error("write refused"),
+    );
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: /^low$/ }));
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeTruthy();
+  });
+
+  it("surfaces a persistence failure returned by a successful set", async () => {
+    // The set IPC resolves, but the returned persist verdict carries a typed
+    // write failure -- the menu says the selection was NOT saved to disk.
+    vi.mocked(setSessionModel).mockResolvedValue({
+      persist_error: { kind: "Io", data: "disk full" },
+      persist_suspended: false,
+    });
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    expect(
+      await screen.findByText(/Selection not saved: Failed to write/),
+    ).toBeTruthy();
+  });
+
+  it("surfaces a persist suspension (ADR-0035 conflict) returned by a successful set", async () => {
+    vi.mocked(setSessionModel).mockResolvedValue({
+      persist_error: null,
+      persist_suspended: true,
+    });
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    expect(await screen.findByText(/changed outside the app/)).toBeTruthy();
+  });
+
+  it("clears the failure lines on the next successful selection", async () => {
+    vi.mocked(setSessionModel)
+      .mockResolvedValueOnce({
+        persist_error: { kind: "Io", data: "disk full" },
+        persist_suspended: false,
+      })
+      .mockResolvedValue(PERSIST_OK);
+    await renderExternalPicker(
+      {},
+      { model: "fake-opus", cached_discovered: CATALOG },
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    expect(await screen.findByText(/Selection not saved/)).toBeTruthy();
+    // The next attempt succeeds -- the fault line must clear.
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/Selection not saved/)).toBeNull(),
     );
   });
 });
@@ -760,5 +961,66 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(
       screen.getByRole("button", { name: "Model: Default (recommended)" }),
     ).toBeTruthy();
+  });
+
+  it("rolls the pending clear back when the backfill-clear IPC rejects (ADR-0100 D3)", async () => {
+    // The clear is optimistic; a rejected wipe must roll the pending pair back
+    // to the displayed posture, otherwise the next cold start re-seeds from
+    // the surviving entry and the "cleared" posture silently comes back.
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    vi.mocked(clearLastModelPosture).mockRejectedValueOnce(
+      new Error("config write failed"),
+    );
+    const onPendingModelPostureChange = vi.fn();
+    await renderColdStartPicker({ onPendingModelPostureChange });
+    const clearingRows = screen.getAllByRole("menuitem", {
+      name: "Default (recommended)",
+    });
+    fireEvent.click(clearingRows[0]);
+    expect(onPendingModelPostureChange).toHaveBeenNthCalledWith(1, {
+      model: null,
+      thought_level: "medium",
+    });
+    await waitFor(() =>
+      expect(onPendingModelPostureChange).toHaveBeenNthCalledWith(2, {
+        model: "fake-opus",
+        thought_level: "medium",
+      }),
+    );
+  });
+});
+
+describe("ComposerProviderPicker backfill cache coherence (ADR-0100 single write point)", () => {
+  it("invalidates the backfill entry after a successful in-session set so the next cold start refetches", async () => {
+    // staleTime: Infinity never auto-refetches; without the invalidation a
+    // return to cold start would show the pre-set entry.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "qwen-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: null,
+      cached_discovered: CATALOG,
+    });
+    render(wrap(pickerJsx(), queryClient));
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    await waitFor(() =>
+      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
+    );
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState(adapterKeys.posture("qwen-code"))
+          ?.isInvalidated,
+      ).toBe(true),
+    );
   });
 });

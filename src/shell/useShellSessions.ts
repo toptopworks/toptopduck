@@ -27,7 +27,7 @@ import type { IntlShape } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
-import type { CreateSessionReply } from "../api";
+import type { CreateSessionReply, SetModelPersistOutcome } from "../api";
 import {
   closeSession,
   closeSessionAndWaitRelease,
@@ -356,6 +356,49 @@ export function useShellSessions({
               setShellError(toAppError(e, intl, "shell"));
             }
           };
+          // The two model facets carry the #529 persist verdict in the
+          // RESOLVED value (never a reject): surface it like the picker's
+          // fault lines, because an un-surfaced verdict leaves the selection
+          // in memory only -- a restart resumes the recipe without it and
+          // the user has no signal the .duck write failed, breaking "set
+          // means persisted" (ADR-0095 Decision 6) silently.
+          const surfacePersistVerdict = (
+            outcome: SetModelPersistOutcome,
+            facet: string,
+          ): void => {
+            if (outcome.persist_error !== null) {
+              log.warn(
+                "useShellSessions",
+                `pending ${facet} applied but not persisted`,
+                fmtError(outcome.persist_error, intl),
+              );
+              setShellError({
+                message: intl.formatMessage(
+                  {
+                    id: "composer.runtimePicker.persistFault",
+                    defaultMessage: "Selection not saved: {reason}",
+                  },
+                  { reason: fmtError(outcome.persist_error, intl) },
+                ),
+                kind: "shell",
+                detail: errorDetail(outcome.persist_error),
+              });
+            } else if (outcome.persist_suspended) {
+              log.warn(
+                "useShellSessions",
+                `pending ${facet} applied but persist suspended (ADR-0035 conflict)`,
+              );
+              setShellError({
+                message: intl.formatMessage({
+                  id: "composer.runtimePicker.persistSuspended",
+                  defaultMessage:
+                    "Selection not saved: the session file was changed outside the app, so autosave is paused until you resolve the conflict.",
+                }),
+                kind: "shell",
+                detail: null,
+              });
+            }
+          };
           if (posture.runtime !== null) {
             // Local const so the null narrowing survives into the write
             // closure (a property access would widen back to the union).
@@ -373,11 +416,19 @@ export function useShellSessions({
             // bar, not "leave whatever the startup backfill seated".
             const modelPick = posture.modelPosture;
             await applyPostureWrite(
-              () => setSessionModel(sid, modelPick.model),
+              async () =>
+                surfacePersistVerdict(
+                  await setSessionModel(sid, modelPick.model),
+                  "model",
+                ),
               "model",
             );
             await applyPostureWrite(
-              () => setSessionThoughtLevel(sid, modelPick.thought_level),
+              async () =>
+                surfacePersistVerdict(
+                  await setSessionThoughtLevel(sid, modelPick.thought_level),
+                  "thought level",
+                ),
               "thought level",
             );
           }
