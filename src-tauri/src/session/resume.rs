@@ -1094,7 +1094,7 @@ mod tests {
     use super::*;
     use crate::cancel::CancelToken;
     use crate::guardrail::{ExecError, ExecErrorKind};
-    use crate::model::{StaleAnchor, StaleReason};
+    use crate::model::{StaleAnchor, StaleReason, TextKind};
     use crate::persistence::recipe::{
         RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef,
     };
@@ -1500,6 +1500,66 @@ mod tests {
                 t.outcome
             );
         }
+    }
+
+    #[test]
+    fn rebuild_timeline_projects_runtime_attribution_to_the_wire() {
+        // ADR-0101: the resume projection maps the persisted pair (runtime
+        // kind + adapter id) onto the wire `TurnRuntime` the thread's segment
+        // badges read. Every recorded shape survives the rebuild: an external
+        // turn names its adapter, a pre-extension external turn degrades to
+        // `External { adapter_id: None }` (never a fabricated id), a built-in
+        // turn carries only the kind, and a v1-era turn without a runtime
+        // stays unattributed.
+        fn attributed(runtime: Option<RuntimeKind>, adapter_id: Option<&str>) -> RecipeEntry {
+            RecipeEntry::Turn(RecipeTurn::with_audit(
+                "q",
+                RecipeOutcome::Textual {
+                    text_kind: TextKind::Agent,
+                    body: "a".into(),
+                    assumption: None,
+                },
+                Vec::new(),
+                crate::persistence::recipe::TurnProvenance {
+                    runtime,
+                    adapter_id: adapter_id.map(Into::into),
+                    skills: Vec::new(),
+                },
+            ))
+        }
+        let recipe = recipe_with(
+            vec![
+                attributed(Some(RuntimeKind::External), Some("gemini-cli")),
+                attributed(Some(RuntimeKind::External), None),
+                attributed(Some(RuntimeKind::BuiltIn), None),
+                attributed(None, None),
+            ],
+            None,
+        );
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let timeline = resumer.rebuild_timeline(&mut ws, None).unwrap();
+        let runtimes: Vec<Option<TurnRuntime>> = timeline
+            .iter()
+            .map(|entry| match entry {
+                TimelineEntry::Turn { record, .. } => record.provenance.runtime.clone(),
+                other => panic!("expected Turn, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            runtimes,
+            vec![
+                Some(TurnRuntime::External {
+                    adapter_id: Some("gemini-cli".into())
+                }),
+                Some(TurnRuntime::External { adapter_id: None }),
+                Some(TurnRuntime::BuiltIn),
+                None,
+            ],
+            "the rebuild projects every recorded attribution shape onto the wire"
+        );
     }
 
     #[test]

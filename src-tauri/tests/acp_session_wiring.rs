@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use toptopduck_lib::model::SkillProvenance;
-use toptopduck_lib::persistence::recipe::RecipeEntry;
+use toptopduck_lib::persistence::recipe::{RecipeEntry, RuntimeKind};
 use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
 use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;
@@ -203,6 +203,20 @@ fn external_turn_with_skill_records_provenance() {
             content_hash: expected_hash,
         }],
         "external path provenance must snapshot skill name + hash"
+    );
+    // ADR-0101: the turn-top snapshot must record the turn's real runtime --
+    // the pre-#588 `TurnAudit::builtin` hardcoded BuiltIn here, mislabeling
+    // every live external turn. The external turn names its driving adapter's
+    // stable id on the persisted pair.
+    assert_eq!(
+        last_turn.provenance.runtime,
+        Some(RuntimeKind::External),
+        "a live external turn records the external runtime, never a hardcoded BuiltIn"
+    );
+    assert_eq!(
+        last_turn.provenance.adapter_id.as_deref(),
+        Some("fake-cli"),
+        "the live snapshot names the driving adapter's stable id"
     );
 }
 
