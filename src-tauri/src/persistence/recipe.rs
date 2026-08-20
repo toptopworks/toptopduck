@@ -215,6 +215,13 @@ pub struct TurnProvenance {
     /// before runtime tracking (v1 migrated, or live turns predating #319).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeKind>,
+    /// Which external CLI adapter drove this turn (ADR-0101): the stable
+    /// `AdapterId` string, carried ONLY on `RuntimeKind::External` turns (a
+    /// BuiltIn turn never sets it). `None` on External turns persisted before
+    /// the field existed (`#[serde(default)]`, no migration -- the thread
+    /// renders the honest "External (unrecorded)" degradation for them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<String>,
     /// The active skills at this turn's assembly time (ADR-0079/0086, issue
     /// #363), each carrying its `content_hash` so the frontend can drift-compare
     /// against the registry's current hash and surface a "modified" badge when
@@ -1316,6 +1323,49 @@ mod tests {
     }
 
     #[test]
+    fn external_provenance_round_trips_adapter_id() {
+        // ADR-0101: an External turn persists the adapter id alongside the
+        // runtime kind, so a mixed thread's reader can tell WHICH external CLI
+        // produced each turn. The pair survives the serialize -> deserialize
+        // cycle -- the .duck written on save reads back identically on resume.
+        let provenance = TurnProvenance {
+            runtime: Some(RuntimeKind::External),
+            adapter_id: Some("gemini-cli".into()),
+            skills: Vec::new(),
+        };
+        let json = serde_json::to_string(&provenance).expect("serialize");
+        assert_eq!(json, r#"{"runtime":"External","adapter_id":"gemini-cli"}"#);
+        let back: TurnProvenance = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, provenance);
+    }
+
+    #[test]
+    fn pre_attribution_external_turn_deserializes_without_adapter_id() {
+        // serde default (ADR-0101): an External turn persisted before the
+        // adapter-id extension carries only the runtime kind. It reads back
+        // with `adapter_id: None` -- the thread then renders the honest
+        // "External (unrecorded)" degradation, never a fabricated id.
+        let legacy = r#"{"runtime":"External"}"#;
+        let back: TurnProvenance = serde_json::from_str(legacy).expect("deserialize");
+        assert_eq!(back.runtime, Some(RuntimeKind::External));
+        assert_eq!(back.adapter_id, None, "missing adapter id degrades to None");
+    }
+
+    #[test]
+    fn builtin_provenance_omits_adapter_id_from_json() {
+        // ADR-0101: a BuiltIn turn never carries the adapter id -- the field
+        // is the external identity, meaningless for the app's own loop. The
+        // serialization stays byte-identical to the pre-extension form.
+        let provenance = TurnProvenance {
+            runtime: Some(RuntimeKind::BuiltIn),
+            adapter_id: None,
+            skills: Vec::new(),
+        };
+        let json = serde_json::to_string(&provenance).expect("serialize");
+        assert_eq!(json, r#"{"runtime":"BuiltIn"}"#);
+    }
+
+    #[test]
     fn recipe_turn_round_trips_a_synthetic_trace_through_json() {
         // A Materialized turn's synthesized single-call trace survives a
         // serialize -> deserialize cycle, so the .duck written on save reads
@@ -1352,6 +1402,7 @@ mod tests {
         let trace = synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data");
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
+            adapter_id: None,
             skills: vec![SkillProvenance {
                 name: "sql-coach".into(),
                 content_hash: "abc123".into(),
@@ -1384,6 +1435,7 @@ mod tests {
         // reproduces the audit anchor "how was this produced" after reopen.
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
+            adapter_id: None,
             skills: vec![
                 SkillProvenance {
                     name: "sql-coach".into(),
@@ -1415,6 +1467,7 @@ mod tests {
         assert!(
             !TurnProvenance {
                 runtime: Some(RuntimeKind::External),
+                adapter_id: None,
                 skills: Vec::new(),
             }
             .is_empty(),
@@ -1423,6 +1476,7 @@ mod tests {
         assert!(
             !TurnProvenance {
                 runtime: None,
+                adapter_id: None,
                 skills: vec![SkillProvenance {
                     name: "s".into(),
                     content_hash: String::new(),

@@ -442,9 +442,10 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         entry: "Turn",
         // Issue #381: the optimistic entry's provenance is empty -- the frontend
         // does not know the assembly-time content_hashes (the backend records
-        // them in record_turn). The refetch replaces this entry with the real
-        // TurnRecord carrying the live provenance, so the drift check activates
-        // only after the refetch lands.
+        // them in record_turn). ADR-0101: the runtime attribution is likewise
+        // left unset (the backend stamps the turn-top snapshot in
+        // record_turn) -- the optimistic row renders no badge, and the refetch
+        // replaces it with the real TurnRecord carrying both halves.
         data: { question, outcome, trace: settledTrace, provenance: { skills: [] } },
       };
       queryClient.setQueryData<ThreadEntry[]>(sessionKeys.thread(sessionId), (old) =>

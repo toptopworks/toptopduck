@@ -503,6 +503,8 @@
   "thread.trace.op.write": "写",
   "thread.trace.successAria": "调用成功",
   "thread.trace.toggle": "轨迹 · {count} 次调用",
+  "thread.runtime.builtIn": "内置",
+  "thread.runtime.externalUnrecorded": "外部（未记录）",
   "viz.chartLabel": "图表",
   "viz.error.invalidJson": "规格不是合法的 JSON",
   "viz.error.notObject": "规格不是 Vega-Lite 对象",

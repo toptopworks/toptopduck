@@ -264,17 +264,40 @@ pub struct SkillProvenance {
     pub content_hash: String,
 }
 
-/// Per-turn skill provenance crossing IPC (issue #381): the active skills at
-/// the turn's assembly time, each with its [`SkillProvenance::content_hash`] so
-/// the frontend drift-compares against the registry and surfaces a "modified" badge for
-/// a skill whose content changed after this turn. Mirrors the skills half of
-/// the persisted [`crate::persistence::recipe::TurnProvenance`] (which also
-/// carries the runtime kind); the IPC wire is intentionally narrower -- the
-/// runtime is backend audit only, never crosses to the webview. Empty `skills`
-/// for turns that mounted no skill and for v3->v4 migrated turns (no baseline).
+/// Which runtime drove one turn (ADR-0101): the app's built-in loop, or an
+/// external CLI adapter named by its stable id. This is the wire half of the
+/// persisted pair ([`crate::persistence::recipe::RuntimeKind`] +
+/// `adapter_id`): the thread renders it as a per-segment attribution badge;
+/// the LLM window never reads it (ADR-0101 Decision 3 -- the successor
+/// runtime needs no knowledge of its predecessor).
+///
+/// An `External` turn with `adapter_id: None` is a pre-extension recording
+/// (serde default on the persisted side, no migration) -- rendered as the
+/// honest "External (unrecorded)" degradation, never a fabricated id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum TurnRuntime {
+    BuiltIn,
+    External {
+        /// The stable `AdapterId` string of the CLI that drove the turn.
+        adapter_id: Option<String>,
+    },
+}
+
+/// Per-turn provenance crossing IPC (issue #381, ADR-0101): the active skills
+/// at the turn's assembly time, each with its [`SkillProvenance::content_hash`]
+/// so the frontend drift-compares against the registry and surfaces a
+/// "modified" badge for a skill whose content changed after this turn, plus
+/// the turn's executing [`TurnRuntime`]. Empty `skills` for turns that mounted
+/// no skill and for v3->v4 migrated turns (no baseline); absent `runtime` for
+/// turns recorded before attribution crossed the wire (an optimistic append
+/// or a pre-extension IPC peer -- shown without a badge, distinct from the
+/// recorded-but-unattributed `External` form).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TurnProvenance {
     pub skills: Vec<SkillProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<TurnRuntime>,
 }
 
 /// One entry in the conversation thread (ADR-0028/0039): the verbatim user

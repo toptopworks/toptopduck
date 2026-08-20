@@ -54,7 +54,7 @@ pub use model::{
     RenameError, RowPage, RowReadError, SheetGuidance, SheetRectify, SkillProvenance,
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThreadEntry,
     TraceEntryView, TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnProvenance, TurnRecord,
-    VizSpec, DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    TurnRuntime, VizSpec, DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
     DuckPath, LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,

@@ -31,7 +31,7 @@ use crate::mcp::config::McpServerConfig;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, RenameError, RowPage, RowReadError, SkillLifecycleEvent,
     SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry, TraceEntryView, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
+    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::recipe::{
     Recipe, RecipeTraceEntry, RecipeTurn, RuntimeKind, TurnProvenance as PersistedTurnProvenance,
@@ -560,28 +560,41 @@ impl TimelineEntry {
 pub(super) struct TurnAudit {
     /// The turn's persisted execution trace (ADR-0078); empty for no-tool turns.
     trace: Vec<RecipeTraceEntry>,
-    /// The turn's runtime + skill provenance (ADR-0078/0081). The PERSISTED
-    /// shape (recipe::TurnProvenance, aliased here) -- wider than the IPC
-    /// [`TurnProvenance`]: also carries the runtime kind for the .duck audit
-    /// anchor. The IPC TurnRecord narrows to skills only (issue #381).
+    /// The turn's runtime + skill provenance (ADR-0078/0081/0101). The
+    /// PERSISTED shape (recipe::TurnProvenance, aliased here): the runtime
+    /// kind + the external adapter id + the mounted skills, for the .duck
+    /// audit anchor. The IPC TurnRecord mirrors the same attribution through
+    /// [`crate::model::TurnRuntime`] (ADR-0101).
     provenance: PersistedTurnProvenance,
 }
 
 impl TurnAudit {
-    /// The audit for a turn the built-in agent loop just recorded (ADR-0078/
-    /// 0081, issue #319; ADR-0086, issue #364): the loop's real multi-call trace
-    /// mapped to its persisted form + the BuiltIn runtime + the mounted skills'
-    /// provenance (each skill's `name` + `content_hash` snapshotted at the
-    /// turn's assembly time). `skills` is empty when no skills were mounted
-    /// (the field is default-omitted from the .duck while empty).
-    fn builtin(trace: Vec<TraceEntry>, skills: Vec<SkillProvenance>) -> Self {
+    /// The audit for one just-recorded turn (ADR-0078/0081, issue #319;
+    /// ADR-0086, issue #364; ADR-0101): the loop's real multi-call trace
+    /// mapped to its persisted form + the turn's runtime attribution +
+    /// the mounted skills' provenance (each skill's `name` + `content_hash`
+    /// snapshotted at the turn's assembly time). `skills` is empty when no
+    /// skills were mounted (the field is default-omitted from the .duck
+    /// while empty); the projection onto the persisted pair (kind + the
+    /// external adapter id) happens inside, so callers pass the one wire
+    /// attribution.
+    fn from_execution(
+        trace: Vec<TraceEntry>,
+        skills: Vec<SkillProvenance>,
+        runtime: TurnRuntime,
+    ) -> Self {
+        let (runtime_kind, adapter_id) = match &runtime {
+            TurnRuntime::BuiltIn => (RuntimeKind::BuiltIn, None),
+            TurnRuntime::External { adapter_id } => (RuntimeKind::External, adapter_id.clone()),
+        };
         Self {
             trace: trace
                 .iter()
                 .map(RecipeTraceEntry::from_live_trace)
                 .collect(),
             provenance: PersistedTurnProvenance {
-                runtime: Some(RuntimeKind::BuiltIn),
+                runtime: Some(runtime_kind),
+                adapter_id,
                 skills,
             },
         }
@@ -1165,6 +1178,20 @@ impl Session {
                 content_hash: f.content_hash.clone(),
             })
             .collect();
+        // ADR-0101: the turn's runtime attribution, snapshotted at the turn
+        // top -- the same dispatch the match below reads, taken BEFORE it so
+        // the recorded attribution is the turn's own even if the selector
+        // changes while the turn runs. An external turn names its adapter
+        // (the stable id, persisted + mirrored across IPC); a built-in turn
+        // records only the kind. Every outcome kind records it, including a
+        // failed external spawn -- the turn was still the external runtime's
+        // to run.
+        let attribution = match &self.external_runtime {
+            Some(spec) => TurnRuntime::External {
+                adapter_id: Some(spec.id.as_str().to_string()),
+            },
+            None => TurnRuntime::BuiltIn,
+        };
         // The external-runtime branch (issue #299 slice 9c, ADR-0085) replaces
         // the built-in agent loop when an adapter is set; otherwise the built-in
         // loop runs (ADR-0081). Both return a `(outcome, trace)` pair; the
@@ -1272,7 +1299,7 @@ impl Session {
             );
             return outcome;
         }
-        self.record_turn(question, outcome, trace, skill_provenance)
+        self.record_turn(question, outcome, trace, skill_provenance, attribution)
     }
 
     /// Drive one external-runtime turn (issue #299 slice 9c, ADR-0085).
@@ -1492,6 +1519,7 @@ impl Session {
         outcome: TurnOutcome,
         trace: Vec<TraceEntry>,
         skills: Vec<SkillProvenance>,
+        runtime: TurnRuntime,
     ) -> TurnOutcome {
         // ADR-0089 Decision 4: on the first terminal turn, auto-name the
         // session from the first question's bounded truncation (ADR-0039
@@ -1520,22 +1548,24 @@ impl Session {
                 question: question.to_string(),
                 outcome: outcome.clone(),
                 trace: trace_view,
-                // Issue #381: the IPC provenance narrows to skills only (the
-                // runtime kind stays in the persisted TurnAudit below -- backend
-                // audit, never crosses to the webview). `skills` is already the
+                // Issue #381 (skills) + ADR-0101 (attribution): the IPC
+                // provenance carries the mounted skills AND the turn's
+                // executing runtime -- the thread renders the attribution as
+                // a per-segment badge. `skills` is already the
                 // model::SkillProvenance shape record_turn receives.
                 provenance: TurnProvenance {
                     skills: skills.clone(),
+                    runtime: Some(runtime.clone()),
                 },
             },
-            // ADR-0078 (issue #319): the loop's real multi-call trace (mapped
-            // to the recipe form) + the BuiltIn runtime provenance + the
-            // mounted-skills provenance (ADR-0086, issue #364: each skill's
-            // name + content_hash snapshotted at assembly time). The PERSISTED
-            // form rides the Session (the recipe is its .duck layer, read by
-            // build_recipe); the TurnRecord's display view above is the same
-            // bounded shape.
-            audit: TurnAudit::builtin(trace, skills),
+            // ADR-0078 (issue #319) + ADR-0101: the loop's real multi-call
+            // trace (mapped to the recipe form) + the runtime attribution +
+            // the mounted-skills provenance (ADR-0086, issue #364: each
+            // skill's name + content_hash snapshotted at assembly time). The
+            // PERSISTED form rides the Session (the recipe is its .duck
+            // layer, read by build_recipe); the TurnRecord's display view
+            // above is the same bounded shape.
+            audit: TurnAudit::from_execution(trace, skills, runtime),
         });
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck
@@ -1901,7 +1931,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::{Session, TOOL_OUTPUT_DIR_NAME};
-    use crate::model::{TurnFailure, TurnOutcome};
+    use crate::model::{TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
     use serde_json::json;
@@ -2594,6 +2624,7 @@ mod tests {
         }];
         let harvested_provenance = PersistedTurnProvenance {
             runtime: Some(RuntimeKind::External),
+            adapter_id: None,
             skills: vec![],
         };
 
@@ -2616,8 +2647,9 @@ mod tests {
         // the recipe, but here the emptiness sharpens the assertion: a
         // regression that reads record.trace instead of audit.trace would
         // produce an empty trace and fail the assert_eq below. External (not
-        // BuiltIn) is chosen so a live-path overwrite (which stamps BuiltIn)
-        // is also caught.
+        // BuiltIn) is chosen so a re-synthesized live-path provenance (which
+        // stamps the turn-top attribution, not the harvested one) is also
+        // caught.
         let record = TurnRecord {
             question: "resumed question".into(),
             outcome: TurnOutcome::Textual {
@@ -2650,6 +2682,102 @@ mod tests {
         assert_eq!(
             turn.provenance, harvested_provenance,
             "the harvested provenance round-trips verbatim (External runtime preserved)"
+        );
+    }
+
+    #[test]
+    fn record_turn_attribution_lands_on_record_and_audit() {
+        // ADR-0101: the turn-top attribution snapshot lands on BOTH halves of
+        // the timeline entry -- the IPC TurnRecord's provenance (the thread
+        // badge source) and the persisted TurnAudit (the .duck anchor). An
+        // external turn names its adapter id; a built-in turn records only
+        // the kind and never an id.
+        use super::PersistedTurnProvenance;
+        use super::TimelineEntry;
+        use crate::model::TurnRuntime;
+        use crate::persistence::recipe::{RecipeEntry, RuntimeKind};
+
+        fn textual(body: &str) -> TurnOutcome {
+            TurnOutcome::Textual {
+                text_kind: crate::model::TextKind::Agent,
+                body: body.into(),
+                assumption: None,
+            }
+        }
+
+        let mut session = Session::new().expect("session");
+        session.record_turn(
+            "external question",
+            textual("external answer"),
+            Vec::new(),
+            Vec::new(),
+            TurnRuntime::External {
+                adapter_id: Some("gemini-cli".into()),
+            },
+        );
+        session.record_turn(
+            "built-in question",
+            textual("built-in answer"),
+            Vec::new(),
+            Vec::new(),
+            TurnRuntime::BuiltIn,
+        );
+
+        let external = match &session.timeline[0] {
+            TimelineEntry::Turn { record, audit } => (record, audit),
+            _ => panic!("first entry is a turn"),
+        };
+        let builtin = match &session.timeline[1] {
+            TimelineEntry::Turn { record, audit } => (record, audit),
+            _ => panic!("second entry is a turn"),
+        };
+        // Wire half: the thread's badge source.
+        assert_eq!(
+            external.0.provenance.runtime,
+            Some(TurnRuntime::External {
+                adapter_id: Some("gemini-cli".into())
+            }),
+            "the external turn's wire provenance names the adapter"
+        );
+        assert_eq!(
+            builtin.0.provenance.runtime,
+            Some(TurnRuntime::BuiltIn),
+            "the built-in turn's wire provenance carries only the kind"
+        );
+        // Persisted half: the .duck anchor.
+        assert_eq!(external.1.provenance().runtime, Some(RuntimeKind::External));
+        assert_eq!(
+            external.1.provenance().adapter_id.as_deref(),
+            Some("gemini-cli"),
+            "the external turn's audit persists the adapter id"
+        );
+        assert_eq!(builtin.1.provenance().runtime, Some(RuntimeKind::BuiltIn));
+        assert_eq!(
+            builtin.1.provenance().adapter_id,
+            None,
+            "the built-in turn's audit never carries an adapter id"
+        );
+        // And the projection round-trips both into the .duck recipe shape.
+        let recipe = session.build_recipe();
+        let mut turns = recipe.history.iter().filter_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t.provenance.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            turns.next(),
+            Some(PersistedTurnProvenance {
+                runtime: Some(RuntimeKind::External),
+                adapter_id: Some("gemini-cli".into()),
+                skills: Vec::new(),
+            })
+        );
+        assert_eq!(
+            turns.next(),
+            Some(PersistedTurnProvenance {
+                runtime: Some(RuntimeKind::BuiltIn),
+                adapter_id: None,
+                skills: Vec::new(),
+            })
         );
     }
 
@@ -2895,6 +3023,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
 
         assert_eq!(
@@ -2916,6 +3045,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         assert_eq!(session.session_name(), Some("first question"));
 
@@ -2928,6 +3058,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         assert_eq!(
             session.session_name(),
@@ -2949,6 +3080,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         let name = session.session_name().expect("name set");
         let chars: Vec<char> = name.chars().collect();
@@ -2981,6 +3113,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         assert_eq!(
             session.session_name(),
@@ -3000,6 +3133,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         assert_eq!(
             session.session_name(),
@@ -3032,6 +3166,7 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         assert_eq!(
             session.session_name(),
@@ -3055,6 +3190,7 @@ mod tests {
             }),
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         assert_eq!(
             session_a.session_name(),
@@ -3068,6 +3204,7 @@ mod tests {
             TurnOutcome::Cancelled,
             Vec::new(),
             Vec::new(),
+            TurnRuntime::BuiltIn,
         );
         assert_eq!(
             session_b.session_name(),
@@ -3108,7 +3245,13 @@ mod tests {
     fn is_timeline_empty_false_after_turn() {
         // A turn (even Cancelled) adds a Turn entry to the timeline.
         let mut session = Session::new().expect("session");
-        session.record_turn("q", TurnOutcome::Cancelled, Vec::new(), Vec::new());
+        session.record_turn(
+            "q",
+            TurnOutcome::Cancelled,
+            Vec::new(),
+            Vec::new(),
+            TurnRuntime::BuiltIn,
+        );
         assert!(
             !session.is_timeline_empty(),
             "session with a turn is not empty"
