@@ -415,6 +415,49 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     );
   });
 
+  it("refetches the model config after a runtime switch so the button shows the seeded pair (#590)", async () => {
+    // ADR-0102 Decision 3: the switch re-seeds the posture slot server-side
+    // from the target adapter's backfill entry. The picker cannot project
+    // the seeded pair locally (the entry read happens in the backend write),
+    // so it invalidates the model-config query -- the refetch lands the
+    // seeded pair and the posture button re-renders off it, never lingering
+    // on the old adapter's stale pair.
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    // First load (pre-switch): the pair held under the old namespace. Later
+    // loads (post-invalidation): the pair the switch seeded.
+    vi.mocked(getSessionModelConfig)
+      .mockResolvedValueOnce({
+        model: "old-namespace-model",
+        thought_level: "high",
+        cached_discovered: null,
+      })
+      .mockResolvedValue({
+        model: "qwen-seeded-model",
+        thought_level: null,
+        cached_discovered: null,
+      });
+    renderPicker(pickerJsx());
+    // Let the first model-config load settle before switching (a switch
+    // racing the first load would invalidate mid-flight and blur the
+    // two-call count the test pins).
+    await waitFor(() => expect(getSessionModelConfig).toHaveBeenCalledTimes(1));
+    await openPopover();
+    await selectOption(
+      screen.getByRole("combobox", { name: CLI_SELECT }),
+      /qwen-code/,
+    );
+    await waitFor(() =>
+      expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+        kind: "external",
+        data: "qwen-code",
+      }),
+    );
+    // The invalidation refetched the model config; the button now shows the
+    // seeded pair, not the stale one.
+    await screen.findByText("qwen-seeded-model");
+    expect(getSessionModelConfig).toHaveBeenCalledTimes(2);
+  });
+
   it("selects the first detected CLI when the Local CLI level-1 row is picked from built-in", async () => {
     vi.mocked(listAdapters).mockResolvedValue([
       adapter("qwen-code"),
