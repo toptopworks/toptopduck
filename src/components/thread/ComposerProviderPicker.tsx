@@ -207,7 +207,7 @@ export function ComposerProviderPicker({
   // sessionId (cold-start bar, ADR-0092): the query is disabled and the
   // caller-held pendingRuntime drives the picker -- no IPC round-trip.
   const queryClient = useQueryClient();
-  const { data: runtimeData } = useQuery({
+  const { data: runtimeData, error: runtimeError } = useQuery({
     queryKey: sessionKeys.runtime(sessionId ?? ""),
     queryFn: () => getSessionRuntime(sessionId as string),
     enabled: sessionId !== null,
@@ -831,55 +831,68 @@ export function ComposerProviderPicker({
         catalogNote={catalogNote}
         disabled={modelSwitching}
       />
-      <Popover open={open} onOpenChange={setOpen}>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <PopoverTrigger asChild>
-              <button
-                type="button"
-                // ADR-0067 (#171): visual rules -> inline utilities. The trigger
-                // is an icon button sized to the QuestionBar row; bg-card + border
-                // ride the ADR-0050 token.
-                className="composer-picker-trigger inline-flex items-center justify-center size-9 rounded-md border border-border bg-card text-foreground hover:bg-muted transition-colors cursor-pointer"
-                aria-label={intl.formatMessage(
-                  {
-                    id: "composer.providerPicker.triggerAria",
-                    defaultMessage: "Runtime: {label}",
-                  },
-                  {
-                    label: isExternal
-                      ? (activeAdapter?.display_name ?? activeAdapterId ?? "")
-                      : providerName,
-                  },
-                )}
-              >
-                {/* The unified entry glyph is the Settings runtime section's
+      {runtimeError != null ? (
+        // Honest read failure (issue #600): a rejected runtime read must not
+        // masquerade as the built-in default -- the chip renders the fault
+        // inline instead of the control (the configFault treatment on the
+        // model-config side, #529 convention). With staleTime: Infinity and
+        // no focus refetch, the error state persists until a refetch, so the
+        // line stays up rather than flashing. Cold start never lands here
+        // (the query is disabled without a session id).
+        <span role="status" className="text-destructive max-w-40 truncate text-xs">
+          {fmtError(runtimeError, intl)}
+        </span>
+      ) : (
+        <Popover open={open} onOpenChange={setOpen}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  // ADR-0067 (#171): visual rules -> inline utilities. The trigger
+                  // is an icon button sized to the QuestionBar row; bg-card + border
+                  // ride the ADR-0050 token.
+                  className="composer-picker-trigger inline-flex items-center justify-center size-9 rounded-md border border-border bg-card text-foreground hover:bg-muted transition-colors cursor-pointer"
+                  aria-label={intl.formatMessage(
+                    {
+                      id: "composer.providerPicker.triggerAria",
+                      defaultMessage: "Runtime: {label}",
+                    },
+                    {
+                      label: isExternal
+                        ? (activeAdapter?.display_name ?? activeAdapterId ?? "")
+                        : providerName,
+                    },
+                  )}
+                >
+                  {/* The unified entry glyph is the Settings runtime section's
                     Brain icon. Still NOT a provider logo (ADR-0071); the
                     aria-label + tooltip are unchanged. */}
-                <Brain className="size-4 shrink-0" aria-hidden />
-              </button>
-            </PopoverTrigger>
-          </TooltipTrigger>
-          <TooltipContent>{tooltipText}</TooltipContent>
-        </Tooltip>
+                  <Brain className="size-4 shrink-0" aria-hidden />
+                </button>
+              </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent>{tooltipText}</TooltipContent>
+          </Tooltip>
 
-        <PopoverContent align="start" className="w-80">
-          <ComposerRuntimeMenu
-            isExternal={isExternal}
-            switching={switching}
-            provider={provider}
-            profileKeys={profileKeys}
-            keysError={keysError}
-            adapters={adapters}
-            activeAdapterId={activeAdapterId}
-            activeAdapterStale={activeAdapterStale}
-            onSwitchActive={onSwitchActive}
-            onSelectRuntime={selectRuntime}
-            onSelectLocalCliGroup={selectLocalCliGroup}
-            onManageRuntimes={handleOpenSettings}
-          />
-        </PopoverContent>
-      </Popover>
+          <PopoverContent align="start" className="w-80">
+            <ComposerRuntimeMenu
+              isExternal={isExternal}
+              switching={switching}
+              provider={provider}
+              profileKeys={profileKeys}
+              keysError={keysError}
+              adapters={adapters}
+              activeAdapterId={activeAdapterId}
+              activeAdapterStale={activeAdapterStale}
+              onSwitchActive={onSwitchActive}
+              onSelectRuntime={selectRuntime}
+              onSelectLocalCliGroup={selectLocalCliGroup}
+              onManageRuntimes={handleOpenSettings}
+            />
+          </PopoverContent>
+        </Popover>
+      )}
     </>
   );
 }

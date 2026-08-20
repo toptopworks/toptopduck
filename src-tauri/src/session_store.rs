@@ -51,7 +51,7 @@ use crate::mcp::aggregator::ConnectResult;
 use crate::mcp::config::McpServerId;
 use crate::provider::Provider;
 use crate::runtime::acp::adapter::AdapterSpec;
-use crate::session::Session;
+use crate::session::{PosturePair, Session};
 
 /// IPC error string carried by [`SessionError::NotFound`] -- the wording the
 /// frontend has always rendered for an unknown / closed session. Kept as a
@@ -225,6 +225,18 @@ impl Default for ClosingFlag {
     }
 }
 
+/// The handle-held runtime choice + posture pair as ONE value behind ONE
+/// mutex (issue #600): the pair is namespaced by the runtime it was selected
+/// under, and the two move together at every switch -- a reader taking the
+/// lock sees one segment's (runtime, pair), never a mix of two segments (a
+/// mix would stamp one runtime's segment header over the other's posture and
+/// inject a foreign-namespace id on resume).
+#[derive(Default)]
+struct RuntimePosture {
+    runtime: Option<AdapterSpec>,
+    posture: PosturePair,
+}
+
 /// One live session's shared handle. Cloned out of the store under a read lock
 /// so a long turn can run against it WITHOUT holding the store lock
 /// (ADR-0056). The `Session` (and its DuckDB connection) lives until the last
@@ -291,31 +303,27 @@ pub struct SessionHandle {
     /// holds. Empty until the first turn + reset on resume alongside the
     /// enablement set (the Session is fresh, no connect has run yet).
     last_mcp_connect: Mutex<Vec<ConnectResult>>,
-    /// The per-session runtime selector for the next turn (issue #353,
-    /// ADR-0076/0081/0083). `None` drives the built-in BYOK agent loop (the
-    /// default); `Some(spec)` drives the external ACP engine for the one CLI.
-    /// Lives on the handle (NOT inside the `Session` mutex) so the composer
-    /// picker's get/set are lock-light -- a write never blocks on an in-flight
-    /// turn; `ask` mirrors the choice into the Session at turn top
-    /// (`Session::set_external_runtime`), so a switch takes effect exactly at
-    /// the turn boundary. Restored on resume from the recipe-header
+    /// The next segment's runtime choice + model posture pair, ONE mutex
+    /// slot (issue #600) -- the runtime selector (issue #353,
+    /// ADR-0076/0081/0083: `None` drives the built-in BYOK agent loop, the
+    /// default; `Some(spec)` drives the external ACP engine for the one CLI)
+    /// and the ADR-0095 model + thought-level pair (the named [`PosturePair`],
+    /// one slot since issue #530) that the external runtime consumes under
+    /// that runtime's namespace. Folding the two former slots into one lock
+    /// makes the combined read ([`Self::runtime_and_posture`]) and the
+    /// switch's combined write ([`Self::set_runtime_and_posture`]) atomic,
+    /// so no interleaving can pair one runtime with the other runtime's
+    /// posture. Lives on the handle (NOT inside the `Session` mutex) so the
+    /// composer picker's get/set are lock-light -- a write never blocks on an
+    /// in-flight turn; `ask` mirrors both into the Session at turn top, so a
+    /// switch takes effect exactly at the turn boundary. The pair is
+    /// PERSISTED to the recipe and restored on resume via open_duck's
+    /// restore call; the runtime choice is restored from the recipe-header
     /// `last_runtime` (ADR-0102 Decision 1, issue #589 -- segment
     /// continuation; the runtime is execution-plane session state, so unlike
     /// the approval / MCP posture it survives a resume as the session's own
     /// last runtime).
-    runtime: Mutex<Option<AdapterSpec>>,
-    /// ADR-0095: the session-level model + thought-level selections for the
-    /// external runtime, held in ONE mutex slot (issue #530) so a torn write
-    /// between the two choices is not a representable intermediate state --
-    /// and every pair-consuming reader goes through
-    /// [`Self::external_model_config`], which reads both under the one lock,
-    /// so it too sees either the old pair or the new pair, never a mix.
-    /// Lock-light like `runtime` (the picker's get/set never block on an
-    /// in-flight turn); mirrored into the Session at turn top beside the
-    /// runtime choice, so a switch lands at the turn boundary. PERSISTED to
-    /// the recipe (unlike the runtime choice) -- a resume restores the
-    /// selection via open_duck's restore call.
-    external_model_config: Mutex<(Option<String>, Option<String>)>,
+    runtime_posture: Mutex<RuntimePosture>,
     /// ADR-0095: the cached discovered model / thought-level catalog from the
     /// last ACP turn. Lets the frontend render the selector immediately on
     /// session open / resume cold-start (before any turn re-discovers). None
@@ -560,20 +568,26 @@ impl SessionHandle {
             .expect("mounted_skills_snapshot lock poisoned") = names;
     }
 
-    // --- Runtime selector (issue #353, ADR-0076/0081/0083) ------------------
+    // --- Runtime + posture slot (issue #353, ADR-0076/0081/0083) ------------
     //
-    // The session's execution-runtime posture: the built-in BYOK agent loop
-    // (None, the default) or one external ACP CLI adapter (Some). Session-level
-    // + resume-resetting like the approval posture + the MCP enablement set --
-    // an explicit user assembly choice that never survives a resume. The
-    // command layer mirrors the choice into the Session at each turn top, so
-    // the switch lands at the turn boundary, never mid-turn.
+    // The session's execution-plane posture: the runtime selector (the
+    // built-in BYOK agent loop, None the default, or one external ACP CLI
+    // adapter, Some) plus the model + thought-level pair the selected
+    // external runtime consumes (ADR-0095). ONE mutex slot since issue #600:
+    // the two move together at every switch, so no reader can see one
+    // runtime paired with the other's posture. The command layer mirrors
+    // both into the Session at each turn top, so the switch lands at the
+    // turn boundary, never mid-turn.
 
     /// The runtime selected for the next turn (issue #353). `None` = the
-    /// built-in runtime. Lock-light: reads the handle's own Mutex, never the
-    /// session lock an in-flight turn holds.
+    /// built-in runtime. Lock-light: reads the handle's own slot lock, never
+    /// the session lock an in-flight turn holds.
     pub fn runtime_choice(&self) -> Option<AdapterSpec> {
-        self.runtime.lock().expect("runtime lock poisoned").clone()
+        self.runtime_posture
+            .lock()
+            .expect("runtime_posture lock poisoned")
+            .runtime
+            .clone()
     }
 
     /// Set the runtime for the next turn(s) (issue #353). `None` reverts to
@@ -582,33 +596,24 @@ impl SessionHandle {
     /// at turn top); an in-flight turn is untouched. The resume path writes
     /// the restored session runtime here (ADR-0102 Decision 1, issue #589).
     pub fn set_runtime_choice(&self, spec: Option<AdapterSpec>) {
-        *self.runtime.lock().expect("runtime lock poisoned") = spec;
+        self.runtime_posture
+            .lock()
+            .expect("runtime_posture lock poisoned")
+            .runtime = spec;
     }
 
     /// The session-level model + thought-level pair (ADR-0095), read under
-    /// the ONE pair-slot lock (issue #530) -- a consumer sees either the old
-    /// pair or the new pair, never a torn mix. Prefer this over composing
-    /// [`Self::external_model`] + [`Self::external_thought_level`] whenever
-    /// both values are needed: the two single-field reads take the lock
-    /// separately, and a set landing between them yields a mix.
-    pub fn external_model_config(&self) -> (Option<String>, Option<String>) {
-        self.external_model_config
+    /// the ONE slot lock (issue #530; since issue #600 the same lock also
+    /// covers the runtime choice) -- a consumer sees either the old
+    /// pair or the new pair, never a torn mix. When the runtime choice is
+    /// needed alongside, prefer [`Self::runtime_and_posture`]: it returns
+    /// both off the same lock state.
+    pub fn external_model_config(&self) -> PosturePair {
+        self.runtime_posture
             .lock()
-            .expect("external_model_config lock poisoned")
+            .expect("runtime_posture lock poisoned")
+            .posture
             .clone()
-    }
-
-    /// The session-level model choice (ADR-0095). Lock-light, single-field
-    /// read -- see [`Self::external_model_config`] for the pair read.
-    pub fn external_model(&self) -> Option<String> {
-        self.external_model_config().0
-    }
-
-    /// The session-level thought-level choice (ADR-0095). Lock-light,
-    /// single-field read -- see [`Self::external_model_config`] for the pair
-    /// read.
-    pub fn external_thought_level(&self) -> Option<String> {
-        self.external_model_config().1
     }
 
     /// The cached discovered catalog (ADR-0095). Lock-light read.
@@ -619,16 +624,71 @@ impl SessionHandle {
             .clone()
     }
 
-    /// Set the model + thought-level choices together (ADR-0095): they are
+    /// Set the model + thought-level pair together (ADR-0095): they are
     /// one assembly posture, written by the same picker surface, so they
     /// share ONE mutex slot -- a torn write between them is not a
-    /// representable intermediate state (issue #530). `None` clears (revert
-    /// to the CLI's own defaults). Lock-light.
-    pub fn set_external_model_config(&self, model: Option<String>, thought_level: Option<String>) {
-        *self
-            .external_model_config
+    /// representable intermediate state (issue #530). `None` fields clear
+    /// (revert to the CLI's own defaults). Lock-light.
+    pub fn set_external_model_config(&self, posture: PosturePair) {
+        self.runtime_posture
             .lock()
-            .expect("external_model_config lock poisoned") = (model, thought_level);
+            .expect("runtime_posture lock poisoned")
+            .posture = posture;
+    }
+
+    /// Read the runtime choice + the posture pair under the ONE slot lock
+    /// (issue #600): the pair is namespaced by the runtime it was selected
+    /// under, so the two are one unit at every consumer that keys off both --
+    /// the `ask` mirror at turn top and the posture set commands (whose
+    /// segment-header stamp + backfill entry both derive from this single
+    /// read). Atomic against [`Self::set_runtime_and_posture`]: a switch can
+    /// never interleave between the two reads, so the caller sees one
+    /// segment's (runtime, pair), never a mix.
+    pub fn runtime_and_posture(&self) -> (Option<AdapterSpec>, PosturePair) {
+        let slot = self
+            .runtime_posture
+            .lock()
+            .expect("runtime_posture lock poisoned");
+        (slot.runtime.clone(), slot.posture.clone())
+    }
+
+    /// Write the runtime choice + the posture pair under the ONE slot lock
+    /// (issue #600) -- the in-session switch's single combined step
+    /// (ADR-0102 Decision 3): a reader taking the same lock sees either the
+    /// old (runtime, pair) or the switched one in full, never a mix.
+    pub fn set_runtime_and_posture(&self, runtime: Option<AdapterSpec>, posture: PosturePair) {
+        let mut slot = self
+            .runtime_posture
+            .lock()
+            .expect("runtime_posture lock poisoned");
+        slot.runtime = runtime;
+        slot.posture = posture;
+    }
+
+    /// Conditionally write the posture pair under the ONE slot lock (issue
+    /// #600): the write lands only while the slot's runtime still equals
+    /// `expected` -- the runtime the caller read the held pair under. The
+    /// set commands use this for their handle write-back so a switch landing
+    /// between the combined read and the write-back cannot pair the new
+    /// runtime with the OLD namespace's pair: the switch has already
+    /// re-seeded the slot with the target adapter's posture (#590 segment
+    /// semantics), and the stale write is dropped instead of overwriting
+    /// it. Returns whether the write landed.
+    pub fn set_posture_if_runtime(
+        &self,
+        expected: &Option<AdapterSpec>,
+        posture: PosturePair,
+    ) -> bool {
+        let mut slot = self
+            .runtime_posture
+            .lock()
+            .expect("runtime_posture lock poisoned");
+        if &slot.runtime == expected {
+            slot.posture = posture;
+            true
+        } else {
+            false
+        }
     }
 
     /// Snapshot the turn's discovered catalog onto the handle (ADR-0095).
@@ -652,7 +712,7 @@ impl SessionHandle {
 
     /// Restore the persisted ADR-0095 trio from the resumed recipe
     /// (open_duck). Unlike the reset-to-default lineage (`reset_approval` /
-    /// `reset_mcp_enablement`), the model + thought-level selections + the
+    /// `reset_mcp_enablement`), the model + thought-level pair + the
     /// discovery cache SURVIVE a resume -- ADR-0095 Decision 6: losing the
     /// model selection is an unexpected degradation of the resume promise
     /// (the runtime choice survives the same way since ADR-0102 Decision 2,
@@ -664,14 +724,10 @@ impl SessionHandle {
     /// catalog).
     pub fn restore_runtime_model_config(
         &self,
-        model: Option<String>,
-        thought_level: Option<String>,
+        posture: PosturePair,
         cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
     ) {
-        *self
-            .external_model_config
-            .lock()
-            .expect("external_model_config lock poisoned") = (model, thought_level);
+        self.set_external_model_config(posture);
         *self
             .cached_discovered
             .lock()
@@ -738,8 +794,7 @@ impl SessionStore {
             // Issue #353: the built-in runtime is the honest default (ADR-0081);
             // an external CLI is an explicit per-session pick, restored on
             // resume from the recipe header (ADR-0102).
-            runtime: Mutex::new(None),
-            external_model_config: Mutex::new((None, None)),
+            runtime_posture: Mutex::new(RuntimePosture::default()),
             cached_discovered: Mutex::new(None),
             mounted_skills_snapshot: Mutex::new(Vec::new()),
         });
@@ -1220,6 +1275,62 @@ mod tests {
         );
     }
 
+    /// The runtime choice + the posture pair share ONE mutex slot (issue
+    /// #600): the combined write lands both atomically, the combined read
+    /// returns both from the same slot state, and a single-field write only
+    /// touches its field -- so no read shape can observe one runtime paired
+    /// with the other's posture.
+    #[test]
+    fn runtime_and_posture_share_one_slot() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("get handle");
+
+        // The combined write lands both fields; every read shape sees it.
+        let spec = crate::runtime::acp::adapter::gemini_cli();
+        let posture = PosturePair {
+            model: Some("fake-opus".into()),
+            thought_level: Some("high".into()),
+        };
+        handle.set_runtime_and_posture(Some(spec), posture.clone());
+        assert_eq!(handle.runtime_choice().unwrap().id.as_str(), "gemini-cli");
+        assert_eq!(handle.external_model_config(), posture);
+        let (runtime, pair) = handle.runtime_and_posture();
+        assert_eq!(runtime.unwrap().id.as_str(), "gemini-cli");
+        assert_eq!(pair, posture);
+
+        // A single-field write only touches its field; the combined read
+        // still returns both under the one lock.
+        handle.set_external_model_config(PosturePair::default());
+        let (runtime, pair) = handle.runtime_and_posture();
+        assert_eq!(runtime.as_ref().unwrap().id.as_str(), "gemini-cli");
+        assert_eq!(pair, PosturePair::default());
+
+        // The conditional write keys off the same slot state: it lands
+        // while the runtime still matches the read, and drops after a
+        // combined write changed the runtime (the set commands' write-back
+        // guard).
+        let pair = PosturePair {
+            model: Some("fake-sonnet".into()),
+            thought_level: None,
+        };
+        assert!(handle.set_posture_if_runtime(&runtime, pair.clone()));
+        assert_eq!(handle.external_model_config(), pair);
+        let codex = crate::runtime::acp::adapter::codex();
+        handle.set_runtime_and_posture(Some(codex), PosturePair::default());
+        assert!(!handle.set_posture_if_runtime(&runtime, pair));
+        assert_eq!(
+            handle.external_model_config(),
+            PosturePair::default(),
+            "the stale-namespace write-back is dropped after a switch"
+        );
+    }
+
     /// ADR-0095: the session-level model config trio round-trips through the
     /// lock-light accessors; the model + thought-level pair share ONE mutex
     /// slot (issue #530), so the pair reader returns both values from the
@@ -1237,17 +1348,20 @@ mod tests {
             .expect("session");
         let handle = store.get(&id).expect("handle");
 
-        assert_eq!(handle.external_model(), None);
-        assert_eq!(handle.external_thought_level(), None);
+        assert_eq!(handle.external_model_config(), PosturePair::default());
         assert_eq!(handle.cached_discovered(), None);
 
-        handle.set_external_model_config(Some("fake-opus".into()), Some("high".into()));
-        assert_eq!(handle.external_model().as_deref(), Some("fake-opus"));
-        assert_eq!(handle.external_thought_level().as_deref(), Some("high"));
+        handle.set_external_model_config(PosturePair {
+            model: Some("fake-opus".into()),
+            thought_level: Some("high".into()),
+        });
         // The pair reader returns both fields of the same slot state.
         assert_eq!(
             handle.external_model_config(),
-            (Some("fake-opus".into()), Some("high".into()))
+            PosturePair {
+                model: Some("fake-opus".into()),
+                thought_level: Some("high".into())
+            }
         );
 
         let catalog = crate::runtime::acp::adapter::DiscoveredRuntime {
@@ -1268,9 +1382,8 @@ mod tests {
         assert_eq!(handle.cached_discovered(), Some(empty_catalog));
 
         // The resume restore overwrites all three in one shot.
-        handle.restore_runtime_model_config(None, None, None);
-        assert_eq!(handle.external_model(), None);
-        assert_eq!(handle.external_thought_level(), None);
+        handle.restore_runtime_model_config(PosturePair::default(), None);
+        assert_eq!(handle.external_model_config(), PosturePair::default());
         assert_eq!(handle.cached_discovered(), None);
     }
 

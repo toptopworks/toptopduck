@@ -198,12 +198,12 @@ pub enum RuntimeKind {
     External,
 }
 
-/// Which runtime the session's last executed turn ran on (ADR-0102 Decision
-/// 1): the recipe-header fact resume restores the runtime choice from (segment
-/// continuation -- the execution-plane selections survive a resume, unlike the
-/// approval / MCP posture). Adjacently tagged with the same `kind` / `data`
-/// shape as the IPC `SessionRuntimeChoice`, so the persisted fact and the wire
-/// fact are the same disjunction.
+/// Which runtime the session's last effective segment header names
+/// (ADR-0102 Decision 1): the recipe-header fact resume restores the runtime
+/// choice from (segment continuation -- the execution-plane selections
+/// survive a resume, unlike the approval / MCP posture). Adjacently tagged
+/// with the same `kind` / `data` shape as the IPC `SessionRuntimeChoice`, so
+/// the persisted fact and the wire fact are the same disjunction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 #[serde(rename_all = "snake_case")]
@@ -514,9 +514,10 @@ pub struct Recipe {
     /// handshake re-discovery. Optional for old-recipe compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
-    /// The runtime the session's last executed turn ran on (ADR-0102
-    /// Decision 1): stamped per turn by the session from the turn's
-    /// attribution snapshot, layered onto the header in the same batch as the
+    /// The runtime the session's last effective segment header names
+    /// (ADR-0102 Decision 1): stamped at the segment's two effective points
+    /// -- turn end, from the turn's attribution snapshot, and a posture
+    /// set's persist-now write -- layered onto the header in the same batch as the
     /// posture pair and `cached_discovered`, so a resume restores the
     /// session's own runtime instead of falling back to the machine-level
     /// default. NOT a replay input. Optional: a recipe persisted before the

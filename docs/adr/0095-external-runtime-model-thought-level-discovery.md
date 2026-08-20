@@ -52,4 +52,4 @@ ADR-0081 定外部运行时为数据定义适配器引擎，每轮 `session/new`
 - **fake fixture 扩展**：ACP fake CLI 需在 `session/new` 响应中返回 `config_options`（含 model + thought_level 项）以驱动发现路径测试。
 - **未决（实施期）**：各 CLI `config_options` 实测形态差异（字段名 / category 命名的兼容性矩阵）；前端选择器 UI 形态与 i18n。
 - **被 ADR-0097 校准与延伸**：发现策略按格式三分化（`ClaudeStreamJson` 的 turn 路径无动态发现，探测通道为 stream-json 控制平面 `initialize`）；注入字段新增 argv 形 `effort_arg` 与 `effort_config_key` 平行。
-- **被 ADR-0102 扩展**：Decision 6 的 resume 恢复持久化字段由三项扩为四项（+ `last_runtime`——会话最后运行时，随姿势对同批持久化）；「set means persisted」载体不变。
+- **被 ADR-0102 扩展**：Decision 6 的 resume 恢复持久化字段由三项扩为四项（+ `last_runtime`——会话最后生效段头的运行时，随姿势对同批持久化）；「set means persisted」载体不变。
