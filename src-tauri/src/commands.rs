@@ -2988,7 +2988,9 @@ pub fn get_session_model_config(
 /// The runtime choice and the held pair come off the ONE slot read (issue
 /// #600): the header stamp and the backfill entry both key off that atomic
 /// read, so a concurrent switch can never interleave between the two and
-/// pair this set's posture with the other runtime's namespace.
+/// pair this set's posture with the other runtime's namespace. The handle
+/// write-back that follows is conditional on the runtime being unchanged,
+/// so a switch landing mid-set keeps its own seeded pair.
 ///
 /// Returns the persist-now verdict (issue #529): the write failure or the
 /// ADR-0035 suspension read in-process right after the persist, so the
@@ -3014,7 +3016,8 @@ pub fn set_session_model(
 /// single handle slot, so a concurrent switch can never interleave between
 /// the two and pair this set's write with the other runtime's seed -- then
 /// the session-side pair write + segment-header stamp + persist-now batch,
-/// the handle slot write, and the adapter backfill entry. `make_pair`
+/// the CONDITIONAL handle slot write (dropped when a switch re-seeded the
+/// slot since the read), and the adapter backfill entry. `make_pair`
 /// composes the new pair from the held one: the command's field lands, the
 /// other passes through untouched.
 fn apply_posture_set(
@@ -3042,7 +3045,11 @@ fn apply_posture_set(
     // in-process, non-consuming -- the banner's take_persist_error channel
     // is untouched.
     let outcome = persist_outcome(&s);
-    handle.set_external_model_config(posture.clone());
+    // The handle write-back is conditional: a switch landing between the
+    // atomic read above and this write has already re-seeded the slot with
+    // the target adapter's posture -- dropping the stale-namespace write
+    // keeps the slot on the switch's segment (the #590 seeding semantics).
+    handle.set_posture_if_runtime(&runtime, posture.clone());
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
     // adapter's startup backfill entry (the single write point shared with
     // the cold-start pre-selection) -- best-effort, never fails the set.
@@ -3097,6 +3104,7 @@ fn record_last_model_posture(
         },
     ) {
         log::warn!(
+            target: "toptopduck::session",
             "failed to persist the {} model-posture backfill entry: {e}",
             spec.id
         );
@@ -4001,6 +4009,138 @@ mod tests {
         // The failed write landed nothing: the honest-degrade read sees no
         // map at all.
         assert!(live.load().last_model_postures.is_empty());
+    }
+
+    #[test]
+    fn apply_posture_set_composes_the_field_and_stamps_the_segment_header() {
+        // The set commands' shared body (issue #600): the command's field
+        // lands, the other passes through untouched; the pair write, the
+        // segment-header stamp (ADR-0102 Decision 1), and the backfill entry
+        // all key off the ONE atomic slot read -- so the persisted pair
+        // travels under the runtime it was selected on. Unbound session ->
+        // persist_if_bound is a no-op, the Session facts are the observable.
+        let (_dir, live) = posture_live();
+        let (_store, handle) = posture_handle();
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        handle.set_runtime_and_posture(
+            Some(gemini),
+            PosturePair {
+                model: Some("old-model".into()),
+                thought_level: Some("low".into()),
+            },
+        );
+
+        apply_posture_set(&handle, &live, |held| PosturePair {
+            model: Some("gemini-2.5-flash".into()),
+            thought_level: held.thought_level,
+        })
+        .expect("set the model");
+
+        // The session side: the new model + the passed-through thought
+        // level, stamped with the pair's own runtime.
+        let s = handle.session_lock().expect("session lock");
+        assert_eq!(s.runtime_facts().model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(s.runtime_facts().thought_level.as_deref(), Some("low"));
+        assert_eq!(
+            s.runtime_facts().last_runtime,
+            Some(LastRuntime::External("gemini-cli".into()))
+        );
+        drop(s);
+        // The handle slot serves the new pair to the lock-light reads.
+        assert_eq!(
+            handle.external_model_config(),
+            PosturePair {
+                model: Some("gemini-2.5-flash".into()),
+                thought_level: Some("low".into())
+            }
+        );
+        // The backfill entry lands under the READ runtime's namespace
+        // (ADR-0100 Decision 3).
+        assert_eq!(
+            live.last_model_posture("gemini-cli"),
+            ModelPosture {
+                model: Some("gemini-2.5-flash".into()),
+                thought_level: Some("low".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn apply_posture_set_stamps_built_in_and_records_no_backfill() {
+        // The built-in half of the stamp: `None` is the built-in runtime and
+        // stamps `BuiltIn` unconditionally; a built-in session has no adapter
+        // namespace, so no backfill entry is written at all.
+        let (_dir, live) = posture_live();
+        let (_store, handle) = posture_handle();
+
+        apply_posture_set(&handle, &live, |held| PosturePair {
+            model: Some("some-model".into()),
+            thought_level: held.thought_level,
+        })
+        .expect("set the model");
+
+        let s = handle.session_lock().expect("session lock");
+        assert_eq!(s.runtime_facts().last_runtime, Some(LastRuntime::BuiltIn));
+        drop(s);
+        assert!(live.load().last_model_postures.is_empty());
+    }
+
+    #[test]
+    fn apply_posture_set_drops_the_handle_write_back_after_a_switch() {
+        // The conditional write-back (issue #600 review): a switch landing
+        // between the set's atomic read and its handle write has already
+        // re-seeded the slot with the target adapter's posture -- the stale
+        // write is dropped, so the slot stays on the switch's segment (the
+        // #590 seeding semantics), while the session side keeps the set's
+        // pair + stamp under the runtime it was read on. The switch inside
+        // `make_pair` is the deterministic single-thread stand-in for the
+        // concurrent interleaving (after the atomic read, before the
+        // write-back).
+        let (_dir, live) = posture_live();
+        let (_store, handle) = posture_handle();
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let codex = resolve_adapter("codex").expect("v1 adapter");
+        handle.set_runtime_and_posture(
+            Some(gemini),
+            PosturePair {
+                model: Some("old-model".into()),
+                thought_level: None,
+            },
+        );
+
+        apply_posture_set(&handle, &live, |held| {
+            apply_runtime_switch(&handle, Some(codex.clone()), &live);
+            PosturePair {
+                model: Some("gemini-2.5-flash".into()),
+                thought_level: held.thought_level,
+            }
+        })
+        .expect("set the model");
+
+        // The handle slot keeps the switch's segment: codex + its seed
+        // (codex has no entry -> unselected), NOT the gemini-namespace pair.
+        assert_eq!(handle.runtime_choice(), Some(codex));
+        assert_eq!(
+            handle.external_model_config(),
+            PosturePair::default(),
+            "the stale-namespace write-back is dropped"
+        );
+        // The session side keeps the set's batch under the READ runtime.
+        let s = handle.session_lock().expect("session lock");
+        assert_eq!(s.runtime_facts().model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(
+            s.runtime_facts().last_runtime,
+            Some(LastRuntime::External("gemini-cli".into()))
+        );
+        drop(s);
+        // The backfill entry keys off the READ runtime, not the switch's.
+        assert_eq!(
+            live.last_model_posture("gemini-cli"),
+            ModelPosture {
+                model: Some("gemini-2.5-flash".into()),
+                thought_level: None,
+            }
+        );
     }
 
     /// The per-session resume guard rejects a mutating command while THAT

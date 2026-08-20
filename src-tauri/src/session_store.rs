@@ -605,29 +605,15 @@ impl SessionHandle {
     /// The session-level model + thought-level pair (ADR-0095), read under
     /// the ONE slot lock (issue #530; since issue #600 the same lock also
     /// covers the runtime choice) -- a consumer sees either the old
-    /// pair or the new pair, never a torn mix. Prefer this over composing
-    /// [`Self::external_model`] + [`Self::external_thought_level`] whenever
-    /// both values are needed: the two single-field reads take the lock
-    /// separately, and a set landing between them yields a mix.
+    /// pair or the new pair, never a torn mix. When the runtime choice is
+    /// needed alongside, prefer [`Self::runtime_and_posture`]: it returns
+    /// both off the same lock state.
     pub fn external_model_config(&self) -> PosturePair {
         self.runtime_posture
             .lock()
             .expect("runtime_posture lock poisoned")
             .posture
             .clone()
-    }
-
-    /// The session-level model choice (ADR-0095). Lock-light, single-field
-    /// read -- see [`Self::external_model_config`] for the pair read.
-    pub fn external_model(&self) -> Option<String> {
-        self.external_model_config().model
-    }
-
-    /// The session-level thought-level choice (ADR-0095). Lock-light,
-    /// single-field read -- see [`Self::external_model_config`] for the pair
-    /// read.
-    pub fn external_thought_level(&self) -> Option<String> {
-        self.external_model_config().thought_level
     }
 
     /// The cached discovered catalog (ADR-0095). Lock-light read.
@@ -677,6 +663,32 @@ impl SessionHandle {
             .expect("runtime_posture lock poisoned");
         slot.runtime = runtime;
         slot.posture = posture;
+    }
+
+    /// Conditionally write the posture pair under the ONE slot lock (issue
+    /// #600): the write lands only while the slot's runtime still equals
+    /// `expected` -- the runtime the caller read the held pair under. The
+    /// set commands use this for their handle write-back so a switch landing
+    /// between the combined read and the write-back cannot pair the new
+    /// runtime with the OLD namespace's pair: the switch has already
+    /// re-seeded the slot with the target adapter's posture (#590 segment
+    /// semantics), and the stale write is dropped instead of overwriting
+    /// it. Returns whether the write landed.
+    pub fn set_posture_if_runtime(
+        &self,
+        expected: &Option<AdapterSpec>,
+        posture: PosturePair,
+    ) -> bool {
+        let mut slot = self
+            .runtime_posture
+            .lock()
+            .expect("runtime_posture lock poisoned");
+        if &slot.runtime == expected {
+            slot.posture = posture;
+            true
+        } else {
+            false
+        }
     }
 
     /// Snapshot the turn's discovered catalog onto the handle (ADR-0095).
@@ -1296,8 +1308,27 @@ mod tests {
         // still returns both under the one lock.
         handle.set_external_model_config(PosturePair::default());
         let (runtime, pair) = handle.runtime_and_posture();
-        assert_eq!(runtime.unwrap().id.as_str(), "gemini-cli");
+        assert_eq!(runtime.as_ref().unwrap().id.as_str(), "gemini-cli");
         assert_eq!(pair, PosturePair::default());
+
+        // The conditional write keys off the same slot state: it lands
+        // while the runtime still matches the read, and drops after a
+        // combined write changed the runtime (the set commands' write-back
+        // guard).
+        let pair = PosturePair {
+            model: Some("fake-sonnet".into()),
+            thought_level: None,
+        };
+        assert!(handle.set_posture_if_runtime(&runtime, pair.clone()));
+        assert_eq!(handle.external_model_config(), pair);
+        let codex = crate::runtime::acp::adapter::codex();
+        handle.set_runtime_and_posture(Some(codex), PosturePair::default());
+        assert!(!handle.set_posture_if_runtime(&runtime, pair));
+        assert_eq!(
+            handle.external_model_config(),
+            PosturePair::default(),
+            "the stale-namespace write-back is dropped after a switch"
+        );
     }
 
     /// ADR-0095: the session-level model config trio round-trips through the
@@ -1317,16 +1348,13 @@ mod tests {
             .expect("session");
         let handle = store.get(&id).expect("handle");
 
-        assert_eq!(handle.external_model(), None);
-        assert_eq!(handle.external_thought_level(), None);
+        assert_eq!(handle.external_model_config(), PosturePair::default());
         assert_eq!(handle.cached_discovered(), None);
 
         handle.set_external_model_config(PosturePair {
             model: Some("fake-opus".into()),
             thought_level: Some("high".into()),
         });
-        assert_eq!(handle.external_model().as_deref(), Some("fake-opus"));
-        assert_eq!(handle.external_thought_level().as_deref(), Some("high"));
         // The pair reader returns both fields of the same slot state.
         assert_eq!(
             handle.external_model_config(),
@@ -1355,8 +1383,7 @@ mod tests {
 
         // The resume restore overwrites all three in one shot.
         handle.restore_runtime_model_config(PosturePair::default(), None);
-        assert_eq!(handle.external_model(), None);
-        assert_eq!(handle.external_thought_level(), None);
+        assert_eq!(handle.external_model_config(), PosturePair::default());
         assert_eq!(handle.cached_discovered(), None);
     }
 

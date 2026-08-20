@@ -614,6 +614,17 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     );
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
   });
+
+  it("renders the runtime read failure as the chip's fault line instead of the control (issue #600)", async () => {
+    // The #529 convention's runtime-side twin: a rejected runtime read must
+    // not masquerade as the built-in default -- the destructive status line
+    // replaces the Popover control entirely (the modelConfig configFault
+    // treatment on its sibling query).
+    vi.mocked(getSessionRuntime).mockRejectedValue(new Error("ipc down"));
+    renderPicker(pickerJsx());
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: BUILTIN_TRIGGER })).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
