@@ -39,3 +39,4 @@ ADR-0007 锁单一 Claude + 薄抽象（`Provider` trait），ADR-0019 把 v1 �
 - **canonical prompt 语言**：结构化契约的 `CAPABILITY_BOUNDARY_PROMPT`（`prompt.rs:108`）为中文 canonical（ADR-0052 layer 4）；openai 协议模型对中文 prompt 遵守度需验证，必要时提供英文 canonical 变体（留后续）。
 - **被 ADR-0070 校准**：profile 配置流程新增 preflight 环节；model 字段选择方式从手填升级为 list models 探测下拉（失败回退手填），profile schema 形状不变（model 仍是字段）。见 ADR-0070。
 - **被 ADR-0071 校准**：model 仍是 profile 字段（不独立化）；对话区切 model 写回 `profile.model`，`live_config` 读法不变；`ProfileSwitcher`（issue #154）退役，日常切换入口移至对话区。见 ADR-0071。
+- **被 ADR-0098 校准**：`ProviderConfig` 不变量变更——`profiles` 可为空、`active_profile` 为 `Option`；`normalize()` 的非空重种 + 悬空回退首项不变量废除（空列表保持空、悬空指针归 `None`）；IPC view 的 effective 回退链随之调整。见 ADR-0098。

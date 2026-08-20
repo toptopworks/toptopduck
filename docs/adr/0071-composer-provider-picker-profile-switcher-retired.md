@@ -32,3 +32,4 @@ ADR-0065 把 profile 管理收口到 Settings 覆盖视图，ADR-0064 把日常�
 - **provider preset 常量**：前端常量（不进 app-config，ADR-0038）；preset 隐含 protocol、Custom 暴露 protocol RadioGroup；字段含「获取 key」链接（信息架构对齐主流 byok 设置面板）。具体 preset 列表与字段进 issue。
 - **key 未配的诚实提示**：popover 显示未配置标记 + 「打开设置」入口（ADR-0019 诚实门槛）。
 - **被 ADR-0092 校准**：本 ADR 引入的 `ColdStartHero` 三态诚实门（no-profile / no-key / ready CTA）随 `ColdStartHero` 退役——诚实门改由 shell 级 `QuestionBar` 的 submit-time 判定承载（built-in 无 key → redirect Settings；external adapter 不可选 → picker disabled）。`QuestionBar` 上提 shell 级，picker 在无 session 时使用 shell-level pending runtime state。见 ADR-0092。
+- **被 ADR-0099 校准**：popover 面板的配置职责退役——model 下拉、key 状态、「打开设置」入口移出浮层归设置页（key 诚实标记降为档案行级标记）；档案下拉保留但形态变为两级单选的二级；「hover tooltip 轻量预览」升级为常驻文字按钮；`model` 写回 `profile.model` 的机制不变（编辑入口移设置页）。见 ADR-0099。

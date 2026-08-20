@@ -52,3 +52,4 @@ ADR-0087 把 DuckDB 从唯一引擎降为默认工具——一个会话可能全
 - **校准 ADR-0071**：`ColdStartHero` 三态诚实门（no-profile / no-key / ready CTA）退役；诚实门改由 shell 级 bar 的 submit-time 判定承载（Decision 4）。
 - **校准 ADR-0051**：keep-alive 保留不变；bar 的 per-session state（`loading` / `phase` / 输入草稿 `value`）从 `SessionPane` 内 `useState` 上提到 shell 层按 `activeSessionId` 路由。
 - **留实现期**：问候语文案（i18n key）、CSS transition 时序、draft state 的具体 state shape、composer 控件 draft 模式的 popover 行为细节、`SessionPane` 重构后 `handleAsk` / `handleCancel` 的回调上提路径。
+- **被 ADR-0098 校准**：Decision 4 的分流结构不变，零档案合法化使「built-in 选中但无 profile → Settings」分支从不可达变为可表示；Decision 6 的冷启动 pending 运行时初始值从 `RUNTIME_CHOICE_DEFAULT` 常量改为默认运行时的解析结果。见 ADR-0098。

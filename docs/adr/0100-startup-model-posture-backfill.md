@@ -31,3 +31,4 @@
 - 校准 ADR-0099 Decision 3：文字按钮已选态在冷启动即可出现（回填值）；级联菜单「默认（推荐）」清除行同时置空起步回填条目；冷启动 pending 模型姿势初值 = 回填值，显式选择覆盖（与 pending runtime 初值 = 默认运行时解析同构）。
 - 会话内改选与冷启动预选共用单一写入点（成功的姿势 set 即更新条目，IPC 层）。
 - `app-config` 新增 map 字段：serde default 空 map 前向兼容，既有配置文件无该 key 不迁移；format_version bump 与否实施期定。
+- **被 ADR-0102 延伸**：Decision 1 的回填作用域从「新会话起步」扩为「新会话与会话内换运行时起步」；resume 不在其列（resume 恢复会话自身的姿势对）。见 ADR-0102。

@@ -37,3 +37,4 @@
 - **四态文案的载体**从既有浮层内 select 变为 bar 文字按钮 + 级联菜单；模型/强度选择的 IPC、目录优先级链（ADR-0096 Decision 6）、诚实渲染（目录未包含持有值的合成行等）与失败面全部沿用，仅 UI 载体迁移。
 - **冷启动与会话两态接线不变**：会话内经 `setSessionRuntime`/模型 set IPC，冷启动写 pending state（初值 = 默认运行时解析结果，ADR-0098）。
 - 级联菜单与两级浮层基于 copy-in dropdown-menu / popover primitive；具体视觉与文案属实现。
+- **被 ADR-0100 校准**：Decision 3 的文字按钮已选态在冷启动即可出现（起步回填值）；级联菜单「默认（推荐）」清除行同时置空起步回填条目。见 ADR-0100。
