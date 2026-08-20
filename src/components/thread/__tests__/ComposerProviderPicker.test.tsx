@@ -1220,6 +1220,21 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
   }
 
+  // The posture surface settles a second async hop after the runtime
+  // trigger (adapters -> external runtime -> catalogs + backfill read):
+  // awaiting the trigger alone leaves the catalog-gated menu racing the
+  // test's first sync query. Either settled form unlocks the wait -- the
+  // Model trigger (catalog present) or the inline status line (backfill
+  // read failed).
+  async function settlePostureSurface() {
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /^Model: / }) ??
+        screen.queryByRole("status"),
+      ).not.toBeNull();
+    });
+  }
+
   async function renderColdStartPicker(overrides: PickerOverrides = {}) {
     seedColdStartCatalog();
     renderPicker(
@@ -1231,6 +1246,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       }),
     );
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await settlePostureSurface();
   }
 
   // The shell-shaped cold-start host: the pending pair lives in the parent
@@ -1275,6 +1291,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     seedColdStartCatalog();
     renderPicker(<ColdStartHost onPendingChange={onPendingChange} />);
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await settlePostureSurface();
   }
 
   it("seeds the label from the backfill entry (initial pending = the entry)", async () => {
@@ -1370,7 +1387,12 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       }),
     );
     await screen.findByRole("button", { name: /Runtime: codex/ });
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
+    // This render is inline (its own codex seed, not the helpers), so await
+    // the catalog-gated row directly -- the same second-hop settle the
+    // cold-start helpers perform.
+    fireEvent.click(
+      await screen.findByRole("menuitemradio", { name: "gpt-5-codex" }),
+    );
     expect(onPendingModelPostureChange).toHaveBeenCalledWith({
       model: "gpt-5-codex",
       thought_level: null,

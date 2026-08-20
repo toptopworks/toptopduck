@@ -113,9 +113,11 @@ export interface TraceEntry {
 
 // The runtime that drove one turn (ADR-0101): the app's built-in loop, or an
 // external CLI adapter named by its stable id. Mirrors the Rust TurnRuntime
-// (adjacently-tagged kind + data, snake_case -- the same shape as
-// SessionRuntimeChoice). The thread renders it as a per-segment attribution
-// badge; the LLM window never reads it (ADR-0101 Decision 3).
+// (adjacently-tagged kind + data, snake_case -- the same tagging scheme as
+// SessionRuntimeChoice; the external payload differs: the adapter-id object
+// with null for pre-id turns, vs the choice's bare adapter string). The
+// thread renders it as a per-segment attribution badge; the LLM window
+// never reads it (ADR-0101 Decision 3).
 export type TurnRuntime =
   | { kind: "built_in" }
   | { kind: "external"; data: { adapter_id: string | null } };

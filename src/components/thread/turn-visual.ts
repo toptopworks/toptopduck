@@ -224,7 +224,7 @@ export function selectDriftedSkills(
     .map((s) => s.name);
 }
 
-// ADR-0101: the segment key of one turn's runtime attribution. Adjacent turns
+// ADR-0101: the segment key of a runtime attribution. Adjacent turns
 // sharing a key form one runtime segment; the thread renders the badge only
 // at a segment's first turn (the "segment-start quieting" rule -- a mixed
 // thread stays readable without repeating the marker on every row). Three
@@ -234,8 +234,7 @@ export function selectDriftedSkills(
 // "unrecorded" (no attribution at all, the optimistic append / pre-extension
 // recording -- never rendered, but it still breaks the segment so the next
 // recorded runtime re-announces itself).
-function runtimeAttributionKey(record: TurnRecord): string {
-  const { runtime } = record.provenance;
+function runtimeAttributionKey(runtime: TurnRuntime | null): string {
   if (!runtime) return "unrecorded";
   if (runtime.kind === "built_in") return "built-in";
   return runtime.data.adapter_id == null
@@ -254,20 +253,33 @@ function runtimeAttributionKey(record: TurnRecord): string {
 export function runtimeSegmentBadges(
   entries: readonly ThreadEntry[],
 ): Array<TurnRuntime | null> {
-  const hasExternal = entries.some(
-    (e) => e.entry === "Turn" && e.data.provenance.runtime?.kind === "external",
+  // One walk of the `provenance.runtime` chain per entry (issue #596): the
+  // extracted value feeds the has-external gate, the key derivation, and
+  // the badge push alike. `undefined` marks a non-Turn entry -- transparent
+  // to segments, no key walk; null marks an unrecorded turn -- no badge,
+  // but it still breaks the segment.
+  const runtimes: Array<TurnRuntime | null | undefined> = entries.map((e) =>
+    e.entry === "Turn" ? (e.data.provenance.runtime ?? null) : undefined,
   );
-  if (!hasExternal) return entries.map(() => null);
+  if (!runtimes.some((r) => r?.kind === "external")) {
+    return entries.map(() => null);
+  }
   const out: Array<TurnRuntime | null> = [];
   let prevKey: string | null = null;
-  for (const entry of entries) {
-    if (entry.entry !== "Turn") {
+  for (const runtime of runtimes) {
+    if (runtime === undefined) {
       out.push(null);
       continue;
     }
-    const key = runtimeAttributionKey(entry.data);
-    const opensSegment = key !== prevKey && key !== "unrecorded";
-    out.push(opensSegment ? (entry.data.provenance.runtime ?? null) : null);
+    const key = runtimeAttributionKey(runtime);
+    // Value guard: `runtime != null` is the `key !== "unrecorded"` half it
+    // replaces (that key derives from exactly the null case), so the old
+    // `?? null` push fallback was unreachable.
+    if (runtime != null && key !== prevKey) {
+      out.push(runtime);
+    } else {
+      out.push(null);
+    }
     prevKey = key;
   }
   return out;

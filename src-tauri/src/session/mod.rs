@@ -2694,7 +2694,6 @@ mod tests {
         // the kind and never an id.
         use super::PersistedTurnProvenance;
         use super::TimelineEntry;
-        use crate::model::TurnRuntime;
         use crate::persistence::recipe::{RecipeEntry, RuntimeKind};
 
         fn textual(body: &str) -> TurnOutcome {

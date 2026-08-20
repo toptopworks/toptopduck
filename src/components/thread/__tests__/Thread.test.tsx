@@ -1499,5 +1499,27 @@ describe("Thread", () => {
       expect(screen.getByText("codex")).toBeInTheDocument();
       expect(screen.getByText("内置")).toBeInTheDocument();
     });
+
+    it("re-announces the same runtime when an unrecorded stretch breaks the segment", () => {
+      // Discriminating companion to the test above: codex -> unrecorded ->
+      // built-in passes whether or not the unrecorded row updates the
+      // segment key (built-in differs from both predecessors anyway). This
+      // codex -> unrecorded -> codex thread pins the break -- the trailing
+      // codex stretch re-announces; a regression that stops updating the
+      // key on unrecorded rows would collapse it to a single badge.
+      renderThread(
+        <Thread
+          entries={[
+            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex" } })),
+            // Optimistic / pre-extension row: no runtime field.
+            turnEntry(runtimeTurn(undefined)),
+            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex" } })),
+          ]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.getAllByText("codex")).toHaveLength(2);
+    });
   });
 });
