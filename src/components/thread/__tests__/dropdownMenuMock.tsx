@@ -1,5 +1,5 @@
-import type { ComponentProps, ReactNode } from "react";
-import { createContext, useContext } from "react";
+import type { ComponentProps, ReactElement, ReactNode } from "react";
+import { cloneElement, createContext, useContext } from "react";
 import { vi } from "vitest";
 
 // The shared always-open dropdown-menu mock for the composer posture tests
@@ -41,10 +41,12 @@ const dropdownMenuTrigger = ({
   asChild,
   ...rest
 }: ComponentProps<"button"> & { children: ReactNode; asChild?: boolean }) => {
-  // Radix merges its props onto the asChild element; the mock cannot merge,
-  // so it renders the child bare (wrapping it in another button would nest
-  // <button> in <button>, which jsdom flags and role queries double-count).
-  if (asChild) return <>{children}</>;
+  // Radix merges its props onto the asChild element -- the mock mirrors
+  // that merge with cloneElement so a wrapping Radix primitive (the
+  // Tooltip > DropdownMenuTrigger composition, issue #586) still reaches
+  // the button. Wrapping the child in another button would nest <button>
+  // in <button>, which jsdom flags and role queries double-count.
+  if (asChild) return <>{cloneElement(children as ReactElement, rest)}</>;
   return (
     <button type="button" {...rest}>
       {children}

@@ -64,6 +64,7 @@ function renderTrigger(overrides: TriggerOverrides = {}) {
         <ComposerPostureTrigger
           label="Default (recommended)"
           catalog={ACP_CATALOG}
+          liveValue={null}
           model={null}
           thoughtLevel={null}
           onSelectModel={onSelectModel}
@@ -279,5 +280,46 @@ describe("ComposerPostureTrigger honest fault surfaces (issue #529)", () => {
     expect(screen.getByText(/Could not apply the selection/)).toBeTruthy();
     expect(screen.getByText(/Selection not saved: Failed to write/)).toBeTruthy();
     expect(screen.getByText(/autosave is paused/)).toBeTruthy();
+  });
+});
+
+describe("ComposerPostureTrigger live readout tooltip (issue #586)", () => {
+  const LIVE_TOOLTIP = /\(last turn\)/;
+
+  it("carries the turn's actual value in the tooltip while the label keeps its default copy", async () => {
+    // The live currents never touch the label: the unselected label keeps
+    // "Default (recommended)" verbatim and the tooltip is the live
+    // readout's only surface.
+    renderTrigger({ liveValue: "gemini-2.5-pro" });
+    const trigger = screen.getByRole("button", {
+      name: "Model: Default (recommended)",
+    });
+    fireEvent.pointerMove(trigger);
+    expect(
+      await screen.findByText("gemini-2.5-pro (last turn)"),
+    ).toBeTruthy();
+  });
+
+  it("carries no live tooltip outside the live state", () => {
+    // The absence assertions open via focus: Radix opens the tooltip
+    // synchronously on focus, while a pointerMove defers the open to a
+    // macrotask -- a synchronous absence query after it would pass
+    // vacuously.
+    renderTrigger();
+    fireEvent.focus(
+      screen.getByRole("button", { name: "Model: Default (recommended)" }),
+    );
+    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
+  });
+
+  it("keeps the cascade menu intact in the live state (still unselected)", () => {
+    // The tooltip is a display-layer mark: the menu's check positions and
+    // clearing rows are exactly the unselected state's.
+    renderTrigger({ liveValue: "gemini-2.5-pro" });
+    const items = screen.getAllByRole("menuitemradio");
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item.getAttribute("aria-checked")).not.toBe("true");
+    }
   });
 });

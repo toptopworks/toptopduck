@@ -295,6 +295,23 @@ export function ComposerProviderPicker({
     discovered.adapter_id != null &&
     discovered.adapter_id !== activeAdapterId;
 
+  // The turn-end live currents (issue #586, ADR-0095 Decision 5): the
+  // session discovery cache records what the last turn ACTUALLY ran -- the
+  // ACP handshake currents, the claude system{init} model (codex turns
+  // report no discovery, so its cache never exists). The provenance gate is
+  // strict: only a cache stamped by the ACTIVE adapter may be asserted as
+  // this runtime's last turn -- another adapter's cache is a stale fact
+  // (the #529 note covers it) and a pre-stamp cache is an unattributable
+  // one. Display-layer only (ADR-0100 constraint): the live currents render
+  // the unselected label; they never write the posture.
+  const liveDiscovered =
+    isExternal &&
+    discovered != null &&
+    discovered.adapter_id != null &&
+    discovered.adapter_id === activeAdapterId
+      ? discovered
+      : null;
+
   // Catalog priority chain (ADR-0096 D6, issue #537, ADR-0097): where the
   // posture catalog comes from, per the active runtime's stream format.
   //   ACP:                  session cached_discovered -> the global probe
@@ -657,12 +674,30 @@ export function ComposerProviderPicker({
   // independently reachable on ACP adapters, so a lone thought level has
   // its own held form) or "Default (recommended)" when nothing is held --
   // anchored to never-selected-or-cleared per dimension (ADR-0100
-  // Decision 1). An empty-string field counts as unset, matching the
-  // menu guards' convention, so a hand-edited blank cannot blank the
-  // button.
+  // Decision 1). The turn-end live currents never touch the label (issue
+  // #586, user-supplied form): they ride the trigger's tooltip instead,
+  // so the unselected label keeps its default copy verbatim. An
+  // empty-string field counts as unset, matching the menu guards'
+  // convention, so a hand-edited blank cannot blank the button.
   const heldParts = [posture.model, posture.thought_level].filter(
     (part): part is string => part != null && part !== "",
   );
+  const liveParts = [
+    liveDiscovered?.current_model,
+    liveDiscovered?.current_thought_level,
+  ].filter((part): part is string => part != null && part !== "");
+  // The tooltip's live payload: the turn-end currents, read as facts only
+  // while nothing is held (a selection always outranks the live read) and
+  // only alongside a catalog -- the trigger drops the tooltip on its
+  // static-label early return, so a claude session whose per-model catalog
+  // still awaits its first settings probe keeps the live read unsurfaced
+  // instead of half-rendered.
+  const liveValue =
+    postureCatalog != null &&
+    heldParts.length === 0 &&
+    liveParts.length > 0
+      ? liveParts.join(" · ")
+      : null;
   const postureLabel = !isExternal
     ? noProfiles
       ? notConfigured
@@ -758,6 +793,7 @@ export function ComposerProviderPicker({
       <ComposerPostureTrigger
         label={postureLabel}
         catalog={postureCatalog}
+        liveValue={liveValue}
         model={isExternal ? posture.model : null}
         thoughtLevel={isExternal ? posture.thought_level : null}
         onSelectModel={(m) => void selectModel(m)}
