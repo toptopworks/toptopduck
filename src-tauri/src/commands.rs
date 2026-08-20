@@ -2593,24 +2593,29 @@ pub fn set_session_runtime(
 
 /// Seat an in-session runtime switch on the handle (ADR-0102 Decision 3,
 /// issue #590): the runtime choice + the new segment's seeded posture, one
-/// write. A switch opens a new segment whose posture slot starts from the
-/// TARGET adapter's backfill entry ([`startup_model_posture`] -- external :=
-/// the adapter's `last_model_postures` entry, absent = unselected; built-in
-/// := empty, the built-in loop consumes no posture), so a stale model id
-/// held under the OLD adapter's namespace never injects into the new CLI,
-/// and a switch back to a previously used adapter recovers its held
-/// selection. Handle-only (lock-light): the pair reaches the Session -- and
-/// the recipe -- at the NEXT turn top via the same `ask` mirror that lands
-/// the runtime choice, so the switch never blocks on an in-flight turn.
-/// Resume never lands here: it restores the session's own persisted pair
-/// (segment continuation, issue #589), never the backfill map.
+/// handle-only step. A switch opens a new segment whose posture slot starts
+/// from the TARGET adapter's backfill entry ([`startup_model_posture`] --
+/// external := the adapter's `last_model_postures` entry, absent =
+/// unselected; built-in := empty, the built-in loop consumes no posture), so
+/// a stale model id held under the OLD adapter's namespace never injects
+/// into the new CLI, and a switch back to a previously used adapter
+/// recovers its held selection. The posture read happens BEFORE the writes
+/// so the two slot writes land back-to-back: every reader (the `ask` mirror,
+/// the set commands) takes the runtime slot before the posture slot, so no
+/// reader can observe the new runtime paired with the old posture -- a torn
+/// pair would inject the stale id into the new CLI for one turn and persist
+/// into the recipe. Handle-only (lock-light): the pair reaches the Session
+/// -- and the recipe -- at the NEXT turn top via the same `ask` mirror that
+/// lands the runtime choice, so the switch never blocks on an in-flight
+/// turn. Resume never lands here: it restores the session's own persisted
+/// pair (segment continuation, issue #589), never the backfill map.
 fn apply_runtime_switch(
     handle: &SessionHandle,
     spec: Option<AdapterSpec>,
     live: &LiveProviderConfig,
 ) {
-    handle.set_runtime_choice(spec.clone());
     let posture = startup_model_posture(spec.as_ref(), live);
+    handle.set_runtime_choice(spec);
     handle.set_external_model_config(posture.model, posture.thought_level);
 }
 
@@ -3774,6 +3779,19 @@ mod tests {
             handle.external_model_config(),
             (Some("gemini-2.5-pro".into()), Some("high".into())),
             "the slot serves the target adapter's entry, not the stale pair"
+        );
+        // Issue #590 AC4: the switch path only READS the backfill map --
+        // the seeded entry keeps exactly what was set and no new key
+        // appears (a read-after-write here would rewrite the entry it just
+        // served and break the single-write-point contract).
+        let stored = live.load().last_model_postures;
+        assert_eq!(stored.len(), 1, "the switch adds no backfill entries");
+        assert_eq!(
+            stored
+                .get("gemini-cli")
+                .map(|p| (&p.model, &p.thought_level)),
+            Some((&Some("gemini-2.5-pro".into()), &Some("high".into()))),
+            "the switch never writes the backfill map"
         );
     }
 
