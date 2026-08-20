@@ -298,9 +298,11 @@ pub struct SessionHandle {
     /// picker's get/set are lock-light -- a write never blocks on an in-flight
     /// turn; `ask` mirrors the choice into the Session at turn top
     /// (`Session::set_external_runtime`), so a switch takes effect exactly at
-    /// the turn boundary. Reset on resume via [`Self::reset_runtime_choice`]
-    /// (the ADR-0080 reset lineage: a session-level assembly posture, not in
-    /// the recipe / app-config).
+    /// the turn boundary. Restored on resume from the recipe-header
+    /// `last_runtime` (ADR-0102 Decision 1, issue #589 -- segment
+    /// continuation; the runtime is execution-plane session state, so unlike
+    /// the approval / MCP posture it survives a resume as the session's own
+    /// last runtime).
     runtime: Mutex<Option<AdapterSpec>>,
     /// ADR-0095: the session-level model + thought-level selections for the
     /// external runtime, held in ONE mutex slot (issue #530) so a torn write
@@ -577,21 +579,10 @@ impl SessionHandle {
     /// Set the runtime for the next turn(s) (issue #353). `None` reverts to
     /// the built-in runtime; `Some(spec)` selects the external ACP engine for
     /// the one CLI. Takes effect at the next turn boundary (`ask` reads this
-    /// at turn top); an in-flight turn is untouched.
+    /// at turn top); an in-flight turn is untouched. The resume path writes
+    /// the restored session runtime here (ADR-0102 Decision 1, issue #589).
     pub fn set_runtime_choice(&self, spec: Option<AdapterSpec>) {
         *self.runtime.lock().expect("runtime lock poisoned") = spec;
-    }
-
-    /// Reset the runtime choice after a successful resume (issue #353,
-    /// ADR-0098 Decision 2). The runtime posture is session-level and must
-    /// not survive a resume (it is not in the recipe / app-config) -- the
-    /// choice returns to the STARTUP default, which since issue #569 is the
-    /// RESOLVED `default_runtime` (an undetected external default already
-    /// degraded to `None` by the caller's resolution), not the hardcoded
-    /// built-in. Called by `open_duck` in the same reset batch as
-    /// [`Self::reset_approval`] + [`Self::reset_mcp_enablement`].
-    pub fn reset_runtime_choice(&self, fallback: Option<AdapterSpec>) {
-        *self.runtime.lock().expect("runtime lock poisoned") = fallback;
     }
 
     /// The session-level model + thought-level pair (ADR-0095), read under
@@ -661,14 +652,16 @@ impl SessionHandle {
 
     /// Restore the persisted ADR-0095 trio from the resumed recipe
     /// (open_duck). Unlike the reset-to-default lineage (`reset_approval` /
-    /// `reset_mcp_enablement` / `reset_runtime_choice`), the model +
-    /// thought-level selections + the discovery cache SURVIVE a resume --
-    /// ADR-0095 Decision 6: losing the model selection is an unexpected
-    /// degradation of the resume promise. Called right after the reset batch
-    /// so the restored values win. The only writer that overwrites all three
-    /// slots in one shot (the user-driven clear -- `set_session_model(None)`
-    /// / `set_session_thought_level(None)` -- goes through
-    /// [`Self::set_external_model_config`] and never touches the catalog).
+    /// `reset_mcp_enablement`), the model + thought-level selections + the
+    /// discovery cache SURVIVE a resume -- ADR-0095 Decision 6: losing the
+    /// model selection is an unexpected degradation of the resume promise
+    /// (the runtime choice survives the same way since ADR-0102 Decision 2,
+    /// restored from the recipe header's `last_runtime`). Called right after
+    /// the reset batch so the restored values win. The only writer that
+    /// overwrites all three slots in one shot (the user-driven clear --
+    /// `set_session_model(None)` / `set_session_thought_level(None)` -- goes
+    /// through [`Self::set_external_model_config`] and never touches the
+    /// catalog).
     pub fn restore_runtime_model_config(
         &self,
         model: Option<String>,
@@ -1188,15 +1181,14 @@ mod tests {
         assert_eq!(err, GateCancelled);
     }
 
-    /// The runtime choice defaults to the built-in runtime (None), round-trips
-    /// an external adapter spec, and resets to the caller-supplied fallback
-    /// (issue #353). The choice lives on the handle, so a fresh session starts
-    /// built-in (the command layer applies the default runtime on top) and a
-    /// resume's `reset_runtime_choice` returns it to the RESOLVED startup
-    /// default -- None when the default is built-in or degraded, the spec when
-    /// the default names a detected CLI (issue #569).
+    /// The runtime choice defaults to the built-in runtime (None) and
+    /// round-trips an external adapter spec (issue #353). The choice lives on
+    /// the handle, so a fresh session starts built-in (the command layer
+    /// applies the default runtime on top) and the resume path overwrites it
+    /// with the restored session runtime via the same setter (ADR-0102
+    /// Decision 1, issue #589 -- segment continuation, not a reset).
     #[test]
-    fn runtime_choice_defaults_to_none_round_trips_and_resets() {
+    fn runtime_choice_defaults_to_none_and_round_trips() {
         let store = SessionStore::new();
         let id = store
             .create(
@@ -1218,23 +1210,12 @@ mod tests {
             .expect("an external choice round-trips");
         assert_eq!(chosen.id.as_str(), "gemini-cli");
 
-        // The resume fallback is the resolved default runtime (issue #569):
-        // resetting with an external default lands that spec, not None.
-        handle.reset_runtime_choice(Some(spec));
-        assert_eq!(
-            handle
-                .runtime_choice()
-                .expect("external default lands")
-                .id
-                .as_str(),
-            "gemini-cli",
-            "reset to an external default returns the choice to that CLI"
-        );
-
-        handle.reset_runtime_choice(None);
+        // The resume restore writes through the same setter -- an overwrite,
+        // not a reset to the machine-level default.
+        handle.set_runtime_choice(None);
         assert!(
             handle.runtime_choice().is_none(),
-            "reset to the built-in default clears the choice"
+            "the restored built-in choice clears the external one"
         );
     }
 

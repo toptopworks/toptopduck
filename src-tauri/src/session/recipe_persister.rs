@@ -246,12 +246,14 @@ impl RecipePersister {
         .expect(
             "RecipePersister::build_recipe produces a recipe satisfying Recipe::build invariants",
         )
-        // ADR-0095: layer the session-level model config onto the header so
-        // every auto-write persists the selections + the discovery cache.
+        // ADR-0095 (+ ADR-0102's last_runtime): layer the session-level
+        // runtime facts onto the header so every auto-write persists the
+        // selections + the discovery cache + the last turn's runtime.
         .with_runtime_model_config(
             config.model.clone(),
             config.thought_level.clone(),
             config.cached_discovered.clone(),
+            config.last_runtime.clone(),
         )
     }
 

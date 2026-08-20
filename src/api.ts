@@ -394,12 +394,13 @@ export async function setSessionsDir(path: string | null): Promise<AppConfig> {
   return invoke<AppConfig>("set_sessions_dir", { path });
 }
 
-// Set the default runtime new sessions + resumes start on (ADR-0098 Decision
-// 2, issue #569). Returns the updated AppConfig so the caller syncs state
-// without a re-fetch. An external id must name a `listAdapters` adapter
-// (unknown ids reject -- UnknownAdapter); the adapter does NOT need to be
-// detected: the preference persists and startup resolution degrades
-// per-start (ADR-0098 Decision 3).
+// Set the default runtime new sessions start on (ADR-0098 Decision 2, issue
+// #569; a resume continues the session's own last runtime since ADR-0102 --
+// the default stays the fallback for a pre-#589 recipe without the field).
+// Returns the updated AppConfig so the caller syncs state without a re-fetch.
+// An external id must name a `listAdapters` adapter (unknown ids reject --
+// UnknownAdapter); the adapter does NOT need to be detected: the preference
+// persists and startup resolution degrades per-start (ADR-0098 Decision 3).
 export async function setDefaultRuntime(runtime: DefaultRuntime): Promise<AppConfig> {
   return invoke<AppConfig>("set_default_runtime", { runtime });
 }
@@ -739,9 +740,10 @@ export async function getAdapterCatalogs(): Promise<AdapterCatalogs> {
   return invoke<AdapterCatalogs>("get_adapter_catalogs");
 }
 
-// Read the session's runtime choice. Returns `built_in` for a fresh / resumed
-// session (the honest default, ADR-0081). Lock-light server-side -- safe to
-// call while a turn is in flight.
+// Read the session's runtime choice. Returns `built_in` for a fresh session
+// (the honest default, ADR-0081); a resumed session returns the restored
+// last runtime (ADR-0102 segment continuation). Lock-light server-side --
+// safe to call while a turn is in flight.
 export async function getSessionRuntime(
   sessionId: string,
 ): Promise<SessionRuntimeChoice> {

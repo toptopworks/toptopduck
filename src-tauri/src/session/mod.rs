@@ -34,7 +34,8 @@ use crate::model::{
     TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::recipe::{
-    Recipe, RecipeTraceEntry, RecipeTurn, RuntimeKind, TurnProvenance as PersistedTurnProvenance,
+    LastRuntime, Recipe, RecipeTraceEntry, RecipeTurn, RuntimeKind,
+    TurnProvenance as PersistedTurnProvenance,
 };
 use crate::persistence::SaveError;
 use crate::provider::keychain::KeychainStore;
@@ -364,14 +365,18 @@ pub struct ResumeProgress {
     pub event: ResumeEvent,
 }
 
-/// The recipe-header ADR-0095 facts the persister layers onto every built
-/// recipe: the model + thought-level selections and the discovered-catalog
-/// cache. Plain data; mirrors the handle-held user choices at turn top.
+/// The recipe-header facts the persister layers onto every built recipe
+/// (ADR-0095, extended by ADR-0102 Decision 1): the model + thought-level
+/// selections, the discovered-catalog cache, and the last executed turn's
+/// runtime. Plain data; mirrors the handle-held user choices at turn top --
+/// except `last_runtime`, which mirrors the turn's own attribution snapshot
+/// instead (stamped by [`Session::record_turn`], one batch with the persist).
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeModelConfig {
     pub model: Option<String>,
     pub thought_level: Option<String>,
     pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    pub last_runtime: Option<crate::persistence::recipe::LastRuntime>,
 }
 
 pub struct Session {
@@ -1521,6 +1526,23 @@ impl Session {
         skills: Vec<SkillProvenance>,
         runtime: TurnRuntime,
     ) -> TurnOutcome {
+        // ADR-0102 Decision 1 (issue #589): stamp the turn's executing runtime
+        // into the recipe-header facts, so the per-terminal-turn persist below
+        // records which runtime ran the turn -- the resume continuation input.
+        // Derived from the same attribution snapshot the thread badge reads,
+        // so header and badge cannot disagree. The legacy
+        // External-without-id shape cannot name an adapter, so it leaves the
+        // previous stamp in place (the live path always carries `Some`; see
+        // the attribution construction in `ask_with_phase`).
+        self.runtime_model_config.last_runtime = match &runtime {
+            TurnRuntime::BuiltIn => Some(LastRuntime::BuiltIn),
+            TurnRuntime::External {
+                adapter_id: Some(id),
+            } => Some(LastRuntime::External(id.clone())),
+            TurnRuntime::External { adapter_id: None } => {
+                self.runtime_model_config.last_runtime.clone()
+            }
+        };
         // ADR-0089 Decision 4: on the first terminal turn, auto-name the
         // session from the first question's bounded truncation (ADR-0039
         // same-kind rule: verbatim question cut at a char boundary, never an
@@ -2694,7 +2716,7 @@ mod tests {
         // the kind and never an id.
         use super::PersistedTurnProvenance;
         use super::TimelineEntry;
-        use crate::persistence::recipe::{RecipeEntry, RuntimeKind};
+        use crate::persistence::recipe::{LastRuntime, RecipeEntry, RuntimeKind};
 
         fn textual(body: &str) -> TurnOutcome {
             TurnOutcome::Textual {
@@ -2713,6 +2735,13 @@ mod tests {
             TurnRuntime::External {
                 adapter_id: Some("gemini-cli".into()),
             },
+        );
+        // ADR-0102 (issue #589): the same attribution snapshot stamps the
+        // recipe-header `last_runtime` -- here the external turn's adapter.
+        assert_eq!(
+            session.runtime_model_config().last_runtime,
+            Some(LastRuntime::External("gemini-cli".into())),
+            "the header stamp follows the recorded turn's runtime"
         );
         session.record_turn(
             "built-in question",
@@ -2777,6 +2806,19 @@ mod tests {
                 adapter_id: None,
                 skills: Vec::new(),
             })
+        );
+        // The later built-in turn overwrote the stamp, and the projection
+        // layers it onto the built recipe's header (one batch with the
+        // posture pair + the catalog).
+        assert_eq!(
+            session.runtime_model_config().last_runtime,
+            Some(LastRuntime::BuiltIn),
+            "the last recorded turn's runtime wins"
+        );
+        assert_eq!(
+            recipe.last_runtime,
+            Some(LastRuntime::BuiltIn),
+            "the built recipe carries the stamp on its header"
         );
     }
 

@@ -772,16 +772,20 @@ impl super::Session {
             session.mounted_skills = recipe.mounted_skills();
         }
 
-        // ADR-0095 Decision 6: restore the session-level model config from
-        // the recipe header. The selections + discovery cache seed BOTH the
+        // ADR-0095 Decision 6 (+ ADR-0102 Decision 1's `last_runtime`):
+        // restore the session-level runtime facts from the recipe header.
+        // The selections + discovery cache + last runtime seed BOTH the
         // Session's recipe-header facts (so the post-resume persist below
-        // rewrites them unchanged) and the caller-visible read
-        // (open_duck at the command layer restores them onto the handle via
-        // `Session::runtime_model_config`).
+        // rewrites them unchanged -- an undetected-adapter degrade at the
+        // command layer never destroys the persisted value) and the
+        // caller-visible read (open_duck at the command layer restores the
+        // posture trio onto the handle and resolves `last_runtime` into the
+        // restored runtime choice via `Session::runtime_model_config`).
         session.runtime_model_config = super::RuntimeModelConfig {
             model: recipe.model.clone(),
             thought_level: recipe.thought_level.clone(),
             cached_discovered: recipe.cached_discovered.clone(),
+            last_runtime: recipe.last_runtime.clone(),
         };
 
         // Phase 5: persist the post-resume state. adopt_resumed already set

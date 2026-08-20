@@ -400,8 +400,11 @@ impl LiveProviderConfig {
         self.store_inner(cfg)
     }
 
-    /// Set the default runtime new sessions + resumes start on (ADR-0098
-    /// Decision 2, issue #569). Read-modify-write under [`Self::write_lock`]
+    /// Set the default runtime new sessions start on (ADR-0098 Decision 2,
+    /// issue #569; since ADR-0102 a resume continues the session's own last
+    /// runtime instead -- the default stays the fallback for a pre-#589
+    /// recipe whose header carries no `last_runtime`). Read-modify-write
+    /// under [`Self::write_lock`]
     /// (same pattern as sessions-dir). The value persists VERBATIM -- no
     /// detected-state write-time validation (ADR-0098 Decision 3): an adapter
     /// that is not currently detected must keep the preference so an
