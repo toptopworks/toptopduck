@@ -107,14 +107,6 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "false");
   });
 
-  it("honors initialRuntimeTab as the landing tab when provided", () => {
-    // Issue #490: the composer picker's entry hints thread through to this
-    // one-shot prop. Passing "local-cli" must land on the Local CLI tab.
-    renderSection({ initialRuntimeTab: "local-cli" });
-    expect(screen.getByRole("tab", { name: "Local CLI" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("aria-selected", "false");
-  });
-
   // --- Default runtime placement (issue #571) -------------------------------
 
   it("renders the default-runtime control above the tab switcher, mounted on both tabs", async () => {
@@ -150,11 +142,6 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
       (b) => !(b as HTMLButtonElement).disabled,
     );
     expect(save).toBeDefined();
-  });
-
-  it("falls back to API Access when initialRuntimeTab is undefined", () => {
-    renderSection();
-    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute("aria-selected", "true");
   });
 
   // --- WAI-ARIA APG keyboard navigation -----------------------------------

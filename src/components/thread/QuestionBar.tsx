@@ -122,9 +122,9 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
           {trailing}
           {loading && phase !== null && (
             // ADR-0059 discrete phase feedback. The attempt number surfaces only
-            // on a blind retry (>1); the first attempt shows the bare verb (守
-            // 0017 -- honest, not fabricated, and the first attempt needs no
-            // "第 1 次" noise).
+            // on a blind retry (>1); the first attempt shows the bare verb
+            // (ADR-0017 -- honest, not fabricated, and the first attempt needs
+            // no attempt-number noise).
             // ADR-0067 (issue #185): the .phase-indicator visual rule (font-size +
             // color + white-space) retired onto utility here; the class hook had no
             // selector / test dependent (Shell.test.tsx queries role="status", not
