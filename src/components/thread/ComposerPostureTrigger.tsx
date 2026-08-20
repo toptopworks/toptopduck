@@ -22,7 +22,10 @@ import {
 // resident text control seated BEFORE the runtime trigger on the QuestionBar
 // row. Its label is the posture readout computed by the picker (built-in:
 // active profile model / "Not configured"; external: "{model} · {strength}",
-// either dimension alone, or "Default (recommended)"). Without a catalog
+// either dimension alone, or "Default (recommended)"). The turn-end live
+// currents never touch the label (issue #586): while nothing is selected,
+// the label keeps its default copy and the tooltip carries what the last
+// turn actually ran. Without a catalog
 // (built-in,
 // or an external CLI never probed/discovered) it renders as a static
 // label with no arrow -- never a button pretending to be clickable; with a
@@ -40,6 +43,12 @@ export type ComposerPostureTriggerProps = {
   label: string;
   // The catalog driving the cascade menu; null = static label (no arrow).
   catalog: PostureCatalog | null;
+  // The turn-end live currents (issue #586): what the last turn actually
+  // ran, read off the session discovery cache while nothing is selected.
+  // Non-null mounts the tooltip that carries the live readout (the label
+  // itself keeps its default copy); null renders no tooltip. An explicit
+  // selection outranks the live read.
+  liveValue: string | null;
   // The held model / thought-level pair the label + menu reflect (the
   // session's modelConfig, or the cold-start pending ?? backfill posture).
   model: string | null;
@@ -88,6 +97,7 @@ export type CatalogNote = "stale-runtime" | "from-probe" | null;
 export function ComposerPostureTrigger({
   label,
   catalog,
+  liveValue,
   model,
   thoughtLevel,
   onSelectModel,
@@ -183,26 +193,49 @@ export function ComposerPostureTrigger({
       ? `${defaultLabel} (${currentLevel})`
       : defaultLabel;
 
+  // The trigger button, hoisted so the live state can wrap it in a tooltip
+  // without duplicating the markup (the Tooltip > DropdownMenuTrigger
+  // composition mirrors the runtime trigger's Tooltip > PopoverTrigger).
+  const triggerButton = (
+    <button
+      type="button"
+      disabled={disabled}
+      aria-label={ariaLabel}
+      className="composer-posture-trigger inline-flex h-9 max-w-52 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
+    >
+      {/* Hides the posture label when the question-bar @container
+          drops below the narrow-rail threshold, leaving the
+          chevron-only button (aria-label keeps the full readout) --
+          the same collapse the auth-mode chip's label performs
+          (LABEL_HIDE_NARROW). */}
+      <span className="@max-[320px]:hidden truncate">{label}</span>
+      <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+    </button>
+  );
+
   return (
     <>
       {catalogNote === "from-probe" && <ProbeCatalogInfoIcon />}
       <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            disabled={disabled}
-            aria-label={ariaLabel}
-            className="composer-posture-trigger inline-flex h-9 max-w-52 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
-          >
-            {/* Hides the posture label when the question-bar @container
-                drops below the narrow-rail threshold, leaving the
-                chevron-only button (aria-label keeps the full readout) --
-                the same collapse the auth-mode chip's label performs
-                (LABEL_HIDE_NARROW). */}
-            <span className="@max-[320px]:hidden truncate">{label}</span>
-            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-          </button>
-        </DropdownMenuTrigger>
+        {liveValue != null ? (
+          // The live readout's only surface (issue #586): the label keeps
+          // its default copy, so the tooltip carries what the last turn
+          // actually ran.
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>{triggerButton}</DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="top" align="start" className="max-w-64">
+              <FormattedMessage
+                id="composer.postureTrigger.liveTooltip"
+                defaultMessage="{value} (last turn)"
+                values={{ value: liveValue }}
+              />
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <DropdownMenuTrigger asChild>{triggerButton}</DropdownMenuTrigger>
+        )}
         <DropdownMenuContent align="end" className="w-60">
           {catalogNote === "stale-runtime" && (
             <p className="text-warning px-2 py-1 text-xs">

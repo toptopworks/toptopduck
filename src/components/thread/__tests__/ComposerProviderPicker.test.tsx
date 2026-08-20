@@ -591,11 +591,12 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
   });
 
-  it("shows Default (recommended), not the CLI current, when a catalog exists but nothing is selected", async () => {
+  it("shows Default (recommended) when the discovery cache predates the provenance stamp (unattributable currents)", async () => {
+    // The live rendering asserts what THIS runtime's last turn ran (issue
+    // #586); a cache persisted before the adapter_id field existed cannot
+    // back that claim, so the unselected label stays anchored to the CLI
+    // default and the directory stays a pick-list, not an auto-selection.
     await renderExternalPicker({}, { cached_discovered: CATALOG });
-    // The label must not adopt the CLI-reported current (fake-opus): with
-    // nothing held, the unselected state reads as the CLI default and the
-    // directory stays a pick-list, not an auto-selection.
     expect(
       screen.getByRole("button", { name: "Model: Default (recommended)" }),
     ).toBeTruthy();
@@ -669,6 +670,200 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     renderPicker(pickerJsx());
     expect(await screen.findByRole("status")).toBeTruthy();
     expect(screen.queryByText("Default (recommended)")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Posture label turn-end live rendering (issue #586, ADR-0095 Decision 5)
+// ---------------------------------------------------------------------------
+
+describe("ComposerProviderPicker posture label live rendering (issue #586)", () => {
+  // The session discovery cache stamped by the ACTIVE adapter: the
+  // turn-end live currents (the ACP handshake currents / the claude
+  // system{init} model) the unselected state's tooltip carries.
+  const STAMPED_CATALOG = { ...CATALOG, adapter_id: "qwen-code" };
+  const LIVE_TOOLTIP = /\(last turn\)/;
+
+  it("keeps the Default (recommended) label and carries the turn's actual pair in the tooltip (ACP)", async () => {
+    await renderExternalPicker({}, { cached_discovered: STAMPED_CATALOG });
+    // The live currents never touch the label (the user-supplied form):
+    // the unselected label keeps its default copy verbatim, and the
+    // tooltip is the live readout's only surface.
+    const trigger = screen.getByRole("button", {
+      name: "Model: Default (recommended)",
+    });
+    expect(trigger).toBeTruthy();
+    fireEvent.pointerMove(trigger);
+    expect(
+      await screen.findByText("fake-opus · medium (last turn)"),
+    ).toBeTruthy();
+    // Display-layer only (ADR-0100 constraint): the live rendering never
+    // writes the posture -- the single write point stays the set IPCs.
+    expect(setSessionModel).not.toHaveBeenCalled();
+    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+    expect(clearLastModelPosture).not.toHaveBeenCalled();
+  });
+
+  it("shows the turn's actual model alone when the live cache carries no level (claude shape)", async () => {
+    // claude-code's turns report only the system{init} model (no thought
+    // levels); the per-model catalog rides the probe entry as usual.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
+    ]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "claude-code": {
+        probe_kind: "claude_stream_json",
+        outcome: {
+          claude_stream_json: {
+            models: [
+              {
+                id: "opus",
+                display_name: "Opus",
+                is_default: true,
+                default_reasoning_effort: "medium",
+                supported_reasoning_efforts: ["low", "medium", "high"],
+              },
+            ],
+          },
+        },
+        probed_at_millis: 0,
+      },
+    });
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: {
+        models: [],
+        current_model: "opus",
+        thought_levels: [],
+        current_thought_level: null,
+        adapter_id: "claude-code",
+      },
+    });
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: claude-code/ });
+    const trigger = screen.getByRole("button", {
+      name: "Model: Default (recommended)",
+    });
+    fireEvent.pointerMove(trigger);
+    expect(await screen.findByText("opus (last turn)")).toBeTruthy();
+  });
+
+  it("an explicit selection outranks the live currents and drops the tooltip", async () => {
+    await renderExternalPicker(
+      {},
+      { model: "fake-sonnet", cached_discovered: STAMPED_CATALOG },
+    );
+    const trigger = screen.getByRole("button", { name: "Model: fake-sonnet" });
+    expect(trigger).toBeTruthy();
+    // The selected state carries no live tooltip.
+    fireEvent.pointerMove(trigger);
+    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
+  });
+
+  it("the live tooltip disappears the moment a model is picked from the live state", async () => {
+    await renderExternalPicker({}, { cached_discovered: STAMPED_CATALOG });
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
+    // The optimistic cache seed flips the label to the selected state in
+    // the same gesture -- the live tooltip goes with it.
+    const trigger = await screen.findByRole("button", {
+      name: "Model: fake-sonnet",
+    });
+    fireEvent.pointerMove(trigger);
+    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
+  });
+
+  it("keeps the menu unselected in the live state (no auto-check)", async () => {
+    // The live rendering is a label-only fact: the cascade menu's check
+    // positions stay untouched (nothing is selected), same as the
+    // Default (recommended) state.
+    await renderExternalPicker({}, { cached_discovered: STAMPED_CATALOG });
+    const items = screen.getAllByRole("menuitemradio");
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item.getAttribute("aria-checked")).not.toBe("true");
+    }
+  });
+
+  it("keeps Default (recommended) on a codex session (probe cache carries no live currents)", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      codex: {
+        probe_kind: "codex_event_stream",
+        outcome: {
+          codex_event_stream: {
+            models: [
+              {
+                id: "gpt-5",
+                display_name: "GPT-5",
+                is_default: true,
+                default_reasoning_effort: "medium",
+                supported_reasoning_efforts: ["low", "medium", "high"],
+              },
+            ],
+          },
+        },
+        probed_at_millis: 0,
+      },
+    });
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: codex/ });
+    const trigger = screen.getByRole("button", {
+      name: "Model: Default (recommended)",
+    });
+    expect(trigger).toBeTruthy();
+    fireEvent.pointerMove(trigger);
+    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
+  });
+
+  it("does not attribute another adapter's live currents to the active runtime", async () => {
+    // The cache holds live values, but its stamp names a different adapter
+    // (the stale-provenance window after a runtime switch): asserting them
+    // as THIS runtime's last turn would be a lie, so no live tooltip.
+    await renderExternalPicker(
+      {},
+      { cached_discovered: { ...CATALOG, adapter_id: "other-cli" } },
+    );
+    const trigger = screen.getByRole("button", {
+      name: "Model: Default (recommended)",
+    });
+    fireEvent.pointerMove(trigger);
+    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
+  });
+
+  it("cold start keeps Default (recommended) even when the probe cache carries currents", async () => {
+    // The probe entry's handshake currents are probe facts, not turn
+    // facts -- and the cold-start bar has no session discovery cache to
+    // read (the model-config query is disabled), so the live rendering
+    // has no source here.
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
+    renderPicker(
+      pickerJsx({
+        sessionId: null,
+        onPendingRuntimeChange: vi.fn(),
+        pendingRuntime: { kind: "external", data: "qwen-code" },
+      }),
+    );
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    const trigger = screen.getByRole("button", {
+      name: "Model: Default (recommended)",
+    });
+    fireEvent.pointerMove(trigger);
+    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
   });
 });
 

@@ -42,6 +42,7 @@
   "composer.mcpTrigger.label": "MCP ({enabled}/{total})",
   "composer.postureTrigger.ariaLabel": "模型：{label}",
   "composer.postureTrigger.default": "默认（推荐）",
+  "composer.postureTrigger.liveTooltip": "{value}（上一轮）",
   "composer.skillsTrigger.label": "技能 ({mounted}/{total})",
   "composer.providerPicker.noKeyMark": "未配置 key",
   "composer.providerPicker.notConfigured": "未配置",

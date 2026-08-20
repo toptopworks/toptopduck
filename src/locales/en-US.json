@@ -42,6 +42,7 @@
   "composer.mcpTrigger.label": "MCP ({enabled}/{total})",
   "composer.postureTrigger.ariaLabel": "Model: {label}",
   "composer.postureTrigger.default": "Default (recommended)",
+  "composer.postureTrigger.liveTooltip": "{value} (last turn)",
   "composer.skillsTrigger.label": "Skills ({mounted}/{total})",
   "composer.providerPicker.noKeyMark": "no key",
   "composer.providerPicker.notConfigured": "Not configured",
