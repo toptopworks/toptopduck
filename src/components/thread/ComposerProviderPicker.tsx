@@ -1,11 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import { FormattedMessage, useIntl } from "react-intl";
+import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import * as SelectPrimitive from "@radix-ui/react-select";
-import { Brain, Check, ChevronRight } from "lucide-react";
+import { Brain } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
 import { log } from "../../lib/log";
@@ -37,13 +34,13 @@ import {
   type CatalogNote,
   type PostureCatalog,
 } from "./ComposerPostureTrigger";
+import { ComposerRuntimeMenu } from "./ComposerRuntimeMenu";
 import {
   PRESET_CUSTOM,
   derivePresetId,
   findPreset,
 } from "../settings/provider-presets";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
-import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 // The honest default while the model-config read settles (and on the
@@ -58,11 +55,6 @@ const MODEL_CONFIG_DEFAULT: SessionModelConfig = {
 // The unselected posture pair (ADR-0100): never chosen, or explicitly
 // cleared -- the "Default (recommended)" start.
 const EMPTY_POSTURE: ModelPosture = { model: null, thought_level: null };
-
-// The two level-2 selects' shared trigger classes: indented under the level-1
-// group row and inset to the remaining width (the dot column).
-const LEVEL2_SELECT_TRIGGER_CLASS =
-  "ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-muted";
 
 // Composer runtime entry (ADR-0099, issues #353/#574; ADR-0071/0081/0085/
 // 0091 lineage). TWO resident controls at the QuestionBar edge, each with one
@@ -403,6 +395,20 @@ export function ComposerProviderPicker({
       ? { model: modelConfig.model, thought_level: modelConfig.thought_level }
       : (pendingModelPosture ?? backfillData ?? EMPTY_POSTURE);
 
+  // Latest caller-held pending posture, mirrored in an effect for the async
+  // rollback guard below: the IPC reject handler must compare against the
+  // CURRENT pair, not the render snapshot its closure captured (issue #592).
+  const pendingPostureRef = useRef(pendingModelPosture);
+  useEffect(() => {
+    pendingPostureRef.current = pendingModelPosture;
+  }, [pendingModelPosture]);
+
+  // Monotonic posture-gesture counter (issue #592): every pending write
+  // bumps it, so a reject handler can tell whether ANY later gesture fired
+  // after its own -- a repeat of the SAME clear re-writes an equal pair the
+  // value check alone cannot distinguish from "no later gesture".
+  const postureGestureSeqRef = useRef(0);
+
   // Cold-start posture writes (ADR-0099/0100, issue #574): a pick patches the
   // shell-held pending pair, seeded from the DISPLAYED posture so the first
   // edit starts from what the bar shows (backfill or a prior pick). The
@@ -424,7 +430,13 @@ export function ComposerProviderPicker({
       return;
     }
     const prevPosture = posture;
-    onPendingModelPostureChange({ ...posture, ...patch });
+    const clearedPosture: ModelPosture = { ...posture, ...patch };
+    const gestureSeq = ++postureGestureSeqRef.current;
+    // A new gesture is a fresh write attempt: clear any fault a previous
+    // rejected one left on the set-fault slot (the applyModelConfig
+    // symmetry on the in-session side).
+    setModelSetError(null);
+    onPendingModelPostureChange(clearedPosture);
     if (clearsBackfill && activeAdapterId !== null) {
       const adapterId = activeAdapterId;
       clearLastModelPosture(adapterId)
@@ -438,10 +450,34 @@ export function ComposerProviderPicker({
           // the un-cleared entry and the posture silently "comes back" --
           // precisely the backfill-defeats-clear outcome this IPC exists to
           // prevent (ADR-0100 Decision 3).
-          onPendingModelPostureChange(prevPosture);
+          //
+          // Lost-update guard (issue #592): the rollback restores
+          // prevPosture only while the pending pair still equals THIS
+          // clear's patch AND no later posture gesture has fired (the
+          // counter; a same-value repeat would slip past the value check
+          // alone). A later gesture (or the caller's runtime-switch reset
+          // to null) means a newer intent -- restoring the pre-clear
+          // snapshot then would silently clobber it.
+          const current = pendingPostureRef.current;
+          const stillThisClear =
+            gestureSeq === postureGestureSeqRef.current &&
+            current != null &&
+            current.model === clearedPosture.model &&
+            current.thought_level === clearedPosture.thought_level;
+          if (stillThisClear) {
+            onPendingModelPostureChange(prevPosture);
+          }
+          // The failed clear surfaces on the shared set-fault line in BOTH
+          // outcomes: rolled back, the bar would otherwise show the restored
+          // entry with no explanation; skipped, the optimistic clear stays
+          // displayed while the backfill entry survived -- the failure would
+          // surface only at the NEXT cold start as the posture "coming back".
+          setModelSetError(e);
           log.warn(
             "ComposerProviderPicker",
-            "clear startup posture failed; rolled the pending clear back",
+            stillThisClear
+              ? "clear startup posture failed; rolled the pending clear back"
+              : "clear startup posture failed; pending posture moved on, rollback skipped",
             fmtError(e, intl),
           );
         });
@@ -578,6 +614,14 @@ export function ComposerProviderPicker({
     // pending state. No IPC, no switching gate -- the write is synchronous.
     if (sessionId === null) {
       if (onPendingRuntimeChange) {
+        // The caller resets the pending posture to null on a runtime switch
+        // (App's handlePendingRuntimeChange; ADR-0100 D2 namespacing) -- a
+        // reset that bypasses pendingPostureWrite and so bumps no gesture
+        // counter. Bump it in the same task so a still-in-flight clear
+        // reject from the previous runtime cannot roll its pre-clear
+        // posture over the reset even if it lands before the ref mirror
+        // flushes.
+        ++postureGestureSeqRef.current;
         onPendingRuntimeChange(next);
       } else {
         log.warn(
@@ -634,38 +678,6 @@ export function ComposerProviderPicker({
     id: "composer.postureTrigger.default",
     defaultMessage: "Default (recommended)",
   });
-
-  // Level-2 select aria labels (each Select announces its dimension) + the
-  // honest empty-CLI placeholder.
-  const profileSelectAria = intl.formatMessage({
-    id: "composer.runtimePicker.profileSelectAria",
-    defaultMessage: "API profile",
-  });
-  const cliSelectAria = intl.formatMessage({
-    id: "composer.runtimePicker.cliSelectAria",
-    defaultMessage: "Local CLI",
-  });
-  const noCliDetected = intl.formatMessage({
-    id: "composer.runtimePicker.noCliDetected",
-    defaultMessage: "None detected",
-  });
-
-  // The synthetic option for a held adapter the detected table no longer
-  // offers (issue #490): keeps the closed CLI select's echo honest (a value
-  // with no matching item would echo blank) while staying unselectable.
-  const staleAdapterOption =
-    activeAdapterStale && activeAdapterId != null
-      ? {
-          value: activeAdapterId,
-          label: intl.formatMessage(
-            {
-              id: "composer.runtimePicker.unrepresentedAdapter",
-              defaultMessage: "{id} (no longer detected)",
-            },
-            { id: activeAdapterId },
-          ),
-        }
-      : null;
 
   // The posture label (ADR-0099 Decision 3 / #573): built-in shows the
   // active profile's model (empty -> em dash; zero profiles -> "Not
@@ -838,273 +850,22 @@ export function ComposerProviderPicker({
         </Tooltip>
 
         <PopoverContent align="start" className="w-80">
-          {/* The two-level runtime selector (ADR-0099 Decision 2): level 1
-              mirrors the Settings runtime sub-tab names; level 2 is one
-              Select per group -- the profiles under API Access, the detected
-              CLIs under Local CLI. Pure selector -- all configuration
-              actions live in Settings (Decision 1). */}
-          <div className="grid gap-1.5">
-            {/* --- Level 1 + 2: API Access (= the built-in runtime) --------- */}
-            <section className="grid gap-1">
-              <RuntimeGroupRow
-                selected={!isExternal}
-                disabled={switching}
-                onClick={() => void selectRuntime({ kind: "built_in" })}
-              >
-                <FormattedMessage
-                  id="settings.runtime.tab.apiAccess"
-                  defaultMessage="API Access"
-                />
-              </RuntimeGroupRow>
-              {/* Level 2: the profile Select. A pick switches active_profile
-                  (global semantics unchanged) AND reverts the runtime to
-                  built-in when an external adapter was active -- picking a
-                  profile IS picking the built-in runtime. The keyless /
-                  keychain-fault marks ride the option rows (dropdown-only,
-                  never echoed in the trigger; ADR-0019/0099). Zero profiles:
-                  the honest "Not configured" placeholder, nothing to switch
-                  (ADR-0098 D1). */}
-              {noProfiles ? (
-                <p className="text-muted-foreground ml-6 px-2 py-1.5 text-sm">
-                  {notConfigured}
-                </p>
-              ) : (
-                // Permanently controlled ("" = the placeholder state):
-                // toggling between a value and undefined would flip Radix
-                // between controlled and uncontrolled, and a switch back
-                // would re-echo the stale internal value.
-                <Select
-                  value={provider.active_profile ?? ""}
-                  onValueChange={(id) => {
-                    onSwitchActive(id);
-                    if (isExternal) void selectRuntime({ kind: "built_in" });
-                  }}
-                  disabled={switching}
-                >
-                  <SelectTrigger
-                    aria-label={profileSelectAria}
-                    className={LEVEL2_SELECT_TRIGGER_CLASS}
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {provider.profiles.map((p) => {
-                      const status = profileKeys[p.id];
-                      const mark = status
-                        ? status.keychain_fault
-                          ? keychainUnavailableMark
-                          : status.has_key
-                            ? null
-                            : noKeyMark
-                        : null;
-                      return (
-                        <RuntimeSelectItem
-                          key={p.id}
-                          value={p.id}
-                          label={p.display_name.trim() || unnamed}
-                          mark={mark ?? undefined}
-                          title={status?.keychain_fault ?? undefined}
-                        />
-                      );
-                    })}
-                  </SelectContent>
-                </Select>
-              )}
-              {keysError && <p className="text-destructive px-2 text-xs">{keysError}</p>}
-            </section>
-
-            <div className="border-t border-border" />
-
-            {/* --- Level 1 + 2: Local CLI (= the external runtime) ---------- */}
-            <section className="grid gap-1">
-              <RuntimeGroupRow
-                selected={isExternal}
-                disabled={switching}
-                onClick={selectLocalCliGroup}
-              >
-                <FormattedMessage
-                  id="settings.runtime.tab.localCli"
-                  defaultMessage="Local CLI"
-                />
-              </RuntimeGroupRow>
-              {activeAdapterStale && (
-                <p className="text-destructive px-2 pb-1 text-xs">
-                  <FormattedMessage
-                    id="composer.runtimePicker.staleAdapter"
-                    defaultMessage="Selected adapter is no longer detected — pick another or manage in settings."
-                  />
-                </p>
-              )}
-              {/* Level 2: the CLI Select. Only detected adapters are offered;
-                  a held adapter the detected table no longer offers surfaces
-                  as a disabled synthetic option so the closed trigger's echo
-                  stays honest (issue #490). No detected CLI: the honest
-                  "None detected" placeholder. */}
-              {/* Permanently controlled ("" = the placeholder state): an
-                  undefined value would make Radix fall back to its internal
-                  (uncontrolled) state, so switching back to built-in within
-                  one popover visit would keep echoing the previous adapter
-                  while level 1 already shows API Access selected. */}
-              <Select
-                value={activeAdapterId ?? ""}
-                onValueChange={(id) =>
-                  void selectRuntime({ kind: "external", data: id })}
-                disabled={switching}
-              >
-                <SelectTrigger
-                  aria-label={cliSelectAria}
-                  className={LEVEL2_SELECT_TRIGGER_CLASS}
-                >
-                  <SelectValue
-                    placeholder={adapters.length === 0 ? noCliDetected : "—"}
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {staleAdapterOption != null && (
-                    <RuntimeSelectItem
-                      value={staleAdapterOption.value}
-                      label={staleAdapterOption.label}
-                      disabled
-                      muted
-                    />
-                  )}
-                  {adapters.map((a) => (
-                    <RuntimeSelectItem
-                      key={a.id}
-                      value={a.id}
-                      label={a.display_name}
-                    />
-                  ))}
-                </SelectContent>
-              </Select>
-            </section>
-
-            {/* Manage runtimes -- opens Settings → Runtime (its default
-                sub-tab; ADR-0091, issue #490). A popover-footer affordance
-                independent of either runtime group, seated at the right
-                edge. */}
-            <div className="border-t border-border" />
-            <button
-              type="button"
-              onClick={handleOpenSettings}
-              className="inline-flex items-center gap-0.5 justify-self-end text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-            >
-              <FormattedMessage
-                id="composer.runtimePicker.manageRuntimes"
-                defaultMessage="Manage runtimes"
-              />
-              <ChevronRight className="size-3.5" aria-hidden />
-            </button>
-          </div>
+          <ComposerRuntimeMenu
+            isExternal={isExternal}
+            switching={switching}
+            provider={provider}
+            profileKeys={profileKeys}
+            keysError={keysError}
+            adapters={adapters}
+            activeAdapterId={activeAdapterId}
+            activeAdapterStale={activeAdapterStale}
+            onSwitchActive={onSwitchActive}
+            onSelectRuntime={selectRuntime}
+            onSelectLocalCliGroup={selectLocalCliGroup}
+            onManageRuntimes={handleOpenSettings}
+          />
         </PopoverContent>
       </Popover>
     </>
-  );
-}
-
-// One level-1 runtime group row (ADR-0099 Decision 2): the radio-style dot +
-// the group label as a full-row button. aria-pressed carries the selection
-// state for assistive tech (the dot itself is aria-hidden).
-function RuntimeGroupRow({
-  selected,
-  disabled,
-  onClick,
-  children,
-}: {
-  selected: boolean;
-  disabled: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      aria-pressed={selected}
-      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium cursor-pointer hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
-    >
-      <RuntimeDot selected={selected} />
-      {children}
-    </button>
-  );
-}
-
-// A radio-style selection dot for the runtime groups: a filled ring with a
-// check when selected, a hollow ring otherwise. aria-hidden -- the selecting
-// button carries aria-pressed, so the dot is purely visual (announcing it
-// would duplicate the pressed state).
-function RuntimeDot({ selected }: { selected: boolean }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex size-4 shrink-0 items-center justify-center rounded-full border",
-        selected
-          ? "border-primary text-primary"
-          : "border-muted-foreground/50 text-transparent",
-      )}
-      aria-hidden
-    >
-      <Check className="size-3" />
-    </span>
-  );
-}
-
-// A SelectPrimitive.Item variant for the two level-2 selects: the label
-// alone rides ItemText (the closed trigger's echo source); the optional
-// key-status mark sits as a sibling -- dropdown-only, never echoed in the
-// trigger. Uses SelectPrimitive.Item directly instead of the shared
-// SelectItem wrapper, which places ALL children inside ItemText and cannot
-// express the mark slot (the AuthModeItem pattern).
-type RuntimeSelectItemProps = {
-  value: string;
-  label: string;
-  /** Dropdown-only trailing mark (the keyless / keychain-fault note). */
-  mark?: string;
-  /** Hover text for the mark (the keychain fault detail). */
-  title?: string;
-  disabled?: boolean;
-  /** Renders the label in the muted tone (the stale synthetic option). */
-  muted?: boolean;
-};
-
-function RuntimeSelectItem({
-  value,
-  label,
-  mark,
-  title,
-  disabled = false,
-  muted = false,
-}: RuntimeSelectItemProps) {
-  return (
-    <SelectPrimitive.Item
-      value={value}
-      disabled={disabled}
-      className={cn(
-        "focus:bg-accent hover:bg-accent relative flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none",
-        "focus:text-accent-foreground",
-        "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-        "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
-      )}
-    >
-      <span className="absolute right-2 flex size-3.5 items-center justify-center">
-        <SelectPrimitive.ItemIndicator>
-          <Check className="size-4" />
-        </SelectPrimitive.ItemIndicator>
-      </span>
-      <SelectPrimitive.ItemText>
-        <span className={cn("truncate", muted && "text-muted-foreground")}>
-          {label}
-        </span>
-      </SelectPrimitive.ItemText>
-      {mark && (
-        <span
-          className="text-muted-foreground ml-auto truncate text-xs"
-          title={title}
-        >
-          {mark}
-        </span>
-      )}
-    </SelectPrimitive.Item>
   );
 }

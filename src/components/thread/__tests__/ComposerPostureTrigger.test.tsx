@@ -172,6 +172,23 @@ describe("ComposerPostureTrigger cascade menu (two-level)", () => {
     expect(onSelectModel).toHaveBeenCalledWith(null);
   });
 
+  it("clears the thought level via the leading Default (recommended) row", () => {
+    const { onSelectThoughtLevel } = renderTrigger({
+      model: "gemini-2.5-flash",
+      thoughtLevel: "high",
+    });
+    // A held model keeps the model list's clearing row un-annotated (the
+    // annotation rides only the nothing-held state), so both lists' clearing
+    // rows read the same label; the thought-level list is the second Sub.
+    // Its clearing row must reach onSelectThoughtLevel(null) through its own
+    // gesture path, not only via the codex linkage chain.
+    const clearingRows = screen.getAllByRole("menuitem", {
+      name: "Default (recommended)",
+    });
+    fireEvent.click(clearingRows[1]);
+    expect(onSelectThoughtLevel).toHaveBeenCalledWith(null);
+  });
+
   it("annotates the clearing row with the CLI current when nothing is held", () => {
     renderTrigger({ model: null });
     expect(

@@ -168,21 +168,13 @@ export function ComposerPostureTrigger({
     levelUnavailable = model == null;
   }
 
-  // The synthetic row for a value the catalog does not offer (#529): the
-  // HELD value -- the explicit selection, else the CLI-reported current the
-  // next turn would actually run (the retired select's held chain). Keeps
-  // the menu honest about an active posture it cannot otherwise show, and
-  // selectable so the user can adopt it explicitly.
+  // The held value per dimension: the explicit selection, else the
+  // CLI-reported current the next turn would actually run (the retired
+  // select's held chain). Feeds the first-level rows' inline values and the
+  // clearing rows' annotations; the second-level synthetic row is derived
+  // inside DimensionSub from the same value.
   const heldModel = model ?? currentModel;
   const heldLevel = thoughtLevel ?? currentLevel;
-  const unrepresentedModelId =
-    heldModel != null && heldModel !== "" && !modelIds.includes(heldModel)
-      ? heldModel
-      : null;
-  const unrepresentedLevelId =
-    heldLevel != null && heldLevel !== "" && !levelIds.includes(heldLevel)
-      ? heldLevel
-      : null;
 
   // The clearing row at the top of each second-level list: "Default
   // (recommended)" -- annotated with the CLI's reported current so the user
@@ -256,7 +248,6 @@ export function ComposerPostureTrigger({
             )}
             displayValue={heldModel}
             clearLabel={modelClearLabel}
-            unrepresentedId={unrepresentedModelId}
             ids={modelIds}
             selectedId={model}
             onSelect={onSelectModel}
@@ -270,7 +261,6 @@ export function ComposerPostureTrigger({
             )}
             displayValue={heldLevel}
             clearLabel={levelClearLabel}
-            unrepresentedId={unrepresentedLevelId}
             ids={levelIds}
             selectedId={thoughtLevel}
             unavailable={levelUnavailable}
@@ -345,7 +335,6 @@ function DimensionSub({
   label,
   displayValue,
   clearLabel,
-  unrepresentedId,
   ids,
   selectedId,
   onSelect,
@@ -354,12 +343,19 @@ function DimensionSub({
   label: ReactNode;
   displayValue: string | null;
   clearLabel: string;
-  unrepresentedId: string | null;
   ids: string[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   unavailable?: boolean;
 }) {
+  // The synthetic row's id, derived from this row's own inputs: it exists
+  // if and only if the displayed value is a non-empty id outside `ids`.
+  // Selectable, so the menu stays honest about an active posture it cannot
+  // otherwise show and the user can adopt it explicitly.
+  const unrepresentedId =
+    displayValue != null && displayValue !== "" && !ids.includes(displayValue)
+      ? displayValue
+      : null;
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger disabled={unavailable}>

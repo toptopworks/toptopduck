@@ -32,7 +32,7 @@ import { GeneralSection } from "./GeneralSection";
 import { McpSection } from "./McpSection";
 import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
-import { RuntimeSection, type RuntimeTab } from "./RuntimeSection";
+import { RuntimeSection } from "./RuntimeSection";
 import { SkillsSection } from "./SkillsSection";
 import {
   SETTINGS_SECTIONS,
@@ -126,7 +126,6 @@ function SectionContent({
   onDefaultRuntimeChanged,
   onIpcBusy,
   initialEditProfileId,
-  initialRuntimeTab,
   profilesControlsRef,
 }: {
   section: SettingsSection;
@@ -136,7 +135,6 @@ function SectionContent({
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   onIpcBusy: IpcBusyReporter;
   initialEditProfileId?: string;
-  initialRuntimeTab?: RuntimeTab;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
 }) {
   switch (section) {
@@ -162,7 +160,6 @@ function SectionContent({
           onDefaultRuntimeChanged={onDefaultRuntimeChanged}
           onIpcBusy={onIpcBusy}
           initialEditProfileId={initialEditProfileId}
-          initialRuntimeTab={initialRuntimeTab}
           profilesControlsRef={profilesControlsRef}
         />
       );
@@ -188,7 +185,6 @@ export function SettingsView({
   section,
   onSectionChange,
   initialEditProfileId,
-  initialRuntimeTab,
   collapsed,
 }: {
   // Collapse state (issue #287): when true the nav subtree goes inert so
@@ -214,7 +210,6 @@ export function SettingsView({
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
   initialEditProfileId?: string;
-  initialRuntimeTab?: RuntimeTab;
 }) {
   const intl = useIntl();
   const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
@@ -453,7 +448,6 @@ export function SettingsView({
             onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
-            initialRuntimeTab={initialRuntimeTab}
             profilesControlsRef={profilesControlsRef}
           />
         </div>
