@@ -2569,12 +2569,17 @@ pub fn get_session_runtime(
 /// at the turn boundary). The choice lands on the handle (lock-light, never
 /// blocks on an in-flight turn); `ask` mirrors it into the Session at the NEXT
 /// turn top, so the switch takes effect exactly at the turn boundary --
-/// the in-flight turn, if any, finishes on the runtime it started on. Selecting an unknown adapter
+/// the in-flight turn, if any, finishes on the runtime it started on. The
+/// switch also opens a new segment, so the model-posture slot re-seeds from
+/// the target adapter's backfill entry (ADR-0102 Decision 3, issue #590 --
+/// [`apply_runtime_switch`]); the same handle-only write carries it into the
+/// Session at the next turn top. Selecting an unknown adapter
 /// id rejects (the picker only offers `list_adapters` ids). Rejected while
 /// resuming (the session contents are mid-swap).
 #[tauri::command]
 pub fn set_session_runtime(
     store: State<'_, Arc<SessionStore>>,
+    live: State<'_, LiveProviderConfig>,
     session_id: String,
     runtime: SessionRuntimeChoice,
 ) -> Result<(), SessionError> {
@@ -2582,8 +2587,31 @@ pub fn set_session_runtime(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     let spec = resolve_runtime_choice(runtime)?;
-    handle.set_runtime_choice(spec);
+    apply_runtime_switch(&handle, spec, live.inner());
     Ok(())
+}
+
+/// Seat an in-session runtime switch on the handle (ADR-0102 Decision 3,
+/// issue #590): the runtime choice + the new segment's seeded posture, one
+/// write. A switch opens a new segment whose posture slot starts from the
+/// TARGET adapter's backfill entry ([`startup_model_posture`] -- external :=
+/// the adapter's `last_model_postures` entry, absent = unselected; built-in
+/// := empty, the built-in loop consumes no posture), so a stale model id
+/// held under the OLD adapter's namespace never injects into the new CLI,
+/// and a switch back to a previously used adapter recovers its held
+/// selection. Handle-only (lock-light): the pair reaches the Session -- and
+/// the recipe -- at the NEXT turn top via the same `ask` mirror that lands
+/// the runtime choice, so the switch never blocks on an in-flight turn.
+/// Resume never lands here: it restores the session's own persisted pair
+/// (segment continuation, issue #589), never the backfill map.
+fn apply_runtime_switch(
+    handle: &SessionHandle,
+    spec: Option<AdapterSpec>,
+    live: &LiveProviderConfig,
+) {
+    handle.set_runtime_choice(spec.clone());
+    let posture = startup_model_posture(spec.as_ref(), live);
+    handle.set_external_model_config(posture.model, posture.thought_level);
 }
 
 // --- Default runtime + startup resolution (ADR-0098 Decision 2/3, #569) -----
@@ -2774,10 +2802,14 @@ pub fn set_default_runtime(
 
 // --- Startup model posture backfill (ADR-0100, issue #581) ------------------
 
-/// The startup model posture for a fresh session (ADR-0100 Decision 1, issue
-/// #581): the startup adapter's backfill entry, or the empty posture when the
-/// start is built-in (or degraded to it) -- unselected, the CLI's own
-/// defaults. Lock-light: one honest-degrade config read.
+/// The segment-start model posture (ADR-0100 Decision 1, extended to
+/// in-session switches by ADR-0102 Decision 3, issues #581/#590): the
+/// adapter's backfill entry, or the empty posture when the start is
+/// built-in (or degraded to it) -- unselected, the CLI's own
+/// defaults. Serves both segment starts: a fresh session's creation
+/// (`create_session`) and an in-session runtime switch
+/// ([`apply_runtime_switch`]); resume restores the session's own pair and
+/// never reads this. Lock-light: one honest-degrade config read.
 fn startup_model_posture(startup: Option<&AdapterSpec>, live: &LiveProviderConfig) -> ModelPosture {
     match startup {
         None => ModelPosture::default(),
@@ -3714,6 +3746,120 @@ mod tests {
         let s = handle.session_lock().expect("session lock");
         assert!(s.runtime_facts().model.is_none());
         assert!(s.runtime_facts().thought_level.is_none());
+    }
+
+    // --- in-session switch re-seeding (issue #590, ADR-0102 Decision 3) ------
+
+    #[test]
+    fn apply_runtime_switch_seeds_the_target_adapters_entry() {
+        // Issue #590 AC1: switching to an external runtime seats that
+        // adapter's backfill entry on the posture slot -- the pair held
+        // under the OLD adapter's namespace never injects into the new CLI
+        // (the pre-#590 dangling state the re-seed replaces).
+        let (_dir, live) = posture_live();
+        live.set_last_model_posture(
+            "gemini-cli",
+            ModelPosture {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
+        )
+        .expect("seed gemini-cli posture");
+        let (_store, handle) = posture_handle();
+        handle.set_external_model_config(Some("claude-opus-4-5".into()), Some("max".into()));
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        apply_runtime_switch(&handle, Some(gemini.clone()), &live);
+        assert_eq!(handle.runtime_choice(), Some(gemini));
+        assert_eq!(
+            handle.external_model_config(),
+            (Some("gemini-2.5-pro".into()), Some("high".into())),
+            "the slot serves the target adapter's entry, not the stale pair"
+        );
+    }
+
+    #[test]
+    fn apply_runtime_switch_without_an_entry_clears_the_slot() {
+        // Issue #590 AC1 (no entry) + AC2 (built-in): both seed the empty
+        // posture -- unselected, the CLI's own defaults. A target adapter
+        // with no entry (never chosen / cleared) clears whatever was held,
+        // and the built-in runtime (which consumes no posture) does too.
+        let (_dir, live) = posture_live();
+        let (_store, handle) = posture_handle();
+        handle.set_external_model_config(Some("gemini-2.5-pro".into()), Some("high".into()));
+        let codex = resolve_adapter("codex").expect("v1 adapter");
+        apply_runtime_switch(&handle, Some(codex), &live);
+        assert_eq!(
+            handle.external_model_config(),
+            (None, None),
+            "an entry-less external target starts the segment unselected"
+        );
+        // Re-hold a pair, then switch to the built-in runtime: cleared again.
+        handle.set_external_model_config(Some("gpt-5.1-codex".into()), None);
+        apply_runtime_switch(&handle, None, &live);
+        assert_eq!(handle.runtime_choice(), None);
+        assert_eq!(handle.external_model_config(), (None, None));
+    }
+
+    #[test]
+    fn apply_runtime_switch_back_recovers_the_held_selection() {
+        // Issue #590 AC3: switching back to a previously used adapter
+        // recovers its held selection -- the single write point
+        // (`record_last_model_posture`) keeps the entry synced with every
+        // successful set made while on that adapter, so the re-seed reads
+        // the last selection back.
+        let (_dir, live) = posture_live();
+        let (_store, handle) = posture_handle();
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let codex = resolve_adapter("codex").expect("v1 adapter");
+        apply_runtime_switch(&handle, Some(gemini.clone()), &live);
+        // An explicit selection while on gemini lands on its entry (the
+        // same helper the set commands call -- the write point stays ONE).
+        record_last_model_posture(
+            &live,
+            Some(gemini.clone()),
+            Some("gemini-2.5-flash".into()),
+            None,
+        );
+        // Switch away (codex has no entry -> the slot clears) and back.
+        apply_runtime_switch(&handle, Some(codex), &live);
+        assert_eq!(handle.external_model_config(), (None, None));
+        apply_runtime_switch(&handle, Some(gemini), &live);
+        assert_eq!(
+            handle.external_model_config(),
+            (Some("gemini-2.5-flash".into()), None),
+            "the adapter's held selection recovers on the switch back"
+        );
+    }
+
+    #[test]
+    fn apply_runtime_switch_leaves_the_session_storage_alone() {
+        // Issue #590 AC6: the switch lands on the HANDLE only -- the Session
+        // (and the recipe it persists) keeps the old pair until the `ask`
+        // mirror at the next turn top, exactly like the runtime choice
+        // itself; the write therefore never blocks on an in-flight turn
+        // holding the session lock.
+        let (_dir, live) = posture_live();
+        let (_store, handle) = posture_handle();
+        {
+            let mut s = handle.session_lock().expect("session lock");
+            s.set_external_model_config(
+                Some("old-namespace-model".into()),
+                Some("old-level".into()),
+            );
+        }
+        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        apply_runtime_switch(&handle, Some(gemini), &live);
+        let s = handle.session_lock().expect("session lock");
+        assert_eq!(
+            s.runtime_facts().model.as_deref(),
+            Some("old-namespace-model"),
+            "the Session keeps the pre-switch pair until the turn-top mirror"
+        );
+        assert_eq!(
+            handle.external_model_config(),
+            (None, None),
+            "the handle slot already serves the seeded (empty) posture"
+        );
     }
 
     #[test]

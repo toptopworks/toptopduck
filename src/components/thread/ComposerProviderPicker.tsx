@@ -642,6 +642,15 @@ export function ComposerProviderPicker({
       // The write is the truth source: seed the cache directly (no extra IPC
       // round-trip; a later remount refetches the same value).
       queryClient.setQueryData(sessionKeys.runtime(sessionId), next);
+      // The switch also re-seeded the posture slot server-side from the
+      // target adapter's backfill entry (ADR-0102 Decision 3, issue #590)
+      // -- invalidate so the model button refetches the seeded pair
+      // instead of lingering on the old adapter's stale one. The seeded
+      // value lives server-side (the backfill map read), so an invalidate +
+      // refetch is the honest path -- no local projection of the entry.
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.modelConfig(sessionId),
+      });
     } catch (e) {
       // Keep the server posture: refetch so the picker re-reads the backend
       // truth instead of showing a selection the write never granted.

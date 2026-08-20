@@ -37,7 +37,9 @@ export const sessionKeys = {
   /** Per-session external-runtime model config (ADR-0095, issue #527) -- the
    *  model / thought-level selectors' read (selections + the cached discovery
    *  catalog). Session-prefixed like `runtime`; a resume restores the persisted
-   *  trio so the fresh mount's refetch lands the recipe values. */
+   *  trio so the fresh mount's refetch lands the recipe values, and a runtime
+   *  switch re-seeds the pair from the target adapter's backfill entry
+   *  (ADR-0102 Decision 3) so the switch's invalidate lands the seeded pair. */
   modelConfig: (sessionId: string) =>
     ["session", sessionId, "modelConfig"] as const,
   /** Per-session mounted-skill names (issue #365, ADR-0086) -- the composer "+"

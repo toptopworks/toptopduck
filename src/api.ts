@@ -753,7 +753,11 @@ export async function getSessionRuntime(
 }
 
 // Set the session's runtime choice. Takes effect at the next turn boundary
-// (the in-flight turn, if any, finishes on the runtime it started on). An
+// (the in-flight turn, if any, finishes on the runtime it started on). The
+// switch opens a new segment, so the server also re-seeds the posture slot
+// from the target adapter's backfill entry -- external := that entry (absent
+// = unselected), built-in := cleared (ADR-0102 Decision 3); callers
+// refetch the model config to pick the seeded pair up. An
 // unknown adapter id rejects -- the picker only offers `listAdapters` ids, so
 // a reject is a stale / buggy client; the chip resyncs off the reject.
 export async function setSessionRuntime(
