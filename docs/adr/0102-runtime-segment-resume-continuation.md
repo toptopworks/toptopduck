@@ -2,7 +2,7 @@
 
 ## Decision
 
-1. **resume = 段延续**：恢复会话**最后运行时**与该运行时下的姿势对（model / thought_level）。两者由构造保证同源——会话内换运行时即按新运行时回填姿势（Decision 3），持久化的姿势对永远属于持久化的运行时，不存在跨命名空间悬空，无需归属字段或条件恢复。`last_runtime` 入 recipe 头，与姿势对、`cached_discovered` 同批持久化（随既有 persist-now 机制）。
+1. **resume = 段延续**：恢复会话**最后生效段头的运行时**与该运行时下的姿势对（model / thought_level）。两者由构造保证同源——会话内换运行时即按新运行时回填姿势（Decision 3），`last_runtime` 在轮末（轮次归属快照）与 set 命令的即时持久化点两处盖章、后者与所持久化的姿势对同批落盘，持久化的姿势对永远属于持久化的运行时，不存在跨命名空间悬空，无需归属字段或条件恢复。`last_runtime` 入 recipe 头，与姿势对、`cached_discovered` 同批持久化（随既有 persist-now 机制）。
 
 2. **执行面 / 安全面分类**：执行面选择（运行时 + 模型姿势）是**会话延续状态**，跨 resume 恢复；安全面姿态（审批模式、MCP 启用）维持 resume 即重置的装配姿态。运行时选择不再与审批模式、MCP 启用同批于 resume 重置。
 
@@ -35,5 +35,5 @@
 - 扩展 ADR-0095 Decision 6：resume 恢复的持久化字段由三项扩为四项（+ `last_runtime`）；「set means persisted」载体不变。
 - 延伸 ADR-0100 Decision 1：回填作用域从「新会话起步」扩为「新会话与会话内换运行时起步」；resume 不在其列。
 - recipe 头新增 `last_runtime`；存量 .duck 缺字段按 serde default 回落旧语义（默认运行时解析），新写入起一律携带；format_version bump 与否实施期定。
-- 会话内换运行时的写路径补回填接线；resume 路径补 `last_runtime` 与姿势对恢复。
+- 会话内换运行时的写路径补回填接线；resume 路径补 `last_runtime` 与姿势对恢复。set 命令（模型 / 思考强度）的即时持久化点补 `last_runtime` 盖章（Decision 1 的段头语义），其读序与切换写序对齐——先运行时槽后姿势对槽，盖章头与回填条目出自同一次运行时读。
 - CONTEXT.md：「默认运行时」「运行时段」「上次模型姿势」词条校准。

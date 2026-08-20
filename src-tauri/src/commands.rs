@@ -51,7 +51,8 @@ use crate::runtime::acp::catalog_store::{
     now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
 };
 use crate::session::{
-    RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts, TurnInputs,
+    PosturePair, RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts,
+    TurnInputs,
 };
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
@@ -214,7 +215,7 @@ pub fn create_session(
     // Decision 6). No entry (never chosen / cleared) or a degraded built-in
     // start stays unselected. Resume never lands here: it restores the
     // session's own posture and never consults the backfill map.
-    let posture = startup_model_posture(startup.as_ref(), live.inner());
+    let posture = session_posture(segment_start_posture(startup.as_ref(), live.inner()));
     handle.set_runtime_choice(startup);
     // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
     // The UUID directory name is the stable identity; session.duck is the
@@ -688,11 +689,11 @@ pub async fn ask(
         // mid-turn, and a resumed Session (fresh, built-in default) reads
         // the reset choice.
         s.set_external_runtime(handle.runtime_choice());
-        // ADR-0095: mirror the session-level model + thought-level choices
+        // ADR-0095: mirror the session-level model + thought-level pair
         // into the turn at the same boundary as the runtime choice (the pair
         // read takes the slot lock once -- no torn mix).
-        let (external_model, external_thought_level) = handle.external_model_config();
-        s.set_external_model_config(external_model, external_thought_level);
+        let external_posture = handle.external_model_config();
+        s.set_external_model_config(external_posture);
         // Issue #364 (ADR-0086): resolve the session's mounted skills into
         // prompt fragments (name + verbatim body + whole-file SHA-256) here
         // at the command boundary, where the registry root lives, so the
@@ -2594,7 +2595,7 @@ pub fn set_session_runtime(
 /// Seat an in-session runtime switch on the handle (ADR-0102 Decision 3,
 /// issue #590): the runtime choice + the new segment's seeded posture, one
 /// handle-only step. A switch opens a new segment whose posture slot starts
-/// from the TARGET adapter's backfill entry ([`startup_model_posture`] --
+/// from the TARGET adapter's backfill entry ([`segment_start_posture`] --
 /// external := the adapter's `last_model_postures` entry, absent =
 /// unselected; built-in := empty, the built-in loop consumes no posture), so
 /// a stale model id held under the OLD adapter's namespace never injects
@@ -2614,9 +2615,9 @@ fn apply_runtime_switch(
     spec: Option<AdapterSpec>,
     live: &LiveProviderConfig,
 ) {
-    let posture = startup_model_posture(spec.as_ref(), live);
+    let posture = session_posture(segment_start_posture(spec.as_ref(), live));
     handle.set_runtime_choice(spec);
-    handle.set_external_model_config(posture.model, posture.thought_level);
+    handle.set_external_model_config(posture);
 }
 
 // --- Default runtime + startup resolution (ADR-0098 Decision 2/3, #569) -----
@@ -2769,8 +2770,10 @@ fn apply_resumed_postures(
     // ADR-0095 Decision 6: restore the model config AFTER the reset batch
     // (the restored values win over any stale pre-resume state).
     handle.restore_runtime_model_config(
-        runtime_facts.model,
-        runtime_facts.thought_level,
+        PosturePair {
+            model: runtime_facts.model,
+            thought_level: runtime_facts.thought_level,
+        },
         runtime_facts.cached_discovered,
     );
 }
@@ -2815,10 +2818,22 @@ pub fn set_default_runtime(
 /// (`create_session`) and an in-session runtime switch
 /// ([`apply_runtime_switch`]); resume restores the session's own pair and
 /// never reads this. Lock-light: one honest-degrade config read.
-fn startup_model_posture(startup: Option<&AdapterSpec>, live: &LiveProviderConfig) -> ModelPosture {
-    match startup {
+fn segment_start_posture(target: Option<&AdapterSpec>, live: &LiveProviderConfig) -> ModelPosture {
+    match target {
         None => ModelPosture::default(),
         Some(spec) => live.last_model_posture(spec.id.as_str()),
+    }
+}
+
+/// Convert the app-config posture (the backfill map's value shape) onto the
+/// session-local pair (the handle slot / Session storage shape): the
+/// boundary conversion lives here because `session_store` deliberately
+/// imports no app-config types -- the two shapes are structurally identical
+/// but never aliased.
+fn session_posture(p: ModelPosture) -> PosturePair {
+    PosturePair {
+        model: p.model,
+        thought_level: p.thought_level,
     }
 }
 
@@ -2835,11 +2850,11 @@ fn startup_model_posture(startup: Option<&AdapterSpec>, live: &LiveProviderConfi
 /// unselected without a guard.
 fn apply_startup_posture(
     handle: &SessionHandle,
-    posture: &ModelPosture,
+    posture: &PosturePair,
 ) -> Result<(), SessionError> {
-    handle.set_external_model_config(posture.model.clone(), posture.thought_level.clone());
+    handle.set_external_model_config(posture.clone());
     let mut s = handle.session_lock()?;
-    s.set_external_model_config(posture.model.clone(), posture.thought_level.clone());
+    s.set_external_model_config(posture.clone());
     Ok(())
 }
 
@@ -2928,7 +2943,10 @@ fn persist_outcome(s: &crate::session::Session) -> SetModelPersistOutcome {
 /// Read the session's external-runtime model config (ADR-0095). Lock-light:
 /// reads the handle's own mutexes, never the session lock an in-flight turn
 /// holds. `cached_discovered` is `None` until the first ACP turn (and is
-/// restored from the recipe on resume).
+/// restored from the recipe on resume). After an in-session runtime switch
+/// it may still carry the PREVIOUS adapter's catalog -- retained by design
+/// until the new runtime's first turn replaces it; the picker discriminates
+/// it via `DiscoveredRuntime.adapter_id` (issue #529 provenance).
 #[tauri::command]
 pub fn get_session_model_config(
     store: State<'_, Arc<SessionStore>>,
@@ -2938,10 +2956,10 @@ pub fn get_session_model_config(
     let handle = store.get(&id)?;
     // The pair read takes the slot lock once: a concurrent set lands entirely
     // before or after this read, never as a torn (old, new) mix.
-    let (model, thought_level) = handle.external_model_config();
+    let posture = handle.external_model_config();
     Ok(SessionModelConfig {
-        model,
-        thought_level,
+        model: posture.model,
+        thought_level: posture.thought_level,
         cached_discovered: handle.cached_discovered(),
     })
 }
@@ -2955,15 +2973,25 @@ pub fn get_session_model_config(
 ///
 /// Persistence: the selection is mirrored into the Session's recipe-header
 /// facts + persisted immediately, so a close-without-another-turn keeps the
-/// resume promise (Decision 6). Rejected with a typed error while resuming
-/// or while a turn is in flight (the same `reject_if_*` guards every other
-/// session-mutating command has); on pass, the session lock is taken only
-/// briefly for the small atomic write.
+/// resume promise (Decision 6). The same persist-now batch stamps the
+/// handle's runtime choice into `last_runtime` (ADR-0102 Decision 1, the
+/// last effective segment header) -- the persisted pair always travels under
+/// its own runtime, so a switch followed by a selection and a close
+/// without a turn resumes on the runtime the pair belongs to. Rejected
+/// with a typed error while resuming or while a turn is in flight (the
+/// same `reject_if_*` guards every other session-mutating command has);
+/// on pass, the session lock is taken only briefly for the small atomic
+/// write.
 ///
 /// Backfill (ADR-0100 Decision 3, issue #581): a successful set also lands
 /// the new pair on the session's runtime adapter's app-config entry (the
 /// single write point shared with the cold-start pre-selection) via
 /// [`record_last_model_posture`] -- best-effort, never fails this command.
+/// The runtime slot is read BEFORE the posture slot (the `ask` mirror's
+/// and the switch's write order, issue #600): the header stamp and the
+/// backfill entry both key off that one read, so a switch interleaving
+/// between the two reads cannot attribute this set's posture to the other
+/// runtime's namespace.
 ///
 /// Returns the persist-now verdict (issue #529): the write failure or the
 /// ADR-0035 suspension read in-process right after the persist, so the
@@ -2979,12 +3007,21 @@ pub fn set_session_model(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
+    // Runtime slot first, posture slot second -- see the doc above.
+    let runtime = handle.runtime_choice();
     let mut s = handle.session_lock()?;
     // The pair read takes the slot lock once -- the untouched field cannot
     // interleave with a concurrent write of the other. `model` passes
     // through as-is: `None` is the explicit user clear.
-    let (_, thought_level) = handle.external_model_config();
-    s.set_external_model_config(model.clone(), thought_level.clone());
+    let held = handle.external_model_config();
+    let posture = PosturePair {
+        model,
+        thought_level: held.thought_level,
+    };
+    s.set_external_model_config(posture.clone());
+    // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair + the
+    // persist below.
+    s.stamp_last_runtime(runtime.clone());
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();
@@ -2992,21 +3029,18 @@ pub fn set_session_model(
     // in-process, non-consuming -- the banner's take_persist_error channel
     // is untouched.
     let outcome = persist_outcome(&s);
-    handle.set_external_model_config(
-        s.runtime_facts().model.clone(),
-        s.runtime_facts().thought_level.clone(),
-    );
+    handle.set_external_model_config(posture.clone());
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
     // adapter's startup backfill entry (see set_session_model's doc).
-    record_last_model_posture(live.inner(), handle.runtime_choice(), model, thought_level);
+    record_last_model_posture(live.inner(), runtime, posture);
     Ok(outcome)
 }
 
 /// Set the session's thought-level selection for the next external-runtime
 /// turn (ADR-0095). `None` clears. Same turn-boundary / resume-reject /
-/// persist-now + backfill-write semantics as [`set_session_model`]; a no-op
-/// posture on the built-in runtime (BYOK thought levels are a separate
-/// future ADR).
+/// persist-now + segment-header-stamp + backfill-write semantics as
+/// [`set_session_model`]; a no-op posture on the built-in runtime (BYOK
+/// thought levels are a separate future ADR).
 #[tauri::command]
 pub fn set_session_thought_level(
     store: State<'_, Arc<SessionStore>>,
@@ -3018,24 +3052,31 @@ pub fn set_session_thought_level(
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
+    // Runtime slot first, posture slot second -- see set_session_model's
+    // doc.
+    let runtime = handle.runtime_choice();
     let mut s = handle.session_lock()?;
     // The pair read takes the slot lock once -- the untouched field cannot
     // interleave with a concurrent write of the other. `thought_level`
     // passes through as-is: `None` is the explicit user clear.
-    let (model, _) = handle.external_model_config();
-    s.set_external_model_config(model.clone(), thought_level.clone());
+    let held = handle.external_model_config();
+    let posture = PosturePair {
+        model: held.model,
+        thought_level,
+    };
+    s.set_external_model_config(posture.clone());
+    // See set_session_model: the segment-header stamp (ADR-0102 Decision 1), same
+    // batch as the pair + the persist.
+    s.stamp_last_runtime(runtime.clone());
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
     s.persist_if_bound();
     // See set_session_model: the in-process verdict read (issue #529).
     let outcome = persist_outcome(&s);
-    handle.set_external_model_config(
-        s.runtime_facts().model.clone(),
-        s.runtime_facts().thought_level.clone(),
-    );
+    handle.set_external_model_config(posture.clone());
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
     // adapter's startup backfill entry (see set_session_model's doc).
-    record_last_model_posture(live.inner(), handle.runtime_choice(), model, thought_level);
+    record_last_model_posture(live.inner(), runtime, posture);
     Ok(outcome)
 }
 
@@ -3052,8 +3093,7 @@ pub fn set_session_thought_level(
 fn record_last_model_posture(
     live: &LiveProviderConfig,
     runtime: Option<AdapterSpec>,
-    model: Option<String>,
-    thought_level: Option<String>,
+    posture: PosturePair,
 ) {
     let Some(spec) = runtime else {
         return;
@@ -3061,8 +3101,8 @@ fn record_last_model_posture(
     if let Err(e) = live.set_last_model_posture(
         spec.id.as_str(),
         ModelPosture {
-            model,
-            thought_level,
+            model: posture.model,
+            thought_level: posture.thought_level,
         },
     ) {
         log::warn!(
@@ -3534,7 +3574,10 @@ mod tests {
         // A stale pre-resume external choice + model -- the batch overwrites
         // both, never merges.
         handle.set_runtime_choice(Some(crate::runtime::acp::adapter::codex()));
-        handle.set_external_model_config(Some("stale-model".into()), None);
+        handle.set_external_model_config(PosturePair {
+            model: Some("stale-model".into()),
+            thought_level: None,
+        });
 
         // Continuation (D1): the recorded detected runtime replaces the
         // stale choice; the startup default is never consulted; the restored
@@ -3559,7 +3602,7 @@ mod tests {
             "the recorded detected runtime overwrites the stale choice"
         );
         assert_eq!(
-            handle.external_model_config().0.as_deref(),
+            handle.external_model_config().model.as_deref(),
             Some("fake-opus"),
             "the restored trio wins over the stale model"
         );
@@ -3651,20 +3694,21 @@ mod tests {
     }
 
     #[test]
-    fn startup_model_posture_built_in_start_stays_unselected() {
+    fn segment_start_posture_built_in_start_stays_unselected() {
         // A built-in start (fresh install, or an external default degraded
-        // for this start) has no adapter namespace, so the startup posture is
-        // the empty one -- the session begins unselected (issue #581 AC3's
-        // degrade clause).
+        // for this start) has no adapter namespace, so the segment-start
+        // posture is the empty one -- the session begins unselected (issue
+        // #581 AC3's degrade clause).
         let (_dir, live) = posture_live();
-        assert_eq!(startup_model_posture(None, &live), ModelPosture::default());
+        assert_eq!(segment_start_posture(None, &live), ModelPosture::default());
     }
 
     #[test]
-    fn startup_model_posture_reads_the_startup_adapters_entry() {
+    fn segment_start_posture_reads_the_target_adapters_entry() {
         // The posture map is keyed by adapter id, so the read follows the
-        // STARTUP adapter exactly: an entry on it injects, an entry on a
-        // sibling adapter never leaks across namespaces (ADR-0100 Decision 2).
+        // segment-start adapter exactly: an entry on it injects, an entry
+        // on a sibling adapter never leaks across namespaces (ADR-0100
+        // Decision 2).
         let (_dir, live) = posture_live();
         live.set_last_model_posture(
             "gemini-cli",
@@ -3676,16 +3720,16 @@ mod tests {
         .expect("seed gemini-cli posture");
         let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
         assert_eq!(
-            startup_model_posture(Some(&gemini), &live),
+            segment_start_posture(Some(&gemini), &live),
             ModelPosture {
                 model: Some("gemini-2.5-pro".into()),
                 thought_level: Some("high".into()),
             },
-            "the startup adapter's entry injects"
+            "the segment-start adapter's entry injects"
         );
         let codex = resolve_adapter("codex").expect("v1 adapter");
         assert_eq!(
-            startup_model_posture(Some(&codex), &live),
+            segment_start_posture(Some(&codex), &live),
             ModelPosture::default(),
             "a sibling adapter's entry does not leak"
         );
@@ -3715,7 +3759,7 @@ mod tests {
         let (_store, handle) = posture_handle();
         apply_startup_posture(
             &handle,
-            &ModelPosture {
+            &PosturePair {
                 model: Some("gemini-2.5-pro".into()),
                 thought_level: Some("high".into()),
             },
@@ -3723,7 +3767,10 @@ mod tests {
         .expect("apply the startup posture");
         assert_eq!(
             handle.external_model_config(),
-            (Some("gemini-2.5-pro".into()), Some("high".into())),
+            PosturePair {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into())
+            },
             "the handle slot serves the lock-light reads"
         );
         let s = handle.session_lock().expect("session lock");
@@ -3746,8 +3793,8 @@ mod tests {
         // starts unselected without a guard (the "default (recommended)"
         // start).
         let (_store, handle) = posture_handle();
-        apply_startup_posture(&handle, &ModelPosture::default()).expect("apply the empty posture");
-        assert_eq!(handle.external_model_config(), (None, None));
+        apply_startup_posture(&handle, &PosturePair::default()).expect("apply the empty posture");
+        assert_eq!(handle.external_model_config(), PosturePair::default());
         let s = handle.session_lock().expect("session lock");
         assert!(s.runtime_facts().model.is_none());
         assert!(s.runtime_facts().thought_level.is_none());
@@ -3771,13 +3818,19 @@ mod tests {
         )
         .expect("seed gemini-cli posture");
         let (_store, handle) = posture_handle();
-        handle.set_external_model_config(Some("claude-opus-4-5".into()), Some("max".into()));
+        handle.set_external_model_config(PosturePair {
+            model: Some("claude-opus-4-5".into()),
+            thought_level: Some("max".into()),
+        });
         let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini.clone()), &live);
         assert_eq!(handle.runtime_choice(), Some(gemini));
         assert_eq!(
             handle.external_model_config(),
-            (Some("gemini-2.5-pro".into()), Some("high".into())),
+            PosturePair {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into())
+            },
             "the slot serves the target adapter's entry, not the stale pair"
         );
         // Issue #590 AC4: the switch path only READS the backfill map --
@@ -3803,19 +3856,25 @@ mod tests {
         // and the built-in runtime (which consumes no posture) does too.
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        handle.set_external_model_config(Some("gemini-2.5-pro".into()), Some("high".into()));
+        handle.set_external_model_config(PosturePair {
+            model: Some("gemini-2.5-pro".into()),
+            thought_level: Some("high".into()),
+        });
         let codex = resolve_adapter("codex").expect("v1 adapter");
         apply_runtime_switch(&handle, Some(codex), &live);
         assert_eq!(
             handle.external_model_config(),
-            (None, None),
+            PosturePair::default(),
             "an entry-less external target starts the segment unselected"
         );
         // Re-hold a pair, then switch to the built-in runtime: cleared again.
-        handle.set_external_model_config(Some("gpt-5.1-codex".into()), None);
+        handle.set_external_model_config(PosturePair {
+            model: Some("gpt-5.1-codex".into()),
+            thought_level: None,
+        });
         apply_runtime_switch(&handle, None, &live);
         assert_eq!(handle.runtime_choice(), None);
-        assert_eq!(handle.external_model_config(), (None, None));
+        assert_eq!(handle.external_model_config(), PosturePair::default());
     }
 
     #[test]
@@ -3835,16 +3894,21 @@ mod tests {
         record_last_model_posture(
             &live,
             Some(gemini.clone()),
-            Some("gemini-2.5-flash".into()),
-            None,
+            PosturePair {
+                model: Some("gemini-2.5-flash".into()),
+                thought_level: None,
+            },
         );
         // Switch away (codex has no entry -> the slot clears) and back.
         apply_runtime_switch(&handle, Some(codex), &live);
-        assert_eq!(handle.external_model_config(), (None, None));
+        assert_eq!(handle.external_model_config(), PosturePair::default());
         apply_runtime_switch(&handle, Some(gemini), &live);
         assert_eq!(
             handle.external_model_config(),
-            (Some("gemini-2.5-flash".into()), None),
+            PosturePair {
+                model: Some("gemini-2.5-flash".into()),
+                thought_level: None
+            },
             "the adapter's held selection recovers on the switch back"
         );
     }
@@ -3860,10 +3924,10 @@ mod tests {
         let (_store, handle) = posture_handle();
         {
             let mut s = handle.session_lock().expect("session lock");
-            s.set_external_model_config(
-                Some("old-namespace-model".into()),
-                Some("old-level".into()),
-            );
+            s.set_external_model_config(PosturePair {
+                model: Some("old-namespace-model".into()),
+                thought_level: Some("old-level".into()),
+            });
         }
         let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini), &live);
@@ -3875,7 +3939,7 @@ mod tests {
         );
         assert_eq!(
             handle.external_model_config(),
-            (None, None),
+            PosturePair::default(),
             "the handle slot already serves the seeded (empty) posture"
         );
     }
@@ -3889,8 +3953,10 @@ mod tests {
         record_last_model_posture(
             &live,
             Some(gemini),
-            Some("gemini-2.5-pro".into()),
-            Some("high".into()),
+            PosturePair {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
         );
         assert_eq!(
             live.last_model_posture("gemini-cli"),
@@ -3906,7 +3972,14 @@ mod tests {
         // A built-in session has no adapter to key the entry under (the
         // posture is a no-op there, ADR-0095) -- nothing is written at all.
         let (_dir, live) = posture_live();
-        record_last_model_posture(&live, None, Some("some-model".into()), None);
+        record_last_model_posture(
+            &live,
+            None,
+            PosturePair {
+                model: Some("some-model".into()),
+                thought_level: None,
+            },
+        );
         assert!(live.load().last_model_postures.is_empty());
     }
 
@@ -3929,8 +4002,10 @@ mod tests {
         record_last_model_posture(
             &live,
             Some(gemini),
-            Some("gemini-2.5-pro".into()),
-            Some("high".into()),
+            PosturePair {
+                model: Some("gemini-2.5-pro".into()),
+                thought_level: Some("high".into()),
+            },
         );
         // The failed write landed nothing: the honest-degrade read sees no
         // map at all.

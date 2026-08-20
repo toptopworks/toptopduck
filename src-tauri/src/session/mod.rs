@@ -365,12 +365,31 @@ pub struct ResumeProgress {
     pub event: ResumeEvent,
 }
 
+/// The session's external-runtime model + thought-level pair as ONE named
+/// value: the pair crosses every boundary (the handle slot, the Session
+/// mirror, the resume restore) as a unit, so a transposed
+/// `(model, thought_level)` cannot compile silently -- two same-typed
+/// `Option<String>` parameters could. Same shape as
+/// `app_config::ModelPosture` but deliberately session-local: this module
+/// (and `session_store`) imports no app-config types, so the persisted
+/// recipe facts and the machine-preference config stay separate layers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PosturePair {
+    /// The model id exactly as the picker set it.
+    pub model: Option<String>,
+    /// The thought-level id exactly as the picker set it.
+    pub thought_level: Option<String>,
+}
+
 /// The recipe-header facts the persister layers onto every built recipe
-/// (ADR-0095, extended by ADR-0102 Decision 1): the model + thought-level
-/// selections, the discovered-catalog cache, and the last executed turn's
-/// runtime. Plain data; mirrors the handle-held user choices at turn top --
-/// except `last_runtime`, which mirrors the turn's own attribution snapshot
-/// instead (stamped by [`Session::record_turn`], one batch with the persist).
+/// (ADR-0095, extended by ADR-0102 Decision 1): the model +
+/// thought-level selections, the discovered-catalog cache, and the last
+/// effective segment header's runtime. Plain data; mirrors the handle-held
+/// user choices at every persist point -- the turn-top mirror, and the set
+/// commands' persist-now write, which stamps the runtime choice beside the
+/// pair it persists. At turn end `record_turn` re-stamps `last_runtime`
+/// from the turn's own attribution snapshot; the two agree by construction
+/// (the turn runs on the runtime the mirror carried).
 #[derive(Debug, Clone, Default)]
 pub struct SessionRuntimeFacts {
     pub model: Option<String>,
@@ -706,20 +725,37 @@ impl Session {
         self.external_runtime = spec;
     }
 
-    /// Mirror the handle-held session-level model + thought-level choices
+    /// Mirror the handle-held session-level model + thought-level pair
     /// into the Session at turn top (ADR-0095, the `set_external_runtime`
     /// pattern): the command layer calls this right after the runtime choice
     /// mirror, so both take effect at the same turn boundary. Writes
     /// `runtime_facts` only -- the single storage both the turn input
     /// and the persister read (issue #530). `pub` so the IPC test seam can
     /// toggle without the command layer.
-    pub fn set_external_model_config(
-        &mut self,
-        model: Option<String>,
-        thought_level: Option<String>,
-    ) {
-        self.runtime_facts.model = model;
-        self.runtime_facts.thought_level = thought_level;
+    pub fn set_external_model_config(&mut self, posture: PosturePair) {
+        self.runtime_facts.model = posture.model;
+        self.runtime_facts.thought_level = posture.thought_level;
+    }
+
+    /// Stamp the handle-held runtime choice into the recipe-header facts as
+    /// the last effective segment header (ADR-0102 Decision 1): the set
+    /// commands call
+    /// this beside their persist-now pair write, so a persisted posture pair
+    /// always travels under its own runtime -- a switch followed by a
+    /// selection and a close without a turn resumes on the runtime the pair
+    /// belongs to (ADR-0102 Decision 1's same-source construction claim,
+    /// closed at the persist-now point). `record_turn` re-stamps at turn end
+    /// from the turn's own attribution; the values agree because the turn
+    /// runs on the runtime the turn-top mirror carried. Unconditional:
+    /// `None` is the built-in runtime and stamps `BuiltIn` (a built-in
+    /// session's posture is a no-op, so the header names the runtime the
+    /// next resume continues). `pub` for the same test-seam reason as
+    /// [`Self::set_external_model_config`].
+    pub fn stamp_last_runtime(&mut self, runtime: Option<AdapterSpec>) {
+        self.runtime_facts.last_runtime = match runtime {
+            None => Some(LastRuntime::BuiltIn),
+            Some(spec) => Some(LastRuntime::External(spec.id.as_str().to_owned())),
+        };
     }
 
     /// Read the recipe-header ADR-0095 facts (the persister layers them onto

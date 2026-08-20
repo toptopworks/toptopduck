@@ -51,7 +51,7 @@ use crate::mcp::aggregator::ConnectResult;
 use crate::mcp::config::McpServerId;
 use crate::provider::Provider;
 use crate::runtime::acp::adapter::AdapterSpec;
-use crate::session::Session;
+use crate::session::{PosturePair, Session};
 
 /// IPC error string carried by [`SessionError::NotFound`] -- the wording the
 /// frontend has always rendered for an unknown / closed session. Kept as a
@@ -304,18 +304,18 @@ pub struct SessionHandle {
     /// the approval / MCP posture it survives a resume as the session's own
     /// last runtime).
     runtime: Mutex<Option<AdapterSpec>>,
-    /// ADR-0095: the session-level model + thought-level selections for the
-    /// external runtime, held in ONE mutex slot (issue #530) so a torn write
-    /// between the two choices is not a representable intermediate state --
-    /// and every pair-consuming reader goes through
-    /// [`Self::external_model_config`], which reads both under the one lock,
-    /// so it too sees either the old pair or the new pair, never a mix.
-    /// Lock-light like `runtime` (the picker's get/set never block on an
-    /// in-flight turn); mirrored into the Session at turn top beside the
-    /// runtime choice, so a switch lands at the turn boundary. PERSISTED to
-    /// the recipe (unlike the runtime choice) -- a resume restores the
-    /// selection via open_duck's restore call.
-    external_model_config: Mutex<(Option<String>, Option<String>)>,
+    /// ADR-0095: the session-level model + thought-level pair for the
+    /// external runtime, held in ONE mutex slot (issue #530) as the named
+    /// [`PosturePair`] so a torn write between the two choices is not a
+    /// representable intermediate state -- and every pair-consuming reader
+    /// goes through [`Self::external_model_config`], which reads both under
+    /// the one lock, so it too sees either the old pair or the new pair,
+    /// never a mix. Lock-light like `runtime` (the picker's get/set never
+    /// block on an in-flight turn); mirrored into the Session at turn top
+    /// beside the runtime choice, so a switch lands at the turn boundary.
+    /// PERSISTED to the recipe (unlike the runtime choice) -- a resume
+    /// restores the selection via open_duck's restore call.
+    external_model_config: Mutex<PosturePair>,
     /// ADR-0095: the cached discovered model / thought-level catalog from the
     /// last ACP turn. Lets the frontend render the selector immediately on
     /// session open / resume cold-start (before any turn re-discovers). None
@@ -591,7 +591,7 @@ impl SessionHandle {
     /// [`Self::external_model`] + [`Self::external_thought_level`] whenever
     /// both values are needed: the two single-field reads take the lock
     /// separately, and a set landing between them yields a mix.
-    pub fn external_model_config(&self) -> (Option<String>, Option<String>) {
+    pub fn external_model_config(&self) -> PosturePair {
         self.external_model_config
             .lock()
             .expect("external_model_config lock poisoned")
@@ -601,14 +601,14 @@ impl SessionHandle {
     /// The session-level model choice (ADR-0095). Lock-light, single-field
     /// read -- see [`Self::external_model_config`] for the pair read.
     pub fn external_model(&self) -> Option<String> {
-        self.external_model_config().0
+        self.external_model_config().model
     }
 
     /// The session-level thought-level choice (ADR-0095). Lock-light,
     /// single-field read -- see [`Self::external_model_config`] for the pair
     /// read.
     pub fn external_thought_level(&self) -> Option<String> {
-        self.external_model_config().1
+        self.external_model_config().thought_level
     }
 
     /// The cached discovered catalog (ADR-0095). Lock-light read.
@@ -619,16 +619,16 @@ impl SessionHandle {
             .clone()
     }
 
-    /// Set the model + thought-level choices together (ADR-0095): they are
+    /// Set the model + thought-level pair together (ADR-0095): they are
     /// one assembly posture, written by the same picker surface, so they
     /// share ONE mutex slot -- a torn write between them is not a
-    /// representable intermediate state (issue #530). `None` clears (revert
-    /// to the CLI's own defaults). Lock-light.
-    pub fn set_external_model_config(&self, model: Option<String>, thought_level: Option<String>) {
+    /// representable intermediate state (issue #530). `None` fields clear
+    /// (revert to the CLI's own defaults). Lock-light.
+    pub fn set_external_model_config(&self, posture: PosturePair) {
         *self
             .external_model_config
             .lock()
-            .expect("external_model_config lock poisoned") = (model, thought_level);
+            .expect("external_model_config lock poisoned") = posture;
     }
 
     /// Snapshot the turn's discovered catalog onto the handle (ADR-0095).
@@ -652,7 +652,7 @@ impl SessionHandle {
 
     /// Restore the persisted ADR-0095 trio from the resumed recipe
     /// (open_duck). Unlike the reset-to-default lineage (`reset_approval` /
-    /// `reset_mcp_enablement`), the model + thought-level selections + the
+    /// `reset_mcp_enablement`), the model + thought-level pair + the
     /// discovery cache SURVIVE a resume -- ADR-0095 Decision 6: losing the
     /// model selection is an unexpected degradation of the resume promise
     /// (the runtime choice survives the same way since ADR-0102 Decision 2,
@@ -664,14 +664,13 @@ impl SessionHandle {
     /// catalog).
     pub fn restore_runtime_model_config(
         &self,
-        model: Option<String>,
-        thought_level: Option<String>,
+        posture: PosturePair,
         cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
     ) {
         *self
             .external_model_config
             .lock()
-            .expect("external_model_config lock poisoned") = (model, thought_level);
+            .expect("external_model_config lock poisoned") = posture;
         *self
             .cached_discovered
             .lock()
@@ -739,7 +738,7 @@ impl SessionStore {
             // an external CLI is an explicit per-session pick, restored on
             // resume from the recipe header (ADR-0102).
             runtime: Mutex::new(None),
-            external_model_config: Mutex::new((None, None)),
+            external_model_config: Mutex::new(PosturePair::default()),
             cached_discovered: Mutex::new(None),
             mounted_skills_snapshot: Mutex::new(Vec::new()),
         });
@@ -1241,13 +1240,19 @@ mod tests {
         assert_eq!(handle.external_thought_level(), None);
         assert_eq!(handle.cached_discovered(), None);
 
-        handle.set_external_model_config(Some("fake-opus".into()), Some("high".into()));
+        handle.set_external_model_config(PosturePair {
+            model: Some("fake-opus".into()),
+            thought_level: Some("high".into()),
+        });
         assert_eq!(handle.external_model().as_deref(), Some("fake-opus"));
         assert_eq!(handle.external_thought_level().as_deref(), Some("high"));
         // The pair reader returns both fields of the same slot state.
         assert_eq!(
             handle.external_model_config(),
-            (Some("fake-opus".into()), Some("high".into()))
+            PosturePair {
+                model: Some("fake-opus".into()),
+                thought_level: Some("high".into())
+            }
         );
 
         let catalog = crate::runtime::acp::adapter::DiscoveredRuntime {
@@ -1268,7 +1273,7 @@ mod tests {
         assert_eq!(handle.cached_discovered(), Some(empty_catalog));
 
         // The resume restore overwrites all three in one shot.
-        handle.restore_runtime_model_config(None, None, None);
+        handle.restore_runtime_model_config(PosturePair::default(), None);
         assert_eq!(handle.external_model(), None);
         assert_eq!(handle.external_thought_level(), None);
         assert_eq!(handle.cached_discovered(), None);
