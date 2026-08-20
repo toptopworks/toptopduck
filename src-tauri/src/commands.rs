@@ -682,17 +682,16 @@ pub async fn ask(
     let skills_root = skills_root.0.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
-        // Issue #353: feed the session's runtime choice into the turn's
-        // dispatch at the turn boundary. The choice lives on the handle
-        // (lock-light writes via set_session_runtime); the Session consumes
-        // it for THIS turn only -- a switch lands between turns, never
-        // mid-turn, and a resumed Session (fresh, built-in default) reads
-        // the reset choice.
-        s.set_external_runtime(handle.runtime_choice());
-        // ADR-0095: mirror the session-level model + thought-level pair
-        // into the turn at the same boundary as the runtime choice (the pair
-        // read takes the slot lock once -- no torn mix).
-        let external_posture = handle.external_model_config();
+        // Issue #353 + ADR-0095: feed the session's runtime choice and the
+        // session-level model + thought-level pair into the turn's dispatch
+        // at the turn boundary. Both live on the handle (lock-light writes
+        // via set_session_runtime / the set commands); the Session consumes
+        // them for THIS turn only -- a switch lands between turns, never
+        // mid-turn, and a resumed Session reads the restored choice. The
+        // combined read takes the one slot lock (issue #600), so the pair
+        // the turn consumes is namespaced by the runtime it runs on.
+        let (external_runtime, external_posture) = handle.runtime_and_posture();
+        s.set_external_runtime(external_runtime);
         s.set_external_model_config(external_posture);
         // Issue #364 (ADR-0086): resolve the session's mounted skills into
         // prompt fragments (name + verbatim body + whole-file SHA-256) here
@@ -2600,12 +2599,12 @@ pub fn set_session_runtime(
 /// unselected; built-in := empty, the built-in loop consumes no posture), so
 /// a stale model id held under the OLD adapter's namespace never injects
 /// into the new CLI, and a switch back to a previously used adapter
-/// recovers its held selection. The posture read happens BEFORE the writes
-/// so the two slot writes land back-to-back: every reader (the `ask` mirror,
-/// the set commands) takes the runtime slot before the posture slot, so no
-/// reader can observe the new runtime paired with the old posture -- a torn
-/// pair would inject the stale id into the new CLI for one turn and persist
-/// into the recipe. Handle-only (lock-light): the pair reaches the Session
+/// recovers its held selection. The runtime choice + the seeded posture land
+/// under the ONE slot lock (issue #600 folded the two former slot mutexes):
+/// every reader (the `ask` mirror, the set commands) takes the same lock, so
+/// no reader can observe the new runtime paired with the old posture -- a
+/// torn pair would inject the stale id into the new CLI for one turn and
+/// persist into the recipe. Handle-only (lock-light): the pair reaches the Session
 /// -- and the recipe -- at the NEXT turn top via the same `ask` mirror that
 /// lands the runtime choice, so the switch never blocks on an in-flight
 /// turn. Resume never lands here: it restores the session's own persisted
@@ -2616,8 +2615,7 @@ fn apply_runtime_switch(
     live: &LiveProviderConfig,
 ) {
     let posture = session_posture(segment_start_posture(spec.as_ref(), live));
-    handle.set_runtime_choice(spec);
-    handle.set_external_model_config(posture);
+    handle.set_runtime_and_posture(spec, posture);
 }
 
 // --- Default runtime + startup resolution (ADR-0098 Decision 2/3, #569) -----
@@ -2987,11 +2985,10 @@ pub fn get_session_model_config(
 /// the new pair on the session's runtime adapter's app-config entry (the
 /// single write point shared with the cold-start pre-selection) via
 /// [`record_last_model_posture`] -- best-effort, never fails this command.
-/// The runtime slot is read BEFORE the posture slot (the `ask` mirror's
-/// and the switch's write order, issue #600): the header stamp and the
-/// backfill entry both key off that one read, so a switch interleaving
-/// between the two reads cannot attribute this set's posture to the other
-/// runtime's namespace.
+/// The runtime choice and the held pair come off the ONE slot read (issue
+/// #600): the header stamp and the backfill entry both key off that atomic
+/// read, so a concurrent switch can never interleave between the two and
+/// pair this set's posture with the other runtime's namespace.
 ///
 /// Returns the persist-now verdict (issue #529): the write failure or the
 /// ADR-0035 suspension read in-process right after the persist, so the
@@ -3003,24 +3000,40 @@ pub fn set_session_model(
     session_id: String,
     model: Option<String>,
 ) -> Result<SetModelPersistOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    reject_if_in_flight(&handle)?;
-    // Runtime slot first, posture slot second -- see the doc above.
-    let runtime = handle.runtime_choice();
-    let mut s = handle.session_lock()?;
-    // The pair read takes the slot lock once -- the untouched field cannot
-    // interleave with a concurrent write of the other. `model` passes
-    // through as-is: `None` is the explicit user clear.
-    let held = handle.external_model_config();
-    let posture = PosturePair {
+    let handle = store.get(&SessionId::parse(&session_id)?)?;
+    // `model` lands as-is (`None` is the explicit user clear); the held
+    // thought level passes through.
+    apply_posture_set(&handle, live.inner(), |held| PosturePair {
         model,
         thought_level: held.thought_level,
-    };
+    })
+}
+
+/// The shared body of the two posture set commands (issue #600): guards,
+/// then ONE atomic slot read -- the runtime choice and the held pair off the
+/// single handle slot, so a concurrent switch can never interleave between
+/// the two and pair this set's write with the other runtime's seed -- then
+/// the session-side pair write + segment-header stamp + persist-now batch,
+/// the handle slot write, and the adapter backfill entry. `make_pair`
+/// composes the new pair from the held one: the command's field lands, the
+/// other passes through untouched.
+fn apply_posture_set(
+    handle: &SessionHandle,
+    live: &LiveProviderConfig,
+    make_pair: impl FnOnce(PosturePair) -> PosturePair,
+) -> Result<SetModelPersistOutcome, SessionError> {
+    reject_if_resuming(handle)?;
+    reject_if_in_flight(handle)?;
+    // One atomic slot read: the runtime and the held pair are one unit (the
+    // pair is namespaced by the runtime it was selected under), so the
+    // stamp + backfill below key off the same read that yields the held
+    // field.
+    let (runtime, held) = handle.runtime_and_posture();
+    let posture = make_pair(held);
+    let mut s = handle.session_lock()?;
     s.set_external_model_config(posture.clone());
-    // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair + the
-    // persist below.
+    // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair +
+    // the persist below.
     s.stamp_last_runtime(runtime.clone());
     // Persist now (via the shared auto-write path) so a selection made
     // without a following turn survives a close (ADR-0095 Decision 6).
@@ -3031,8 +3044,9 @@ pub fn set_session_model(
     let outcome = persist_outcome(&s);
     handle.set_external_model_config(posture.clone());
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
-    // adapter's startup backfill entry (see set_session_model's doc).
-    record_last_model_posture(live.inner(), runtime, posture);
+    // adapter's startup backfill entry (the single write point shared with
+    // the cold-start pre-selection) -- best-effort, never fails the set.
+    record_last_model_posture(live, runtime, posture);
     Ok(outcome)
 }
 
@@ -3048,36 +3062,13 @@ pub fn set_session_thought_level(
     session_id: String,
     thought_level: Option<String>,
 ) -> Result<SetModelPersistOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    reject_if_in_flight(&handle)?;
-    // Runtime slot first, posture slot second -- see set_session_model's
-    // doc.
-    let runtime = handle.runtime_choice();
-    let mut s = handle.session_lock()?;
-    // The pair read takes the slot lock once -- the untouched field cannot
-    // interleave with a concurrent write of the other. `thought_level`
-    // passes through as-is: `None` is the explicit user clear.
-    let held = handle.external_model_config();
-    let posture = PosturePair {
+    let handle = store.get(&SessionId::parse(&session_id)?)?;
+    // `thought_level` lands as-is (`None` is the explicit user clear); the
+    // held model passes through.
+    apply_posture_set(&handle, live.inner(), |held| PosturePair {
         model: held.model,
         thought_level,
-    };
-    s.set_external_model_config(posture.clone());
-    // See set_session_model: the segment-header stamp (ADR-0102 Decision 1), same
-    // batch as the pair + the persist.
-    s.stamp_last_runtime(runtime.clone());
-    // Persist now (via the shared auto-write path) so a selection made
-    // without a following turn survives a close (ADR-0095 Decision 6).
-    s.persist_if_bound();
-    // See set_session_model: the in-process verdict read (issue #529).
-    let outcome = persist_outcome(&s);
-    handle.set_external_model_config(posture.clone());
-    // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
-    // adapter's startup backfill entry (see set_session_model's doc).
-    record_last_model_posture(live.inner(), runtime, posture);
-    Ok(outcome)
+    })
 }
 
 /// The single backfill write point (ADR-0100 Decision 3, issue #581): every

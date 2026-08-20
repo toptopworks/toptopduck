@@ -35,5 +35,5 @@
 - 扩展 ADR-0095 Decision 6：resume 恢复的持久化字段由三项扩为四项（+ `last_runtime`）；「set means persisted」载体不变。
 - 延伸 ADR-0100 Decision 1：回填作用域从「新会话起步」扩为「新会话与会话内换运行时起步」；resume 不在其列。
 - recipe 头新增 `last_runtime`；存量 .duck 缺字段按 serde default 回落旧语义（默认运行时解析），新写入起一律携带；format_version bump 与否实施期定。
-- 会话内换运行时的写路径补回填接线；resume 路径补 `last_runtime` 与姿势对恢复。set 命令（模型 / 思考强度）的即时持久化点补 `last_runtime` 盖章（Decision 1 的段头语义），其读序与切换写序对齐——先运行时槽后姿势对槽，盖章头与回填条目出自同一次运行时读。
+- 会话内换运行时的写路径补回填接线；resume 路径补 `last_runtime` 与姿势对恢复。set 命令（模型 / 思考强度）的即时持久化点补 `last_runtime` 盖章（Decision 1 的段头语义）。运行时槽与姿势对槽共用单一互斥槽：切换的合写与 set / ask 的合读互斥，盖章头与回填条目出自同一次原子读，错位组合在构造上不可达。
 - CONTEXT.md：「默认运行时」「运行时段」「上次模型姿势」词条校准。
