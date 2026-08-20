@@ -47,7 +47,9 @@ export type ComposerPostureTriggerProps = {
   // ran, read off the session discovery cache while nothing is selected.
   // Non-null mounts the tooltip that carries the live readout (the label
   // itself keeps its default copy); null renders no tooltip. An explicit
-  // selection outranks the live read.
+  // selection outranks the live read. The picker emits a non-null value
+  // only alongside a non-null catalog -- the static-label early return
+  // below carries no tooltip, so a live read never reaches it.
   liveValue: string | null;
   // The held model / thought-level pair the label + menu reflect (the
   // session's modelConfig, or the cold-start pending ?? backfill posture).

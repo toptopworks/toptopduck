@@ -301,8 +301,12 @@ describe("ComposerPostureTrigger live readout tooltip (issue #586)", () => {
   });
 
   it("carries no live tooltip outside the live state", () => {
+    // The absence assertions open via focus: Radix opens the tooltip
+    // synchronously on focus, while a pointerMove defers the open to a
+    // macrotask -- a synchronous absence query after it would pass
+    // vacuously.
     renderTrigger();
-    fireEvent.pointerMove(
+    fireEvent.focus(
       screen.getByRole("button", { name: "Model: Default (recommended)" }),
     );
     expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();

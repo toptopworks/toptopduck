@@ -522,7 +522,15 @@ async function renderExternalPicker(
   modelConfig: {
     model?: string | null;
     thought_level?: string | null;
-    cached_discovered?: (typeof CATALOG & { adapter_id?: string }) | null;
+    // The two current fields widen to the wire shape (the wire reports
+    // either field alone); the rest of the fixture stays inferred.
+    cached_discovered?:
+      | (Omit<typeof CATALOG, "current_model" | "current_thought_level"> & {
+        current_model: string | null;
+        current_thought_level: string | null;
+        adapter_id?: string;
+      })
+      | null;
   } = {},
 ) {
   vi.mocked(getSessionRuntime).mockResolvedValue({
@@ -600,6 +608,13 @@ describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)"
     expect(
       screen.getByRole("button", { name: "Model: Default (recommended)" }),
     ).toBeTruthy();
+    // And no live tooltip: focus opens the tooltip synchronously (a
+    // pointerMove would defer it to a macrotask and this absence query
+    // would pass vacuously).
+    fireEvent.focus(
+      screen.getByRole("button", { name: "Model: Default (recommended)" }),
+    );
+    expect(screen.queryByText(/\(last turn\)/)).toBeNull();
   });
 
   it("places no check on any catalog item while nothing is selected", async () => {
@@ -753,6 +768,60 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     expect(await screen.findByText("opus (last turn)")).toBeTruthy();
   });
 
+  it("shows the turn's actual level alone when the live cache carries no model", async () => {
+    // The two current fields are independent Options on the wire (a
+    // handshake may report only a thought level); a lone level has its own
+    // live form, mirroring the held side's lone-level form.
+    await renderExternalPicker(
+      {},
+      {
+        cached_discovered: {
+          models: CATALOG.models,
+          current_model: null,
+          thought_levels: CATALOG.thought_levels,
+          current_thought_level: "medium",
+          adapter_id: "qwen-code",
+        },
+      },
+    );
+    const trigger = screen.getByRole("button", {
+      name: "Model: Default (recommended)",
+    });
+    fireEvent.focus(trigger);
+    expect(await screen.findByText("medium (last turn)")).toBeTruthy();
+  });
+
+  it("holds the live read back when a stamped claude cache has no probe entry to seat the menu", async () => {
+    // claude stamps the session cache on its turns, but its per-model
+    // catalog exists only after a settings probe; without one the trigger
+    // is the static no-arrow label, and the picker emits no live value
+    // rather than one the static form would drop.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "claude-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
+    ]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: {
+        models: [],
+        current_model: "opus",
+        thought_levels: [],
+        current_thought_level: null,
+        adapter_id: "claude-code",
+      },
+    });
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: claude-code/ });
+    // Static label: no arrow, no menu -- and structurally no tooltip.
+    expect(screen.getByText("Default (recommended)")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
+  });
+
   it("an explicit selection outranks the live currents and drops the tooltip", async () => {
     await renderExternalPicker(
       {},
@@ -760,8 +829,11 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     );
     const trigger = screen.getByRole("button", { name: "Model: fake-sonnet" });
     expect(trigger).toBeTruthy();
-    // The selected state carries no live tooltip.
-    fireEvent.pointerMove(trigger);
+    // The selected state carries no live tooltip. The absence assertions
+    // open via focus -- Radix opens the tooltip synchronously on focus,
+    // while a pointerMove defers the open to a macrotask and a synchronous
+    // absence query right after it would pass vacuously.
+    fireEvent.focus(trigger);
     expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
   });
 
@@ -773,7 +845,7 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     const trigger = await screen.findByRole("button", {
       name: "Model: fake-sonnet",
     });
-    fireEvent.pointerMove(trigger);
+    fireEvent.focus(trigger);
     expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
   });
 
@@ -825,7 +897,7 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
       name: "Model: Default (recommended)",
     });
     expect(trigger).toBeTruthy();
-    fireEvent.pointerMove(trigger);
+    fireEvent.focus(trigger);
     expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
   });
 
@@ -840,7 +912,7 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     const trigger = screen.getByRole("button", {
       name: "Model: Default (recommended)",
     });
-    fireEvent.pointerMove(trigger);
+    fireEvent.focus(trigger);
     expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
   });
 
@@ -862,7 +934,7 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     const trigger = screen.getByRole("button", {
       name: "Model: Default (recommended)",
     });
-    fireEvent.pointerMove(trigger);
+    fireEvent.focus(trigger);
     expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
   });
 });

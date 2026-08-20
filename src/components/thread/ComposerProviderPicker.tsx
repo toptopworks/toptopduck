@@ -687,9 +687,15 @@ export function ComposerProviderPicker({
     liveDiscovered?.current_thought_level,
   ].filter((part): part is string => part != null && part !== "");
   // The tooltip's live payload: the turn-end currents, read as facts only
-  // while nothing is held (a selection always outranks the live read).
+  // while nothing is held (a selection always outranks the live read) and
+  // only alongside a catalog -- the trigger drops the tooltip on its
+  // static-label early return, so a claude session whose per-model catalog
+  // still awaits its first settings probe keeps the live read unsurfaced
+  // instead of half-rendered.
   const liveValue =
-    heldParts.length === 0 && liveParts.length > 0
+    postureCatalog != null &&
+    heldParts.length === 0 &&
+    liveParts.length > 0
       ? liveParts.join(" · ")
       : null;
   const postureLabel = !isExternal
