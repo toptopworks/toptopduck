@@ -31,7 +31,7 @@
 
 ## Consequences
 
-- 校准 ADR-0098 Decision 2：resume 半边反转——resume 恢复会话最后运行时，不再回落默认运行时；新会话半边与「会话内切换不回写默认」不变。默认运行时的作用域收窄为新会话起步（含冷启动 pending 回填）。
+- 校准 ADR-0098 Decision 2：resume 半边反转——resume 恢复会话最后生效段头的运行时，不再回落默认运行时；新会话半边与「会话内切换不回写默认」不变。默认运行时的作用域收窄为新会话起步（含冷启动 pending 回填）。
 - 扩展 ADR-0095 Decision 6：resume 恢复的持久化字段由三项扩为四项（+ `last_runtime`）；「set means persisted」载体不变。
 - 延伸 ADR-0100 Decision 1：回填作用域从「新会话起步」扩为「新会话与会话内换运行时起步」；resume 不在其列。
 - recipe 头新增 `last_runtime`；存量 .duck 缺字段按 serde default 回落旧语义（默认运行时解析），新写入起一律携带；format_version bump 与否实施期定。
