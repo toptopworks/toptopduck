@@ -31,7 +31,8 @@ export const sessionKeys = {
    *  read. Lives under the session prefix so a close's removeQueries drops it
    *  with the rest; a resume lands the RESTORED last runtime via the fresh
    *  SessionPane mount (ADR-0102 segment continuation -- unlike authMode,
-   *  the runtime survives the resume). */
+   *  the runtime survives the resume; an undetected recorded adapter or a
+   *  pre-#589 recipe lands built-in / the default runtime instead). */
   runtime: (sessionId: string) => ["session", sessionId, "runtime"] as const,
   /** Per-session external-runtime model config (ADR-0095, issue #527) -- the
    *  model / thought-level selectors' read (selections + the cached discovery

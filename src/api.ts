@@ -742,8 +742,10 @@ export async function getAdapterCatalogs(): Promise<AdapterCatalogs> {
 
 // Read the session's runtime choice. Returns `built_in` for a fresh session
 // (the honest default, ADR-0081); a resumed session returns the restored
-// last runtime (ADR-0102 segment continuation). Lock-light server-side --
-// safe to call while a turn is in flight.
+// last runtime (ADR-0102 segment continuation) -- degraded to the built-in
+// start when the recorded adapter is not detected, or the resolved default
+// when the recipe predates the field. Lock-light server-side -- safe to
+// call while a turn is in flight.
 export async function getSessionRuntime(
   sessionId: string,
 ): Promise<SessionRuntimeChoice> {

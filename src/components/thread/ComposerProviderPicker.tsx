@@ -83,7 +83,9 @@ const EMPTY_POSTURE: ModelPosture = { model: null, thought_level: null };
 // `getSessionRuntime` under the session-prefix query (a close drops it with
 // the rest; a resume lands the RESTORED session runtime via the fresh
 // SessionPane mount -- ADR-0102 segment continuation, unlike authMode the
-// runtime survives the resume). Writes go through `setSessionRuntime` and take
+// runtime survives the resume; an undetected recorded adapter degrades that
+// resume to built-in and a pre-#589 recipe falls back to the default
+// runtime). Writes go through `setSessionRuntime` and take
 // effect at the NEXT turn boundary. A rejected write keeps the server
 // posture -- the picker resyncs via refetch and never shows a runtime the
 // backend did not grant.
@@ -200,9 +202,10 @@ export function ComposerProviderPicker({
   // Per-session runtime choice (issue #353). Backend truth, read under the
   // session-prefix query so a close drops it with the rest and a resume lands
   // the restored session runtime via the fresh SessionPane mount (ADR-0102
-  // segment continuation). Null sessionId (cold-start bar, ADR-0092): the
-  // query is disabled and the caller-held pendingRuntime drives the picker --
-  // no IPC round-trip.
+  // segment continuation; an undetected recorded adapter degrades the resume
+  // to built-in, a pre-#589 recipe falls back to the default runtime). Null
+  // sessionId (cold-start bar, ADR-0092): the query is disabled and the
+  // caller-held pendingRuntime drives the picker -- no IPC round-trip.
   const queryClient = useQueryClient();
   const { data: runtimeData } = useQuery({
     queryKey: sessionKeys.runtime(sessionId ?? ""),

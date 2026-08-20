@@ -39,7 +39,8 @@ export interface AdapterEntry {
 }
 
 // The honest default while the read settles (a fresh session, or the window
-// before a resumed pane's read lands the restored last runtime): the
+// before a resumed pane's read lands the restored last runtime -- degraded
+// to this same built-in when the recorded adapter is not detected): the
 // built-in BYOK loop (ADR-0081). A single TS expression of the backend's
 // `None` / `BuiltIn` default, mirroring how the auth-mode chip renders
 // `AUTH_MODE_DEFAULT` before its read resolves.

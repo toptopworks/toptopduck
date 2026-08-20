@@ -736,7 +736,8 @@ impl SessionStore {
             enabled_mcp: Mutex::new(HashSet::new()),
             last_mcp_connect: Mutex::new(Vec::new()),
             // Issue #353: the built-in runtime is the honest default (ADR-0081);
-            // an external CLI is an explicit per-session pick, reset on resume.
+            // an external CLI is an explicit per-session pick, restored on
+            // resume from the recipe header (ADR-0102).
             runtime: Mutex::new(None),
             external_model_config: Mutex::new((None, None)),
             cached_discovered: Mutex::new(None),
