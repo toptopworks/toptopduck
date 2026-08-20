@@ -18,22 +18,27 @@ import type { TurnRuntime } from "../../types/thread";
 export function RuntimeAttributionMarker({ runtime }: { runtime: TurnRuntime }) {
   const isExternal = runtime.kind === "external";
   const Icon = isExternal ? Terminal : Cpu;
+  // One branch on the kind, not two tests of the same discriminant: the
+  // external arm falls back to the honest "not recorded" note when the id
+  // is null (adapter_id is string | null, so ?? matches the old != null
+  // check bit for bit).
+  const label = isExternal ? (
+    runtime.data.adapter_id ?? (
+      <FormattedMessage
+        id="thread.runtime.externalUnrecorded"
+        defaultMessage="External (not recorded)"
+      />
+    )
+  ) : (
+    <FormattedMessage id="thread.runtime.builtIn" defaultMessage="Built-in" />
+  );
   return (
     <p
       className="runtime-attribution m-0 mb-0.5 flex items-center gap-1 text-xs text-muted-foreground"
       data-runtime-kind={runtime.kind}
     >
       <Icon aria-hidden="true" className="h-3 w-3 shrink-0" />
-      {isExternal && runtime.data.adapter_id != null ? (
-        runtime.data.adapter_id
-      ) : isExternal ? (
-        <FormattedMessage
-          id="thread.runtime.externalUnrecorded"
-          defaultMessage="External (not recorded)"
-        />
-      ) : (
-        <FormattedMessage id="thread.runtime.builtIn" defaultMessage="Built-in" />
-      )}
+      {label}
     </p>
   );
 }
