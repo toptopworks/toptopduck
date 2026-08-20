@@ -27,6 +27,7 @@ import type {
   AdapterCatalogs,
   CatalogModel,
   DiscoveredRuntime,
+  SessionRuntimeChoice,
 } from "../../../types/runtime";
 
 // ComposerProviderPicker tests (ADR-0099, issue #574): the two-level
@@ -1235,21 +1236,32 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
   // The shell-shaped cold-start host: the pending pair lives in the parent
   // and feeds back through pendingModelPosture, mirroring the QuestionBar
   // wiring the rollback guard reads (issue #592). An inert vi.fn() callback
-  // never updates the prop, so the guard would always see a stale pair.
+  // never updates the prop, so the guard would always see a stale pair. The
+  // runtime handler mirrors App's handlePendingRuntimeChange -- the switch
+  // resets the pending posture to null (ADR-0100 D2) -- so the guard's
+  // caller-reset branch is reachable from tests.
   function ColdStartHost({
     onPendingChange,
   }: {
     onPendingChange: (posture: ModelPosture) => void;
   }) {
     const [pending, setPending] = useState<ModelPosture | null>(null);
+    const [pendingRuntime, setPendingRuntime] =
+      useState<SessionRuntimeChoice | null>({
+        kind: "external",
+        data: "qwen-code",
+      });
     return (
       <ComposerProviderPicker
         sessionId={null}
         provider={pickerProvider()}
         onSwitchActive={vi.fn()}
         onOpenSettings={vi.fn()}
-        onPendingRuntimeChange={vi.fn()}
-        pendingRuntime={{ kind: "external", data: "qwen-code" }}
+        onPendingRuntimeChange={(runtime) => {
+          setPendingRuntime(runtime);
+          setPending(null);
+        }}
+        pendingRuntime={pendingRuntime}
         onPendingModelPostureChange={(p) => {
           setPending(p);
           onPendingChange(p);
@@ -1406,6 +1418,13 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     // The hosted pair follows the rollback: the label shows the restored
     // posture, not the cleared one.
     expect(await screen.findByText("fake-opus · medium")).toBeTruthy();
+    // The failed clear also surfaces on the shared set-fault line (the
+    // cold-start twin of the in-session #529 contract), not only the log
+    // sink -- the restored label alone would otherwise carry no
+    // explanation.
+    expect(
+      await screen.findByText(/Could not apply the selection/),
+    ).toBeTruthy();
   });
 
   it("does not roll the pending clear back when a later gesture rewrote the pair (issue #592)", async () => {
@@ -1481,6 +1500,53 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(
       screen.getByRole("button", { name: "Model: medium" }),
     ).toBeTruthy();
+    expect(screen.queryByText("fake-opus · medium")).toBeNull();
+  });
+
+  it("does not roll the pending clear back when the caller resets the pair on a runtime switch (issue #592)", async () => {
+    // The clear IPC fails only AFTER the user switched runtimes on the bar:
+    // the host mirrors App's handlePendingRuntimeChange, resetting the
+    // pending pair to null (ADR-0100 D2 namespacing) -- a reset that
+    // bypasses the picker's gesture path, so it bumps no gesture counter.
+    // The guard must still skip the rollback (the null check, plus the
+    // counter the runtime write itself bumps): restoring the pre-clear
+    // posture would resurrect it under the NEW runtime.
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    let rejectClear: ((reason: unknown) => void) | undefined;
+    vi.mocked(clearLastModelPosture).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectClear = reject;
+        }),
+    );
+    const onPendingModelPostureChange = vi.fn();
+    await renderColdStartHost(onPendingModelPostureChange);
+    // The posture menu's clearing row issues the clear...
+    fireEvent.click(
+      screen.getAllByRole("menuitem", {
+        name: /^Default \(recommended\)/,
+      })[0],
+    );
+    // ...then the user switches to the built-in runtime inside the IPC
+    // window (the popover's level-1 API Access row).
+    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
+    await screen.findByText("API Access");
+    fireEvent.click(screen.getByRole("button", { name: "API Access" }));
+    // Self-check the clear IPC fired before rejecting it, so the
+    // optional-chain reject below cannot pass vacuously.
+    expect(clearLastModelPosture).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      rejectClear?.(new Error("config write failed"));
+    });
+    // No rollback: exactly the one gesture call (the caller's reset is its
+    // own setState, not a picker write), and the pre-clear posture is not
+    // resurrected under the new runtime. (The set-fault line is pinned by
+    // the rolled-back test above -- the built-in runtime renders the
+    // static no-menu label, so no fault surface exists to query here.)
+    expect(onPendingModelPostureChange).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("fake-opus · medium")).toBeNull();
   });
 });

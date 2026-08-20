@@ -432,6 +432,10 @@ export function ComposerProviderPicker({
     const prevPosture = posture;
     const clearedPosture: ModelPosture = { ...posture, ...patch };
     const gestureSeq = ++postureGestureSeqRef.current;
+    // A new gesture is a fresh write attempt: clear any fault a previous
+    // rejected one left on the set-fault slot (the applyModelConfig
+    // symmetry on the in-session side).
+    setModelSetError(null);
     onPendingModelPostureChange(clearedPosture);
     if (clearsBackfill && activeAdapterId !== null) {
       const adapterId = activeAdapterId;
@@ -463,6 +467,12 @@ export function ComposerProviderPicker({
           if (stillThisClear) {
             onPendingModelPostureChange(prevPosture);
           }
+          // The failed clear surfaces on the shared set-fault line in BOTH
+          // outcomes: rolled back, the bar would otherwise show the restored
+          // entry with no explanation; skipped, the optimistic clear stays
+          // displayed while the backfill entry survived -- the failure would
+          // surface only at the NEXT cold start as the posture "coming back".
+          setModelSetError(e);
           log.warn(
             "ComposerProviderPicker",
             stillThisClear
@@ -604,6 +614,14 @@ export function ComposerProviderPicker({
     // pending state. No IPC, no switching gate -- the write is synchronous.
     if (sessionId === null) {
       if (onPendingRuntimeChange) {
+        // The caller resets the pending posture to null on a runtime switch
+        // (App's handlePendingRuntimeChange; ADR-0100 D2 namespacing) -- a
+        // reset that bypasses pendingPostureWrite and so bumps no gesture
+        // counter. Bump it in the same task so a still-in-flight clear
+        // reject from the previous runtime cannot roll its pre-clear
+        // posture over the reset even if it lands before the ref mirror
+        // flushes.
+        ++postureGestureSeqRef.current;
         onPendingRuntimeChange(next);
       } else {
         log.warn(
