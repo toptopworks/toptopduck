@@ -25,7 +25,7 @@ import type { AdapterEntry, AdapterCatalogs } from "../../../types/runtime";
 
 // ComposerProviderPicker tests (ADR-0099, issue #574): the two-level
 // runtime popover + the brain-icon trigger + the posture text button's
-// integration (four-state label, set-IPC writes, cold-start pending
+// integration (posture label, set-IPC writes, cold-start pending
 // channel). Rendered inside an empty-catalog English IntlProvider so
 // assertions anchor on stable English strings. The IPC surface is mocked so
 // the view never hits Tauri.
@@ -540,10 +540,10 @@ async function renderExternalPicker(
   await screen.findByRole("button", { name: /Runtime: qwen-code/ });
 }
 
-describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3, issue #573)", () => {
+describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)", () => {
   it("shows the active profile's model as a static label on the built-in runtime", () => {
     renderPicker(pickerJsx());
-    // Static: the four-state label renders, but NOT as a button (no arrow,
+    // Static: the posture label renders, but NOT as a button (no arrow,
     // no menu -- profile.model is configured in Settings, ADR-0099).
     expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
@@ -968,6 +968,16 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(getLastModelPosture).toHaveBeenCalledWith("qwen-code");
   });
 
+  it("renders the backfill read failure as an inline status line instead of a default label (issue #584)", async () => {
+    // The cold-start twin of the in-session #529 contract: a rejected
+    // startup-posture read must not masquerade as "Default (recommended)"
+    // while the backend entry still takes effect on the first turn.
+    vi.mocked(getLastModelPosture).mockRejectedValue(new Error("ipc down"));
+    await renderColdStartPicker();
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.queryByText("Default (recommended)")).toBeNull();
+  });
+
   it("prefers an explicit pendingModelPosture over the backfill entry (ADR-0100 D1)", async () => {
     vi.mocked(getLastModelPosture).mockResolvedValue({
       model: "fake-opus",
@@ -1181,6 +1191,18 @@ describe("ComposerProviderPicker catalog provenance staleness (issue #529)", () 
     ).toBeTruthy();
   });
 
+  it("does not flag a discovery stamped by the active adapter itself", async () => {
+    // The steady state after a turn on this runtime: the stamp's presence
+    // alone is not staleness -- only a mismatch is.
+    await renderExternalPicker(
+      {},
+      { cached_discovered: { ...CATALOG, adapter_id: "qwen-code" } },
+    );
+    expect(
+      screen.queryByText(/discovered on a different runtime/),
+    ).toBeNull();
+  });
+
   it("does not flag a pre-stamp discovery with no adapter_id", async () => {
     await renderExternalPicker({}, { cached_discovered: CATALOG });
     // Persisted before the field existed: no provenance, no mismatch.
@@ -1278,6 +1300,32 @@ describe("ComposerProviderPicker key overlay refetch (issue #154)", () => {
     await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
     rerender(wrap(pickerJsx({ profileKeyEpoch: 1 }), queryClient));
     await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not refetch the key overlay while the epoch is unchanged", async () => {
+    // The deps cut both ways: an unrelated rerender must not re-run the
+    // fetch effect (one IPC per epoch, not per render).
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(wrap(pickerJsx(), queryClient));
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
+    rerender(wrap(pickerJsx(), queryClient));
+    expect(listProviderProfiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the overlay error line when an epoch refetch succeeds (issue #584)", async () => {
+    vi.mocked(listProviderProfiles)
+      .mockRejectedValueOnce(new Error("ipc down"))
+      .mockResolvedValue(keyStatus([["anthropic", true]]));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(wrap(pickerJsx(), queryClient));
+    await openPopover();
+    expect(await screen.findByText(/ipc down/)).toBeTruthy();
+    rerender(wrap(pickerJsx({ profileKeyEpoch: 1 }), queryClient));
+    await waitFor(() => expect(screen.queryByText(/ipc down/)).toBeNull());
   });
 });
 

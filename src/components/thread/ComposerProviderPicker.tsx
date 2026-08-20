@@ -192,6 +192,9 @@ export function ComposerProviderPicker({
         const map: Record<string, ProfileKeyStatus> = {};
         for (const s of status) map[s.profile_id] = s;
         setProfileKeys(map);
+        // A successful (re)fetch clears the error line from the previous
+        // failure -- otherwise it persists until unmount.
+        setKeysError(null);
       })
       .catch((e) => {
         if (!cancelled) setKeysError(fmtError(e, intlRef.current));
@@ -264,7 +267,7 @@ export function ComposerProviderPicker({
   // truth is the model-config query above). Enabled flips true whenever the
   // bar returns to cold start / the adapter changes, so the entry refetches
   // after any in-session set updated it server-side.
-  const { data: backfillData } = useQuery({
+  const { data: backfillData, error: backfillError } = useQuery({
     // Disabled-state key placeholder: with no external adapter active the
     // query never runs (enabled below), so the inert "" segment carries the
     // key -- the same always-disabled convention as the __cold_start__
@@ -654,18 +657,19 @@ export function ComposerProviderPicker({
   // independently reachable on ACP adapters, so a lone thought level has
   // its own held form) or "Default (recommended)" when nothing is held --
   // anchored to never-selected-or-cleared per dimension (ADR-0100
-  // Decision 1).
+  // Decision 1). An empty-string field counts as unset, matching the
+  // menu guards' convention, so a hand-edited blank cannot blank the
+  // button.
+  const heldParts = [posture.model, posture.thought_level].filter(
+    (part): part is string => part != null && part !== "",
+  );
   const postureLabel = !isExternal
     ? noProfiles
       ? notConfigured
       : builtInModel || "—"
-    : posture.model != null && posture.thought_level != null
-      ? `${posture.model} · ${posture.thought_level}`
-      : posture.model != null
-        ? posture.model
-        : posture.thought_level != null
-          ? posture.thought_level
-          : defaultRecommended;
+    : heldParts.length > 0
+      ? heldParts.join(" · ")
+      : defaultRecommended;
 
   // The provider readout = the preset the active profile sits on (e.g.
   // "Anthropic"); falls back to the profile's own display name when the
@@ -713,11 +717,14 @@ export function ComposerProviderPicker({
   const activeStatus = activeProfile ? profileKeys[activeProfile.id] : undefined;
   const hasKey = activeStatus?.has_key ?? false;
   const keychainFault = activeStatus?.keychain_fault ?? null;
+  // A failed overlay read must not state "no key" as fact: while the error
+  // line is up the mark is suppressed rather than guessed (the profile may
+  // well have a key -- the popover carries the read failure itself).
   const builtInTooltip = noProfiles
     ? notConfigured
     : keychainFault
       ? `${summary} · ${keychainUnavailableMark}`
-      : hasKey
+      : hasKey || keysError != null
         ? summary
         : `${summary} · ${noKeyMark}`;
   const tooltipText = isExternal ? externalTooltip : builtInTooltip;
@@ -730,11 +737,18 @@ export function ComposerProviderPicker({
     onOpenSettings();
   }
 
-  // Honest read failure (issue #529): a rejected model-config get must NOT
+  // Honest read failure (issue #529): a rejected posture read must NOT
   // masquerade as an unselected default -- the posture trigger renders the
   // fault inline instead of the control. Scoped to external runtimes: the
-  // built-in posture reads app-config, not this query.
-  const modelConfigFault = isExternal ? modelConfigError : null;
+  // built-in posture reads app-config, not these queries. In-session the
+  // source is the model-config query; on the cold-start bar it is the
+  // backfill read (the model-config query is disabled there) -- the two
+  // are mutually exclusive by their enabled guards.
+  const modelConfigFault = isExternal
+    ? sessionId === null
+      ? backfillError
+      : modelConfigError
+    : null;
 
   return (
     <>

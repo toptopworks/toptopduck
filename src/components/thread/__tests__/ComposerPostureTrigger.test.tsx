@@ -9,7 +9,7 @@ import { selectPreventDefault } from "./dropdownMenuMock";
 import type { CatalogModel } from "../../../types/runtime";
 
 // ComposerPostureTrigger tests (ADR-0099 Decision 3, issues #574/#573): the
-// four-state posture button + cascade menu. The label itself is computed by
+// posture button + cascade menu. The label itself is computed by
 // the picker; these tests pin the trigger's contract -- static vs
 // interactive rendering, the menu's two-level structure, selection /
 // clearing / synthetic-row behavior, and the honest fault surfaces.
