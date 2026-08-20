@@ -160,13 +160,6 @@ export function useAppConfigState({
     [appConfig, commitAppConfig, intl, setShellError],
   );
 
-  // Switch the active profile's model from the composer popover (issue #238,
-  // ADR-0071). Sibling to switchActiveProfile: there is no separate set-model
-  // IPC -- model is a field of the active profile in app-config (ADR-0064:
-  // model is per-profile, NOT a global -- different providers support
-  // different model sets, so a global active model is meaningless). The
-  // switch is one commitAppConfig write that patches ONLY the active
-
   // Commit the three shell prefs (two collapses + the sidebar grouping mode) as
   // ONE app-config write (ADR-0038/0054, issue #84; ADR-0072, issue #251).
   // A single IPC write keeps the three shell-chrome prefs atomic against any

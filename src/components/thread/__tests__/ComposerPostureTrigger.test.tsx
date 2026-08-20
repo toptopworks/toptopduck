@@ -5,6 +5,7 @@ import { IntlProvider } from "react-intl";
 import { ComposerPostureTrigger } from "../ComposerPostureTrigger";
 import type { PostureCatalog } from "../ComposerPostureTrigger";
 import { TooltipProvider } from "../../ui/tooltip";
+import { selectPreventDefault } from "./dropdownMenuMock";
 import type { CatalogModel } from "../../../types/runtime";
 
 // ComposerPostureTrigger tests (ADR-0099 Decision 3, issues #574/#573): the
@@ -129,24 +130,34 @@ describe("ComposerPostureTrigger cascade menu (two-level)", () => {
     expect(rows[0].textContent).toContain("gemini-2.5-pro");
   });
 
-  it("offers the catalog models with a check on the current item", () => {
+  it("offers the catalog models as radio rows with the checked state on the current item", () => {
     renderTrigger({ model: "gemini-2.5-flash" });
-    const flash = screen.getByRole("menuitem", { name: "gemini-2.5-flash" });
-    expect(flash.getAttribute("data-selected")).toBe("true");
-    const pro = screen.getByRole("menuitem", { name: "gemini-2.5-pro" });
-    expect(pro.getAttribute("data-selected")).toBe("false");
+    const flash = screen.getByRole("menuitemradio", { name: "gemini-2.5-flash" });
+    expect(flash.getAttribute("aria-checked")).toBe("true");
+    const pro = screen.getByRole("menuitemradio", { name: "gemini-2.5-pro" });
+    expect(pro.getAttribute("aria-checked")).toBe("false");
   });
 
   it("selects a model through onSelectModel", () => {
     const { onSelectModel } = renderTrigger();
-    fireEvent.click(screen.getByRole("menuitem", { name: "gemini-2.5-flash" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "gemini-2.5-flash" }));
     expect(onSelectModel).toHaveBeenCalledWith("gemini-2.5-flash");
   });
 
   it("selects a thought level through onSelectThoughtLevel", () => {
     const { onSelectThoughtLevel } = renderTrigger();
-    fireEvent.click(screen.getByRole("menuitem", { name: /^low$/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^low$/ }));
     expect(onSelectThoughtLevel).toHaveBeenCalledWith("low");
+  });
+
+  it("keeps the menu open on selection (preventDefault on the item select)", () => {
+    // The keep-open contract's only implementation is the e.preventDefault()
+    // in the option / clearing item handlers -- assert the mock's injected
+    // spy fired for both row kinds (issue #584).
+    renderTrigger();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "gemini-2.5-flash" }));
+    fireEvent.click(screen.getAllByRole("menuitem", { name: "Default (recommended)" })[0]);
+    expect(selectPreventDefault).toHaveBeenCalledTimes(2);
   });
 
   it("clears the dimension via the leading Default (recommended) row", () => {
@@ -170,12 +181,12 @@ describe("ComposerPostureTrigger cascade menu (two-level)", () => {
   });
 
   it("renders a synthetic row for a held model the catalog does not offer", () => {
-    renderTrigger({ model: "gemini-1.0-ultra" });
-    const synthetic = screen.getByRole("menuitem", {
+    const { onSelectModel } = renderTrigger({ model: "gemini-1.0-ultra" });
+    const synthetic = screen.getByRole("menuitemradio", {
       name: "gemini-1.0-ultra (not offered by this runtime)",
     });
-    expect(synthetic).toBeTruthy();
     fireEvent.click(synthetic);
+    expect(onSelectModel).toHaveBeenCalledWith("gemini-1.0-ultra");
   });
 
   it("renders a synthetic row for a CLI current the catalog does not offer (issue #529)", () => {
@@ -191,7 +202,7 @@ describe("ComposerPostureTrigger cascade menu (two-level)", () => {
         currentThoughtLevel: null,
       },
     });
-    const synthetic = screen.getByRole("menuitem", {
+    const synthetic = screen.getByRole("menuitemradio", {
       name: "gemini-2.5-pro (not offered by this runtime)",
     });
     fireEvent.click(synthetic);
@@ -200,7 +211,7 @@ describe("ComposerPostureTrigger cascade menu (two-level)", () => {
 
   it("renders a synthetic row for a held thought level the catalog does not offer", () => {
     const { onSelectThoughtLevel } = renderTrigger({ thoughtLevel: "ultra" });
-    const synthetic = screen.getByRole("menuitem", {
+    const synthetic = screen.getByRole("menuitemradio", {
       name: "ultra (not offered by this runtime)",
     });
     fireEvent.click(synthetic);

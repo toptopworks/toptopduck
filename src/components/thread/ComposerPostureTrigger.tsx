@@ -1,7 +1,7 @@
+import type { ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Check, ChevronDown, Info } from "lucide-react";
+import { ChevronDown, Info } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { fmtError } from "../../lib/error-presentation";
 import type { SaveError } from "../../types/session";
 import type { CatalogModel } from "../../types/runtime";
@@ -10,6 +10,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -18,20 +20,23 @@ import {
 
 // The next-turn posture text button (ADR-0099 Decision 3, issue #574/#573): a
 // resident text control seated BEFORE the runtime trigger on the QuestionBar
-// row. Its label is the four-state readout computed by the picker (built-in:
-// active profile model / "Not configured"; external: "{model} · {strength}"
-// when selected, else "Default (recommended)"). Without a catalog (built-in,
+// row. Its label is the posture readout computed by the picker (built-in:
+// active profile model / "Not configured"; external: "{model} · {strength}",
+// either dimension alone, or "Default (recommended)"). Without a catalog
+// (built-in,
 // or an external CLI never probed/discovered) it renders as a static
 // label with no arrow -- never a button pretending to be clickable; with a
 // catalog it opens the cascade menu (dropdown-menu Sub primitive): two
 // first-level rows (Model / Thinking) showing the current value inline, each
-// opening a second-level list with a leading "Default (recommended)" clearing
-// row, a check on the current item, and the honest synthetic row for a held
-// value the catalog does not offer (issue #529). Item selection keeps the
-// menu open (preventDefault) so the ✓ updates and the fault lines below stay
-// visible -- the fault surfaces that rode the old popover's selector body.
+// opening a second-level menuitemradio list (aria-checked carries the
+// current selection, issue #584) with a leading "Default (recommended)"
+// clearing row and the honest synthetic row for a held value the catalog
+// does not offer (issue #529). Item selection keeps the menu open
+// (preventDefault) so the checked state updates and the fault lines below
+// stay visible -- the fault surfaces that rode the old popover's selector
+// body.
 export type ComposerPostureTriggerProps = {
-  // The four-state display label, already formatted by the picker.
+  // The posture display label, already formatted by the picker.
   label: string;
   // The catalog driving the cascade menu; null = static label (no arrow).
   catalog: PostureCatalog | null;
@@ -167,10 +172,6 @@ export function ComposerPostureTrigger({
       ? heldLevel
       : null;
 
-  // Inline current values for the two first-level rows.
-  const modelRowValue = heldModel;
-  const levelRowValue = heldLevel;
-
   // The clearing row at the top of each second-level list: "Default
   // (recommended)" -- annotated with the CLI's reported current so the user
   // can tell what the unselected state would actually run (the SelectorOptions
@@ -193,7 +194,7 @@ export function ComposerPostureTrigger({
             aria-label={ariaLabel}
             className="composer-posture-trigger inline-flex h-9 max-w-52 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
           >
-            {/* Hides the four-state label when the question-bar @container
+            {/* Hides the posture label when the question-bar @container
                 drops below the narrow-rail threshold, leaving the
                 chevron-only button (aria-label keeps the full readout) --
                 the same collapse the auth-mode chip's label performs
@@ -211,78 +212,35 @@ export function ComposerPostureTrigger({
               />
             </p>
           )}
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger>
+          <DimensionSub
+            label={(
               <FormattedMessage
                 id="composer.runtimePicker.modelLabel"
                 defaultMessage="Model"
               />
-              <InlineValue value={modelRowValue} />
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              <ClearingItem label={modelClearLabel} onClear={() => onSelectModel(null)} />
-              {unrepresentedModelId != null && (
-                <OptionItem
-                  id={unrepresentedModelId}
-                  selected={model === unrepresentedModelId}
-                  onSelect={() => onSelectModel(unrepresentedModelId)}
-                  unrepresented
-                />
-              )}
-              {modelIds.map((id) => (
-                <OptionItem
-                  key={id}
-                  id={id}
-                  selected={model === id}
-                  onSelect={() => onSelectModel(id)}
-                />
-              ))}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger disabled={levelUnavailable}>
+            )}
+            displayValue={heldModel}
+            clearLabel={modelClearLabel}
+            unrepresentedId={unrepresentedModelId}
+            ids={modelIds}
+            selectedId={model}
+            onSelect={onSelectModel}
+          />
+          <DimensionSub
+            label={(
               <FormattedMessage
                 id="composer.runtimePicker.thoughtLevelLabel"
                 defaultMessage="Thinking"
               />
-              {levelUnavailable ? (
-                <span className="text-muted-foreground min-w-0 flex-1 truncate text-right text-xs">
-                  <FormattedMessage
-                    id="composer.runtimePicker.pickModelFirst"
-                    defaultMessage="Pick a model first."
-                  />
-                </span>
-              ) : (
-                <InlineValue value={levelRowValue} />
-              )}
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              {!levelUnavailable && (
-                <>
-                  <ClearingItem
-                    label={levelClearLabel}
-                    onClear={() => onSelectThoughtLevel(null)}
-                  />
-                  {unrepresentedLevelId != null && (
-                    <OptionItem
-                      id={unrepresentedLevelId}
-                      selected={thoughtLevel === unrepresentedLevelId}
-                      onSelect={() => onSelectThoughtLevel(unrepresentedLevelId)}
-                      unrepresented
-                    />
-                  )}
-                  {levelIds.map((id) => (
-                    <OptionItem
-                      key={id}
-                      id={id}
-                      selected={thoughtLevel === id}
-                      onSelect={() => onSelectThoughtLevel(id)}
-                    />
-                  ))}
-                </>
-              )}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
+            )}
+            displayValue={heldLevel}
+            clearLabel={levelClearLabel}
+            unrepresentedId={unrepresentedLevelId}
+            ids={levelIds}
+            selectedId={thoughtLevel}
+            unavailable={levelUnavailable}
+            onSelect={onSelectThoughtLevel}
+          />
           <SelectorFaultLines
             setFault={setFault}
             persistFault={persistFault}
@@ -341,32 +299,90 @@ function InlineValue({ value }: { value: string | null }) {
   );
 }
 
-// One second-level option row: the id plus a check on the current item.
-// Selecting keeps the menu open (preventDefault) so the check updates and
-// the fault lines below stay in view.
+// One cascade dimension (ADR-0099 Decision 3): a first-level row (label +
+// the inline current value) opening the second-level radio list -- the
+// leading "Default (recommended)" clearing row, the honest synthetic row
+// for a held value the directory does not offer (#529), and the directory
+// itself as menuitemradio rows whose checked state the group value carries
+// (readable to screen readers, unlike the retired aria-hidden check icon,
+// issue #584).
+function DimensionSub({
+  label,
+  displayValue,
+  clearLabel,
+  unrepresentedId,
+  ids,
+  selectedId,
+  onSelect,
+  unavailable = false,
+}: {
+  label: ReactNode;
+  displayValue: string | null;
+  clearLabel: string;
+  unrepresentedId: string | null;
+  ids: string[];
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  unavailable?: boolean;
+}) {
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger disabled={unavailable}>
+        {label}
+        {unavailable ? (
+          <span className="text-muted-foreground min-w-0 flex-1 truncate text-right text-xs">
+            <FormattedMessage
+              id="composer.runtimePicker.pickModelFirst"
+              defaultMessage="Pick a model first."
+            />
+          </span>
+        ) : (
+          <InlineValue value={displayValue} />
+        )}
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent>
+        {!unavailable && (
+          // Permanently controlled ("" = nothing selected): the radio value
+          // must never fall back to an uncontrolled internal state.
+          <DropdownMenuRadioGroup value={selectedId ?? ""}>
+            <ClearingItem label={clearLabel} onClear={() => onSelect(null)} />
+            {unrepresentedId != null && (
+              <OptionItem
+                id={unrepresentedId}
+                onSelect={() => onSelect(unrepresentedId)}
+                unrepresented
+              />
+            )}
+            {ids.map((id) => (
+              <OptionItem key={id} id={id} onSelect={() => onSelect(id)} />
+            ))}
+          </DropdownMenuRadioGroup>
+        )}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
+}
+
+// One second-level option row: a menuitemradio whose checked state rides
+// the group value. Selecting keeps the menu open (preventDefault) so the
+// checked mark updates and the fault lines below stay in view.
 function OptionItem({
   id,
-  selected,
   onSelect,
   unrepresented = false,
 }: {
   id: string;
-  selected: boolean;
   onSelect: () => void;
   unrepresented?: boolean;
 }) {
   return (
-    <DropdownMenuItem
-      data-selected={selected}
+    <DropdownMenuRadioItem
+      value={id}
       onSelect={(e) => {
         e.preventDefault();
         onSelect();
       }}
     >
-      <Check
-        className={cn("size-4", !selected && "invisible")}
-        aria-hidden
-      />
       {unrepresented ? (
         <FormattedMessage
           id="composer.runtimePicker.unrepresentedModel"
@@ -376,7 +392,7 @@ function OptionItem({
       ) : (
         id
       )}
-    </DropdownMenuItem>
+    </DropdownMenuRadioItem>
   );
 }
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as SelectPrimitive from "@radix-ui/react-select";
@@ -36,6 +37,14 @@ import {
   type CatalogNote,
   type PostureCatalog,
 } from "./ComposerPostureTrigger";
+import {
+  PRESET_CUSTOM,
+  derivePresetId,
+  findPreset,
+} from "../settings/provider-presets";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 // The honest default while the model-config read settles (and on the
 // cold-start bar, where there is no session to read): no selection, no
@@ -50,21 +59,18 @@ const MODEL_CONFIG_DEFAULT: SessionModelConfig = {
 // cleared -- the "Default (recommended)" start.
 const EMPTY_POSTURE: ModelPosture = { model: null, thought_level: null };
 
-import {
-  PRESET_CUSTOM,
-  derivePresetId,
-  findPreset,
-} from "../settings/provider-presets";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
-import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+// The two level-2 selects' shared trigger classes: indented under the level-1
+// group row and inset to the remaining width (the dot column).
+const LEVEL2_SELECT_TRIGGER_CLASS =
+  "ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-muted";
 
 // Composer runtime entry (ADR-0099, issues #353/#574; ADR-0071/0081/0085/
 // 0091 lineage). TWO resident controls at the QuestionBar edge, each with one
 // job:
 //   - the POSTURE text button (ComposerPostureTrigger, seated first) is the
 //     readout + cascade menu for the next turn's model / thought level --
-//     the four-state label of ADR-0099 Decision 3 / #573;
+//     the posture label of ADR-0099 Decision 3 / #573 (the held pair,
+//     either dimension alone, or the default);
 //   - the ICON trigger's popover is the ONLY runtime-switching entry:
 //     two-level (level 1 "API Access" / "Local CLI" radio rows mirroring
 //     the Settings runtime sub-tab names; level 2 one Select per group --
@@ -132,7 +138,9 @@ export type ComposerProviderPickerProps = {
   // The shell-level pending runtime value to DISPLAY while sessionId is null
   // (issue #572, ADR-0098 Decision 4): the caller seeds it with the resolved
   // default_runtime and replaces it on each onPendingRuntimeChange. null
-  // means untouched -- the picker then displays the startup resolution.
+  // means untouched -- the picker's OWN fallback then renders the built-in
+  // default; showing the startup resolution is the caller's pre-seeding,
+  // not a picker-side read.
   pendingRuntime?: SessionRuntimeChoice | null;
   // Cold-start posture channel (ADR-0099/0100, issue #574): a cascade-menu
   // pick on the cold-start bar patches the shell-held pending pair via this
@@ -257,6 +265,11 @@ export function ComposerProviderPicker({
   // bar returns to cold start / the adapter changes, so the entry refetches
   // after any in-session set updated it server-side.
   const { data: backfillData } = useQuery({
+    // Disabled-state key placeholder: with no external adapter active the
+    // query never runs (enabled below), so the inert "" segment carries the
+    // key -- the same always-disabled convention as the __cold_start__
+    // sentinel in sessionKeys, fixed by comment rather than a second
+    // sentinel constant.
     queryKey: adapterKeys.posture(activeAdapterId ?? ""),
     queryFn: () => getLastModelPosture(activeAdapterId as string),
     enabled: sessionId === null && activeAdapterId !== null,
@@ -634,20 +647,25 @@ export function ComposerProviderPicker({
         }
       : null;
 
-  // The four-state posture label (ADR-0099 Decision 3 / #573): built-in
-  // shows the active profile's model (empty -> em dash; zero profiles ->
-  // "Not configured", never a fake default); external shows the held pair
-  // (strength omitted when unset) or "Default (recommended)" when nothing
-  // is held -- anchored to never-selected-or-cleared (ADR-0100 Decision 1).
+  // The posture label (ADR-0099 Decision 3 / #573): built-in shows the
+  // active profile's model (empty -> em dash; zero profiles -> "Not
+  // configured", never a fake default); external shows the held pair
+  // (either side omitted when unset -- the two dimensions are
+  // independently reachable on ACP adapters, so a lone thought level has
+  // its own held form) or "Default (recommended)" when nothing is held --
+  // anchored to never-selected-or-cleared per dimension (ADR-0100
+  // Decision 1).
   const postureLabel = !isExternal
     ? noProfiles
       ? notConfigured
       : builtInModel || "—"
-    : posture.model != null
-      ? posture.thought_level != null
-        ? `${posture.model} · ${posture.thought_level}`
-        : posture.model
-      : defaultRecommended;
+    : posture.model != null && posture.thought_level != null
+      ? `${posture.model} · ${posture.thought_level}`
+      : posture.model != null
+        ? posture.model
+        : posture.thought_level != null
+          ? posture.thought_level
+          : defaultRecommended;
 
   // The provider readout = the preset the active profile sits on (e.g.
   // "Anthropic"); falls back to the profile's own display name when the
@@ -721,7 +739,7 @@ export function ComposerProviderPicker({
   return (
     <>
       {/* The posture text button, seated BEFORE the runtime trigger
-          (ADR-0099 Decision 1): the resident four-state readout + cascade
+          (ADR-0099 Decision 1): the resident posture readout + cascade
           menu for the next turn's model / thought level. */}
       <ComposerPostureTrigger
         label={postureLabel}
@@ -778,19 +796,16 @@ export function ComposerProviderPicker({
           <div className="grid gap-1.5">
             {/* --- Level 1 + 2: API Access (= the built-in runtime) --------- */}
             <section className="grid gap-1">
-              <button
-                type="button"
+              <RuntimeGroupRow
+                selected={!isExternal}
                 disabled={switching}
                 onClick={() => void selectRuntime({ kind: "built_in" })}
-                aria-pressed={!isExternal}
-                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium cursor-pointer hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
               >
-                <RuntimeDot selected={!isExternal} />
                 <FormattedMessage
                   id="settings.runtime.tab.apiAccess"
                   defaultMessage="API Access"
                 />
-              </button>
+              </RuntimeGroupRow>
               {/* Level 2: the profile Select. A pick switches active_profile
                   (global semantics unchanged) AND reverts the runtime to
                   built-in when an external adapter was active -- picking a
@@ -818,7 +833,7 @@ export function ComposerProviderPicker({
                 >
                   <SelectTrigger
                     aria-label={profileSelectAria}
-                    className="ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-muted"
+                    className={LEVEL2_SELECT_TRIGGER_CLASS}
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -852,19 +867,16 @@ export function ComposerProviderPicker({
 
             {/* --- Level 1 + 2: Local CLI (= the external runtime) ---------- */}
             <section className="grid gap-1">
-              <button
-                type="button"
+              <RuntimeGroupRow
+                selected={isExternal}
                 disabled={switching}
                 onClick={selectLocalCliGroup}
-                aria-pressed={isExternal}
-                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium cursor-pointer hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
               >
-                <RuntimeDot selected={isExternal} />
                 <FormattedMessage
                   id="settings.runtime.tab.localCli"
                   defaultMessage="Local CLI"
                 />
-              </button>
+              </RuntimeGroupRow>
               {activeAdapterStale && (
                 <p className="text-destructive px-2 pb-1 text-xs">
                   <FormattedMessage
@@ -891,7 +903,7 @@ export function ComposerProviderPicker({
               >
                 <SelectTrigger
                   aria-label={cliSelectAria}
-                  className="ml-6 w-[calc(100%-1.5rem)] border-border bg-card hover:bg-muted"
+                  className={LEVEL2_SELECT_TRIGGER_CLASS}
                 >
                   <SelectValue
                     placeholder={adapters.length === 0 ? noCliDetected : "—"}
@@ -937,6 +949,34 @@ export function ComposerProviderPicker({
         </PopoverContent>
       </Popover>
     </>
+  );
+}
+
+// One level-1 runtime group row (ADR-0099 Decision 2): the radio-style dot +
+// the group label as a full-row button. aria-pressed carries the selection
+// state for assistive tech (the dot itself is aria-hidden).
+function RuntimeGroupRow({
+  selected,
+  disabled,
+  onClick,
+  children,
+}: {
+  selected: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-pressed={selected}
+      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium cursor-pointer hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+    >
+      <RuntimeDot selected={selected} />
+      {children}
+    </button>
   );
 }
 
