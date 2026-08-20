@@ -25,7 +25,7 @@ import type { AdapterEntry, AdapterCatalogs } from "../../../types/runtime";
 
 // ComposerProviderPicker tests (ADR-0099, issue #574): the two-level
 // runtime popover + the brain-icon trigger + the posture text button's
-// integration (four-state label, set-IPC writes, cold-start pending
+// integration (posture label, set-IPC writes, cold-start pending
 // channel). Rendered inside an empty-catalog English IntlProvider so
 // assertions anchor on stable English strings. The IPC surface is mocked so
 // the view never hits Tauri.
@@ -325,6 +325,29 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     expect(mark.closest("[role=\"option\"]")?.textContent).toContain("Anthropic");
   });
 
+  it("never echoes the keyless mark in the closed profile select (dropdown-only, ADR-0099)", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue(
+      keyStatus([["anthropic", false]]),
+    );
+    renderPicker(pickerJsx());
+    await openPopover();
+    const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
+    // The mark exists in the dropdown (contrast anchor) but the CLOSED
+    // trigger echoes the profile name alone.
+    await openSelect(trigger);
+    expect(await screen.findByText("no key")).toBeTruthy();
+    expect(trigger.textContent).toContain("Anthropic");
+    expect(trigger.textContent).not.toContain("no key");
+  });
+
+  it("shows the None detected placeholder in the closed CLI select when no adapter is detected", async () => {
+    // beforeEach seeds an empty adapter table: the honest empty-list
+    // placeholder, not a blank echo.
+    renderPicker(pickerJsx());
+    await openPopover();
+    expect(screen.getByLabelText(CLI_SELECT).textContent).toBe("None detected");
+  });
+
   it("offers only detected external adapters as level-2 CLI options", async () => {
     vi.mocked(listAdapters).mockResolvedValue([
       adapter("qwen-code", "qwen-code", true),
@@ -410,6 +433,13 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     // the disabled synthetic option -- a blank echo would hide the breakage.
     const cliTrigger = screen.getByRole("combobox", { name: CLI_SELECT });
     expect(cliTrigger.textContent).toContain("gemini-cli");
+    // The synthetic option itself is labeled and DISABLED -- visible as the
+    // held value, but not a pickable row.
+    await openSelect(cliTrigger);
+    const staleOption = screen.getByRole("option", {
+      name: /gemini-cli \(no longer detected\)/,
+    });
+    expect(staleOption.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("retires the settings-test guidance from the popover when the active CLI has no catalog", async () => {
@@ -433,6 +463,10 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     await openPopover();
     fireEvent.click(screen.getByText("Manage runtimes"));
     expect(onOpenSettings).toHaveBeenCalledWith();
+    // The popover ACTUALLY closes (the content unmounts), not just the
+    // callback firing -- the portaled content would otherwise stay visible
+    // atop the settings overlay.
+    await waitFor(() => expect(screen.queryByText("API Access")).toBeNull());
   });
 
   it("does not call getSessionRuntime when sessionId is null", () => {
@@ -488,7 +522,7 @@ async function renderExternalPicker(
   modelConfig: {
     model?: string | null;
     thought_level?: string | null;
-    cached_discovered?: typeof CATALOG | null;
+    cached_discovered?: (typeof CATALOG & { adapter_id?: string }) | null;
   } = {},
 ) {
   vi.mocked(getSessionRuntime).mockResolvedValue({
@@ -506,10 +540,10 @@ async function renderExternalPicker(
   await screen.findByRole("button", { name: /Runtime: qwen-code/ });
 }
 
-describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3, issue #573)", () => {
+describe("ComposerProviderPicker posture button label (ADR-0099 D3, issue #573)", () => {
   it("shows the active profile's model as a static label on the built-in runtime", () => {
     renderPicker(pickerJsx());
-    // Static: the four-state label renders, but NOT as a button (no arrow,
+    // Static: the posture label renders, but NOT as a button (no arrow,
     // no menu -- profile.model is configured in Settings, ADR-0099).
     expect(screen.getByText("claude-sonnet-4-6")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
@@ -569,12 +603,13 @@ describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3, i
 
   it("places no check on any catalog item while nothing is selected", async () => {
     await renderExternalPicker({}, { cached_discovered: CATALOG });
-    // Neither dimension auto-selects its CLI-reported current: no
-    // data-selected lands on any menu row (clearing rows carry none).
-    const items = screen.getAllByRole("menuitem");
+    // Neither dimension auto-selects its CLI-reported current: no radio row
+    // carries aria-checked (the clearing rows are plain menuitems with no
+    // checked state at all).
+    const items = screen.getAllByRole("menuitemradio");
     expect(items.length).toBeGreaterThan(0);
     for (const item of items) {
-      expect(item.getAttribute("data-selected")).not.toBe("true");
+      expect(item.getAttribute("aria-checked")).not.toBe("true");
     }
   });
 
@@ -600,9 +635,22 @@ describe("ComposerProviderPicker posture button four-state label (ADR-0099 D3, i
     ).toBeTruthy();
   });
 
+  it("shows the held thought level alone when no model is held (fifth state, issue #584)", async () => {
+    // The two dimensions are independently reachable on ACP adapters: a
+    // lone held level must NOT collapse to "Default (recommended)" -- the
+    // label and the Thinking submenu's checked row agree.
+    await renderExternalPicker(
+      {},
+      { thought_level: "medium", cached_discovered: CATALOG },
+    );
+    expect(screen.getByRole("button", { name: "Model: medium" })).toBeTruthy();
+    const level = screen.getByRole("menuitemradio", { name: /^medium$/ });
+    expect(level.getAttribute("aria-checked")).toBe("true");
+  });
+
   it("updates the label in place when a model is picked from the catalog", async () => {
     await renderExternalPicker({}, { cached_discovered: CATALOG });
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     // The optimistic cache seed flips the label in the same gesture -- the
     // "this pick" source of the selected state (ADR-0100 Decision 1), with
     // no refetch round-trip.
@@ -672,7 +720,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     });
     renderPicker(pickerJsx());
     await screen.findByRole("button", { name: /Runtime: claude-code/ });
-    fireEvent.click(screen.getByRole("menuitem", { name: "sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "sonnet" }));
     await waitFor(() =>
       expect(setSessionModel).toHaveBeenCalledWith("sess-1", "sonnet"),
     );
@@ -681,7 +729,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
   it("writes a model selection through setSessionModel", async () => {
     await renderExternalPicker({}, { cached_discovered: CATALOG });
     fireEvent.click(
-      screen.getByRole("menuitem", { name: "fake-sonnet" }),
+      screen.getByRole("menuitemradio", { name: "fake-sonnet" }),
     );
     await waitFor(() =>
       expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
@@ -693,7 +741,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: /^low$/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^low$/ }));
     await waitFor(() =>
       expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", "low"),
     );
@@ -754,7 +802,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     });
     renderPicker(pickerJsx());
     await screen.findByRole("button", { name: /Runtime: codex/ });
-    fireEvent.click(screen.getByRole("menuitem", { name: "gpt-5-codex" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
     await waitFor(() =>
       expect(setSessionModel).toHaveBeenCalledWith("sess-1", "gpt-5-codex"),
     );
@@ -807,7 +855,7 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     vi.mocked(setSessionModel).mockRejectedValueOnce(new Error("write refused"));
     renderPicker(pickerJsx());
     await screen.findByRole("button", { name: /Runtime: codex/ });
-    fireEvent.click(screen.getByRole("menuitem", { name: "gpt-5-codex" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
     await waitFor(() =>
       expect(setSessionModel).toHaveBeenCalledWith("sess-1", "gpt-5-codex"),
     );
@@ -822,7 +870,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     expect(
       await screen.findByText(/Could not apply the selection/),
     ).toBeTruthy();
@@ -838,7 +886,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: /^low$/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^low$/ }));
     expect(
       await screen.findByText(/Could not apply the selection/),
     ).toBeTruthy();
@@ -855,7 +903,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     expect(
       await screen.findByText(/Selection not saved: Failed to write/),
     ).toBeTruthy();
@@ -870,7 +918,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     expect(await screen.findByText(/changed outside the app/)).toBeTruthy();
   });
 
@@ -885,10 +933,10 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     expect(await screen.findByText(/Selection not saved/)).toBeTruthy();
     // The next attempt succeeds -- the fault line must clear.
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     await waitFor(() =>
       expect(screen.queryByText(/Selection not saved/)).toBeNull(),
     );
@@ -920,6 +968,31 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(getLastModelPosture).toHaveBeenCalledWith("qwen-code");
   });
 
+  it("renders the backfill read failure as an inline status line instead of a default label (issue #584)", async () => {
+    // The cold-start twin of the in-session #529 contract: a rejected
+    // startup-posture read must not masquerade as "Default (recommended)"
+    // while the backend entry still takes effect on the first turn.
+    vi.mocked(getLastModelPosture).mockRejectedValue(new Error("ipc down"));
+    await renderColdStartPicker();
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.queryByText("Default (recommended)")).toBeNull();
+  });
+
+  it("prefers an explicit pendingModelPosture over the backfill entry (ADR-0100 D1)", async () => {
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    await renderColdStartPicker({
+      pendingModelPosture: { model: "fake-sonnet", thought_level: null },
+    });
+    // The explicit pending pair wins over the seeded entry.
+    expect(
+      screen.getByRole("button", { name: "Model: fake-sonnet" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("fake-opus · medium")).toBeNull();
+  });
+
   it("routes a pick to onPendingModelPostureChange seeded from the backfill (no set IPCs)", async () => {
     vi.mocked(getLastModelPosture).mockResolvedValue({
       model: "fake-opus",
@@ -927,7 +1000,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     });
     const onPendingModelPostureChange = vi.fn();
     await renderColdStartPicker({ onPendingModelPostureChange });
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     expect(onPendingModelPostureChange).toHaveBeenCalledWith({
       model: "fake-sonnet",
       thought_level: "medium",
@@ -1003,7 +1076,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       }),
     );
     await screen.findByRole("button", { name: /Runtime: codex/ });
-    fireEvent.click(screen.getByRole("menuitem", { name: "gpt-5-codex" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
     expect(onPendingModelPostureChange).toHaveBeenCalledWith({
       model: "gpt-5-codex",
       thought_level: null,
@@ -1050,6 +1123,27 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
 });
 
 describe("ComposerProviderPicker backfill cache coherence (ADR-0100 single write point)", () => {
+  it("does not read the backfill entry in-session (cold-start-only query)", async () => {
+    // In-session truth is the model-config query; the backfill read must
+    // stay disabled.
+    await renderExternalPicker();
+    expect(getLastModelPosture).not.toHaveBeenCalled();
+  });
+
+  it("does not read the backfill entry on a cold-start built-in runtime", async () => {
+    // Postures are adapter-namespaced: with no external adapter active
+    // there is no backfill entry to read.
+    renderPicker(
+      pickerJsx({
+        sessionId: null,
+        onPendingRuntimeChange: vi.fn(),
+        pendingRuntime: { kind: "built_in" },
+      }),
+    );
+    await screen.findByRole("button", { name: BUILTIN_TRIGGER });
+    expect(getLastModelPosture).not.toHaveBeenCalled();
+  });
+
   it("invalidates the backfill entry after a successful in-session set so the next cold start refetches", async () => {
     // staleTime: Infinity never auto-refetches; without the invalidation a
     // return to cold start would show the pre-set entry.
@@ -1068,7 +1162,7 @@ describe("ComposerProviderPicker backfill cache coherence (ADR-0100 single write
     });
     render(wrap(pickerJsx(), queryClient));
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
-    fireEvent.click(screen.getByRole("menuitem", { name: "fake-sonnet" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     await waitFor(() =>
       expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
     );
@@ -1078,5 +1172,199 @@ describe("ComposerProviderPicker backfill cache coherence (ADR-0100 single write
           ?.isInvalidated,
       ).toBe(true),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Catalog provenance staleness (issue #529, restored #584): the deleted
+// popover-rewrite tests' liveness coverage.
+// ---------------------------------------------------------------------------
+
+describe("ComposerProviderPicker catalog provenance staleness (issue #529)", () => {
+  it("flags a session discovery stamped by a different adapter", async () => {
+    await renderExternalPicker(
+      {},
+      { cached_discovered: { ...CATALOG, adapter_id: "other-cli" } },
+    );
+    expect(
+      screen.getByText(/discovered on a different runtime/),
+    ).toBeTruthy();
+  });
+
+  it("does not flag a discovery stamped by the active adapter itself", async () => {
+    // The steady state after a turn on this runtime: the stamp's presence
+    // alone is not staleness -- only a mismatch is.
+    await renderExternalPicker(
+      {},
+      { cached_discovered: { ...CATALOG, adapter_id: "qwen-code" } },
+    );
+    expect(
+      screen.queryByText(/discovered on a different runtime/),
+    ).toBeNull();
+  });
+
+  it("does not flag a pre-stamp discovery with no adapter_id", async () => {
+    await renderExternalPicker({}, { cached_discovered: CATALOG });
+    // Persisted before the field existed: no provenance, no mismatch.
+    expect(
+      screen.queryByText(/discovered on a different runtime/),
+    ).toBeNull();
+  });
+
+  it("never flags a per-model adapter (its turns never replace the discovery cache)", async () => {
+    // The stale note's promise ("refreshes after this runtime's next turn")
+    // would be a permanent lie for a per-model runtime -- the predicate is
+    // scoped to discovery-fed (ACP) adapters only.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: "gpt-5",
+      thought_level: null,
+      cached_discovered: { ...CATALOG, adapter_id: "other-cli" },
+    });
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: codex/ });
+    expect(
+      screen.queryByText(/discovered on a different runtime/),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Catalog priority chain (ADR-0096 D6, restored #584)
+// ---------------------------------------------------------------------------
+
+describe("ComposerProviderPicker catalog priority chain (ADR-0096 D6)", () => {
+  it("prefers the session's cached discovery over a probe-cache entry", async () => {
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({
+      "qwen-code": {
+        probe_kind: "acp",
+        outcome: {
+          acp: {
+            discovered: {
+              ...CATALOG,
+              models: ["probe-only-model"],
+              adapter_id: "qwen-code",
+            },
+          },
+        },
+        probed_at_millis: 0,
+      },
+    });
+    await renderExternalPicker({}, { cached_discovered: CATALOG });
+    // The menu lists the session cache's models, never the probe entry's.
+    expect(screen.getByRole("menuitemradio", { name: "fake-opus" })).toBeTruthy();
+    expect(
+      screen.queryByRole("menuitemradio", { name: "probe-only-model" }),
+    ).toBeNull();
+  });
+
+  it("renders the static label when the probe cache holds only another adapter's entry", async () => {
+    // The entry is keyed under qwen-code while the session runs a different
+    // ACP adapter with no session discovery: no catalog anywhere, so the
+    // trigger is a static label (no menu to fake).
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "other-acp",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("other-acp")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: null,
+      cached_discovered: null,
+    });
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: other-acp/ });
+    expect(screen.getByText("Default (recommended)")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-profile key overlay refetch (issue #154, restored #584)
+// ---------------------------------------------------------------------------
+
+describe("ComposerProviderPicker key overlay refetch (issue #154)", () => {
+  it("refetches the key overlay on a profileKeyEpoch bump", async () => {
+    // The mount-time fetch effect lists profileKeyEpoch in its deps; losing
+    // the dep would leave stale "no key" marks after a Settings Save that
+    // just configured a key.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(wrap(pickerJsx(), queryClient));
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
+    rerender(wrap(pickerJsx({ profileKeyEpoch: 1 }), queryClient));
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not refetch the key overlay while the epoch is unchanged", async () => {
+    // The deps cut both ways: an unrelated rerender must not re-run the
+    // fetch effect (one IPC per epoch, not per render).
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(wrap(pickerJsx(), queryClient));
+    await waitFor(() => expect(listProviderProfiles).toHaveBeenCalledTimes(1));
+    rerender(wrap(pickerJsx(), queryClient));
+    expect(listProviderProfiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the overlay error line when an epoch refetch succeeds (issue #584)", async () => {
+    vi.mocked(listProviderProfiles)
+      .mockRejectedValueOnce(new Error("ipc down"))
+      .mockResolvedValue(keyStatus([["anthropic", true]]));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(wrap(pickerJsx(), queryClient));
+    await openPopover();
+    expect(await screen.findByText(/ipc down/)).toBeTruthy();
+    rerender(wrap(pickerJsx({ profileKeyEpoch: 1 }), queryClient));
+    await waitFor(() => expect(screen.queryByText(/ipc down/)).toBeNull());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Trigger tooltip content (ADR-0099, restored #584)
+// ---------------------------------------------------------------------------
+
+describe("ComposerProviderPicker trigger tooltip (ADR-0099)", () => {
+  it("previews {provider} · {model} on the built-in runtime", async () => {
+    // A keyed active profile: no mark appended (the no-key variant is its
+    // own test below).
+    vi.mocked(listProviderProfiles).mockResolvedValue(
+      keyStatus([["anthropic", true]]),
+    );
+    renderPicker(pickerJsx());
+    fireEvent.pointerMove(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    expect(await screen.findByText("Anthropic · claude-sonnet-4-6")).toBeTruthy();
+  });
+
+  it("appends the honest no-key mark when the active profile has no key (ADR-0019)", async () => {
+    vi.mocked(listProviderProfiles).mockResolvedValue(
+      keyStatus([["anthropic", false]]),
+    );
+    renderPicker(pickerJsx());
+    fireEvent.pointerMove(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
+    expect(
+      await screen.findByText("Anthropic · claude-sonnet-4-6 · no key"),
+    ).toBeTruthy();
+  });
+
+  it("names the adapter on an external runtime", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "qwen-code",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code", "Qwen Code")]);
+    renderPicker(pickerJsx());
+    const trigger = await screen.findByRole("button", { name: /Runtime: Qwen Code/ });
+    fireEvent.pointerMove(trigger);
+    expect(await screen.findByText("External runtime: Qwen Code")).toBeTruthy();
   });
 });
