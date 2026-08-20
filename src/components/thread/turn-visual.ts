@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
-import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
+import type { ThreadEntry, TurnOutcome, TurnRecord, TurnRuntime } from "../../types/thread";
 
 // A compact label slice for the active-chip match (ADR-0047): the thread only
 // needs the names to detect when a question explicitly points at a dataset, so
@@ -222,4 +222,53 @@ export function selectDriftedSkills(
       return current.content_hash !== s.content_hash;
     })
     .map((s) => s.name);
+}
+
+// ADR-0101: the segment key of one turn's runtime attribution. Adjacent turns
+// sharing a key form one runtime segment; the thread renders the badge only
+// at a segment's first turn (the "segment-start quieting" rule -- a mixed
+// thread stays readable without repeating the marker on every row). Three
+// key families: the built-in loop, one per named external adapter, and the
+// unrecorded forms -- "external-unrecorded" (an external turn persisted before the
+// adapter id existed, rendered as the honest "not recorded" note) and
+// "unrecorded" (no attribution at all, the optimistic append / pre-extension
+// recording -- never rendered, but it still breaks the segment so the next
+// recorded runtime re-announces itself).
+function runtimeAttributionKey(record: TurnRecord): string {
+  const { runtime } = record.provenance;
+  if (!runtime) return "unrecorded";
+  if (runtime.kind === "built_in") return "built-in";
+  return runtime.data.adapter_id == null
+    ? "external-unrecorded"
+    : `external:${runtime.data.adapter_id}`;
+}
+
+// ADR-0101: which thread entries open a runtime segment and carry its badge.
+// The gate: badges appear only when the thread holds at least one external
+// turn -- a purely built-in thread carries no information (the default
+// runtime), and ADR-0101 Decision 4 keeps attribution a "useful when needed"
+// affordance, not an always-on label. Behind the gate, every attribution
+// CHANGE re-announces (built-in segments included -- in a mixed thread the
+// reader must be able to tell who ran which stretch); an unrecorded stretch
+// stays silent (no fabrication) but still breaks the segment.
+export function runtimeSegmentBadges(
+  entries: readonly ThreadEntry[],
+): Array<TurnRuntime | null> {
+  const hasExternal = entries.some(
+    (e) => e.entry === "Turn" && e.data.provenance.runtime?.kind === "external",
+  );
+  if (!hasExternal) return entries.map(() => null);
+  const out: Array<TurnRuntime | null> = [];
+  let prevKey: string | null = null;
+  for (const entry of entries) {
+    if (entry.entry !== "Turn") {
+      out.push(null);
+      continue;
+    }
+    const key = runtimeAttributionKey(entry.data);
+    const opensSegment = key !== prevKey && key !== "unrecorded";
+    out.push(opensSegment ? (entry.data.provenance.runtime ?? null) : null);
+    prevKey = key;
+  }
+  return out;
 }

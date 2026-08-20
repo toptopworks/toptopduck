@@ -1421,4 +1421,83 @@ describe("Thread", () => {
       expect(screen.queryByText(/答案产生后已修改/)).not.toBeInTheDocument();
     });
   });
+
+  describe("runtime attribution segments (ADR-0101)", () => {
+    // A textual record with an explicit runtime attribution -- the minimal
+    // TurnRecord shape the badge logic reads.
+    function runtimeTurn(runtime: TurnRecord["provenance"]["runtime"]): TurnRecord {
+      return {
+        question: "问",
+        outcome: {
+          kind: "Textual",
+          data: { text_kind: "Agent", body: "答", assumption: null },
+        },
+        trace: [],
+        provenance: { skills: [], runtime },
+      };
+    }
+
+    it("renders one badge per attribution change in a mixed thread (segment-start quieting)", () => {
+      renderThread(
+        <Thread
+          entries={[
+            turnEntry(runtimeTurn({ kind: "built_in" })),
+            turnEntry(runtimeTurn({ kind: "built_in" })),
+            turnEntry(
+              runtimeTurn({ kind: "external", data: { adapter_id: "gemini-cli" } }),
+            ),
+            turnEntry(
+              runtimeTurn({ kind: "external", data: { adapter_id: "gemini-cli" } }),
+            ),
+          ]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      // The built-in segment announces once (its first turn), the external
+      // segment once -- continuation turns stay quiet.
+      expect(screen.getAllByText("内置")).toHaveLength(1);
+      expect(screen.getAllByText("gemini-cli")).toHaveLength(1);
+    });
+
+    it("renders no badges at all for a purely built-in thread (the gate)", () => {
+      renderThread(
+        <Thread
+          entries={[turnEntry(runtimeTurn({ kind: "built_in" }))]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.queryByText("内置")).not.toBeInTheDocument();
+    });
+
+    it("degrades a pre-attribution external turn to the honest not-recorded note", () => {
+      renderThread(
+        <Thread
+          entries={[turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: null } }))]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.getByText("外部（未记录）")).toBeInTheDocument();
+      expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
+    });
+
+    it("stays silent on an unrecorded stretch but re-announces the next segment", () => {
+      renderThread(
+        <Thread
+          entries={[
+            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex" } })),
+            // Optimistic / pre-extension row: no runtime field.
+            turnEntry(runtimeTurn(undefined)),
+            turnEntry(runtimeTurn({ kind: "built_in" })),
+          ]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(screen.getByText("codex")).toBeInTheDocument();
+      expect(screen.getByText("内置")).toBeInTheDocument();
+    });
+  });
 });

@@ -10,8 +10,9 @@
 //! names a CLI.
 //!
 //! An [`AdapterSpec`] carries:
-//! - identification: a stable [`AdapterId`] + display name (the composer runtime
-//!   picker + the per-turn provenance, ADR-0078, read these);
+//! - identification: a stable [`AdapterId`] + display name (the composer
+//!   runtime picker, ADR-0083, and the per-turn provenance, ADR-0101, read
+//!   these);
 //! - detection: the candidate binary names a PATH scan resolves (the composer
 //!   grays out an absent CLI, ADR-0083);
 //! - launch: the argv prefix that puts the CLI into its ACP stdio mode (the
@@ -79,8 +80,10 @@ pub enum EffortSurface {
     ArgvFlag(&'static str),
 }
 
-/// A stable identifier for a CLI adapter (per-turn provenance + the composer
-/// picker's key). Distinct from the binary name and from the display name.
+/// A stable identifier for a CLI adapter: the composer picker's key
+/// (ADR-0083) and the id persisted on an external turn's provenance +
+/// mirrored across IPC (ADR-0101). Distinct from the binary name and from
+/// the display name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AdapterId(&'static str);
 

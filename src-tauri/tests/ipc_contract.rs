@@ -618,6 +618,64 @@ fn turn_record_pairs_question_and_outcome() {
 }
 
 #[test]
+fn turn_provenance_runtime_attribution_shapes() {
+    // ADR-0101: the turn's executing runtime rides the provenance across
+    // IPC -- adjacently-tagged (kind + data, snake_case) like every other
+    // runtime choice on the wire. An external turn names its adapter id
+    // under data; a pre-attribution external recording carries null (the
+    // thread's honest "not recorded" degradation); a built-in turn is a
+    // bare unit kind with no data key. Absent runtime (pre-extension peer /
+    // optimistic append) serializes to the pre-#588 shape -- nothing breaks
+    // either way across the boundary.
+    use toptopduck_lib::{TurnProvenance, TurnRuntime};
+
+    // External with the adapter id.
+    assert_wire(
+        &TurnProvenance {
+            skills: vec![],
+            runtime: Some(TurnRuntime::External {
+                adapter_id: Some("gemini-cli".into()),
+            }),
+        },
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":"gemini-cli"}}}"#,
+    );
+
+    // External recorded before the adapter id existed: null, never omitted
+    // -- the distinction between "external, unknown which" and "not recorded
+    // at all" is the degradation the thread renders.
+    assert_wire(
+        &TurnProvenance {
+            skills: vec![],
+            runtime: Some(TurnRuntime::External { adapter_id: None }),
+        },
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":null}}}"#,
+    );
+
+    // Built-in: a unit kind, no data key (mirrors SessionRuntimeChoice).
+    assert_wire(
+        &TurnProvenance {
+            skills: vec![],
+            runtime: Some(TurnRuntime::BuiltIn),
+        },
+        r#"{"skills":[],"runtime":{"kind":"built_in"}}"#,
+    );
+
+    // No attribution: byte-identical to the pre-#588 wire shape.
+    assert_wire(
+        &TurnProvenance {
+            skills: vec![],
+            runtime: None,
+        },
+        r#"{"skills":[]}"#,
+    );
+
+    // And the pre-#588 JSON (no runtime key) still deserializes -- an older
+    // recorded payload reads back as no attribution.
+    let back: TurnProvenance = serde_json::from_str(r#"{"skills":[]}"#).expect("deserialize");
+    assert_eq!(back.runtime, None);
+}
+
+#[test]
 fn trace_entry_view_is_a_flat_snake_case_object() {
     // ADR-0078 (issue #297): the display trace entry -- flat snake_case fields
     // like every other wire struct, operation_kind reusing the approval

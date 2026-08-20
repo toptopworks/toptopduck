@@ -3,11 +3,13 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { LiveTurnCard } from "./TraceView";
 import { SourceMarker } from "./SourceMarker";
 import { SkillMarker } from "./SkillMarker";
+import { RuntimeAttributionMarker } from "./RuntimeAttributionMarker";
 import { TurnCard } from "./TurnCard";
 import {
   primaryReferenceName,
   findMentionedDataset,
   findStaleSourceIdx,
+  runtimeSegmentBadges,
   type DatasetLabel,
 } from "./turn-visual";
 import type { LiveTurn } from "../../session/useTurnFlow";
@@ -123,6 +125,12 @@ export function Thread({
     return m;
   }, [staleByReference]);
 
+  // ADR-0101: the per-entry runtime segment badge (null where none opens).
+  // Gated + quieted inside the helper -- a purely built-in thread renders
+  // nothing; a mixed thread announces each attribution change once, at the
+  // segment's first turn.
+  const segmentBadges = useMemo(() => runtimeSegmentBadges(entries), [entries]);
+
   // Apply a chip jump (ADR-0047): highlight the matched source event and scroll
   // it into view. Only ever called when findStaleSourceIdx already located a
   // target (the chip is disabled otherwise), so targetIdx is a valid index.
@@ -155,6 +163,7 @@ export function Thread({
       <ol className="list-none m-0 p-0">
         {entries.map((entry, i) => {
           if (entry.entry === "Turn") {
+            const segmentRuntime = segmentBadges[i];
             const primaryRef = primaryReferenceName(entry.data.outcome);
             const staleAnchor =
               primaryRef === undefined ? undefined : staleByReference.get(primaryRef);
@@ -176,6 +185,9 @@ export function Thread({
                 className="turn-entry"
                 data-outcome={entry.data.outcome.kind.toLowerCase()}
               >
+                {segmentRuntime != null && (
+                  <RuntimeAttributionMarker runtime={segmentRuntime} />
+                )}
                 <TurnCard
                   record={entry.data}
                   selectedResult={selectedResult}

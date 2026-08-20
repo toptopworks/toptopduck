@@ -39,10 +39,12 @@ use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadError, RectifyProvenance, TraceEntryView, TurnFailure,
-    TurnOutcome, TurnProvenance, TurnRecord,
+    TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::read_duck;
-use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, SourceRef};
+use crate::persistence::recipe::{
+    Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RuntimeKind, SourceRef,
+};
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::provider::Provider;
 use crate::workingset::WorkingSet;
@@ -522,14 +524,24 @@ impl<'a> Resumer<'a> {
                             // v1-era migrated turns (their RecipeTurn carries no
                             // trace; the v2+ synthetic single-call trace does).
                             trace: turn.trace.iter().map(TraceEntryView::from).collect(),
-                            // Issue #381: the IPC provenance narrows to skills
-                            // (recipe::TurnProvenance also carries runtime, which
-                            // stays backend-side). RecipeTurn.skills is already the
-                            // model::SkillProvenance shape, so a verbatim clone
-                            // preserves each skill's assembly-time content_hash
-                            // for the frontend drift check.
+                            // Issue #381 (skills) + ADR-0101 (attribution):
+                            // the IPC provenance mirrors the persisted pair --
+                            // skills (already the model::SkillProvenance
+                            // shape, a verbatim clone preserves each skill's
+                            // assembly-time content_hash for the frontend
+                            // drift check) and the runtime projection. A
+                            // persisted External turn without an adapter id
+                            // (pre-extension recording) projects to
+                            // External { adapter_id: None } -- the thread's
+                            // "not recorded" degradation.
                             provenance: TurnProvenance {
                                 skills: turn.provenance.skills.clone(),
+                                runtime: turn.provenance.runtime.map(|kind| match kind {
+                                    RuntimeKind::BuiltIn => TurnRuntime::BuiltIn,
+                                    RuntimeKind::External => TurnRuntime::External {
+                                        adapter_id: turn.provenance.adapter_id.clone(),
+                                    },
+                                }),
                             },
                         },
                         // ADR-0078 (issue #319): the persisted audit round-trips
@@ -1082,7 +1094,7 @@ mod tests {
     use super::*;
     use crate::cancel::CancelToken;
     use crate::guardrail::{ExecError, ExecErrorKind};
-    use crate::model::{StaleAnchor, StaleReason};
+    use crate::model::{StaleAnchor, StaleReason, TextKind};
     use crate::persistence::recipe::{
         RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef,
     };
@@ -1488,6 +1500,66 @@ mod tests {
                 t.outcome
             );
         }
+    }
+
+    #[test]
+    fn rebuild_timeline_projects_runtime_attribution_to_the_wire() {
+        // ADR-0101: the resume projection maps the persisted pair (runtime
+        // kind + adapter id) onto the wire `TurnRuntime` the thread's segment
+        // badges read. Every recorded shape survives the rebuild: an external
+        // turn names its adapter, a pre-extension external turn degrades to
+        // `External { adapter_id: None }` (never a fabricated id), a built-in
+        // turn carries only the kind, and a v1-era turn without a runtime
+        // stays unattributed.
+        fn attributed(runtime: Option<RuntimeKind>, adapter_id: Option<&str>) -> RecipeEntry {
+            RecipeEntry::Turn(RecipeTurn::with_audit(
+                "q",
+                RecipeOutcome::Textual {
+                    text_kind: TextKind::Agent,
+                    body: "a".into(),
+                    assumption: None,
+                },
+                Vec::new(),
+                crate::persistence::recipe::TurnProvenance {
+                    runtime,
+                    adapter_id: adapter_id.map(Into::into),
+                    skills: Vec::new(),
+                },
+            ))
+        }
+        let recipe = recipe_with(
+            vec![
+                attributed(Some(RuntimeKind::External), Some("gemini-cli")),
+                attributed(Some(RuntimeKind::External), None),
+                attributed(Some(RuntimeKind::BuiltIn), None),
+                attributed(None, None),
+            ],
+            None,
+        );
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let timeline = resumer.rebuild_timeline(&mut ws, None).unwrap();
+        let runtimes: Vec<Option<TurnRuntime>> = timeline
+            .iter()
+            .map(|entry| match entry {
+                TimelineEntry::Turn { record, .. } => record.provenance.runtime.clone(),
+                other => panic!("expected Turn, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            runtimes,
+            vec![
+                Some(TurnRuntime::External {
+                    adapter_id: Some("gemini-cli".into())
+                }),
+                Some(TurnRuntime::External { adapter_id: None }),
+                Some(TurnRuntime::BuiltIn),
+                None,
+            ],
+            "the rebuild projects every recorded attribution shape onto the wire"
+        );
     }
 
     #[test]

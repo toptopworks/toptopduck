@@ -111,15 +111,26 @@ export interface TraceEntry {
   result_excerpt: string;
 }
 
-// Per-turn skill provenance crossing IPC (issue #381): the active skills at
-// the turn's assembly time, each with its content_hash so the TurnCard can
+// The runtime that drove one turn (ADR-0101): the app's built-in loop, or an
+// external CLI adapter named by its stable id. Mirrors the Rust TurnRuntime
+// (adjacently-tagged kind + data, snake_case -- the same shape as
+// SessionRuntimeChoice). The thread renders it as a per-segment attribution
+// badge; the LLM window never reads it (ADR-0101 Decision 3).
+export type TurnRuntime =
+  | { kind: "built_in" }
+  | { kind: "external"; data: { adapter_id: string | null } };
+
+// Per-turn provenance crossing IPC (issue #381, ADR-0101): the active skills
+// at the turn's assembly time, each with its content_hash so the TurnCard can
 // drift-compare against the registry's current SkillEntry.content_hash and
-// surface a "modified" drift badge when a skill changed after a recorded turn. Mirrors the
-// Rust crate::model::TurnProvenance -- the IPC wire is intentionally narrower
-// than the persisted recipe::TurnProvenance (which also carries the runtime
-// kind); the runtime is backend audit only, never crosses to the webview.
+// surface a "modified" drift badge when a skill changed after a recorded turn,
+// plus the turn's executing runtime. Mirrors the Rust
+// crate::model::TurnProvenance; `runtime` is omitted when absent (the
+// optimistic append, or a pre-extension IPC peer) -- rendered without a
+// badge, distinct from external-with-null-id ("recorded, adapter unknown").
 export interface TurnProvenance {
   skills: SkillProvenance[];
+  runtime?: TurnRuntime;
 }
 
 // One conversation-thread entry (ADR-0028/0039): the verbatim user question

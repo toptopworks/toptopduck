@@ -503,6 +503,8 @@
   "thread.trace.op.write": "write",
   "thread.trace.successAria": "Call succeeded",
   "thread.trace.toggle": "Trace · {count} {count, plural, one {call} other {calls}}",
+  "thread.runtime.builtIn": "Built-in",
+  "thread.runtime.externalUnrecorded": "External (not recorded)",
   "viz.chartLabel": "Chart",
   "viz.error.invalidJson": "the spec is not valid JSON",
   "viz.error.notObject": "the spec is not a Vega-Lite object",
