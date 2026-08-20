@@ -673,7 +673,7 @@ impl Recipe {
             // ADR-0095/0102 header facts: Recipe::build constructs the replay
             // projection; the caller (RecipePersister::build_recipe) layers
             // the session-level facts on top via
-            // [`Recipe::with_runtime_model_config`].
+            // [`Recipe::with_session_runtime_facts`].
             model: None,
             thought_level: None,
             cached_discovered: None,
@@ -686,7 +686,7 @@ impl Recipe {
     /// `last_runtime`). Builder-style: `Recipe::build` produces the replay
     /// projection, then the persister layers the session-level facts so the
     /// persisted file carries them.
-    pub fn with_runtime_model_config(
+    pub fn with_session_runtime_facts(
         mut self,
         model: Option<String>,
         thought_level: Option<String>,
@@ -1725,7 +1725,7 @@ mod tests {
         assert_eq!(recipe.thought_level, None);
         assert_eq!(recipe.cached_discovered, None);
 
-        let layered = recipe.with_runtime_model_config(
+        let layered = recipe.with_session_runtime_facts(
             Some("fake-opus".into()),
             Some("high".into()),
             Some(crate::runtime::acp::adapter::DiscoveredRuntime {
@@ -1772,7 +1772,7 @@ mod tests {
         let recipe: Recipe = serde_json::from_value(old).expect("pre-#589 recipe parses");
         assert_eq!(recipe.last_runtime, None);
 
-        let stamped = recipe.with_runtime_model_config(
+        let stamped = recipe.with_session_runtime_facts(
             None,
             None,
             None,

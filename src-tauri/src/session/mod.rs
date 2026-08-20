@@ -372,11 +372,11 @@ pub struct ResumeProgress {
 /// except `last_runtime`, which mirrors the turn's own attribution snapshot
 /// instead (stamped by [`Session::record_turn`], one batch with the persist).
 #[derive(Debug, Clone, Default)]
-pub struct RuntimeModelConfig {
+pub struct SessionRuntimeFacts {
     pub model: Option<String>,
     pub thought_level: Option<String>,
     pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
-    pub last_runtime: Option<crate::persistence::recipe::LastRuntime>,
+    pub last_runtime: Option<LastRuntime>,
 }
 
 pub struct Session {
@@ -498,7 +498,7 @@ pub struct Session {
     /// future ADR). The `set_session_model` / `set_session_thought_level`
     /// commands also write it so the next auto-write persists a selection
     /// made WITHOUT a following turn (the resume promise, ADR-0095 D6).
-    runtime_model_config: RuntimeModelConfig,
+    runtime_facts: SessionRuntimeFacts,
     /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
     /// Updated at the top of each turn (the aggregator's `connect_all` result)
     /// so the command layer can snapshot it into the SessionHandle for
@@ -710,7 +710,7 @@ impl Session {
     /// into the Session at turn top (ADR-0095, the `set_external_runtime`
     /// pattern): the command layer calls this right after the runtime choice
     /// mirror, so both take effect at the same turn boundary. Writes
-    /// `runtime_model_config` only -- the single storage both the turn input
+    /// `runtime_facts` only -- the single storage both the turn input
     /// and the persister read (issue #530). `pub` so the IPC test seam can
     /// toggle without the command layer.
     pub fn set_external_model_config(
@@ -718,16 +718,16 @@ impl Session {
         model: Option<String>,
         thought_level: Option<String>,
     ) {
-        self.runtime_model_config.model = model;
-        self.runtime_model_config.thought_level = thought_level;
+        self.runtime_facts.model = model;
+        self.runtime_facts.thought_level = thought_level;
     }
 
     /// Read the recipe-header ADR-0095 facts (the persister layers them onto
     /// every built recipe). Exposed so the `set_session_model` /
     /// `set_session_thought_level` commands can persist a selection made
     /// without a following turn.
-    pub fn runtime_model_config(&self) -> &RuntimeModelConfig {
-        &self.runtime_model_config
+    pub fn runtime_facts(&self) -> &SessionRuntimeFacts {
+        &self.runtime_facts
     }
 
     /// The last turn's discovered runtime catalog (ADR-0095): snapshotted
@@ -757,7 +757,7 @@ impl Session {
         &mut self,
         discovered: crate::runtime::acp::adapter::DiscoveredRuntime,
     ) {
-        self.runtime_model_config.cached_discovered = Some(discovered.clone());
+        self.runtime_facts.cached_discovered = Some(discovered.clone());
         self.last_discovered_runtime = Some(discovered);
     }
 
@@ -821,7 +821,7 @@ impl Session {
             drop_signal: None,
             external_runtime: None,
             last_discovered_runtime: None,
-            runtime_model_config: RuntimeModelConfig::default(),
+            runtime_facts: SessionRuntimeFacts::default(),
             last_mcp_connect: Vec::new(),
             mounted_skills: Vec::new(),
         })
@@ -925,7 +925,7 @@ impl Session {
             session_name,
             &self.working_set,
             &self.timeline,
-            &self.runtime_model_config,
+            &self.runtime_facts,
         )
     }
 
@@ -1080,11 +1080,8 @@ impl Session {
         }
         let name = trimmed.to_string();
         self.persister.set_session_name(name.clone());
-        self.persister.save_if_bound(
-            &self.working_set,
-            &self.timeline,
-            &self.runtime_model_config,
-        );
+        self.persister
+            .save_if_bound(&self.working_set, &self.timeline, &self.runtime_facts);
         Ok(name)
     }
 
@@ -1392,11 +1389,11 @@ impl Session {
             // ADR-0095: the session-level model / thought-level choices ride
             // the turn input (injected per-format inside the engine: ACP
             // set_config_option requests, non-ACP argv). Read from the
-            // SAME `runtime_model_config` the persister layers onto the recipe
+            // SAME `runtime_facts` the persister layers onto the recipe
             // header -- one storage, no mirror to drift (issue #530). `None`
             // leaves the CLI's own defaults in place.
-            model: self.runtime_model_config.model.clone(),
-            thought_level: self.runtime_model_config.thought_level.clone(),
+            model: self.runtime_facts.model.clone(),
+            thought_level: self.runtime_facts.thought_level.clone(),
             prompt_blocks,
         };
         // 5. Drive the gateway serve + the ACP engine on two scoped threads.
@@ -1534,14 +1531,12 @@ impl Session {
         // External-without-id shape cannot name an adapter, so it leaves the
         // previous stamp in place (the live path always carries `Some`; see
         // the attribution construction in `ask_with_phase`).
-        self.runtime_model_config.last_runtime = match &runtime {
+        self.runtime_facts.last_runtime = match &runtime {
             TurnRuntime::BuiltIn => Some(LastRuntime::BuiltIn),
             TurnRuntime::External {
                 adapter_id: Some(id),
             } => Some(LastRuntime::External(id.clone())),
-            TurnRuntime::External { adapter_id: None } => {
-                self.runtime_model_config.last_runtime.clone()
-            }
+            TurnRuntime::External { adapter_id: None } => self.runtime_facts.last_runtime.clone(),
         };
         // ADR-0089 Decision 4: on the first terminal turn, auto-name the
         // session from the first question's bounded truncation (ADR-0039
@@ -1600,11 +1595,8 @@ impl Session {
     /// Build the recipe (ADR-0034). Facade delegate to
     /// [`RecipePersister::build_recipe`](recipe_persister::RecipePersister::build_recipe).
     pub fn build_recipe(&self) -> Recipe {
-        self.persister.build_recipe(
-            &self.working_set,
-            &self.timeline,
-            &self.runtime_model_config,
-        )
+        self.persister
+            .build_recipe(&self.working_set, &self.timeline, &self.runtime_facts)
     }
 
     /// Rewrite the recipe at the bound path (ADR-0034 atomic write). Facade
@@ -1621,11 +1613,8 @@ impl Session {
         if let Some(duck_path) = self.persister.duck_path().map(PathBuf::from) {
             self.migrate_derived_sources(&duck_path);
         }
-        self.persister.save_if_bound(
-            &self.working_set,
-            &self.timeline,
-            &self.runtime_model_config,
-        );
+        self.persister
+            .save_if_bound(&self.working_set, &self.timeline, &self.runtime_facts);
     }
 
     /// Take (read + clear) the most recent per-turn persistence failure, if
@@ -1653,11 +1642,8 @@ impl Session {
 
     /// Resolve a pending conflict with "Keep Mine" (ADR-0035 Decision 3).
     pub fn conflict_keep_mine(&mut self) -> Result<(), SaveError> {
-        self.persister.conflict_keep_mine(
-            &self.working_set,
-            &self.timeline,
-            &self.runtime_model_config,
-        )
+        self.persister
+            .conflict_keep_mine(&self.working_set, &self.timeline, &self.runtime_facts)
     }
 
     /// Resolve a pending conflict with "Save As New" (ADR-0035 Decision 3).
@@ -1666,7 +1652,7 @@ impl Session {
             new_path,
             &self.working_set,
             &self.timeline,
-            &self.runtime_model_config,
+            &self.runtime_facts,
         )
     }
 
@@ -2739,7 +2725,7 @@ mod tests {
         // ADR-0102 (issue #589): the same attribution snapshot stamps the
         // recipe-header `last_runtime` -- here the external turn's adapter.
         assert_eq!(
-            session.runtime_model_config().last_runtime,
+            session.runtime_facts().last_runtime,
             Some(LastRuntime::External("gemini-cli".into())),
             "the header stamp follows the recorded turn's runtime"
         );
@@ -2811,7 +2797,7 @@ mod tests {
         // layers it onto the built recipe's header (one batch with the
         // posture pair + the catalog).
         assert_eq!(
-            session.runtime_model_config().last_runtime,
+            session.runtime_facts().last_runtime,
             Some(LastRuntime::BuiltIn),
             "the last recorded turn's runtime wins"
         );

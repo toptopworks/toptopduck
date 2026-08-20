@@ -780,8 +780,8 @@ impl super::Session {
         // command layer never destroys the persisted value) and the
         // caller-visible read (open_duck at the command layer restores the
         // posture trio onto the handle and resolves `last_runtime` into the
-        // restored runtime choice via `Session::runtime_model_config`).
-        session.runtime_model_config = super::RuntimeModelConfig {
+        // restored runtime choice via `Session::runtime_facts`).
+        session.runtime_facts = super::SessionRuntimeFacts {
             model: recipe.model.clone(),
             thought_level: recipe.thought_level.clone(),
             cached_discovered: recipe.cached_discovered.clone(),

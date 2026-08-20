@@ -308,7 +308,7 @@ fn resume_restores_the_header_last_runtime_and_the_rewrite_keeps_it() {
 
     let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
     assert_eq!(
-        resumed.runtime_model_config().last_runtime,
+        resumed.runtime_facts().last_runtime,
         Some(toptopduck_lib::persistence::recipe::LastRuntime::External(
             "gemini-cli".into()
         )),

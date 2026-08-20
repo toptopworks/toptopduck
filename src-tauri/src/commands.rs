@@ -51,7 +51,7 @@ use crate::runtime::acp::catalog_store::{
     now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
 };
 use crate::session::{
-    RenameSessionError, ResumeEvent, ResumeProgress, RuntimeModelConfig, Session, TurnInputs,
+    RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts, TurnInputs,
 };
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
@@ -2026,11 +2026,11 @@ pub async fn open_duck(
         new_session.set_drop_signal(drop_tx);
         handle_for_task.set_drop_signal_rx(drop_rx);
         // ADR-0095 Decision 6: capture the resumed Session's recipe-header
-        // model config BEFORE the swap consumes new_session (the Session's
+        // runtime facts BEFORE the swap consumes new_session (the Session's
         // accessor borrows it). Restored onto the handle after the reset
         // batch below so the model / thought-level selections + the discovery
         // cache survive the resume (unlike the reset-to-default postures).
-        let model_config = new_session.runtime_model_config().clone();
+        let runtime_facts = new_session.runtime_facts().clone();
         let mut s = handle_for_task.session_lock()?;
         // Capture the pre-resume binding before the rebind. create_session
         // bound a fresh empty session.duck in a new per-session directory;
@@ -2048,7 +2048,7 @@ pub async fn open_duck(
         // restored after the resets so the restored values win. Extracted
         // into `apply_resumed_postures` so the wiring is testable without
         // an AppHandle.
-        apply_resumed_postures(&handle_for_task, model_config, startup, |spec| {
+        apply_resumed_postures(&handle_for_task, runtime_facts, startup, |spec| {
             detect_adapter(spec).is_some()
         });
         // Remove the orphaned empty per-session directory create_session made
@@ -2702,7 +2702,7 @@ fn resume_runtime_choice(
 /// injects.
 fn apply_resumed_postures(
     handle: &SessionHandle,
-    model_config: RuntimeModelConfig,
+    runtime_facts: SessionRuntimeFacts,
     startup: Option<AdapterSpec>,
     detected: impl Fn(&AdapterSpec) -> bool,
 ) {
@@ -2729,16 +2729,16 @@ fn apply_resumed_postures(
     // `Session::open_duck`, whose phase-5 rewrite already re-emitted it
     // unchanged, so a re-detected CLI is honored by the next resume.
     handle.set_runtime_choice(resume_runtime_choice(
-        model_config.last_runtime.as_ref(),
+        runtime_facts.last_runtime.as_ref(),
         startup,
         detected,
     ));
     // ADR-0095 Decision 6: restore the model config AFTER the reset batch
     // (the restored values win over any stale pre-resume state).
     handle.restore_runtime_model_config(
-        model_config.model,
-        model_config.thought_level,
-        model_config.cached_discovered,
+        runtime_facts.model,
+        runtime_facts.thought_level,
+        runtime_facts.cached_discovered,
     );
 }
 
@@ -2956,8 +2956,8 @@ pub fn set_session_model(
     // is untouched.
     let outcome = persist_outcome(&s);
     handle.set_external_model_config(
-        s.runtime_model_config().model.clone(),
-        s.runtime_model_config().thought_level.clone(),
+        s.runtime_facts().model.clone(),
+        s.runtime_facts().thought_level.clone(),
     );
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
     // adapter's startup backfill entry (see set_session_model's doc).
@@ -2993,8 +2993,8 @@ pub fn set_session_thought_level(
     // See set_session_model: the in-process verdict read (issue #529).
     let outcome = persist_outcome(&s);
     handle.set_external_model_config(
-        s.runtime_model_config().model.clone(),
-        s.runtime_model_config().thought_level.clone(),
+        s.runtime_facts().model.clone(),
+        s.runtime_facts().thought_level.clone(),
     );
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
     // adapter's startup backfill entry (see set_session_model's doc).
@@ -3504,7 +3504,7 @@ mod tests {
         // trio wins over the stale model.
         apply_resumed_postures(
             &handle,
-            RuntimeModelConfig {
+            SessionRuntimeFacts {
                 last_runtime: Some(LastRuntime::External("gemini-cli".into())),
                 model: Some("fake-opus".into()),
                 ..Default::default()
@@ -3531,7 +3531,7 @@ mod tests {
         // runtime -- the ADR-0098 Decision 2 semantics.
         apply_resumed_postures(
             &handle,
-            RuntimeModelConfig::default(),
+            SessionRuntimeFacts::default(),
             Some(gemini.clone()),
             detected_ids(&[]),
         );
@@ -3550,7 +3550,7 @@ mod tests {
         // detected CLI.
         apply_resumed_postures(
             &handle,
-            RuntimeModelConfig {
+            SessionRuntimeFacts {
                 last_runtime: Some(LastRuntime::External("gemini-cli".into())),
                 ..Default::default()
             },
@@ -3691,12 +3691,12 @@ mod tests {
         );
         let s = handle.session_lock().expect("session lock");
         assert_eq!(
-            s.runtime_model_config().model.as_deref(),
+            s.runtime_facts().model.as_deref(),
             Some("gemini-2.5-pro"),
             "the Session storage feeds the recipe"
         );
         assert_eq!(
-            s.runtime_model_config().thought_level.as_deref(),
+            s.runtime_facts().thought_level.as_deref(),
             Some("high"),
             "the Session storage feeds the recipe"
         );
@@ -3712,8 +3712,8 @@ mod tests {
         apply_startup_posture(&handle, &ModelPosture::default()).expect("apply the empty posture");
         assert_eq!(handle.external_model_config(), (None, None));
         let s = handle.session_lock().expect("session lock");
-        assert!(s.runtime_model_config().model.is_none());
-        assert!(s.runtime_model_config().thought_level.is_none());
+        assert!(s.runtime_facts().model.is_none());
+        assert!(s.runtime_facts().thought_level.is_none());
     }
 
     #[test]
