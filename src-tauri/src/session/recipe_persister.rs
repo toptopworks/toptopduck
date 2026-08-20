@@ -128,7 +128,7 @@ impl RecipePersister {
         &self,
         working_set: &WorkingSet,
         timeline: &[TimelineEntry],
-        config: &super::RuntimeModelConfig,
+        config: &super::SessionRuntimeFacts,
     ) -> Recipe {
         // ADR-0036 Decision 4 hybrid paths: `source_path` is always absolute
         // (fallback resolver); `relative_path` is set when the source lives
@@ -246,12 +246,14 @@ impl RecipePersister {
         .expect(
             "RecipePersister::build_recipe produces a recipe satisfying Recipe::build invariants",
         )
-        // ADR-0095: layer the session-level model config onto the header so
-        // every auto-write persists the selections + the discovery cache.
-        .with_runtime_model_config(
+        // ADR-0095 (+ ADR-0102's last_runtime): layer the session-level
+        // runtime facts onto the header so every auto-write persists the
+        // selections + the discovery cache + the last turn's runtime.
+        .with_session_runtime_facts(
             config.model.clone(),
             config.thought_level.clone(),
             config.cached_discovered.clone(),
+            config.last_runtime.clone(),
         )
     }
 
@@ -263,7 +265,7 @@ impl RecipePersister {
         &self,
         working_set: &WorkingSet,
         timeline: &[TimelineEntry],
-        config: &super::RuntimeModelConfig,
+        config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
         let Some(path) = &self.duck_path else {
             return Ok(());
@@ -288,7 +290,7 @@ impl RecipePersister {
         &mut self,
         working_set: &WorkingSet,
         timeline: &[TimelineEntry],
-        config: &super::RuntimeModelConfig,
+        config: &super::SessionRuntimeFacts,
     ) {
         let Some(path) = self.duck_path.as_deref() else {
             return; // unbound -- in-memory-only session, nothing to persist.
@@ -370,7 +372,7 @@ impl RecipePersister {
         session_name: String,
         working_set: &WorkingSet,
         timeline: &[TimelineEntry],
-        config: &super::RuntimeModelConfig,
+        config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
         let canonical = canonicalize_duck(&path).map_err(|e| SaveError::Io(e.to_string()))?;
         // Single-writer gate: re-binding the SAME canonical path is an update;
@@ -432,7 +434,7 @@ impl RecipePersister {
         &mut self,
         working_set: &WorkingSet,
         timeline: &[TimelineEntry],
-        config: &super::RuntimeModelConfig,
+        config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
         let path = self
             .duck_path
@@ -455,7 +457,7 @@ impl RecipePersister {
         new_path: PathBuf,
         working_set: &WorkingSet,
         timeline: &[TimelineEntry],
-        config: &super::RuntimeModelConfig,
+        config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
         let canonical = canonicalize_duck(&new_path).map_err(|e| SaveError::Io(e.to_string()))?;
         if self.duck_canonical.as_deref() == Some(canonical.as_path()) {
@@ -587,7 +589,7 @@ mod tests {
         let persister = RecipePersister::new();
         let ws = WorkingSet::default();
         let recipe =
-            persister.build_recipe(&ws, &[], &crate::session::RuntimeModelConfig::default());
+            persister.build_recipe(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
         assert!(recipe.sources.is_empty());
         assert!(recipe.history.is_empty());
@@ -601,7 +603,7 @@ mod tests {
         persister.set_session_name("my session".into());
         let ws = WorkingSet::default();
         let recipe =
-            persister.build_recipe(&ws, &[], &crate::session::RuntimeModelConfig::default());
+            persister.build_recipe(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         assert_eq!(recipe.session_name, "my session");
     }
 
@@ -615,7 +617,7 @@ mod tests {
 
         let persister = RecipePersister::new();
         let recipe =
-            persister.build_recipe(&ws, &[], &crate::session::RuntimeModelConfig::default());
+            persister.build_recipe(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         assert_eq!(recipe.sources.len(), 1, "result_N is filtered out");
         assert_eq!(recipe.sources[0].reference_name, "people");
     }
@@ -633,7 +635,7 @@ mod tests {
         persister.duck_path = Some(duck);
 
         let recipe =
-            persister.build_recipe(&ws, &[], &crate::session::RuntimeModelConfig::default());
+            persister.build_recipe(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         let src = &recipe.sources[0];
         assert_eq!(
             src.relative_path.as_deref(),
@@ -661,7 +663,7 @@ mod tests {
         persister.duck_path = Some(duck);
 
         let recipe =
-            persister.build_recipe(&ws, &[], &crate::session::RuntimeModelConfig::default());
+            persister.build_recipe(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         assert!(
             recipe.sources[0].relative_path.is_none(),
             "out-of-subtree source has no relative path"
@@ -686,7 +688,7 @@ mod tests {
         let recipe = persister.build_recipe(
             &ws,
             &timeline,
-            &crate::session::RuntimeModelConfig::default(),
+            &crate::session::SessionRuntimeFacts::default(),
         );
         assert_eq!(recipe.history.len(), 1);
         match &recipe.history[0] {
@@ -712,7 +714,7 @@ mod tests {
         let recipe = persister.build_recipe(
             &ws,
             &timeline,
-            &crate::session::RuntimeModelConfig::default(),
+            &crate::session::SessionRuntimeFacts::default(),
         );
         assert_eq!(recipe.history.len(), 1);
         assert!(matches!(
@@ -755,7 +757,7 @@ mod tests {
         let recipe = persister.build_recipe(
             &WorkingSet::default(),
             &timeline,
-            &crate::session::RuntimeModelConfig::default(),
+            &crate::session::SessionRuntimeFacts::default(),
         );
         match &recipe.history[0] {
             RecipeEntry::Turn(t) => {
@@ -797,7 +799,7 @@ mod tests {
         let recipe = persister.build_recipe(
             &ws,
             &timeline,
-            &crate::session::RuntimeModelConfig::default(),
+            &crate::session::SessionRuntimeFacts::default(),
         );
         assert!(
             recipe.history.is_empty(),
@@ -811,7 +813,7 @@ mod tests {
     fn save_if_bound_is_noop_when_unbound() {
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
-        persister.save_if_bound(&ws, &[], &crate::session::RuntimeModelConfig::default());
+        persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         // No error, no conflict, no state change.
         assert!(persister.take_persist_error().is_none());
         assert!(persister.take_pending_conflict().is_none());
@@ -830,7 +832,7 @@ mod tests {
                 "test session".into(),
                 &ws,
                 &[],
-                &crate::session::RuntimeModelConfig::default(),
+                &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("bind");
 
@@ -855,13 +857,13 @@ mod tests {
                 "initial".into(),
                 &ws,
                 &[],
-                &crate::session::RuntimeModelConfig::default(),
+                &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("bind");
 
         // Change the name and save again.
         persister.set_session_name("updated".into());
-        persister.save_if_bound(&ws, &[], &crate::session::RuntimeModelConfig::default());
+        persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
 
         let recipe = crate::persistence::read_duck(&path).expect("read back");
         assert_eq!(recipe.session_name, "updated");
@@ -880,7 +882,7 @@ mod tests {
                 "mine".into(),
                 &ws,
                 &[],
-                &crate::session::RuntimeModelConfig::default(),
+                &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("bind");
 
@@ -889,7 +891,7 @@ mod tests {
         std::fs::write(&path, r#"{"externally":"edited"}"#).expect("external write");
 
         persister.set_session_name("new content".into());
-        persister.save_if_bound(&ws, &[], &crate::session::RuntimeModelConfig::default());
+        persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
 
         let conflict = persister.take_pending_conflict().expect("conflict stashed");
         assert_eq!(conflict.path, path);
@@ -912,22 +914,22 @@ mod tests {
                 "mine".into(),
                 &ws,
                 &[],
-                &crate::session::RuntimeModelConfig::default(),
+                &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("bind");
 
         // External edit -> conflict.
         std::fs::write(&path, r#"{"externally":"edited"}"#).expect("external write");
-        persister.save_if_bound(&ws, &[], &crate::session::RuntimeModelConfig::default());
+        persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         assert!(persister.take_pending_conflict().is_some());
 
         // Simulate re-detection (save_if_bound sets conflict again).
         std::fs::write(&path, r#"{"another":"edit"}"#).expect("external write 2");
-        persister.save_if_bound(&ws, &[], &crate::session::RuntimeModelConfig::default());
+        persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
 
         // Keep mine -> overwrites the external edit.
         persister
-            .conflict_keep_mine(&ws, &[], &crate::session::RuntimeModelConfig::default())
+            .conflict_keep_mine(&ws, &[], &crate::session::SessionRuntimeFacts::default())
             .expect("keep mine succeeds");
 
         assert!(
@@ -952,18 +954,18 @@ mod tests {
                 "session".into(),
                 &ws,
                 &[],
-                &crate::session::RuntimeModelConfig::default(),
+                &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("bind");
 
         // External edit -> conflict.
         std::fs::write(&old_path, r#"{"externally":"edited"}"#).expect("external write");
-        persister.save_if_bound(&ws, &[], &crate::session::RuntimeModelConfig::default());
+        persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
         assert!(persister.take_pending_conflict().is_some());
 
         // Re-detect for the resolution path.
         std::fs::write(&old_path, r#"{"another":"edit"}"#).expect("external write 2");
-        persister.save_if_bound(&ws, &[], &crate::session::RuntimeModelConfig::default());
+        persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
 
         // Save as new.
         persister
@@ -971,7 +973,7 @@ mod tests {
                 new_path.clone(),
                 &ws,
                 &[],
-                &crate::session::RuntimeModelConfig::default(),
+                &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("save as new");
 
@@ -1021,7 +1023,7 @@ mod tests {
                 "gated".into(),
                 &ws,
                 &[],
-                &crate::session::RuntimeModelConfig::default(),
+                &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("bind");
         assert!(persister.duck_canonical.is_some());

@@ -345,7 +345,7 @@
   "settings.profiles.validate.invalidUrl": "Base URL is not a valid URL.",
   "settings.reading": "Reading current config…",
   "settings.runtime.defaultRuntime.builtIn": "Built-in",
-  "settings.runtime.defaultRuntime.description": "The runtime new sessions and resumed sessions start with.",
+  "settings.runtime.defaultRuntime.description": "The runtime new sessions start with.",
   "settings.runtime.defaultRuntime.legend": "Default runtime",
   "settings.runtime.defaultRuntime.notInstalled": "{name} (Not installed)",
   "settings.runtime.description": "API access profiles and local CLI adapters for driving turns.",

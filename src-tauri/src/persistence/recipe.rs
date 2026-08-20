@@ -198,6 +198,22 @@ pub enum RuntimeKind {
     External,
 }
 
+/// Which runtime the session's last executed turn ran on (ADR-0102 Decision
+/// 1): the recipe-header fact resume restores the runtime choice from (segment
+/// continuation -- the execution-plane selections survive a resume, unlike the
+/// approval / MCP posture). Adjacently tagged with the same `kind` / `data`
+/// shape as the IPC `SessionRuntimeChoice`, so the persisted fact and the wire
+/// fact are the same disjunction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+#[serde(rename_all = "snake_case")]
+pub enum LastRuntime {
+    /// The app's own Rust-native agent loop (ADR-0081).
+    BuiltIn,
+    /// The named external CLI adapter (its stable `AdapterId` string).
+    External(String),
+}
+
 /// Provenance of a turn's execution context (ADR-0078): which runtime produced
 /// it and which skills were active at assembly time. The persisted audit anchor
 /// for "how was this answer produced".
@@ -498,6 +514,18 @@ pub struct Recipe {
     /// handshake re-discovery. Optional for old-recipe compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    /// The runtime the session's last executed turn ran on (ADR-0102
+    /// Decision 1): stamped per turn by the session from the turn's
+    /// attribution snapshot, layered onto the header in the same batch as the
+    /// posture pair and `cached_discovered`, so a resume restores the
+    /// session's own runtime instead of falling back to the machine-level
+    /// default. NOT a replay input. Optional: a recipe persisted before the
+    /// field deserializes as `None` (resume then applies the pre-ADR-0102
+    /// default-runtime resolution). No format_version bump -- strictly
+    /// additive with a serde default, the same precedent as `adapter_id` on
+    /// the fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_runtime: Option<LastRuntime>,
 }
 
 /// Why [`Recipe::build`] rejected a proposed recipe.
@@ -642,29 +670,33 @@ impl Recipe {
             sources,
             history,
             active,
-            // ADR-0095 header facts: Recipe::build constructs the replay
+            // ADR-0095/0102 header facts: Recipe::build constructs the replay
             // projection; the caller (RecipePersister::build_recipe) layers
-            // the session-level model config on top via
-            // [`Recipe::with_runtime_model_config`].
+            // the session-level facts on top via
+            // [`Recipe::with_session_runtime_facts`].
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         })
     }
 
-    /// Layer the session-level external-runtime model config onto the
-    /// recipe header (ADR-0095 Decision 6). Builder-style: `Recipe::build`
-    /// produces the replay projection, then the persister layers the
-    /// session-level facts so the persisted file carries them.
-    pub fn with_runtime_model_config(
+    /// Layer the session-level runtime facts onto the recipe header
+    /// (ADR-0095 Decision 6, extended by ADR-0102 Decision 1 with
+    /// `last_runtime`). Builder-style: `Recipe::build` produces the replay
+    /// projection, then the persister layers the session-level facts so the
+    /// persisted file carries them.
+    pub fn with_session_runtime_facts(
         mut self,
         model: Option<String>,
         thought_level: Option<String>,
         cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+        last_runtime: Option<LastRuntime>,
     ) -> Recipe {
         self.model = model;
         self.thought_level = thought_level;
         self.cached_discovered = cached_discovered;
+        self.last_runtime = last_runtime;
         self
     }
 
@@ -813,6 +845,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         }
     }
 
@@ -887,6 +920,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -934,6 +968,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -999,6 +1034,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1113,6 +1149,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1513,6 +1550,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -1546,6 +1584,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         assert_eq!(
             recipe.mounted_skills(),
@@ -1580,6 +1619,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         assert_eq!(recipe.mounted_skills(), vec!["b".to_string()]);
     }
@@ -1597,6 +1637,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         assert!(recipe.mounted_skills().is_empty());
     }
@@ -1660,6 +1701,7 @@ mod tests {
             model: None,
             thought_level: None,
             cached_discovered: None,
+            last_runtime: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(chain.len(), 1);
@@ -1683,7 +1725,7 @@ mod tests {
         assert_eq!(recipe.thought_level, None);
         assert_eq!(recipe.cached_discovered, None);
 
-        let layered = recipe.with_runtime_model_config(
+        let layered = recipe.with_session_runtime_facts(
             Some("fake-opus".into()),
             Some("high".into()),
             Some(crate::runtime::acp::adapter::DiscoveredRuntime {
@@ -1695,6 +1737,7 @@ mod tests {
                 thought_level_config_id: Some("thought".into()),
                 adapter_id: Some("gemini-cli".into()),
             }),
+            Some(LastRuntime::External("gemini-cli".into())),
         );
         let v = serde_json::to_value(&layered).expect("serialize");
         assert_eq!(v["model"], "fake-opus");
@@ -1710,6 +1753,45 @@ mod tests {
             back.cached_discovered.and_then(|d| d.adapter_id),
             Some("gemini-cli".to_string())
         );
+    }
+
+    /// ADR-0102 (issue #589): `last_runtime` rides the header like the posture
+    /// pair -- absent on pre-#589 recipes (serde default `None`, so resume
+    /// applies the old default-runtime semantics), and both variants
+    /// round-trip through the layering builder with the same `kind` / `data`
+    /// shape as the IPC `SessionRuntimeChoice`.
+    #[test]
+    fn recipe_last_runtime_defaults_none_and_round_trips() {
+        let old = serde_json::json!({
+            "format_version": 1,
+            "session_name": "s",
+            "sources": [],
+            "history": [],
+            "model": "fake-opus",
+        });
+        let recipe: Recipe = serde_json::from_value(old).expect("pre-#589 recipe parses");
+        assert_eq!(recipe.last_runtime, None);
+
+        let stamped = recipe.with_session_runtime_facts(
+            None,
+            None,
+            None,
+            Some(LastRuntime::External("gemini-cli".into())),
+        );
+        let v = serde_json::to_value(&stamped).expect("serialize");
+        assert_eq!(
+            v["last_runtime"],
+            serde_json::json!({"kind": "external", "data": "gemini-cli"})
+        );
+        let back: Recipe = serde_json::from_value(v).expect("round-trip");
+        assert_eq!(
+            back.last_runtime,
+            Some(LastRuntime::External("gemini-cli".into()))
+        );
+
+        // The built-in variant serializes contentless, same as the wire form.
+        let v = serde_json::to_value(LastRuntime::BuiltIn).expect("serialize");
+        assert_eq!(v, serde_json::json!({"kind": "built_in"}));
     }
 
     /// Issue #529: a recipe persisted before the adapter-id stamp carries no

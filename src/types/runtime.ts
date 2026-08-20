@@ -38,10 +38,12 @@ export interface AdapterEntry {
   stream_format: "acp" | "codex_event_stream" | "claude_stream_json";
 }
 
-// The honest default while the read settles (and after a resume, before the
-// fresh pane's read lands): the built-in BYOK loop (ADR-0081). A single TS
-// expression of the backend's `None` / `BuiltIn` default, mirroring how the
-// auth-mode chip renders `AUTH_MODE_DEFAULT` before its read resolves.
+// The honest default while the read settles (a fresh session, or the window
+// before a resumed pane's read lands the restored last runtime -- degraded
+// to this same built-in when the recorded adapter is not detected): the
+// built-in BYOK loop (ADR-0081). A single TS expression of the backend's
+// `None` / `BuiltIn` default, mirroring how the auth-mode chip renders
+// `AUTH_MODE_DEFAULT` before its read resolves.
 export const RUNTIME_CHOICE_DEFAULT = {
   kind: "built_in",
 } as const satisfies SessionRuntimeChoice;

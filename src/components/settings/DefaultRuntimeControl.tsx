@@ -19,7 +19,9 @@ import {
 import { SettingsCard, SettingsRow } from "./settings-chrome";
 
 // Default runtime control (issue #571, ADR-0098 Decision 2): the machine-level
-// preference selecting the runtime new sessions + resumes start on. Rendered at
+// preference selecting the runtime new sessions start on (since ADR-0102 a
+// resume continues the session's own last runtime -- the default stays the
+// fallback for a pre-#589 recipe without the field). Rendered at
 // the top of the Runtime pane (above the two sub-tabs, always mounted), so it
 // reads as a section-level preamble preference rather than either tab's content.
 //
@@ -141,7 +143,7 @@ export function DefaultRuntimeControl({
           description={(
             <FormattedMessage
               id="settings.runtime.defaultRuntime.description"
-              defaultMessage="The runtime new sessions and resumed sessions start with."
+              defaultMessage="The runtime new sessions start with."
             />
           )}
           action={(

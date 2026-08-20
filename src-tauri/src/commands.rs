@@ -38,6 +38,7 @@ use crate::model::{
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
     SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
+use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
     default_sessions_root, scan_sessions_dir, validate_sessions_dir, SaveError, SessionMetadata,
     SessionsRoot,
@@ -49,7 +50,9 @@ use crate::runtime::acp::adapter::{
 use crate::runtime::acp::catalog_store::{
     now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
 };
-use crate::session::{RenameSessionError, ResumeEvent, ResumeProgress, Session, TurnInputs};
+use crate::session::{
+    RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts, TurnInputs,
+};
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
     discover_skill_sources, import_skills as import_skills_impl, resolve_prompt_fragments,
@@ -1963,11 +1966,13 @@ pub async fn open_duck(
     let app_for_cb = app.clone();
     let sid = id.clone();
     let sessions_root_path = sessions_root.path();
-    // ADR-0098 Decision 2 (issue #569): the resume reset's fallback is the
-    // RESOLVED default runtime, replacing the hardcoded built-in. Resolved
-    // BEFORE the swap closure (the State handle must not cross into the
-    // 'static blocking task; the resolved spec is plain data) so the reset
-    // batch below stays pure handle mutations.
+    // ADR-0102 Decision 1/4 (issue #589): resume restores the session's LAST
+    // runtime (segment continuation) instead of resetting to the default. The
+    // default resolution is still computed here BEFORE the swap closure (the
+    // State handle must not cross into the 'static blocking task; the
+    // resolved spec is plain data) -- it is the fallback for a pre-#589
+    // recipe whose header carries no `last_runtime` (the ADR-0098 Decision 2
+    // semantics, unchanged for old files).
     let startup = startup_runtime_choice(live.inner());
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
@@ -2021,11 +2026,11 @@ pub async fn open_duck(
         new_session.set_drop_signal(drop_tx);
         handle_for_task.set_drop_signal_rx(drop_rx);
         // ADR-0095 Decision 6: capture the resumed Session's recipe-header
-        // model config BEFORE the swap consumes new_session (the Session's
+        // runtime facts BEFORE the swap consumes new_session (the Session's
         // accessor borrows it). Restored onto the handle after the reset
         // batch below so the model / thought-level selections + the discovery
         // cache survive the resume (unlike the reset-to-default postures).
-        let model_config = new_session.runtime_model_config().clone();
+        let runtime_facts = new_session.runtime_facts().clone();
         let mut s = handle_for_task.session_lock()?;
         // Capture the pre-resume binding before the rebind. create_session
         // bound a fresh empty session.duck in a new per-session directory;
@@ -2037,33 +2042,15 @@ pub async fn open_duck(
         *s = new_session;
         // Release the session lock before filesystem cleanup.
         drop(s);
-        // ADR-0080 (issue #294): resume 归零. Trust state is session-level and
-        // must not survive a resume (it is not in the recipe / app-config), so
-        // the moment the resumed contents are live, drop the authorization
-        // mode + trust set back to the default PerCall posture. Reset is
-        // independent of the session rebind -- the approval state lives on the
-        // handle, not inside the Session mutex.
-        handle_for_task.reset_approval();
-        // Issue #301 slice D, AC#3: reset the per-session MCP server
-        // enablement + connect cache alongside the approval posture. The
-        // enablement is session-level (not in the recipe / app-config), so a
-        // resumed session starts at the default empty set -- the user re-
-        // enables servers explicitly, mirroring how trust resets (ADR-0080).
-        handle_for_task.reset_mcp_enablement();
-        // Issue #353 / ADR-0098 Decision 2 (issue #569): reset the per-session
-        // runtime choice alongside the approval posture + MCP enablement. The
-        // runtime is a session-level assembly posture (not in the recipe /
-        // app-config), so it must not survive a resume -- but the fallback is
-        // now the RESOLVED default runtime instead of the hardcoded built-in:
-        // a zero-profile user whose default is a detected CLI resumes on it.
-        handle_for_task.reset_runtime_choice(startup);
-        // ADR-0095 Decision 6: restore the model config AFTER the reset batch
-        // (the restored values win over any stale pre-resume state).
-        handle_for_task.restore_runtime_model_config(
-            model_config.model,
-            model_config.thought_level,
-            model_config.cached_discovered,
-        );
+        // The resumed postures in one batch: the security-plane resets
+        // (approval + MCP enablement) fire first, then the execution-plane
+        // restore -- the runtime continuation + the ADR-0095 posture trio,
+        // restored after the resets so the restored values win. Extracted
+        // into `apply_resumed_postures` so the wiring is testable without
+        // an AppHandle.
+        apply_resumed_postures(&handle_for_task, runtime_facts, startup, |spec| {
+            detect_adapter(spec).is_some()
+        });
         // Remove the orphaned empty per-session directory create_session made
         // when open_duck rebinds to a different resume target path. The old
         // Session::Drop (fired by the `*s = new_session` assignment above)
@@ -2564,7 +2551,10 @@ pub fn get_adapter_catalogs(catalog_store: State<'_, AdapterCatalogStore>) -> Ad
 
 /// Read the session's runtime selection (issue #353). Lock-light: reads the
 /// handle's choice, never the session lock an in-flight turn holds. Returns
-/// the built-in default for a fresh / resumed session.
+/// the startup default for a fresh session; a resumed session returns the
+/// restored last runtime (ADR-0102) -- degraded to the built-in start when
+/// the recorded adapter is not detected, or the resolved default when the
+/// recipe predates the field.
 #[tauri::command]
 pub fn get_session_runtime(
     store: State<'_, Arc<SessionStore>>,
@@ -2600,7 +2590,8 @@ pub fn set_session_runtime(
 
 /// Resolve the app-config `default_runtime` (ADR-0098 Decision 2/3, issue
 /// #569) onto the session-handle storage form (`None` = built-in) for ONE
-/// startup -- a fresh session's creation or a resume's post-reset fallback.
+/// startup -- a fresh session's creation or a pre-#589 recipe's resume
+/// fallback (a recorded `last_runtime` continues otherwise).
 /// `BuiltIn` passes through as `None`. `External(id)` resolves the id
 /// against the v1 adapter table and degrades to `None` when the adapter is
 /// unknown or not detected -- never to another detected adapter (the user
@@ -2657,8 +2648,105 @@ fn startup_runtime_choice(live: &LiveProviderConfig) -> Option<AdapterSpec> {
     })
 }
 
-/// Set the default runtime new sessions + resumes start on (ADR-0098 Decision
-/// 2, issue #569). Returns the updated AppConfig so the frontend syncs state
+/// Resolve the recipe-header `last_runtime` into the resumed session's
+/// runtime choice (ADR-0102 Decision 1/4, issue #589). Segment continuation:
+/// the session's own last runtime wins over the machine-level default. A
+/// pre-#589 recipe (`None`) falls back to the caller's RESOLVED default
+/// runtime (the ADR-0098 Decision 2 semantics); an adapter that is not
+/// currently detected degrades THIS resume to the built-in start (mirroring
+/// [`resolve_default_runtime`]'s rule) while the persisted value survives on
+/// the recipe header -- a re-detected CLI is honored by the next resume.
+fn resume_runtime_choice(
+    last: Option<&LastRuntime>,
+    default: Option<AdapterSpec>,
+    detected: impl Fn(&AdapterSpec) -> bool,
+) -> Option<AdapterSpec> {
+    match last {
+        // Pre-#589 recipe: no recorded runtime -- the old default-runtime
+        // resolution applies unchanged.
+        None => default,
+        Some(LastRuntime::BuiltIn) => None,
+        Some(LastRuntime::External(id)) => {
+            let Some(spec) = resolve_adapter(id) else {
+                // Only a hand-edited recipe reaches here (the stamp records a
+                // v1-table id), so warn on the anomaly. The field is kept on
+                // disk -- resolution degrades, never rewrites.
+                log::warn!(
+                    "recipe last_runtime names an adapter outside the v1 table ({id}); \
+                     degrading this resume to the built-in runtime"
+                );
+                return None;
+            };
+            if !detected(&spec) {
+                // The specced common case (ADR-0102 Decision 4): the CLI is
+                // not installed right now. Info, not warn -- the degrade is
+                // per-resume and the persisted value is kept for the
+                // environment's return.
+                log::info!(
+                    "recipe last_runtime names {id}, which is not currently detected; \
+                     degrading this resume to the built-in runtime (persisted value kept)"
+                );
+                return None;
+            }
+            Some(spec)
+        }
+    }
+}
+
+/// Apply the resumed session's postures to the handle after the swap
+/// (`open_duck`). The whole reset + restore batch in one free function so
+/// the command-layer wiring is testable without an AppHandle: the
+/// security-plane resets fire first, then the execution-plane continuation,
+/// then the ADR-0095 trio -- restored last so the restored values win.
+/// `detected` is the same PATH-scan-free seam [`resume_runtime_choice`]
+/// injects.
+fn apply_resumed_postures(
+    handle: &SessionHandle,
+    runtime_facts: SessionRuntimeFacts,
+    startup: Option<AdapterSpec>,
+    detected: impl Fn(&AdapterSpec) -> bool,
+) {
+    // ADR-0080 (issue #294): resume zeroes trust. Trust state is
+    // session-level and must not survive a resume (it is not in the recipe /
+    // app-config), so the moment the resumed contents are live, drop the
+    // authorization mode + trust set back to the default PerCall posture.
+    // Reset is independent of the session rebind -- the approval state lives
+    // on the handle, not inside the Session mutex.
+    handle.reset_approval();
+    // Issue #301 slice D, AC#3: reset the per-session MCP server enablement
+    // + connect cache alongside the approval posture. The enablement is
+    // session-level (not in the recipe / app-config), so a resumed session
+    // starts at the default empty set -- the user re-enables servers
+    // explicitly, mirroring how trust resets (ADR-0080).
+    handle.reset_mcp_enablement();
+    // ADR-0102 Decision 2 (issue #589): the runtime choice is
+    // execution-plane session state, so the resume continues the session's
+    // OWN last runtime (unlike the approval + MCP resets above, the
+    // security-plane posture). A pre-#589 recipe without `last_runtime`
+    // keeps the old semantics (the resolved default runtime); an undetected
+    // adapter degrades THIS resume to the built-in start while the persisted
+    // value survives on the Session's recipe-header facts -- restored inside
+    // `Session::open_duck`, whose phase-5 rewrite already re-emitted it
+    // unchanged, so a re-detected CLI is honored by the next resume.
+    handle.set_runtime_choice(resume_runtime_choice(
+        runtime_facts.last_runtime.as_ref(),
+        startup,
+        detected,
+    ));
+    // ADR-0095 Decision 6: restore the model config AFTER the reset batch
+    // (the restored values win over any stale pre-resume state).
+    handle.restore_runtime_model_config(
+        runtime_facts.model,
+        runtime_facts.thought_level,
+        runtime_facts.cached_discovered,
+    );
+}
+
+/// Set the default runtime new sessions start on (ADR-0098 Decision 2, issue
+/// #569; since ADR-0102 a resume continues the session's own last runtime
+/// instead -- the default stays the fallback for a pre-#589 recipe whose
+/// header carries no `last_runtime`). Returns the updated AppConfig so the
+/// frontend syncs state
 /// without a re-fetch (same shape as `set_sessions_dir`). Lock-light: the
 /// only serialization is the config write lock inside the read-modify-write.
 /// An `External` id must name a v1 adapter -- the settings control only
@@ -2868,8 +2956,8 @@ pub fn set_session_model(
     // is untouched.
     let outcome = persist_outcome(&s);
     handle.set_external_model_config(
-        s.runtime_model_config().model.clone(),
-        s.runtime_model_config().thought_level.clone(),
+        s.runtime_facts().model.clone(),
+        s.runtime_facts().thought_level.clone(),
     );
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
     // adapter's startup backfill entry (see set_session_model's doc).
@@ -2905,8 +2993,8 @@ pub fn set_session_thought_level(
     // See set_session_model: the in-process verdict read (issue #529).
     let outcome = persist_outcome(&s);
     handle.set_external_model_config(
-        s.runtime_model_config().model.clone(),
-        s.runtime_model_config().thought_level.clone(),
+        s.runtime_facts().model.clone(),
+        s.runtime_facts().thought_level.clone(),
     );
     // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
     // adapter's startup backfill entry (see set_session_model's doc).
@@ -3313,6 +3401,168 @@ mod tests {
         );
     }
 
+    // --- resume runtime continuation (issue #589, ADR-0102 D1/D4) ----------
+
+    #[test]
+    fn resume_continues_the_sessions_last_runtime() {
+        // D1 segment continuation: a recorded external runtime resolves to
+        // that exact CLI, and a recorded built-in runtime resumes built-in --
+        // the machine-level default never overrides the session's own state.
+        let spec = resume_runtime_choice(
+            Some(&LastRuntime::External("gemini-cli".into())),
+            None,
+            detected_ids(&["gemini-cli"]),
+        )
+        .expect("a recorded detected runtime continues the session");
+        assert_eq!(spec.id.as_str(), "gemini-cli");
+        assert_eq!(
+            resume_runtime_choice(
+                Some(&LastRuntime::BuiltIn),
+                Some(spec.clone()),
+                detected_ids(&["gemini-cli"]),
+            ),
+            None,
+            "a recorded built-in runtime resumes built-in, default ignored"
+        );
+    }
+
+    #[test]
+    fn resume_without_the_field_falls_back_to_the_default_runtime() {
+        // Old-recipe compatibility (AC5): a pre-#589 recipe carries no
+        // `last_runtime`, so the resume keeps the ADR-0098 Decision 2
+        // semantics -- the RESOLVED default runtime, whatever it resolved to.
+        let fallback = crate::runtime::acp::adapter::gemini_cli();
+        assert_eq!(
+            resume_runtime_choice(None, Some(fallback.clone()), detected_ids(&[])),
+            Some(fallback),
+            "no recorded runtime -> the resolved default lands verbatim"
+        );
+        assert_eq!(
+            resume_runtime_choice(None, None, detected_ids(&["gemini-cli"])),
+            None,
+            "no recorded runtime + built-in default -> built-in"
+        );
+    }
+
+    #[test]
+    fn resume_undetected_adapter_degrades_but_never_substitutes() {
+        // D4: an undetected adapter degrades THIS resume to the built-in
+        // start (the persisted value itself is disk-side, untouched here);
+        // re-detection makes the same recorded value resolve external again.
+        // Resolution also never substitutes a different detected CLI.
+        let last = LastRuntime::External("gemini-cli".into());
+        assert_eq!(
+            resume_runtime_choice(Some(&last), None, detected_ids(&[])),
+            None,
+            "undetected runtime degrades this resume to built-in"
+        );
+        assert_eq!(
+            resume_runtime_choice(Some(&last), None, detected_ids(&["codex"])),
+            None,
+            "a missing CLI never silently resumes on another detected adapter"
+        );
+        let spec = resume_runtime_choice(Some(&last), None, detected_ids(&["gemini-cli"]))
+            .expect("re-detected runtime resolves external again");
+        assert_eq!(spec.id.as_str(), "gemini-cli");
+        // An id outside the v1 table (hand-edited recipe) degrades the same
+        // way -- resolution is total, the persisted field stays as written.
+        assert_eq!(
+            resume_runtime_choice(
+                Some(&LastRuntime::External("no-such-cli".into())),
+                None,
+                detected_ids(&["gemini-cli", "codex"])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn apply_resumed_postures_lands_the_resume_continuation_on_the_handle() {
+        // The open_duck wiring -- the command itself needs an AppHandle, so
+        // the batch lives in a free function (issue #589): the stale
+        // pre-resume choice is OVERWRITTEN by the resume continuation, the
+        // ADR-0095 trio restores after the resets, a pre-#589 recipe falls
+        // back to the resolved default, and an undetected adapter degrades
+        // to the built-in start.
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("get handle");
+        let gemini = crate::runtime::acp::adapter::gemini_cli();
+
+        // A stale pre-resume external choice + model -- the batch overwrites
+        // both, never merges.
+        handle.set_runtime_choice(Some(crate::runtime::acp::adapter::codex()));
+        handle.set_external_model_config(Some("stale-model".into()), None);
+
+        // Continuation (D1): the recorded detected runtime replaces the
+        // stale choice; the startup default is never consulted; the restored
+        // trio wins over the stale model.
+        apply_resumed_postures(
+            &handle,
+            SessionRuntimeFacts {
+                last_runtime: Some(LastRuntime::External("gemini-cli".into())),
+                model: Some("fake-opus".into()),
+                ..Default::default()
+            },
+            Some(crate::runtime::acp::adapter::codex()),
+            detected_ids(&["gemini-cli"]),
+        );
+        assert_eq!(
+            handle
+                .runtime_choice()
+                .expect("the continuation lands")
+                .id
+                .as_str(),
+            "gemini-cli",
+            "the recorded detected runtime overwrites the stale choice"
+        );
+        assert_eq!(
+            handle.external_model_config().0.as_deref(),
+            Some("fake-opus"),
+            "the restored trio wins over the stale model"
+        );
+
+        // Pre-#589 recipe (no recorded runtime): the resolved default
+        // runtime -- the ADR-0098 Decision 2 semantics.
+        apply_resumed_postures(
+            &handle,
+            SessionRuntimeFacts::default(),
+            Some(gemini.clone()),
+            detected_ids(&[]),
+        );
+        assert_eq!(
+            handle
+                .runtime_choice()
+                .expect("the fallback lands")
+                .id
+                .as_str(),
+            "gemini-cli",
+            "a pre-#589 recipe resumes on the resolved default"
+        );
+
+        // D4: an undetected recorded adapter degrades THIS resume to the
+        // built-in start -- never to the startup default, never to another
+        // detected CLI.
+        apply_resumed_postures(
+            &handle,
+            SessionRuntimeFacts {
+                last_runtime: Some(LastRuntime::External("gemini-cli".into())),
+                ..Default::default()
+            },
+            Some(gemini.clone()),
+            detected_ids(&[]),
+        );
+        assert!(
+            handle.runtime_choice().is_none(),
+            "an undetected recorded runtime degrades the resume to built-in"
+        );
+    }
+
     #[test]
     fn startup_runtime_choice_reads_the_real_config_and_degrades_unknown_ids() {
         // The command-path helper through a real config file (the two cases
@@ -3441,12 +3691,12 @@ mod tests {
         );
         let s = handle.session_lock().expect("session lock");
         assert_eq!(
-            s.runtime_model_config().model.as_deref(),
+            s.runtime_facts().model.as_deref(),
             Some("gemini-2.5-pro"),
             "the Session storage feeds the recipe"
         );
         assert_eq!(
-            s.runtime_model_config().thought_level.as_deref(),
+            s.runtime_facts().thought_level.as_deref(),
             Some("high"),
             "the Session storage feeds the recipe"
         );
@@ -3462,8 +3712,8 @@ mod tests {
         apply_startup_posture(&handle, &ModelPosture::default()).expect("apply the empty posture");
         assert_eq!(handle.external_model_config(), (None, None));
         let s = handle.session_lock().expect("session lock");
-        assert!(s.runtime_model_config().model.is_none());
-        assert!(s.runtime_model_config().thought_level.is_none());
+        assert!(s.runtime_facts().model.is_none());
+        assert!(s.runtime_facts().thought_level.is_none());
     }
 
     #[test]

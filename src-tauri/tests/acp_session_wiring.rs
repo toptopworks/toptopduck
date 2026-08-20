@@ -266,7 +266,7 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
         Some(&catalog),
         "a pre-handshake failure must retain the previous catalog"
     );
-    let config = session.runtime_model_config();
+    let config = session.runtime_facts();
     assert_eq!(
         config.cached_discovered.as_ref(),
         Some(&catalog),

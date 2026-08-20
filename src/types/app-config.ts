@@ -74,8 +74,10 @@ export interface ShellPrefs {
   sidebar_grouping: SidebarGrouping;
 }
 
-// The default runtime new sessions + resumes start on (ADR-0098 Decision 2,
-// issue #569). A machine-level preference like the active provider profile,
+// The default runtime new sessions start on (ADR-0098 Decision 2, issue
+// #569; a resume continues the session's own last runtime since ADR-0102 --
+// the default stays the fallback for a pre-#589 recipe without the field).
+// A machine-level preference like the active provider profile,
 // NOT a last-used hint. Mirrors the Rust `DefaultRuntime` -- a type distinct
 // from `SessionRuntimeChoice`, mirroring the config-vs-session domain split
 // on the Rust side; the two wire shapes are pinned identical in
@@ -120,8 +122,9 @@ export interface AppConfig {
   // null = runtime-computed default (<Documents>/toptopduck/sessions/).
   // serde(default) fills null for a pre-#452 file.
   sessions_dir: string | null;
-  // The default runtime new sessions + resumes start on (ADR-0098 Decision 2,
-  // issue #569). serde(default) fills built_in for a pre-#569 file.
+  // The default runtime new sessions start on (ADR-0098 Decision 2, issue
+  // #569; resumes continue the session's last runtime since ADR-0102).
+  // serde(default) fills built_in for a pre-#569 file.
   default_runtime: DefaultRuntime;
   // Per-adapter last-selected model postures (ADR-0100, issue #581), keyed by
   // adapter id. serde(default) fills an empty map for a pre-#581 file, but

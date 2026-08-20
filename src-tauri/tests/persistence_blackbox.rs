@@ -280,6 +280,54 @@ fn resume_restores_working_set_history_and_active() {
     );
 }
 
+/// ADR-0102 (issue #589): the recipe-header `last_runtime` is stamped by
+/// every executed turn (the built-in loop records `built_in`), restored into
+/// the resumed Session's recipe-header facts, and the post-resume rewrite
+/// keeps it -- the persisted value survives even when the command layer would
+/// degrade the resumed runtime choice (an undetected adapter), so a
+/// re-detected CLI is honored by the next resume.
+#[test]
+fn resume_restores_the_header_last_runtime_and_the_rewrite_keeps_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let session = build_session(&duck);
+    drop(session);
+
+    // AC1: every executed turn stamped the header (the built-in loop records
+    // `built_in`). Rewrite the stamp to an external id so the RESTORE half is
+    // pinned on a value the built-in loop could never produce on its own.
+    let disk = fs::read_to_string(&duck).expect("read duck");
+    let mut v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    assert_eq!(
+        v["last_runtime"],
+        json!({"kind": "built_in"}),
+        "the executed turns stamped last_runtime"
+    );
+    v["last_runtime"] = json!({"kind": "external", "data": "gemini-cli"});
+    fs::write(&duck, serde_json::to_string_pretty(&v).expect("serialize")).expect("write duck");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert_eq!(
+        resumed.runtime_facts().last_runtime,
+        Some(toptopduck_lib::persistence::recipe::LastRuntime::External(
+            "gemini-cli".into()
+        )),
+        "the resumed Session restores the header's last_runtime"
+    );
+
+    // The post-resume rewrite (resume phase 5) rebuilt the file from the
+    // restored facts, so the persisted value is still there for the next
+    // resume -- the degrade never destroys it.
+    drop(resumed);
+    let disk = fs::read_to_string(&duck).expect("read duck");
+    let v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    assert_eq!(
+        v["last_runtime"],
+        json!({"kind": "external", "data": "gemini-cli"}),
+        "the post-resume rewrite preserves the persisted value"
+    );
+}
+
 #[test]
 fn resume_rebuilds_mounted_skills_from_timeline_fold() {
     // AC#5 (ADR-0086, issue #363): the live `Session.mounted_skills` cache is
