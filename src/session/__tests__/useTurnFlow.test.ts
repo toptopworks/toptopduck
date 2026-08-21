@@ -393,6 +393,56 @@ describe("useTurnFlow", () => {
       });
     });
 
+    it("stamps a round-2 gate wait's pending card with round 2 (hook wiring, issue #610)", async () => {
+      // The hook passes live.step into the merge (not a constant): after
+      // round 1 completes its call and round 2's Thinking opens, a pending
+      // approval must trail at step 2 -- the live grouping renders its card
+      // inside round 2's block. A wiring regression to a constant null/1
+      // keeps every other test green while stranding the card in round 1.
+      const approval: ApprovalEntry = {
+        requestId: "req-1",
+        server: "acme",
+        tool: "fetch",
+        operationKind: "network",
+        summary: "GET /x",
+        status: { kind: "pending" },
+      };
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() =>
+        useTurnFlow(SID, { ...deps, approvals: [approval] }),
+      );
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      // Round 1's completed call, then the round-2 gate wait trailing in place.
+      expect(result.current.liveTurn?.rows).toHaveLength(2);
+      expect(result.current.liveTurn?.rows[0]).toMatchObject({ key: "call-0", step: 1, success: true });
+      expect(result.current.liveTurn?.rows[1]).toMatchObject({
+        key: "req-1",
+        step: 2,
+        approval: { requestId: "req-1", response: null },
+        success: null,
+      });
+    });
+
     it("clears the live card on ask end and calls onApprovalsSettled", async () => {
       const { deps } = setup();
       let resolveAsk!: (o: TurnOutcome) => void;

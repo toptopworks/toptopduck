@@ -1348,6 +1348,26 @@ describe("Thread", () => {
       expect(within(roundBlocks[1] as HTMLElement).getByText("materialize")).toBeInTheDocument();
     });
 
+    it("brings the thinking status back between rounds once every row settles", () => {
+      // Every row completed (no running dispatch, no gate wait) at step 2:
+      // the turn is back on an LLM round-trip, so the trailing status must
+      // return naming the step -- the gate predicate reads row state, not row
+      // count (a `rows.length > 0` regression drops the spinner on every
+      // multi-round turn and stays green against the rest of the suite).
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 2,
+        roundTexts: [],
+        roundThinkings: [],
+        rows: [liveRow({ key: "call-0", running: false, success: true })],
+      };
+      renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+    });
+
     it("renders a pending approval card whose three buttons answer by request id", () => {
       const liveTurn: LiveTurn = {
         question: "q",
@@ -1378,6 +1398,10 @@ describe("Thread", () => {
         />,
       );
       expect(screen.getByText("等待审批")).toBeInTheDocument();
+      // The pending gate wait carries the motion itself, so the trailing
+      // thinking status steps aside (no second spinner beside the card -- a
+      // predicate regression to `running` alone renders both).
+      expect(screen.queryByText("思考中…")).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
       expect(onRespondApproval).toHaveBeenCalledWith("req-1", "allow_once");
       fireEvent.click(screen.getByRole("button", { name: "始终允许" }));
