@@ -2046,7 +2046,7 @@ mod tests {
     // composes -- tested in isolation here so a regression in the dedup
     // contract surfaces without driving the full Session -> AcpEngine -> bridge
     // chain.
-    use super::merge_outcomes;
+    use super::{clamp_settle, merge_outcomes};
     use crate::approval::OperationKind;
     use crate::runtime::gateway::server::GatewayOutcome;
     use crate::session::agent_loop::{LoopOutcome, LoopRound, Termination, TraceEntry};
@@ -2058,12 +2058,12 @@ mod tests {
     // never a synthetic value).
     #[test]
     fn clamp_settle_keeps_the_pair_monotonic() {
-        use super::clamp_settle;
         assert_eq!(clamp_settle(Some(150), Some(100)), Some(150));
         // Clock stepped backward between the two reads: settle floors at ask.
         assert_eq!(clamp_settle(Some(90), Some(100)), Some(100));
         assert_eq!(clamp_settle(None, Some(100)), None);
         assert_eq!(clamp_settle(Some(150), None), Some(150));
+        assert_eq!(clamp_settle(None, None), None);
     }
 
     /// A materialize tool call promoting `sql` -- the tool-calling contract's

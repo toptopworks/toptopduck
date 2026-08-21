@@ -216,14 +216,16 @@ pub struct RecipeTraceRound {
     pub calls: Vec<RecipeTraceEntry>,
 }
 
-/// The turn's wall-clock pair (ADR-0103, issue #608): the ask stamp (submit
-/// time) and the settle stamp (record time, clamped onto the ask). A named
-/// struct instead of two trailing `Option<u64>` params on [`RecipeTurn::with_audit`],
-/// so a transposed pair cannot compile silently at a construction site
-/// (issue #617; the `PosturePair` precedent).
+/// The turn's wall-clock pair (ADR-0103, issue #608). A named struct
+/// instead of two trailing `Option<u64>` params on [`RecipeTurn::with_audit`],
+/// so the pair travels as one unit and a construction site fills it by
+/// field name (issue #617; the `PosturePair` precedent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TurnTimestamps {
+    /// The ask stamp: when the turn's question was accepted.
     pub asked_at: Option<u64>,
+    /// The settle stamp: when the outcome was recorded, clamped onto the
+    /// ask so the pair stays monotonic.
     pub settled_at: Option<u64>,
 }
 

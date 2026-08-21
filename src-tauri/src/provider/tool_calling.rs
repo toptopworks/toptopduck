@@ -168,10 +168,11 @@ pub enum ToolTurnReply {
 
 impl ToolTurnReply {
     /// Convenience constructor for a tool-call batch with no connective
-    /// prose -- the common scripted/test shape (a real adapter reply that
-    /// carried text constructs the struct variant explicitly).
+    /// prose -- the common scripted/test shape. Delegates to
+    /// [`tool_calls_with`], so the non-empty-calls assertion and the
+    /// empty-text normalization cover both constructors.
     pub fn tool_calls(calls: Vec<ToolUse>) -> Self {
-        Self::ToolCalls { text: None, calls }
+        Self::tool_calls_with(None, calls)
     }
 
     /// Construct a tool-call batch with its connective prose, normalizing an

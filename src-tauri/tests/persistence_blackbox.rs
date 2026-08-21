@@ -2185,20 +2185,35 @@ fn open_duck_migrates_a_v4_real_recording_shape_into_one_round() {
         "Catalog Error: Table with name nonexistent does not exist"
     );
     assert_eq!(
-        turn.asked_at, None,
+        (turn.asked_at, turn.settled_at),
+        (None, None),
         "a v4 turn honest-degrades with no timestamps"
     );
 
     // The on-disk .duck re-persisted at v5: the wrapped round landed
-    // verbatim.
+    // verbatim, failure bit and excerpt and all.
     let persisted = read_duck(&duck).expect("read persisted");
     assert_eq!(persisted.format_version(), RECIPE_FORMAT_VERSION);
     let RecipeEntry::Turn(t) = &persisted.history[0] else {
         panic!("first history entry is the turn");
     };
     assert_eq!(t.trace.len(), 1);
+    assert_eq!(t.trace[0].thinking, None);
+    assert_eq!(t.trace[0].text, None);
     assert_eq!(t.trace[0].calls.len(), 3);
+    assert_eq!(t.trace[0].calls[0].name, "explore");
+    assert_eq!(t.trace[0].calls[0].operation_kind, OperationKind::Read);
+    assert!(t.trace[0].calls[1].success);
     assert!(!t.trace[0].calls[2].success);
+    assert_eq!(
+        t.trace[0].calls[2].result_excerpt,
+        "Catalog Error: Table with name nonexistent does not exist"
+    );
+    assert_eq!(
+        (t.asked_at, t.settled_at),
+        (None, None),
+        "the honest-degrade pair re-persists as absent"
+    );
 }
 
 /// AC1: move the .duck AND its in-subtree source together -> the relative
