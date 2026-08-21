@@ -14,7 +14,7 @@
 
 6. **SessionHandle 新增三个会话级字段并持久化**：`model: Option<String>`（选中的模型 ID）、`thought_level: Option<String>`（选中的思考强度值）、`cached_discovered: Option<DiscoveredRuntime>`（上轮发现的模型列表缓存，供 resume 冷启动渲染）。resume 时三者一并恢复——模型选择丢失是 resume 承诺的意外退化。recipe **不记录**模型与思考强度：LLM 模型不是可重放的确定性输入，模型选择是会话级配置而非 recipe 步骤。
 
-7. **IPC 为两个独立 lock-light 命令**：`set_session_model(session_id, model)` 与 `set_session_thought_level(session_id, thought_level)`，与 `set_session_runtime` 同模式（落 handle、turn boundary 生效、resume 中拒绝）。模型 ID 不在 IPC 边界校验：前端下拉只提供发现的模型，无效 ID 只能来自 stale 缓存或手动调用，CLI 在 spawn 时自行处置。
+7. **IPC 为单 lock-light 命令**：`set_session_posture(session_id, model, thought_level)` 一次携带完整姿势对——`model` 与 `thought_level` 均为显式意图值（`null` 为用户清除，「未动」由前端送当前值），后端不从槽位旧值派生未动字段，并发写的语义是「后写整对覆盖」。与 `set_session_runtime` 同模式（落 handle、turn boundary 生效、resume 中拒绝）。模型 ID 不在 IPC 边界校验：前端下拉只提供发现的模型，无效 ID 只能来自 stale 缓存或手动调用，CLI 在 spawn 时自行处置。
 
 8. **内置运行时（BYOK）的思考强度不在本 ADR 范围**。`thought_level` 对内置运行时为 no-op。provider 级思考强度（anthropic extended thinking / openai reasoning_effort）语义异构于 CLI 的离散 thought_level，需逐 provider 适配，留待独立 ADR。内置运行时的模型选择维持现状（provider profile 驱动）。
 

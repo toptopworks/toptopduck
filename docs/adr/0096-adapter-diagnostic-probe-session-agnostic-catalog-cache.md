@@ -14,7 +14,7 @@
 
 6. **选择器目录优先级：会话目录 > 全局探测缓存 > 空态**。Composer 的模型/强度选择器在当前运行时为外部 CLI 时：会话有 `cached_discovered`（首轮 turn 后的握手目录）优先——它是本轮 CLI 实际报告的真相；无则回落全局探测缓存（用户显式测试的快照）；再无则空态并展示引导（「去设置页测试以获取模型列表」）。时间戳仅展示用，不参与优先级逻辑。codex 选择器选模型后强度下拉只列该模型声明的 efforts（per-model 联动）；ACP 选择器维持全局扁平列表。
 
-7. **选择与注入链路维持 ADR-0095 语义**。探测缓存只做选择器的数据源；用户选中值照常经 `set_session_model` / `set_session_thought_level` 落会话、turn boundary 生效、注入按 per-format 分派（ACP 协议参数 / codex argv flag）。IPC 边界不校验模型 ID——缓存过期产生的无效 ID 由 CLI 在 spawn 时报错，可观察。
+7. **选择与注入链路维持 ADR-0095 语义**。探测缓存只做选择器的数据源；用户选中值照常经 `set_session_posture`（ADR-0095 Decision 7 的单命令）落会话、turn boundary 生效、注入按 per-format 分派（ACP 协议参数 / codex argv flag）。IPC 边界不校验模型 ID——缓存过期产生的无效 ID 由 CLI 在 spawn 时报错，可观察。
 
 8. **设置页与 Composer 分工维持 ADR-0091**。设置页本机 CLI tab 是管理面：检测列表 + rescan + 测试 + 目录展示。Composer 是纯选择面：运行时 chip + 模型/强度下拉（消费本 ADR 的优先级链）。运行时选择保持 per-session，不全局化。
 
