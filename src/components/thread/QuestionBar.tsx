@@ -118,7 +118,12 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
         <div className="flex items-center gap-1.5">
           {children}
         </div>
-        <div className="flex items-center gap-2">
+        {/* min-w-0 lets the trailing cluster shrink inside the
+            justify-between row: without it the cluster's automatic minimum
+            size locks to the posture label's content width and the whole
+            cluster (label + runtime trigger + submit) paints past the bar's
+            right border on narrow bars. */}
+        <div className="flex min-w-0 items-center gap-2">
           {trailing}
           {loading && phase !== null && (
             // ADR-0059 discrete phase feedback. The attempt number surfaces only
