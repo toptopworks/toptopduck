@@ -57,11 +57,7 @@ vi.mock("../../api", async (importOriginal) => {
     // posture tests assert calls.
     setSessionRuntime: vi.fn(async () => {}),
     // The clean #529 persist verdict; fault-verdict tests override per case.
-    setSessionModel: vi.fn(async () => ({
-      persist_error: null,
-      persist_suspended: false,
-    })),
-    setSessionThoughtLevel: vi.fn(async () => ({
+    setSessionPosture: vi.fn(async () => ({
       persist_error: null,
       persist_suspended: false,
     })),
@@ -96,9 +92,8 @@ import {
   renamePersistedSession,
   renameSession,
   setAuthorizationMode,
-  setSessionModel,
+  setSessionPosture,
   setSessionRuntime,
-  setSessionThoughtLevel,
   toggleMcpServer,
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -215,8 +210,7 @@ describe("useShellSessions", () => {
       await result.current.createSessionWithQuestion("q", DEFAULT_POSTURE, []);
     });
     expect(setSessionRuntime).not.toHaveBeenCalled();
-    expect(setSessionModel).not.toHaveBeenCalled();
-    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+    expect(setSessionPosture).not.toHaveBeenCalled();
     expect(setAuthorizationMode).not.toHaveBeenCalled();
     expect(mountSkill).not.toHaveBeenCalled();
     expect(toggleMcpServer).not.toHaveBeenCalled();
@@ -241,17 +235,17 @@ describe("useShellSessions", () => {
         [],
       );
     });
-    expect(setSessionModel).toHaveBeenCalledWith("s1", "fake-sonnet");
-    expect(setSessionThoughtLevel).toHaveBeenCalledWith("s1", "high");
+    expect(setSessionPosture).toHaveBeenCalledWith("s1", { model: "fake-sonnet", thought_level: "high" });
     expect(
       vi.mocked(setSessionRuntime).mock.invocationCallOrder[0],
-    ).toBeLessThan(vi.mocked(setSessionModel).mock.invocationCallOrder[0]);
+    ).toBeLessThan(vi.mocked(setSessionPosture).mock.invocationCallOrder[0]);
     expect(result.current.openSessions).toHaveLength(1);
   });
 
   it("createSessionWithQuestion writes null posture fields as explicit clears", async () => {
     // A non-null pair is EXPLICIT: null fields are real clears the user made
-    // on the bar, not "skip this dimension" -- both IPCs fire with null.
+    // on the bar, not "skip this dimension" -- the full pair rides one wire
+    // submit with the null intact.
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
     const { result } = renderSessions();
     await act(async () => {
@@ -267,17 +261,16 @@ describe("useShellSessions", () => {
         [],
       );
     });
-    expect(setSessionModel).toHaveBeenCalledWith("s1", "fake-sonnet");
-    expect(setSessionThoughtLevel).toHaveBeenCalledWith("s1", null);
+    expect(setSessionPosture).toHaveBeenCalledWith("s1", { model: "fake-sonnet", thought_level: null });
   });
 
-  it("createSessionWithQuestion surfaces a persist fault returned by a successful model set (#529)", async () => {
+  it("createSessionWithQuestion surfaces a persist fault returned by a successful posture set (#529)", async () => {
     // The set IPC resolves, but the persist verdict carries a typed write
     // failure: the verdict rides the resolved value (never a reject), so the
     // mint path must surface it like the picker's fault lines -- a silent
     // drop leaves the selection in memory only and a resume reverts it.
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
-    vi.mocked(setSessionModel).mockResolvedValueOnce({
+    vi.mocked(setSessionPosture).mockResolvedValueOnce({
       persist_error: { kind: "Io", data: "disk full" },
       persist_suspended: false,
     });
@@ -299,8 +292,8 @@ describe("useShellSessions", () => {
     expect(created).toBe(true);
     expect(setShellError).toHaveBeenCalledTimes(1);
     expect(setShellError.mock.calls[0][0].message).toMatch(/Selection not saved/);
-    // The fault is per-facet: the thought-level write still lands.
-    expect(setSessionThoughtLevel).toHaveBeenCalledWith("s1", "high");
+    // The full pair rode the one wire submit despite the persist fault.
+    expect(setSessionPosture).toHaveBeenCalledTimes(1);
     expect(result.current.openSessions).toHaveLength(1);
   });
 

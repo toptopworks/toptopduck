@@ -27,7 +27,7 @@ import type { IntlShape } from "react-intl";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
-import type { CreateSessionReply, SetModelPersistOutcome } from "../api";
+import type { CreateSessionReply, SetPosturePersistOutcome } from "../api";
 import {
   closeSession,
   closeSessionAndWaitRelease,
@@ -42,9 +42,8 @@ import {
   renamePersistedSession,
   renameSession,
   setAuthorizationMode,
-  setSessionModel,
+  setSessionPosture,
   setSessionRuntime,
-  setSessionThoughtLevel,
   toggleMcpServer,
 } from "../api";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
@@ -337,7 +336,7 @@ export function useShellSessions({
           // surfaces via setShellError but never fails the whole creation --
           // the session opens on the backend default for that facet and the
           // remaining picks still apply (the picker's keep-server-posture
-          // semantics). The four facets share this helper so the catch
+          // semantics). The write kinds share this helper so the catch
           // contract lives in one place.
           const applyPostureWrite = async (
             write: () => Promise<unknown>,
@@ -356,20 +355,19 @@ export function useShellSessions({
               setShellError(toAppError(e, intl, "shell"));
             }
           };
-          // The two model facets carry the #529 persist verdict in the
+          // The posture write carries the #529 persist verdict in the
           // RESOLVED value (never a reject): surface it like the picker's
           // fault lines, because an un-surfaced verdict leaves the selection
           // in memory only -- a restart resumes the recipe without it and
           // the user has no signal the .duck write failed, breaking "set
           // means persisted" (ADR-0095 Decision 6) silently.
           const surfacePersistVerdict = (
-            outcome: SetModelPersistOutcome,
-            facet: string,
+            outcome: SetPosturePersistOutcome,
           ): void => {
             if (outcome.persist_error !== null) {
               log.warn(
                 "useShellSessions",
-                `pending ${facet} applied but not persisted`,
+                "pending posture applied but not persisted",
                 fmtError(outcome.persist_error, intl),
               );
               setShellError({
@@ -386,7 +384,7 @@ export function useShellSessions({
             } else if (outcome.persist_suspended) {
               log.warn(
                 "useShellSessions",
-                `pending ${facet} applied but persist suspended (ADR-0035 conflict)`,
+                "pending posture applied but persist suspended (ADR-0035 conflict)",
               );
               setShellError({
                 message: intl.formatMessage({
@@ -411,25 +409,15 @@ export function useShellSessions({
           if (posture.modelPosture !== null) {
             // ADR-0100 (issue #574): the cold-start cascade menu's explicit
             // pair -- AFTER the runtime write so the model / thought level
-            // land on the chosen external adapter. Both dimensions always
-            // write: null fields are explicit clears the user made on the
-            // bar, not "leave whatever the startup backfill seated".
+            // land on the chosen external adapter. One full-pair command
+            // (issue #603): both dimensions always write, null fields being
+            // explicit clears the user made on the bar, not "leave whatever
+            // the startup backfill seated".
             const modelPick = posture.modelPosture;
             await applyPostureWrite(
               async () =>
-                surfacePersistVerdict(
-                  await setSessionModel(sid, modelPick.model),
-                  "model",
-                ),
-              "model",
-            );
-            await applyPostureWrite(
-              async () =>
-                surfacePersistVerdict(
-                  await setSessionThoughtLevel(sid, modelPick.thought_level),
-                  "thought level",
-                ),
-              "thought level",
+                surfacePersistVerdict(await setSessionPosture(sid, modelPick)),
+              "posture",
             );
           }
           if (posture.authMode !== AUTH_MODE_DEFAULT) {

@@ -497,7 +497,7 @@ impl RecipePersister {
 
     /// NON-consuming snapshot of the persist outcome, for callers that need
     /// an immediate verdict right after their own `save_if_bound` call (the
-    /// ADR-0095 set commands, issue #529): `Err` carries the typed write
+    /// ADR-0095 set command, issue #529): `Err` carries the typed write
     /// failure, `Ok` with `true` means a write landed, `Ok` with `false`
     /// means the write was SUSPENDED on a pending conflict (ADR-0035 -- the
     /// auto-write refuses to clobber an externally-edited file). Distinct
