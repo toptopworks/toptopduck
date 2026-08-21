@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
@@ -1125,6 +1125,38 @@ describe("Thread", () => {
       await waitFor(() => expect(writeText).toHaveBeenCalledWith("答复正文"));
     });
 
+    it("reverts the copied ack after the hold and re-arms it on a repeat copy", async () => {
+      // shouldAdvanceTime lets findByRole/waitFor's own timers keep ticking
+      // while the hold is under fake-time control.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+      renderChat(chatRecord());
+      fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
+      expect(await screen.findByRole("button", { name: "已复制" })).toBeInTheDocument();
+      // Halfway through the hold the ack is still up (no early revert).
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.getByRole("button", { name: "已复制" })).toBeInTheDocument();
+      // A repeat copy during the hold re-arms it: the old timer's
+      // remaining 500ms elapse and the ack survives them...
+      fireEvent.click(screen.getByRole("button", { name: "已复制" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(screen.getByRole("button", { name: "已复制" })).toBeInTheDocument();
+      // ...then the re-armed hold expires and everything reverts: glyph,
+      // accessible name, and the popped tooltip (nothing holds it open).
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.getByRole("button", { name: "复制消息" })).toBeInTheDocument();
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+      vi.useRealTimers();
+    });
+
     it("leaves the copy glyph unchanged when the clipboard rejects (honest no-op)", async () => {
       const writeText = vi.fn().mockRejectedValue(new Error("denied"));
       vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
@@ -1157,7 +1189,13 @@ describe("Thread", () => {
         expect(el.className).toContain("opacity-0");
         expect(el.className).toContain("group-hover:opacity-100");
         expect(el.className).toContain("group-focus-within:opacity-100");
+        expect(el.className).toContain("[@media(hover:none)]:opacity-100");
       });
+      // The reveal rides each side's group marker -- both anchors are part
+      // of the contract (drop one and its side's hover/focus reveal dies
+      // silently in the browser; jsdom cannot notice).
+      expect(container.querySelector(".user-bubble")?.className.split(/\s+/)).toContain("group");
+      expect(container.querySelector(".assistant-stream")?.className.split(/\s+/)).toContain("group");
       // The outcome glyph is state, not chrome: it lives outside the reveal.
       expect(container.querySelector(".meta-reveal .outcome-icon")).toBeNull();
       expect(container.querySelector(".turn-meta .outcome-icon")).not.toBeNull();
