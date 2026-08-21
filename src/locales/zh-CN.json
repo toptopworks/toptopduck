@@ -472,7 +472,6 @@
   "thread.copy.copied": "已复制",
   "thread.copy.question": "复制问话",
   "thread.copy.reply": "复制答复",
-  "thread.live.running": "执行中",
   "thread.live.thinkingStep": "思考中（第 {step} 步）…",
   "thread.outcome.agent": "已回答",
   "thread.outcome.cancelled": "已取消",

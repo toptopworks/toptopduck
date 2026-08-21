@@ -1210,7 +1210,11 @@ describe("Thread", () => {
     });
   });
 
-  describe("in-flight live turn card (ADR-0078/0083, issue #297)", () => {
+  describe("in-flight live chat exchange (ADR-0103 live, issues #297/#610)", () => {
+    // Fixed submit stamp: the bubble's <time> PRESENCE is asserted, not its
+    // locale-rendered text.
+    const ASKED_AT = 1_700_000_000_000;
+
     function liveRow(over: Partial<LiveTraceRow> = {}): LiveTraceRow {
       return {
         key: "call-0",
@@ -1227,17 +1231,137 @@ describe("Thread", () => {
       };
     }
 
-    it("renders the asking question with a running glyph + thinking hint", () => {
-      const liveTurn: LiveTurn = { question: "统计一下", step: 1, rows: [], roundTexts: [] };
-      renderThread(
+    it("mounts the user bubble at submit with the thinking status (chat live form)", () => {
+      const liveTurn: LiveTurn = {
+        question: "统计一下",
+        askedAt: ASKED_AT,
+        step: null,
+        rows: [],
+        roundTexts: [],
+        roundThinkings: [],
+      };
+      const { container } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
       expect(screen.getByText("统计一下")).toBeInTheDocument();
       expect(screen.getByText("思考中…")).toBeInTheDocument();
+      // The bubble is the settled chat form's own component (#610): the full
+      // question + the ask stamp + copy, mounted before any progress event.
+      const bubble = container.querySelector(".user-bubble");
+      expect(bubble).not.toBeNull();
+      expect(bubble?.querySelector("time")).not.toBeNull();
+      // No thinking data -> no thinking fold (honest degrade).
+      expect(container.querySelector(".thinking-toggle")).toBeNull();
+      // The old progressive card form is retired.
+      expect(container.querySelector(".live-turn-card")).toBeNull();
     });
 
     it("surfaces the step on a multi-round-trip turn (honest step N)", () => {
-      const liveTurn: LiveTurn = { question: "q", step: 2, rows: [], roundTexts: [] };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 2,
+        rows: [],
+        roundTexts: [],
+        roundThinkings: [],
+      };
+      renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+    });
+
+    it("streams round prose, the thinking fold and rows grouped by round", () => {
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 2,
+        roundTexts: ["先看一眼数据。", null],
+        roundThinkings: [{ duration_ms: 900, text: "推理" }, null],
+        rows: [
+          liveRow({
+            key: "call-0",
+            running: false,
+            success: false,
+            resultExcerpt: "boom",
+          }),
+          liveRow({
+            key: "call-1",
+            step: 2,
+            name: "materialize",
+            operationKind: "write",
+            summary: "SELECT 2",
+          }),
+        ],
+      };
+      const { container } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      // Prose renders always-expanded and the thinking fold with its honest
+      // duration label (collapsed) -- both identical to the settled form, so
+      // the settle swap does not move them.
+      expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
+      expect(screen.getByText("思考 · 0.9s")).toBeInTheDocument();
+      // The grouping itself is the contract (rowsToRounds groups the same
+      // way at settle): one block per round, each row inside ITS round.
+      const roundBlocks = container.querySelectorAll(".trace-round");
+      expect(roundBlocks).toHaveLength(2);
+      const round1 = within(roundBlocks[0] as HTMLElement);
+      expect(round1.getByText("explore")).toBeInTheDocument();
+      expect(round1.getByText("先看一眼数据。")).toBeInTheDocument();
+      const round1Toggle = roundBlocks[0]?.querySelector(".thinking-toggle") ?? null;
+      expect(round1Toggle).not.toBeNull();
+      // The live thinking fold defaults to collapsed (the settled posture).
+      expect(round1Toggle?.getAttribute("aria-expanded")).toBe("false");
+      // Round 2 had no thinking (null slot): no thinking fold, just its row.
+      const round2 = within(roundBlocks[1] as HTMLElement);
+      expect(round2.getByText("materialize")).toBeInTheDocument();
+      expect(round2.queryByText("思考 · 0.9s")).not.toBeInTheDocument();
+      expect(round2.queryByText("先看一眼数据。")).not.toBeInTheDocument();
+      expect(roundBlocks[1]?.querySelector(".thinking-toggle")).toBeNull();
+      // A dispatched row carries the motion, so the trailing thinking
+      // status steps aside (no second spinner row).
+      expect(screen.queryByText("思考中…")).not.toBeInTheDocument();
+      expect(screen.queryByText("思考中（第 2 步）…")).not.toBeInTheDocument();
+    });
+
+    it("derives rounds from rows beyond the slot arrays (rows lead the slots)", () => {
+      // A call can land in round 3 while only round 1 emitted prose (the
+      // slot arrays lag the dispatch stream): the block count follows the
+      // rows, so the newest call still groups into its own round.
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 3,
+        roundTexts: ["先看一眼数据。"],
+        roundThinkings: [],
+        rows: [
+          liveRow({ key: "call-2", step: 3, name: "materialize", operationKind: "write", summary: "SELECT 3" }),
+        ],
+      };
+      const { container } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      const roundBlocks = container.querySelectorAll(".trace-round");
+      expect(roundBlocks).toHaveLength(2);
+      expect(within(roundBlocks[0] as HTMLElement).getByText("先看一眼数据。")).toBeInTheDocument();
+      expect(within(roundBlocks[1] as HTMLElement).getByText("materialize")).toBeInTheDocument();
+    });
+
+    it("brings the thinking status back between rounds once every row settles", () => {
+      // Every row completed (no running dispatch, no gate wait) at step 2:
+      // the turn is back on an LLM round-trip, so the trailing status must
+      // return naming the step -- the gate predicate reads row state, not row
+      // count (a `rows.length > 0` regression drops the spinner on every
+      // multi-round turn and stays green against the rest of the suite).
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 2,
+        roundTexts: [],
+        roundThinkings: [],
+        rows: [liveRow({ key: "call-0", running: false, success: true })],
+      };
       renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
@@ -1247,8 +1371,10 @@ describe("Thread", () => {
     it("renders a pending approval card whose three buttons answer by request id", () => {
       const liveTurn: LiveTurn = {
         question: "q",
+        askedAt: ASKED_AT,
         step: 1,
         roundTexts: [],
+        roundThinkings: [],
         rows: [
           liveRow({
             key: "req-1",
@@ -1272,6 +1398,10 @@ describe("Thread", () => {
         />,
       );
       expect(screen.getByText("等待审批")).toBeInTheDocument();
+      // The pending gate wait carries the motion itself, so the trailing
+      // thinking status steps aside (no second spinner beside the card -- a
+      // predicate regression to `running` alone renders both).
+      expect(screen.queryByText("思考中…")).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
       expect(onRespondApproval).toHaveBeenCalledWith("req-1", "allow_once");
       fireEvent.click(screen.getByRole("button", { name: "始终允许" }));
@@ -1283,8 +1413,10 @@ describe("Thread", () => {
     it("flips an answered approval to its resolved badge in place", () => {
       const liveTurn: LiveTurn = {
         question: "q",
+        askedAt: ASKED_AT,
         step: 1,
         roundTexts: [],
+        roundThinkings: [],
         rows: [
           liveRow({
             key: "req-1",
@@ -1310,14 +1442,21 @@ describe("Thread", () => {
     });
 
     it("appends after recorded entries and renders alone on a first-turn session", () => {
-      const liveTurn: LiveTurn = { question: "第一问", step: null, rows: [], roundTexts: [] };
-      // entries empty (a brand-new session's first ask): the live card still
-      // renders (the empty-thread bail-out must not swallow it).
+      const liveTurn: LiveTurn = {
+        question: "第一问",
+        askedAt: ASKED_AT,
+        step: null,
+        rows: [],
+        roundTexts: [],
+        roundThinkings: [],
+      };
+      // entries empty (a brand-new session's first ask): the live exchange
+      // still renders (the empty-thread bail-out must not swallow it).
       const { container } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
       expect(screen.getByText("第一问")).toBeInTheDocument();
-      expect(container.querySelector(".live-turn-card")).not.toBeNull();
+      expect(container.querySelector(".live-turn-exchange")).not.toBeNull();
     });
   });
 

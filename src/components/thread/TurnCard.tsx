@@ -7,15 +7,17 @@
 // settled_at). App annotations all live on the assistant side; the bubble
 // carries only user output and conversation facts.
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { ChevronRight, PencilLine } from "lucide-react";
+import { PencilLine } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { TraceRowList } from "./TraceView";
 import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
+import { FoldToggle } from "./FoldToggle";
+import { ThinkingFold } from "./ThinkingFold";
 import { UserBubble } from "./UserBubble";
 import { StaleChip } from "./StaleChip";
 import { outcomeVisual, selectDriftedSkills, type DatasetLabel } from "./turn-visual";
@@ -174,40 +176,6 @@ export function TurnCard({
   );
 }
 
-// The shared fold chrome: a compact chevron + label button, the chevron
-// rotating on expand; aria-expanded conveys the fold state. Used by the
-// per-round thinking + steps folds -- the hook class is the fold's selector /
-// test anchor, the label rides children.
-function FoldToggle({
-  hookClass,
-  expanded,
-  onToggle,
-  children,
-}: {
-  hookClass: string;
-  expanded: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      className={cn(
-        hookClass,
-        "mt-0.5 flex items-center gap-1 cursor-pointer text-xs text-muted-foreground hover:text-foreground",
-      )}
-      aria-expanded={expanded}
-      onClick={onToggle}
-    >
-      <ChevronRight
-        aria-hidden="true"
-        className={cn("w-3.5 h-3.5 transition-transform", expanded && "rotate-90")}
-      />
-      {children}
-    </button>
-  );
-}
-
 // One round of the round-grouped trace (ADR-0103, calibrating ADR-0078): the
 // thinking fold (default collapsed, ADR-0078 long-rail posture), the round's
 // connective prose (always expanded -- the readability mainstay), and the
@@ -215,9 +183,10 @@ function FoldToggle({
 // state; the trace data persists on the TurnRecord / recipe. Absent members
 // render nothing (honest degrade: no thinking source -> no thinking fold; a
 // pre-v5 migrated round is a bare call list -> just the step fold; an entirely
-// empty round -> no chrome at all).
+// empty round -> no chrome at all). The thinking fold + prose are shared with
+// the live round block (issue #610) via ThinkingFold + the identical prose
+// markup, so the settle swap does not move them.
 function TraceRoundBlock({ round }: { round: TraceRound }) {
-  const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [stepsExpanded, setStepsExpanded] = useState(false);
   // Destructured const so the aliased guard narrows the binding itself (a
   // boolean alias of `round.thinking !== undefined` does not narrow the
@@ -228,29 +197,7 @@ function TraceRoundBlock({ round }: { round: TraceRound }) {
   if (!hasThinking && text === undefined && !hasCalls) return null;
   return (
     <div className="trace-round">
-      {hasThinking && (
-        // The thinking fold: an honest duration label (seconds, one decimal),
-        // collapsed by default; the raw reasoning text is layer-4 content and
-        // passes through untranslated in a muted, scroll-capped block.
-        <>
-          <FoldToggle
-            hookClass="thinking-toggle"
-            expanded={thinkingExpanded}
-            onToggle={() => setThinkingExpanded((v) => !v)}
-          >
-            <FormattedMessage
-              id="thread.trace.thinkingToggle"
-              defaultMessage="Thinking · {sec}s"
-              values={{ sec: (thinking.duration_ms / 1000).toFixed(1) }}
-            />
-          </FoldToggle>
-          {thinkingExpanded && (
-            <p className="round-thinking m-0 mt-0.5 ml-5 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
-              {thinking.text}
-            </p>
-          )}
-        </>
-      )}
+      {hasThinking && <ThinkingFold thinking={thinking} />}
       {text !== undefined && (
         // The round's connective prose: always expanded (ADR-0103 -- prose is
         // the conversational discourse, folding it would hide the narrative).

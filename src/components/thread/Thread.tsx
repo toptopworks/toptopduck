@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { LiveTurnCard } from "./TraceView";
+import { LiveTurnExchange } from "./LiveTurnExchange";
 import { SourceMarker } from "./SourceMarker";
 import { SkillMarker } from "./SkillMarker";
 import { RuntimeAttributionMarker } from "./RuntimeAttributionMarker";
@@ -250,13 +250,16 @@ export function Thread({
           );
         })}
       </ol>
-      {/* The in-flight turn's progressive card (ADR-0078, issue #297): trails
-          the recorded entries while a turn runs, then folds away as the
-          settled TurnRecord appends. A distinct block (not an <li>) -- the
-          ol is the recorded timeline (append-only, ADR-0028/0040), the live
-          card is transient client state that never enters it. */}
+      {/* The in-flight turn's chat exchange (ADR-0103, issue #610): trails
+          the recorded entries while a turn runs -- the user bubble mounts at
+          submit, the assistant side streams -- then folds away as the settled
+          TurnRecord appends (the same chat form, so the swap does not move
+          the bubble / prose / thinking folds). A distinct block (not an
+          <li>) -- the ol is the recorded timeline (append-only,
+          ADR-0028/0040), the live exchange is transient client state that
+          never enters it. */}
       {liveTurn !== null && (
-        <LiveTurnCard liveTurn={liveTurn} onRespondApproval={onRespondApproval} />
+        <LiveTurnExchange liveTurn={liveTurn} onRespondApproval={onRespondApproval} />
       )}
     </section>
   );
