@@ -822,7 +822,8 @@ describe("Thread", () => {
 
   it("weakens Failed + Cancelled via opacity-60, never collapsed (ADR-0028 Why 2, issue #169)", () => {
     // ADR-0028 Why 2: recent intent stays visible even when it produced nothing.
-    // The opacity-60 weak state now rides the card as a utility.
+    // ADR-0103: the weakening rides the ASSISTANT stream (the failure is the
+    // assistant's); the user's question bubble never dims.
     const records: TurnRecord[] = [
       { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [], provenance: { skills: [] } },
       { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
@@ -830,10 +831,16 @@ describe("Thread", () => {
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
     );
-    const failedCard = container.querySelector(`.turn-entry[data-outcome="failed"] .turn-card`);
-    const cancelledCard = container.querySelector(`.turn-entry[data-outcome="cancelled"] .turn-card`);
-    expect(failedCard?.className.split(/\s+/)).toContain("opacity-60");
-    expect(cancelledCard?.className.split(/\s+/)).toContain("opacity-60");
+    const failedStream = container.querySelector(
+      `.turn-entry[data-outcome="failed"] .assistant-stream`,
+    );
+    const cancelledStream = container.querySelector(
+      `.turn-entry[data-outcome="cancelled"] .assistant-stream`,
+    );
+    expect(failedStream?.className.split(/\s+/)).toContain("opacity-60");
+    expect(cancelledStream?.className.split(/\s+/)).toContain("opacity-60");
+    const bubble = container.querySelector(`.turn-entry[data-outcome="failed"] .user-bubble`);
+    expect(bubble?.className.split(/\s+/)).not.toContain("opacity-60");
   });
 
   it("encodes the three source lifecycle kinds by border-l-* tone (ADR-0047, issue #169)", () => {
@@ -1023,6 +1030,183 @@ describe("Thread", () => {
         />,
       );
       expect(screen.queryByRole("button", { name: /轨迹/ })).not.toBeInTheDocument();
+    });
+  });
+
+  describe("chat projection rendering (ADR-0103, issue #609)", () => {
+    // A two-round record exercising every projection surface: round 1 carries
+    // thinking + prose + two calls, round 2 prose + one call. asked_at /
+    // settled_at stamp the bubble + the closing meta row (honest degrade:
+    // both absent on pre-v5 turns).
+    const ASKED_AT = 1724232000000;
+    const SETTLED_AT = 1724232060000;
+
+    function chatRecord(over: Partial<TurnRecord> = {}): TurnRecord {
+      return {
+        question: "第一行问话\n第二行问话",
+        outcome: {
+          kind: "Textual",
+          data: { text_kind: "Agent", body: "答复正文", assumption: null },
+        },
+        trace: [
+          {
+            thinking: { duration_ms: 1500, text: "先推理一下" },
+            text: "我先查一下数据",
+            calls: [
+              { name: "explore", operation_kind: "read", summary: "SELECT 1", success: true, result_excerpt: "" },
+              { name: "materialize", operation_kind: "write", summary: "SELECT 2", success: false, result_excerpt: "boom" },
+            ],
+          },
+          {
+            text: "再聚合一次",
+            calls: [
+              { name: "explore", operation_kind: "read", summary: "SELECT 3", success: true, result_excerpt: "" },
+            ],
+          },
+        ],
+        provenance: { skills: [] },
+        asked_at: ASKED_AT,
+        settled_at: SETTLED_AT,
+        ...over,
+      };
+    }
+
+    function renderChat(record: TurnRecord) {
+      return renderThread(
+        <Thread entries={[turnEntry(record)]} selectedResult={null} onSelectResult={() => {}} />,
+      );
+    }
+
+    it("renders the question as a right-aligned user bubble: full text wrapped, no truncation", () => {
+      // ADR-0103 retires the ADR-0054 single-line posture: the bubble carries
+      // the question in full (pre-wrap keeps the newline visible) and the
+      // bubble container owns the right alignment.
+      const { container } = renderChat(chatRecord());
+      const bubble = container.querySelector(".user-bubble");
+      expect(bubble).not.toBeNull();
+      expect(bubble!.className.split(/\s+/)).toContain("items-end");
+      const q = bubble!.querySelector(".turn-question");
+      expect(q).not.toBeNull();
+      expect(q!.textContent).toBe("第一行问话\n第二行问话");
+      const classes = q!.className.split(/\s+/);
+      expect(classes).toContain("whitespace-pre-wrap");
+      expect(classes).not.toContain("truncate");
+    });
+
+    it("stamps asked_at on the bubble + settled_at on the closing meta; omits both for pre-v5 turns", () => {
+      const { container } = renderChat(chatRecord());
+      // <time> carries the machine-readable stamp; the visible text is the
+      // locale time (TZ-dependent in CI, so only the shape is asserted).
+      const asked = container.querySelector(".user-bubble time");
+      expect(asked?.getAttribute("datetime")).toBe(new Date(ASKED_AT).toISOString());
+      expect(asked?.textContent).toMatch(/^\d{1,2}:\d{2}/);
+      const settled = container.querySelector(".turn-meta time");
+      expect(settled?.getAttribute("datetime")).toBe(new Date(SETTLED_AT).toISOString());
+      // Honest degrade: no recorded stamp -> no time element, never synthetic.
+      const old = renderChat(chatRecord({ asked_at: undefined, settled_at: undefined }));
+      expect(old.container.querySelectorAll(".turn-card time")).toHaveLength(0);
+    });
+
+    it("copies the question and the textual reply via the clipboard", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      // stubGlobal (not Object.assign) so the setup file's unstubAllGlobals
+      // restores the navigator between tests.
+      vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+      renderChat(chatRecord());
+      fireEvent.click(screen.getByRole("button", { name: "复制问话" }));
+      expect(writeText).toHaveBeenCalledWith("第一行问话\n第二行问话");
+      // The flip lands after the awaited clipboard write (async state).
+      expect(await screen.findByRole("button", { name: "已复制" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "复制答复" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith("答复正文"));
+    });
+
+    it("leaves the copy glyph unchanged when the clipboard rejects (honest no-op)", async () => {
+      const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+      vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+      renderChat(chatRecord());
+      fireEvent.click(screen.getByRole("button", { name: "复制问话" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+      // No ack flip: the accessible name stays the idle label.
+      expect(screen.queryByRole("button", { name: "已复制" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "复制问话" })).toBeInTheDocument();
+    });
+
+    it("omits the reply copy on a turn with no textual reply (Materialized)", () => {
+      renderChat(chatRecord({ outcome: materializedRecord("result_1", null).outcome }));
+      // The question copy is the bubble's conversation fact -- always present.
+      expect(screen.getByRole("button", { name: "复制问话" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "复制答复" })).not.toBeInTheDocument();
+    });
+
+    it("renders each round's prose always expanded with thinking + steps folds default collapsed", () => {
+      renderChat(chatRecord());
+      // Connective prose is the readability mainstay -- always visible.
+      expect(screen.getByText("我先查一下数据")).toBeInTheDocument();
+      expect(screen.getByText("再聚合一次")).toBeInTheDocument();
+      // Thinking + steps folds are per round, both default collapsed.
+      const thinking = screen.getByRole("button", { name: "思考 · 1.5s" });
+      expect(thinking).toHaveAttribute("aria-expanded", "false");
+      const round1 = screen.getByRole("button", { name: "轨迹 · 2 次调用" });
+      const round2 = screen.getByRole("button", { name: "轨迹 · 1 次调用" });
+      expect(round1).toHaveAttribute("aria-expanded", "false");
+      expect(round2).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText("先推理一下")).not.toBeInTheDocument();
+      expect(screen.queryByText("SELECT 1")).not.toBeInTheDocument();
+    });
+
+    it("expands each round's thinking + steps folds independently", () => {
+      renderChat(chatRecord());
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 1.5s" }));
+      expect(screen.getByText("先推理一下")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · 2 次调用" }));
+      expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+      expect(screen.getByText("SELECT 2")).toBeInTheDocument();
+      // Round 2's fold stays collapsed -- its call is still hidden.
+      expect(screen.queryByText("SELECT 3")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "轨迹 · 1 次调用" }));
+      expect(screen.getByText("SELECT 3")).toBeInTheDocument();
+    });
+
+    it("renders an all-prose round (no calls, no thinking) as bare prose with no fold chrome", () => {
+      renderChat(
+        chatRecord({
+          trace: [
+            { text: "直接答复", calls: [] },
+          ],
+        }),
+      );
+      expect(screen.getByText("直接答复")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /轨迹/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /思考/ })).not.toBeInTheDocument();
+    });
+
+    it("renders an entirely empty round as nothing (no chrome)", () => {
+      const { container } = renderChat(chatRecord({ trace: [{ calls: [] }] }));
+      expect(container.querySelector(".trace-round")).toBeNull();
+      // The exchange still closes with the meta row.
+      expect(container.querySelector(".turn-meta")).not.toBeNull();
+    });
+
+    it("closes the assistant stream with the outcome glyph + settled_at in the meta row", () => {
+      const { container } = renderChat(chatRecord());
+      const stream = container.querySelector(".assistant-stream");
+      expect(stream).not.toBeNull();
+      const glyph = stream!.querySelector(".turn-meta .outcome-icon");
+      expect(glyph?.getAttribute("aria-label")).toBe("已回答");
+      expect(stream!.querySelector(".turn-meta time")).not.toBeNull();
+    });
+
+    it("weakens Failed/Cancelled on the assistant side only -- the user bubble stays full", () => {
+      // ADR-0103 attribution: the failure is the assistant's, so the
+      // weakening lands on the stream; the user's own question never dims.
+      const { container } = renderChat(
+        chatRecord({ outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } } }),
+      );
+      const stream = container.querySelector(".assistant-stream");
+      expect(stream!.className.split(/\s+/)).toContain("opacity-60");
+      const bubble = container.querySelector(".user-bubble");
+      expect(bubble!.className.split(/\s+/)).not.toContain("opacity-60");
     });
   });
 

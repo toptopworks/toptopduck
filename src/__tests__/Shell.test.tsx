@@ -1884,13 +1884,13 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(createSession).toHaveBeenCalledTimes(1);
   });
 
-  it("recovers the full verbatim question via hover Tooltip (ADR-0050/0054, #106)", async () => {
-    // The rail truncates the verbatim question at a fixed width with a TAIL
-    // ellipsis (keeps the head -- the identity handle, ADR-0039). jsdom has no
-    // layout so the rendered glyph is not assertable; the contract is that the
-    // full text rides a Radix Tooltip (ADR-0050 maps Tooltip to card-truncation
-    // full-text recovery) so a hover recovers it, replacing the v0 native title
-    // attribute.
+  it("renders the verbatim question in full inside the user bubble (ADR-0103, #609)", async () => {
+    // ADR-0103 retires the ADR-0054 truncation posture: the chat projection
+    // wraps the question in full (pre-wrap) inside the right-aligned bubble --
+    // no tail-ellipsis span, no hover-recovery Tooltip. jsdom has no layout,
+    // so the contract is asserted at the class level: the question carries
+    // the pre-wrap utility and no truncate, the full text is the element's
+    // own content, and hovering opens no recovery tooltip.
     const longQuestion = "前".repeat(120);
     state.thread = [
       {
@@ -1901,23 +1901,23 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     render(<App />);
     await openSession();
     // The thread loads async (conversation IPC); wait for the turn card to
-    // render before asserting the truncation contract on its question span.
+    // render before asserting the wrap contract on its question span.
     const q = await waitFor(() => {
       const el = document.querySelector(".turn-question");
       expect(el).not.toBeNull();
       return el as HTMLElement;
     });
-    // The native title is gone (replaced by the Radix Tooltip); moving the
-    // pointer over the truncated span opens the tooltip. Radix renders the
-    // content into a portal and also mirrors it once in a visually-hidden
-    // role="tooltip" node (the trigger's aria-describedby target, a single
-    // unmirrored text copy), so getByRole("tooltip") carries the full verbatim
-    // text exactly once.
-    expect(q.getAttribute("title")).toBeNull();
+    const classes = q.className.split(/\s+/);
+    expect(classes).toContain("whitespace-pre-wrap");
+    expect(classes).not.toContain("truncate");
+    expect(q.textContent).toBe(longQuestion);
+    // No truncation-recovery tooltip mounts for the question: the old
+    // TruncatingTooltip wrapper opened one on hover (jsdom reports 0-width,
+    // so the overflow gate always let it through); the bubble posture opens
+    // none. A real-timer beat lets a would-be Radix open surface.
     fireEvent.pointerMove(q);
-    await waitFor(() => {
-      expect(screen.getByRole("tooltip").textContent).toBe(longQuestion);
-    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 });
 
