@@ -179,8 +179,11 @@ export function Thread({
                 // 0040), so the array index is a stable, unique key for each
                 // entry -- no separate id is needed (YAGNI: an id would ripple
                 // through the Rust/TS model + wire contract for no present
-                // benefit). Switch to a stable monotonic id if entry-local UI
-                // state (fold/copy) ever lands.
+                // benefit). ADR-0103 (issue #609) landed entry-local UI state
+                // (each turn's fold + copy state lives INSIDE its components);
+                // append-only keeps that state attached to the right entry. A
+                // stable monotonic id becomes necessary only if entries can
+                // ever be truncated or reordered.
                 key={i}
                 className="turn-entry"
                 data-outcome={entry.data.outcome.kind.toLowerCase()}

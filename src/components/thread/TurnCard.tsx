@@ -1,9 +1,13 @@
-// TurnCard + TurnBody + AssumptionNote extracted from Thread.tsx (issue #427).
-// These three functions form the turn rendering unit: the card head (outcome
-// glyph + question + active chip), the collapsible trace fold, and the body
-// (result link / textual body / failure reason / cancelled marker).
+// TurnCard + TraceRoundBlock + TurnBody + AssumptionNote form the turn's chat
+// projection (ADR-0103, issue #609): a right-aligned user bubble (UserBubble,
+// question in full + asked_at + copy) over a left assistant stream -- header
+// annotations (active chip, skill drift), the round-grouped trace as per-round
+// thinking folds + always-expanded connective prose + per-round step folds,
+// the outcome body, and a closing meta row (outcome glyph + reply copy +
+// settled_at). App annotations all live on the assistant side; the bubble
+// carries only user output and conversation facts.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { ChevronRight, PencilLine } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -11,12 +15,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 import { TraceRowList } from "./TraceView";
 import { ResultPreviewCard } from "./ResultPreviewCard";
-import { TruncatingTooltip } from "./TruncatingTooltip";
+import { CopyButton } from "./CopyButton";
+import { UserBubble } from "./UserBubble";
 import { StaleChip } from "./StaleChip";
 import { outcomeVisual, selectDriftedSkills, type DatasetLabel } from "./turn-visual";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
-import type { TurnRecord } from "../../types/thread";
+import type { TraceRound, TurnRecord } from "../../types/thread";
 import { formatTurnFailure, turnFailureDetail } from "../../lib/error-presentation";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 
@@ -40,16 +45,21 @@ interface TurnCardProps {
   skillIndex: ReadonlyMap<string, SkillEntry> | undefined;
 }
 
-// One turn rendered as a single-row head (ADR-0047): outcome glyph + verbatim
-// question (tail-truncated, head kept per ADR-0054) + a conditional active chip
-// when the question named a dataset. The outcome body (result link / textual
-// body / failure reason / cancelled marker) renders beneath so the four kinds
-// stay distinguishable by text as well as by glyph/color (ADR-0028). A stale
-// Materialized turn becomes a ghost (CircleOff + reduced opacity) and gains a
-// clickable causal chip; Failed/Cancelled are weakened (opacity) but kept
-// visible -- never collapsed away (ADR-0028 Why 2). The verbatim question and
-// the chip's dataset display name are layer-4 content (ADR-0039/0037) and pass
-// through untranslated.
+// One turn rendered as a chat exchange (ADR-0103): the user bubble (verbatim
+// question, full text) over the assistant stream. The four outcome kinds stay
+// distinguishable by text as well as by glyph/color (ADR-0028); the outcome
+// glyph rides the stream's closing meta row. A stale Materialized turn ghosts
+// the whole exchange (opacity-50) and gains a clickable causal chip
+// (ADR-0041/0047). ADR-0103's attribution list names `stale`: the CHIP is
+// that app annotation and renders on the assistant side (inside the body);
+// the whole-exchange ghost + the question strike are the outcome-state
+// marking ADR-0041/0047 established -- ADR-0103 retires neither, and the
+// strike rides the question because the question's answer is what died.
+// Failed/Cancelled weaken the ASSISTANT side only (opacity-60 -- the failure
+// is the assistant's, the user's question never dims) but stay visible --
+// never collapsed away (ADR-0028 Why 2). The verbatim question and the chip's
+// dataset display name are layer-4 content (ADR-0039/0037) and pass through
+// untranslated.
 export function TurnCard({
   record,
   selectedResult,
@@ -64,139 +74,208 @@ export function TurnCard({
   const isStale = !!staleAnchor;
   const drifted = selectDriftedSkills(record, skillIndex);
   const { Icon, label, tone } = outcomeVisual(intl, record.outcome, isStale);
-  // ADR-0028 Why 2: Failed/Cancelled are weakened but not collapsed (opacity-
-  // 60); a stale Materialized turn ghosts further (opacity-50, ADR-0041/0047).
-  // Stale only lands on Materialized turns, so the two dims never stack.
-  const weakened =
-    record.outcome.kind === "Failed" || record.outcome.kind === "Cancelled";
-  // ADR-0078 (issue #297): the execution trace is collapsible -- the card
-  // shows the question + answer + outcome always and expands the tool-call
-  // chain on demand. Default COLLAPSED so a forty-turn rail stays readable;
-  // the expand state is session-ephemeral UI state (the trace DATA persists
-  // on the TurnRecord / recipe, the toggle does not). Zero-call turns (a
-  // plain textual answer) carry no trace, hence no toggle.
-  const [traceExpanded, setTraceExpanded] = useState(false);
-  // ADR-0103 (issue #608): the trace is round-grouped, but the card's
-  // rendering stays call-flat for this slice -- the rounds' calls flatten in
-  // dispatch order (a pre-v5 single-round turn renders identically). The
-  // chat-projection rendering (prose + thinking folds) is the follow-up
-  // slices' surface.
-  const traceCalls = record.trace.flatMap((round) => round.calls);
-  const hasTrace = traceCalls.length > 0;
+  // ADR-0028 Why 2 + ADR-0103 attribution: Failed/Cancelled weaken the stream
+  // only. Stale only lands on Materialized turns, so the two dims never stack.
+  const weakened = record.outcome.kind === "Failed" || record.outcome.kind === "Cancelled";
+  // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
+  // IS text: a Textual turn's body. Materialized answers with a result link,
+  // Failed/Cancelled with markers -- nothing textual to copy.
+  const replyText = record.outcome.kind === "Textual" ? record.outcome.data.body : null;
   return (
     <div
-      className={cn(
-        "turn-card rounded-md py-1.5",
-        isStale && "stale-ghost opacity-50",
-        weakened && "opacity-60",
-      )}
+      className={cn("turn-card rounded-md py-1.5", isStale && "stale-ghost opacity-50")}
       data-stale={isStale ? "true" : undefined}
     >
-      <div className="turn-head flex items-center gap-1.5 min-w-0">
-        <span
-          className={cn(
-            "outcome-icon inline-flex items-center justify-center w-4 h-4 shrink-0",
-            tone,
-          )}
-          role="img"
-          aria-label={label}
-        >
-          <Icon aria-hidden="true" className="w-4 h-4" />
-        </span>
-        {/* The verbatim question is the identity handle (ADR-0039): single-line,
-            tail-ellipsis truncation keeps the head (where identity concentrates)
-            visible at a fixed rail width (ADR-0054). The full text rides the
-            Tooltip (ADR-0050, issue #106). A stale ghost also strikes the
-            question through dotted (ADR-0041/0047) -- the strike is question-
-            local so the truncation + tooltip still recover the full text. */}
-        <TruncatingTooltip
-          text={record.question}
-          className={cn(
-            "turn-question flex-1 min-w-0 truncate text-sm text-foreground",
-            isStale && "line-through decoration-dotted",
-          )}
-        >
-          {record.question}
-        </TruncatingTooltip>
-        {/* The active chip (ADR-0047) flags a turn that explicitly named a
-            dataset. Unlike the question/source tooltips (truncation recovery),
-            its hover carries a localized explanatory label -- the v0 native
-            title's "Question names {name}" -- so the chip's meaning survives
-            both truncation (max-width 8rem) and non-English locales (ADR-0052).
-            The full name rides the {name} placeholder, so the hover also
-            recovers a truncated chip verbatim. */}
-        {mentionedDataset && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              {/* Badge default = teal --primary (ADR-0050 active semantic); the
-                  turn-active-chip class carries layout only (flex-shrink,
-                  8rem tail-ellipsis + the test selector), the variant owns the
-                  color so the chip recolors with .dark alongside the token. */}
-              <Badge
-                variant="default"
-                className="turn-active-chip shrink-0 max-w-32 truncate"
+      <UserBubble question={record.question} askedAt={record.asked_at} isStale={isStale} />
+      <div className={cn("assistant-stream mt-1 flex flex-col items-start", weakened && "opacity-60")}>
+        {/* Header annotations (ADR-0103): the app's read of the question --
+            which dataset it named (ADR-0047 active chip) and which mounted
+            skills drifted since the answer (issue #381) -- open the stream,
+            ahead of the rounds, so the reading order is question -> annotation
+            -> execution -> reply. */}
+        {(mentionedDataset || drifted.length > 0) && (
+          <div className="stream-header flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+            {mentionedDataset && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  {/* Badge default = teal --primary (ADR-0050 active semantic); the
+                      turn-active-chip class carries layout only (flex-shrink,
+                      8rem tail-ellipsis + the test selector), the variant owns the
+                      color so the chip recolors with .dark alongside the token. */}
+                  <Badge variant="default" className="turn-active-chip shrink-0 max-w-32 truncate">
+                    →{mentionedDataset.display_name}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  <FormattedMessage
+                    id="thread.activeChip.title"
+                    defaultMessage={`Question names "{name}"`}
+                    values={{ name: mentionedDataset.display_name }}
+                  />
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {drifted.map((name) => (
+              <span
+                key={name}
+                className="skill-drift-name inline-flex items-center gap-0.5 rounded-sm bg-muted px-1 py-0.5"
               >
-                →{mentionedDataset.display_name}
-              </Badge>
-            </TooltipTrigger>
-            <TooltipContent className="max-w-xs">
-              <FormattedMessage
-                id="thread.activeChip.title"
-                defaultMessage={`Question names "{name}"`}
-                values={{ name: mentionedDataset.display_name }}
-              />
-            </TooltipContent>
-          </Tooltip>
+                <PencilLine aria-hidden="true" className="w-3 h-3 shrink-0" />
+                <span className="truncate">{name}</span>
+                <FormattedMessage
+                  id="thread.skill.modifiedSuffix"
+                  defaultMessage=" · modified since this answer"
+                />
+              </span>
+            ))}
+          </div>
         )}
+        {record.trace.map((round, i) => (
+          // The trace is append-only within a turn and never reordered, so the
+          // index is a stable key (the same YAGNI call the thread makes).
+          <TraceRoundBlock key={i} round={round} />
+        ))}
+        <TurnBody
+          record={record}
+          selectedResult={selectedResult}
+          onSelectResult={onSelectResult}
+          staleAnchor={staleAnchor}
+          hasJumpTarget={hasJumpTarget}
+          onStaleChipJump={onStaleChipJump}
+        />
+        {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange,
+            flanked by the reply copy + the settle stamp (honest degrade: no
+            settled_at recorded -> no time element). */}
+        <p className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span
+            className={cn(
+              "outcome-icon inline-flex items-center justify-center w-4 h-4 shrink-0",
+              tone,
+            )}
+            role="img"
+            aria-label={label}
+          >
+            <Icon aria-hidden="true" className="w-4 h-4" />
+          </span>
+          {replyText !== null && (
+            <CopyButton
+              text={replyText}
+              label={intl.formatMessage({ id: "thread.copy.reply", defaultMessage: "Copy reply" })}
+            />
+          )}
+          {record.settled_at !== undefined && (
+            <time dateTime={new Date(record.settled_at).toISOString()}>
+              {intl.formatTime(record.settled_at)}
+            </time>
+          )}
+        </p>
       </div>
-      {drifted.length > 0 && (
-        <p className="skill-drift m-0 mt-0.5 ml-6 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-          {drifted.map((name) => (
-            <span
-              key={name}
-              className="skill-drift-name inline-flex items-center gap-0.5 rounded-sm bg-muted px-1 py-0.5"
-            >
-              <PencilLine aria-hidden="true" className="w-3 h-3 shrink-0" />
-              <span className="truncate">{name}</span>
-              <FormattedMessage
-                id="thread.skill.modifiedSuffix"
-                defaultMessage=" · modified since this answer"
-              />
-            </span>
-          ))}
+    </div>
+  );
+}
+
+// The shared fold chrome: a compact chevron + label button, the chevron
+// rotating on expand; aria-expanded conveys the fold state. Used by the
+// per-round thinking + steps folds -- the hook class is the fold's selector /
+// test anchor, the label rides children.
+function FoldToggle({
+  hookClass,
+  expanded,
+  onToggle,
+  children,
+}: {
+  hookClass: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        hookClass,
+        "mt-0.5 flex items-center gap-1 cursor-pointer text-xs text-muted-foreground hover:text-foreground",
+      )}
+      aria-expanded={expanded}
+      onClick={onToggle}
+    >
+      <ChevronRight
+        aria-hidden="true"
+        className={cn("w-3.5 h-3.5 transition-transform", expanded && "rotate-90")}
+      />
+      {children}
+    </button>
+  );
+}
+
+// One round of the round-grouped trace (ADR-0103, calibrating ADR-0078): the
+// thinking fold (default collapsed, ADR-0078 long-rail posture), the round's
+// connective prose (always expanded -- the readability mainstay), and the
+// round's step fold (default collapsed). Fold state is session-ephemeral UI
+// state; the trace data persists on the TurnRecord / recipe. Absent members
+// render nothing (honest degrade: no thinking source -> no thinking fold; a
+// pre-v5 migrated round is a bare call list -> just the step fold; an entirely
+// empty round -> no chrome at all).
+function TraceRoundBlock({ round }: { round: TraceRound }) {
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [stepsExpanded, setStepsExpanded] = useState(false);
+  // Destructured const so the aliased guard narrows the binding itself (a
+  // boolean alias of `round.thinking !== undefined` does not narrow the
+  // property access); the render below reads `thinking` with no assertions.
+  const { thinking, text, calls } = round;
+  const hasThinking = thinking !== undefined;
+  const hasCalls = calls.length > 0;
+  if (!hasThinking && text === undefined && !hasCalls) return null;
+  return (
+    <div className="trace-round">
+      {hasThinking && (
+        // The thinking fold: an honest duration label (seconds, one decimal),
+        // collapsed by default; the raw reasoning text is layer-4 content and
+        // passes through untranslated in a muted, scroll-capped block.
+        <>
+          <FoldToggle
+            hookClass="thinking-toggle"
+            expanded={thinkingExpanded}
+            onToggle={() => setThinkingExpanded((v) => !v)}
+          >
+            <FormattedMessage
+              id="thread.trace.thinkingToggle"
+              defaultMessage="Thinking · {sec}s"
+              values={{ sec: (thinking.duration_ms / 1000).toFixed(1) }}
+            />
+          </FoldToggle>
+          {thinkingExpanded && (
+            <p className="round-thinking m-0 mt-0.5 ml-5 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+              {thinking.text}
+            </p>
+          )}
+        </>
+      )}
+      {text !== undefined && (
+        // The round's connective prose: always expanded (ADR-0103 -- prose is
+        // the conversational discourse, folding it would hide the narrative).
+        <p className="round-text m-0 mt-0.5 text-sm leading-snug text-foreground whitespace-pre-wrap break-words">
+          {text}
         </p>
       )}
-      {hasTrace && (
-        // The trace toggle: a compact chevron + call count between the head
-        // and the answer. aria-expanded conveys the fold state; the chevron
-        // rotates on expand. The count reads "Trace · N calls" so a rail
-        // scan shows which turns made multiple calls without expanding.
-        <button
-          type="button"
-          className="trace-toggle mt-0.5 ml-6 flex items-center gap-1 cursor-pointer text-xs text-muted-foreground hover:text-foreground"
-          aria-expanded={traceExpanded}
-          onClick={() => setTraceExpanded((v) => !v)}
-        >
-          <ChevronRight
-            aria-hidden="true"
-            className={cn("w-3.5 h-3.5 transition-transform", traceExpanded && "rotate-90")}
-          />
-          <FormattedMessage
-            id="thread.trace.toggle"
-            defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
-            values={{ count: traceCalls.length }}
-          />
-        </button>
+      {hasCalls && (
+        // The round's step fold: the call count reads "Trace · N calls" so a
+        // rail scan shows which rounds made multiple calls without expanding.
+        <>
+          <FoldToggle
+            hookClass="trace-toggle"
+            expanded={stepsExpanded}
+            onToggle={() => setStepsExpanded((v) => !v)}
+          >
+            <FormattedMessage
+              id="thread.trace.toggle"
+              defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
+              values={{ count: calls.length }}
+            />
+          </FoldToggle>
+          {stepsExpanded && <TraceRowList entries={calls} />}
+        </>
       )}
-      {hasTrace && traceExpanded && <TraceRowList entries={traceCalls} />}
-      <TurnBody
-        record={record}
-        selectedResult={selectedResult}
-        onSelectResult={onSelectResult}
-        staleAnchor={staleAnchor}
-        hasJumpTarget={hasJumpTarget}
-        onStaleChipJump={onStaleChipJump}
-      />
     </div>
   );
 }
@@ -250,7 +329,7 @@ function TurnBody({
       const active = primary.dataset.reference_name === selectedResult;
       return (
         <>
-          <p className="turn-outcome mt-1 ml-6 text-xs leading-snug">
+          <p className="turn-outcome mt-1 text-xs leading-snug">
             {antecedents.length > 0 && (
               <span className="antecedents block mb-0.5 text-muted-foreground">
                 <FormattedMessage
@@ -266,11 +345,11 @@ function TurnBody({
               </span>
             )}
             {/* result-link is a real <button> (clickable, focusable) but stripped
-              of native button chrome via [all:unset] so it reads as an inline
-              link; subsequent utilities rebuild the box model + token color.
-              `active`/`stale` are kept as hook classes (semantic + test
-              selectors) -- their visual lands on the same element via the
-              conditional utilities below. */}
+                of native button chrome via [all:unset] so it reads as an inline
+                link; subsequent utilities rebuild the box model + token color.
+                `active`/`stale` are kept as hook classes (semantic + test
+                selectors) -- their visual lands on the same element via the
+                conditional utilities below. */}
             <button
               type="button"
               className={cn(
@@ -299,11 +378,11 @@ function TurnBody({
             <AssumptionNote assumption={assumption} />
           </p>
           {/* ADR-0083 (issue #298): the primary result's inline preview card --
-            the windowed sample (first rows, ADR-0026) for a rail-scan glance
-            at the answer. Clicking it selects the result (the caller opens
-            the workspace); the active state mirrors the viewed selection
-            back (dual-view linkage). Antecedent promotions carry no card --
-            the chain tail is the answer. */}
+              the windowed sample (first rows, ADR-0026) for a rail-scan glance
+              at the answer. Clicking it selects the result (the caller opens
+              the workspace); the active state mirrors the viewed selection
+              back (dual-view linkage). Antecedent promotions carry no card --
+              the chain tail is the answer. */}
           <ResultPreviewCard
             dataset={primary.dataset}
             active={active}
@@ -327,7 +406,7 @@ function TurnBody({
       return (
         <p
           className={cn(
-            "turn-outcome textual mt-1 ml-6 text-xs leading-snug",
+            "turn-outcome textual mt-1 text-xs leading-snug",
             text_kind.toLowerCase(),
           )}
         >
@@ -346,7 +425,7 @@ function TurnBody({
       const failure = record.outcome.data;
       const detail = turnFailureDetail(failure);
       return (
-        <div className="turn-outcome failed mt-1 ml-6 text-xs leading-snug">
+        <div className="turn-outcome failed mt-1 text-xs leading-snug">
           {/* <div>, not <p>: a <p> cannot legally contain the <details> fold. */}
           <span className="failed-reason text-destructive">{formatTurnFailure(failure, intl)}</span>
           <TechnicalDetailsFold detail={detail} />
@@ -355,7 +434,7 @@ function TurnBody({
     }
     case "Cancelled":
       return (
-        <p className="turn-outcome cancelled mt-1 ml-6 text-xs leading-snug text-muted-foreground">
+        <p className="turn-outcome cancelled mt-1 text-xs leading-snug text-muted-foreground">
           <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
         </p>
       );
