@@ -2,6 +2,8 @@
 
 > 部分被 [ADR-0090](./0090-sidebar-drag-resize-remove-rail-collapse-flex-pane.md) 取代：Decision「rail 固定宽度，v1 不可拖拽调宽」+ Considered options「rail 可拖拽调宽（resizable splitter）：v1 YAGNI…否决」**退役**——sidebar 改为可拖拽调宽（clamp 到固定下限 + 上限，localStorage 持久化）。Decision「rail 可折叠」+ Consequences「三级手动折叠」**退役**——rail collapse 移除，rail 恒显；workspace fold（ADR-0083）成为 session pane 内唯一折叠机制。截断策略（尾部 ellipsis）+ Tauri minWidth 兜底不受影响。
 
+> 被 [ADR-0103](./0103-thread-chat-projection-turn-ledger-unchanged.md) 取代：Decision「截断策略定为尾部 ellipsis」**退役**——chat 形态问话在用户气泡内全文换行，单行尾截断 + tooltip 姿态失载体。Tauri minWidth 兜底不受影响。
+
 ## Decision
 
 ADR-0045 定了两栏 shell（thread rail + workspace），但**未定义桌面窗口可变尺寸下的行为**。本 ADR 收口这道边界遗漏，并连带闭合 ADR-0047 / 0050 的截断策略 open item：
