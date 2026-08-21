@@ -14,10 +14,9 @@ import {
   getSessionRuntime,
   listAdapters,
   listProviderProfiles,
-  setSessionModel,
+  setSessionPosture,
   setSessionRuntime,
-  setSessionThoughtLevel,
-  type SetModelPersistOutcome,
+  type SetPosturePersistOutcome,
 } from "../../api";
 import { adapterKeys, sessionKeys } from "../../session/queryKeys";
 import type { ModelPosture } from "../../types/app-config";
@@ -375,11 +374,11 @@ export function ComposerProviderPicker({
           }
         : null;
 
-  // Guards the two set IPCs (one at a time; the menu is disabled while a
-  // write is in flight). In-session only -- the cold-start channel is a
-  // synchronous pending patch.
+  // Guards the posture set IPC (the menu is disabled while a write is in
+  // flight). In-session only -- the cold-start channel is a synchronous
+  // pending patch.
   const [modelSwitching, setModelSwitching] = useState(false);
-  // Inline failure line for the two set IPCs (issue #529). Holds the raw
+  // Inline failure line for the posture set IPC (issue #529). Holds the raw
   // reject and formats at render so a locale switch re-renders the wording.
   // Cleared on the next attempt.
   const [modelSetError, setModelSetError] = useState<unknown>(null);
@@ -489,19 +488,16 @@ export function ComposerProviderPicker({
     }
   }
 
-  // Shared write sequence for both selectors in-session (the two bodies
-  // differ only in the IPC, the patched key, and the log verb). On resolve:
-  // seed the cache with the granted posture and project the returned persist
+  // The selectors' shared write sequence in-session. On resolve: seed the
+  // cache with the submitted posture and project the returned persist
   // verdict onto the two fault slots. On reject: keep the server posture
-  // (refetch off the reject) + show the failure. Returns whether the write
-  // was GRANTED (a dropped click or a reject yields false) -- the codex
-  // model->effort linkage gates its clearing write on it.
+  // (refetch off the reject) + show the failure. Never rejects -- every
+  // failure lands on the fault slots instead.
   async function applyModelConfig(
-    write: () => Promise<SetModelPersistOutcome>,
-    patch: Partial<Pick<SessionModelConfig, "model" | "thought_level">>,
-    logVerb: string,
-  ): Promise<boolean> {
-    if (sessionId === null || modelSwitching) return false;
+    write: () => Promise<SetPosturePersistOutcome>,
+    next: ModelPosture,
+  ): Promise<void> {
+    if (sessionId === null || modelSwitching) return;
     setModelSwitching(true);
     setModelSetError(null);
     setModelPersistFault(null);
@@ -516,7 +512,7 @@ export function ComposerProviderPicker({
         sessionKeys.modelConfig(sessionId),
         (prev: SessionModelConfig | undefined): SessionModelConfig => ({
           ...(prev ?? modelConfig),
-          ...patch,
+          ...next,
         }),
       );
       setModelPersistFault(outcome.persist_error);
@@ -531,36 +527,36 @@ export function ComposerProviderPicker({
           queryKey: adapterKeys.posture(activeAdapterId),
         });
       }
-      return true;
     } catch (e) {
       setModelSetError(e);
       log.warn(
         "ComposerProviderPicker",
-        `set session ${logVerb} failed; resyncing from the session`,
+        "set session posture failed; resyncing from the session",
         fmtError(e, intl),
       );
       void queryClient.invalidateQueries({
         queryKey: sessionKeys.modelConfig(sessionId),
       });
-      return false;
     } finally {
       setModelSwitching(false);
     }
   }
 
-  const selectModel = async (model: string | null) => {
+  const selectModel = (model: string | null) => {
     // Per-model linkage (issue #537, shared by codex + claude-code): the
     // thought level must sit in the newly selected model's supported set. A
     // held level outside that set (including every held level once the
     // model pick is cleared -- no model means no supported set at all) is
-    // cleared in the SAME user gesture. A rejected model write (in-session)
-    // returns early: the held level stays against the still-held model.
+    // cleared in the SAME user gesture -- since issue #603 the same wire
+    // submit, so a rejected write leaves the held level against the
+    // still-held model untouched.
     const mustClearLevel =
       perModelCatalog &&
       posture.thought_level != null &&
       !supportedEffortsFor(perModelCatalog, model).includes(
         posture.thought_level,
       );
+    const thoughtLevel = mustClearLevel ? null : posture.thought_level;
     if (sessionId === null) {
       // Cold start: the linkage is part of the pending patch (no IPCs).
       pendingPostureWrite(
@@ -569,18 +565,8 @@ export function ComposerProviderPicker({
       );
       return;
     }
-    const granted = await applyModelConfig(
-      () => setSessionModel(sessionId, model),
-      { model },
-      "model",
-    );
-    if (!granted) return;
-    // The clear lands via the existing set IPC -- awaiting the model write
-    // first means applyModelConfig's switching gate has re-opened and the
-    // clear cannot be swallowed.
-    if (mustClearLevel) {
-      await selectThoughtLevel(null);
-    }
+    const next: ModelPosture = { model, thought_level: thoughtLevel };
+    return applyModelConfig(() => setSessionPosture(sessionId, next), next);
   };
 
   const selectThoughtLevel = (thoughtLevel: string | null) => {
@@ -588,11 +574,11 @@ export function ComposerProviderPicker({
       pendingPostureWrite({ thought_level: thoughtLevel }, thoughtLevel === null);
       return;
     }
-    return applyModelConfig(
-      () => setSessionThoughtLevel(sessionId, thoughtLevel),
-      { thought_level: thoughtLevel },
-      "thought level",
-    );
+    // The full pair rides one wire submit (issue #603): the held model is
+    // sent as its current value -- an untouched field is never derived
+    // server-side.
+    const next: ModelPosture = { model: posture.model, thought_level: thoughtLevel };
+    return applyModelConfig(() => setSessionPosture(sessionId, next), next);
   };
 
   // Per-model helper (issue #537, codex + claude-code): the thought-level

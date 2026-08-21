@@ -719,9 +719,8 @@ impl SessionHandle {
     /// restored from the recipe header's `last_runtime`). Called right after
     /// the reset batch so the restored values win. The only writer that
     /// overwrites all three slots in one shot (the user-driven clear --
-    /// `set_session_model(None)` / `set_session_thought_level(None)` -- goes
-    /// through [`Self::set_external_model_config`] and never touches the
-    /// catalog).
+    /// `set_session_posture` with null fields -- goes through
+    /// [`Self::set_external_model_config`] and never touches the catalog).
     pub fn restore_runtime_model_config(
         &self,
         posture: PosturePair,

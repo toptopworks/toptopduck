@@ -783,33 +783,25 @@ export async function getSessionModelConfig(
 // failed write; `persist_suspended` = true when the write was withheld on a
 // pending ADR-0035 conflict (externally modified .duck). Both null/false =
 // the write landed (or the session is unbound, nothing to persist).
-export interface SetModelPersistOutcome {
+export interface SetPosturePersistOutcome {
   persist_error: SaveError | null;
   persist_suspended: boolean;
 }
 
-// Set the session's model selection for the next external-runtime turn
-// (ADR-0095). `null` clears (the CLI's own default). Takes effect at the next
-// turn boundary; rejected while resuming or while a turn is in flight.
-export async function setSessionModel(
+// Set the session's model + thought-level selections for the next
+// external-runtime turn (ADR-0095). The wire IS the complete posture
+// (issue #603): every field is an explicit intent value -- `null` clears
+// (the CLI's own default) and an untouched field arrives as its current
+// value -- so the backend never derives off its held slot. Takes effect at
+// the next turn boundary; rejected while resuming or while a turn is in
+// flight.
+export async function setSessionPosture(
   sessionId: string,
-  model: string | null,
-): Promise<SetModelPersistOutcome> {
-  return invoke<SetModelPersistOutcome>("set_session_model", {
+  posture: ModelPosture,
+): Promise<SetPosturePersistOutcome> {
+  return invoke<SetPosturePersistOutcome>("set_session_posture", {
     sessionId,
-    model,
-  });
-}
-
-// Set the session's thought-level selection for the next external-runtime turn
-// (ADR-0095). Same semantics as setSessionModel; a no-op posture on the
-// built-in runtime.
-export async function setSessionThoughtLevel(
-  sessionId: string,
-  thoughtLevel: string | null,
-): Promise<SetModelPersistOutcome> {
-  return invoke<SetModelPersistOutcome>("set_session_thought_level", {
-    sessionId,
-    thoughtLevel,
+    model: posture.model,
+    thoughtLevel: posture.thought_level,
   });
 }

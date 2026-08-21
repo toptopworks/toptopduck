@@ -514,9 +514,9 @@ pub struct Session {
     /// persisted recipe can never diverge (issue #530). `None` selections
     /// leave the CLI's own defaults; no-op on the built-in runtime (its model
     /// comes from the provider profile; BYOK thought levels are a separate
-    /// future ADR). The `set_session_model` / `set_session_thought_level`
-    /// commands also write it so the next auto-write persists a selection
-    /// made WITHOUT a following turn (the resume promise, ADR-0095 D6).
+    /// future ADR). The `set_session_posture` command also writes it so the
+    /// next auto-write persists a selection made WITHOUT a following turn
+    /// (the resume promise, ADR-0095 D6).
     runtime_facts: SessionRuntimeFacts,
     /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
     /// Updated at the top of each turn (the aggregator's `connect_all` result)
@@ -759,9 +759,8 @@ impl Session {
     }
 
     /// Read the recipe-header ADR-0095 facts (the persister layers them onto
-    /// every built recipe). Exposed so the `set_session_model` /
-    /// `set_session_thought_level` commands can persist a selection made
-    /// without a following turn.
+    /// every built recipe). Exposed so the `set_session_posture` command can
+    /// persist a selection made without a following turn.
     pub fn runtime_facts(&self) -> &SessionRuntimeFacts {
         &self.runtime_facts
     }

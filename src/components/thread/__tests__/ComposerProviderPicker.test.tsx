@@ -13,10 +13,9 @@ import {
   getSessionRuntime,
   listAdapters,
   listProviderProfiles,
-  setSessionModel,
+  setSessionPosture,
   setSessionRuntime,
-  setSessionThoughtLevel,
-  type SetModelPersistOutcome,
+  type SetPosturePersistOutcome,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
 import { adapterKeys } from "../../../session/queryKeys";
@@ -55,16 +54,15 @@ vi.mock("../../../api", async (importOriginal) => {
     setSessionRuntime: vi.fn(async () => {}),
     listAdapters: vi.fn(),
     getSessionModelConfig: vi.fn(),
-    setSessionModel: vi.fn(async () => PERSIST_OK),
-    setSessionThoughtLevel: vi.fn(async () => PERSIST_OK),
+    setSessionPosture: vi.fn(async () => PERSIST_OK),
     getAdapterCatalogs: vi.fn(async () => ({})),
     getLastModelPosture: vi.fn(async () => EMPTY_POSTURE),
     clearLastModelPosture: vi.fn(async () => ({})),
   };
 });
 
-// The set commands' clean persist verdict (issue #529): the write landed.
-const PERSIST_OK: SetModelPersistOutcome = {
+// The set command's clean persist verdict (issue #529): the write landed.
+const PERSIST_OK: SetPosturePersistOutcome = {
   persist_error: null,
   persist_suspended: false,
 };
@@ -835,9 +833,8 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
       await screen.findByText("fake-opus · medium (last turn)"),
     ).toBeTruthy();
     // Display-layer only (ADR-0100 constraint): the live rendering never
-    // writes the posture -- the single write point stays the set IPCs.
-    expect(setSessionModel).not.toHaveBeenCalled();
-    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+    // writes the posture -- the single write point stays the set IPC.
+    expect(setSessionPosture).not.toHaveBeenCalled();
     expect(clearLastModelPosture).not.toHaveBeenCalled();
   });
 
@@ -1095,28 +1092,28 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     await screen.findByRole("button", { name: /Runtime: claude-code/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "sonnet" }));
     await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "sonnet"),
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "sonnet", thought_level: null }),
     );
   });
 
-  it("writes a model selection through setSessionModel", async () => {
+  it("writes a model selection through setSessionPosture", async () => {
     await renderExternalPicker({}, { cached_discovered: CATALOG });
     fireEvent.click(
       screen.getByRole("menuitemradio", { name: "fake-sonnet" }),
     );
     await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "fake-sonnet", thought_level: null }),
     );
   });
 
-  it("writes a thought-level selection through setSessionThoughtLevel", async () => {
+  it("writes a thought-level selection through setSessionPosture", async () => {
     await renderExternalPicker(
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
     );
     fireEvent.click(screen.getByRole("menuitemradio", { name: /^low$/ }));
     await waitFor(() =>
-      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", "low"),
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "fake-opus", thought_level: "low" }),
     );
   });
 
@@ -1130,12 +1127,12 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     });
     fireEvent.click(clearingRows[0]);
     await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", null),
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: null, thought_level: null }),
     );
     expect(clearLastModelPosture).not.toHaveBeenCalled();
   });
 
-  it("clears a held effort the newly picked model does not support (codex linkage, issue #537)", async () => {
+  it("clears a held effort the newly picked model does not support in the same wire submit (codex linkage, issue #537)", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "codex",
@@ -1151,19 +1148,17 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     renderPicker(pickerJsx());
     await screen.findByRole("button", { name: /Runtime: codex/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
+    // The linkage clear rides the SAME wire submit (issues #537 + #603):
+    // one call carries the model pick AND the level null.
     await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "gpt-5-codex"),
-    );
-    // The chained clear lands through the SAME gesture (issue #537).
-    await waitFor(() =>
-      expect(setSessionThoughtLevel).toHaveBeenCalledWith("sess-1", null),
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "gpt-5-codex", thought_level: null }),
     );
   });
 
-  it("keeps the held effort when the model write itself rejects (codex linkage granted gate)", async () => {
-    // The same codex fixture, but the model write rejects: the chained
-    // effort clear gates on the granted verdict, so the held level stays
-    // against the still-held model instead of being cleared for nothing.
+  it("keeps the held effort when the write itself rejects (codex linkage)", async () => {
+    // The same codex fixture, but the single posture write rejects:
+    // nothing of the pair lands, so the held level stays against the
+    // still-held model instead of being cleared for nothing.
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",
       data: "codex",
@@ -1175,20 +1170,21 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
       cached_discovered: null,
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
-    vi.mocked(setSessionModel).mockRejectedValueOnce(new Error("write refused"));
+    vi.mocked(setSessionPosture).mockRejectedValueOnce(new Error("write refused"));
     renderPicker(pickerJsx());
     await screen.findByRole("button", { name: /Runtime: codex/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5-codex" }));
     await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "gpt-5-codex"),
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "gpt-5-codex", thought_level: null }),
     );
-    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+    // One submit carried the whole pair -- there is no second write.
+    expect(setSessionPosture).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () => {
-  it("renders an inline fault and resyncs when the set-model IPC rejects", async () => {
-    vi.mocked(setSessionModel).mockRejectedValue(new Error("write refused"));
+  it("renders an inline fault and resyncs when the set-posture IPC rejects", async () => {
+    vi.mocked(setSessionPosture).mockRejectedValue(new Error("write refused"));
     await renderExternalPicker(
       {},
       { model: "fake-opus", cached_discovered: CATALOG },
@@ -1201,8 +1197,8 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
     await waitFor(() => expect(getSessionModelConfig).toHaveBeenCalledTimes(2));
   });
 
-  it("renders an inline fault when the set-thought-level IPC rejects", async () => {
-    vi.mocked(setSessionThoughtLevel).mockRejectedValue(
+  it("renders an inline fault when the set-posture IPC rejects from the thought-level row", async () => {
+    vi.mocked(setSessionPosture).mockRejectedValue(
       new Error("write refused"),
     );
     await renderExternalPicker(
@@ -1218,7 +1214,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
   it("surfaces a persistence failure returned by a successful set", async () => {
     // The set IPC resolves, but the returned persist verdict carries a typed
     // write failure -- the menu says the selection was NOT saved to disk.
-    vi.mocked(setSessionModel).mockResolvedValue({
+    vi.mocked(setSessionPosture).mockResolvedValue({
       persist_error: { kind: "Io", data: "disk full" },
       persist_suspended: false,
     });
@@ -1233,7 +1229,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
   });
 
   it("surfaces a persist suspension (ADR-0035 conflict) returned by a successful set", async () => {
-    vi.mocked(setSessionModel).mockResolvedValue({
+    vi.mocked(setSessionPosture).mockResolvedValue({
       persist_error: null,
       persist_suspended: true,
     });
@@ -1246,7 +1242,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
   });
 
   it("clears the failure lines on the next successful selection", async () => {
-    vi.mocked(setSessionModel)
+    vi.mocked(setSessionPosture)
       .mockResolvedValueOnce({
         persist_error: { kind: "Io", data: "disk full" },
         persist_suspended: false,
@@ -1395,7 +1391,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       model: "fake-sonnet",
       thought_level: "medium",
     });
-    expect(setSessionModel).not.toHaveBeenCalled();
+    expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
   it("clears the dimension AND wipes the backfill entry via the #581 IPC (ADR-0100 D3)", async () => {
@@ -1414,7 +1410,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       thought_level: "medium",
     });
     expect(clearLastModelPosture).toHaveBeenCalledWith("qwen-code");
-    expect(setSessionModel).not.toHaveBeenCalled();
+    expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
   it("clears an unsupported held level in the same pending patch (cold-start #537 linkage)", async () => {
@@ -1451,8 +1447,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       model: "gpt-5-codex",
       thought_level: null,
     });
-    expect(setSessionModel).not.toHaveBeenCalled();
-    expect(setSessionThoughtLevel).not.toHaveBeenCalled();
+    expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
   it("renders Default (recommended) when the backfill entry is empty", async () => {
@@ -1669,7 +1664,7 @@ describe("ComposerProviderPicker backfill cache coherence (ADR-0100 single write
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
     fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     await waitFor(() =>
-      expect(setSessionModel).toHaveBeenCalledWith("sess-1", "fake-sonnet"),
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "fake-sonnet", thought_level: null }),
     );
     await waitFor(() =>
       expect(
