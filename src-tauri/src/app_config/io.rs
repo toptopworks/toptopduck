@@ -140,11 +140,16 @@ pub fn write_at(target: &Path, cfg: &AppConfig) -> Result<(), WriteError> {
 }
 
 /// Why a write failed. Every failure leaves the prior config file (if any)
-/// untouched: a serialize error happens before any IO; an IO failure leaves the
-/// temp file behind but the target unchanged; a rename failure leaves the target
+/// untouched: a read failure happens before any write is attempted; a
+/// serialize error happens before any IO; an IO failure leaves the temp file
+/// behind but the target unchanged; a rename failure leaves the target
 /// unchanged (temp best-effort removed).
 #[derive(Debug)]
 pub enum WriteError {
+    /// The read half of a read-modify-write failed (corrupt file, version
+    /// mismatch, transient IO). Surfaced instead of degrading to defaults so
+    /// a rewrite can never persist "defaults + this one write" (issue #602).
+    Read(String),
     Serialize(String),
     Io(String),
     Rename(String),
@@ -153,6 +158,7 @@ pub enum WriteError {
 impl std::fmt::Display for WriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Self::Read(d) => write!(f, "read app-config for rewrite failed: {d}"),
             Self::Serialize(d) => write!(f, "serialize app-config failed: {d}"),
             Self::Io(d) => write!(f, "write app-config temp file failed: {d}"),
             Self::Rename(d) => write!(f, "replace app-config failed: {d}"),
@@ -185,9 +191,11 @@ pub fn read_at(path: &Path) -> AppConfig {
 }
 
 /// Parse the config file, routing on `format_version` and scanning for secret
-/// fields. Internal: the honest-degrade decision lives in [`read_at`]; this
-/// surfaced `Result` lets the tests pin each failure mode precisely.
-fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
+/// fields. The honest-degrade decision for READ consumers lives in
+/// [`read_at`]; this surfaced `Result` lets the tests pin each failure mode
+/// precisely and feeds the app-config read-modify-write entries, where a
+/// degraded read must never become the source of a rewrite (issue #602).
+pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

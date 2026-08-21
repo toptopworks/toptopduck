@@ -240,7 +240,7 @@ impl LiveProviderConfig {
             .write_lock
             .lock()
             .expect("app-config write_lock poisoned");
-        let mut cfg = self.load();
+        let mut cfg = self.load_for_write()?;
         let stored = cfg.mcp_servers.upsert(server);
         self.store_inner(cfg)?;
         Ok(stored)
@@ -258,7 +258,7 @@ impl LiveProviderConfig {
             .write_lock
             .lock()
             .expect("app-config write_lock poisoned");
-        let mut cfg = self.load();
+        let mut cfg = self.load_for_write()?;
         cfg.mcp_servers.remove(id);
         self.store_inner(cfg)?;
         Ok(())
@@ -307,13 +307,38 @@ impl LiveProviderConfig {
     /// never fires again, so repeated loads are plain reads.
     pub fn load(&self) -> AppConfig {
         if !self.path.exists() {
-            if let Some(blob) = self.keychain.fetch_legacy_provider_blob() {
-                return self.migrate_from_legacy_blob(blob);
-            }
-            // No file, no legacy blob -> defaults (file created lazily on first store).
-            return AppConfig::defaults();
+            return self.load_missing();
         }
         app_config::read_at(&self.path)
+    }
+
+    /// The value for an absent config file: the one-time legacy keychain blob
+    /// migration when a blob is present, otherwise the built-in defaults (the
+    /// file is created lazily on first store). A missing file is the correct
+    /// starting value, not a degraded state -- shared by [`load`] and the
+    /// read-modify-write entries below.
+    fn load_missing(&self) -> AppConfig {
+        if let Some(blob) = self.keychain.fetch_legacy_provider_blob() {
+            return self.migrate_from_legacy_blob(blob);
+        }
+        AppConfig::defaults()
+    }
+
+    /// The read source for the read-modify-write entries (issue #602). Unlike
+    /// [`load`], a read failure on an EXISTING file surfaces as `Err` instead
+    /// of degrading to defaults: a degraded read handed to `store_inner` would
+    /// atomically persist "defaults + this one write", resetting every other
+    /// pref on disk while the write reports success. Only a missing file goes
+    /// to the defaults (same branch as `load`, legacy migration included).
+    fn load_for_write(&self) -> Result<AppConfig, app_config::WriteError> {
+        match app_config::parse_at(&self.path) {
+            Ok(cfg) => Ok(cfg),
+            Err(app_config::AppConfigReadError::Missing) => Ok(self.load_missing()),
+            Err(reason) => Err(app_config::WriteError::Read(format!(
+                "{reason}: {}",
+                self.path.display()
+            ))),
+        }
     }
 
     /// One-time migration: seed a fresh app-config's default profile endpoint
@@ -395,7 +420,7 @@ impl LiveProviderConfig {
             .write_lock
             .lock()
             .expect("app-config write_lock poisoned");
-        let mut cfg = self.load();
+        let mut cfg = self.load_for_write()?;
         cfg.sessions_dir = path;
         self.store_inner(cfg)
     }
@@ -419,7 +444,7 @@ impl LiveProviderConfig {
             .write_lock
             .lock()
             .expect("app-config write_lock poisoned");
-        let mut cfg = self.load();
+        let mut cfg = self.load_for_write()?;
         cfg.default_runtime = runtime;
         self.store_inner(cfg)
     }
@@ -442,7 +467,7 @@ impl LiveProviderConfig {
             .write_lock
             .lock()
             .expect("app-config write_lock poisoned");
-        let mut cfg = self.load();
+        let mut cfg = self.load_for_write()?;
         cfg.last_model_postures
             .insert(adapter_id.to_string(), posture);
         self.store_inner(cfg)
@@ -1087,6 +1112,82 @@ mod tests {
             live.last_model_posture("gemini-cli"),
             ModelPosture::default()
         );
+    }
+
+    // --- RMW read strictness (issue #602) -------------------------------------
+
+    #[test]
+    fn rmw_entries_err_and_leave_a_corrupt_config_untouched() {
+        // A read failure on the read half of a read-modify-write must surface
+        // as Err and leave the file bytes untouched. The ADR-0038
+        // honest-degrade read is a STARTUP contract: handed to a rewrite it
+        // would have store_inner atomically persist "defaults + this one
+        // write", resetting every other pref while the write returns Ok. All
+        // five RMW entries share the read source, so all five are pinned
+        // against the same corrupt seed.
+        let (_dir, live) = live();
+        let corrupt = b"{ this is not json";
+        std::fs::write(live.path(), corrupt).expect("seed corrupt file");
+        let server = McpServerConfig {
+            id: McpServerId(String::new()),
+            display_name: String::new(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms: None,
+        };
+
+        live.upsert_mcp_server(server)
+            .expect_err("upsert refuses a corrupt read");
+        assert_eq!(
+            std::fs::read(live.path()).expect("file still there"),
+            corrupt,
+            "no defaults-plus-one-write rewrite"
+        );
+
+        live.remove_mcp_server(&McpServerId("any".into()))
+            .expect_err("remove refuses a corrupt read");
+        assert_eq!(
+            std::fs::read(live.path()).expect("file still there"),
+            corrupt
+        );
+
+        live.set_sessions_dir(Some("/elsewhere".into()))
+            .expect_err("set_sessions_dir refuses a corrupt read");
+        assert_eq!(
+            std::fs::read(live.path()).expect("file still there"),
+            corrupt
+        );
+
+        live.set_default_runtime(DefaultRuntime::BuiltIn)
+            .expect_err("set_default_runtime refuses a corrupt read");
+        assert_eq!(
+            std::fs::read(live.path()).expect("file still there"),
+            corrupt
+        );
+
+        live.set_last_model_posture("codex", ModelPosture::default())
+            .expect_err("set_last_model_posture refuses a corrupt read");
+        assert_eq!(
+            std::fs::read(live.path()).expect("file still there"),
+            corrupt
+        );
+    }
+
+    #[test]
+    fn rmw_read_failure_error_names_the_path_and_reason() {
+        // The Err must be diagnosable at the best-effort warn site
+        // (record_last_model_posture) and in the IPC ConfigWriteFailure
+        // string: the Display carries both the read failure reason and the
+        // config path, so one log line attributes the refused write.
+        let (_dir, live) = live();
+        std::fs::write(live.path(), b"{ nope").expect("seed corrupt file");
+        let msg = live
+            .set_default_runtime(DefaultRuntime::BuiltIn)
+            .expect_err("read failure surfaces")
+            .to_string();
+        assert!(msg.contains("config.json"), "names the file: {msg}");
+        assert!(msg.contains("parse"), "names the reason: {msg}");
     }
 
     // --- MCP server CRUD (issue #301 slice B) -------------------------------
