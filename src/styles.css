@@ -97,11 +97,11 @@
   /* Shared 4-track conversation grid (ADR-0083/0090). Both .session-body and
    * .shell-bar-track reference these so the bar sits exactly under the
    * conversation column. Default: rail open. Collapsed: workspace folded,
-   * conversation centered. The narrow-viewport + sidebar-collapsed variants
-   * handle the two centering thresholds. */
+   * conversation centered at any container width -- the 1fr spacers shrink to
+   * 0 below the 800px cap, so a narrow container still fills the width (no
+   * centering threshold needed; matches the cold-start bar's centering). */
   --track-grid: 0fr minmax(0, var(--rail-width, 350px)) 1fr 0fr;
-  --track-grid-collapsed: 0fr minmax(0, 800px) 0fr 0fr;
-  --track-grid-collapsed-wide: 1fr minmax(0, 800px) 0fr 1fr;
+  --track-grid-collapsed: 1fr minmax(0, 800px) 0fr 1fr;
   /* Codex-style collapse: animate the first column var(--sidebar-width) <-> 0
    * so the main region slides instead of snapping. grid-template-columns
    * interpolation needs the column to actually shrink, which in turn needs
@@ -409,20 +409,11 @@
   background: var(--card);
 }
 /* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar
- * follows the conversation column's 800px geometry. Both selectors reference
- * the shared custom properties on .shell so the two surfaces never drift. */
+ * follows the conversation column's centered 800px geometry. Both selectors
+ * reference the shared custom properties on .shell so the two surfaces never
+ * drift. */
 .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
   grid-template-columns: var(--track-grid-collapsed);
-}
-@media (min-width: 1280px) {
-  .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
-    grid-template-columns: var(--track-grid-collapsed-wide);
-  }
-}
-@media (min-width: 900px) {
-  .shell.sidebar-collapsed .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
-    grid-template-columns: var(--track-grid-collapsed-wide);
-  }
 }
 .shell-bar-slot.bottom .question-bar {
   grid-column: 2;
@@ -457,25 +448,12 @@
 }
 /* Workspace folded (ADR-0083, issue #298): 4-track grid centers the
  * conversation when the workspace folds. Tracks: [left-spacer] [conversation]
- * [workspace] [right-spacer]. Left/right spacers grow 0fr -> 1fr equally so
- * the conversation slides to center; the workspace column shrinks 1fr -> 0fr.
- * Every track interpolates (fr->fr, minmax px->px) so no jitter. */
-/* Default (narrow container): spacers stay 0fr -- conversation fills width,
- * no centering, no jitter. */
+ * [workspace] [right-spacer]. The 1fr spacers center the 800px column at any
+ * container width (they shrink to 0 below the cap, so a narrow container
+ * fills the width); the workspace column shrinks 1fr -> 0fr. Every track
+ * interpolates (fr->fr, minmax px->px) so no jitter. */
 .shell .session-pane.workspace-collapsed .session-body {
   grid-template-columns: var(--track-grid-collapsed);
-}
-/* Wide viewport: spacers grow 1fr to center the conversation. */
-@media (min-width: 1280px) {
-  .shell .session-pane.workspace-collapsed .session-body {
-    grid-template-columns: var(--track-grid-collapsed-wide);
-  }
-}
-/* Sidebar collapsed: container = full viewport, so lower threshold suffices. */
-@media (min-width: 900px) {
-  .shell.sidebar-collapsed .session-pane.workspace-collapsed .session-body {
-    grid-template-columns: var(--track-grid-collapsed-wide);
-  }
 }
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
 .shell .session-pane.workspace-collapsed .session-workspace {

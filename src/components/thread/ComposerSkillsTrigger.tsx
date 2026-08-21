@@ -7,6 +7,7 @@ import { listMountedSkills, listSkills } from "../../api";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { ComposerSkillsSection } from "./ComposerSkillsSection";
+import { LABEL_HIDE_NARROW } from "./composer-visual";
 
 // The Skills trigger chip, rendered in the QuestionBar container's top row
 // (the shell-level bar's header slot). Shows the puzzle icon + mounted/total
@@ -80,11 +81,11 @@ export function ComposerSkillsTrigger({
       <PopoverTrigger asChild>
         <button type="button" className={CHIP_CLASS} aria-label={label}>
           <Puzzle className="size-3.5" aria-hidden />
-          {/* @max-[320px]:hidden collapses the label when the QuestionBar
+          {/* LABEL_HIDE_NARROW collapses the label when the QuestionBar
               @container narrows, leaving the icon -- the same threshold the
               auth-mode chip uses. aria-label keeps the full label (with
               counts) as the accessible name at every width. */}
-          <span className="@max-[320px]:hidden">{label}</span>
+          <span className={LABEL_HIDE_NARROW}>{label}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent side="bottom" align="start" className="w-64 p-3">

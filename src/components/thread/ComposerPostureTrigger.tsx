@@ -17,6 +17,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { LABEL_HIDE_NARROW } from "./composer-visual";
 
 // The next-turn posture text button (ADR-0099 Decision 3, issue #574/#573): a
 // resident text control seated BEFORE the runtime trigger on the QuestionBar
@@ -124,9 +125,12 @@ export function ComposerPostureTrigger({
   }
 
   // Static label (ADR-0099 Decision 3): no catalog, no arrow, not a button.
+  // Hides on the same narrow-rail threshold as the trigger button's label
+  // below (LABEL_HIDE_NARROW), so both runtime postures collapse their label
+  // identically instead of this one degrading to an ellipsis.
   if (catalog === null) {
     return (
-      <span className="text-muted-foreground max-w-44 truncate text-sm">
+      <span className={`${LABEL_HIDE_NARROW} text-muted-foreground max-w-44 truncate text-sm`}>
         {label}
       </span>
     );
@@ -195,14 +199,14 @@ export function ComposerPostureTrigger({
       type="button"
       disabled={disabled}
       aria-label={ariaLabel}
-      className="composer-posture-trigger inline-flex h-9 max-w-52 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
+      className="composer-posture-trigger inline-flex h-9 max-w-52 min-w-0 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
     >
       {/* Hides the posture label when the question-bar @container
           drops below the narrow-rail threshold, leaving the
           chevron-only button (aria-label keeps the full readout) --
           the same collapse the auth-mode chip's label performs
           (LABEL_HIDE_NARROW). */}
-      <span className="@max-[320px]:hidden truncate">{label}</span>
+      <span className={`${LABEL_HIDE_NARROW} truncate`}>{label}</span>
       <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
     </button>
   );
