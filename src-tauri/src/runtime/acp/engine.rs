@@ -56,7 +56,7 @@ use crate::runtime::acp::wire::{
     Response, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus,
 };
 use crate::session::agent_loop::{
-    truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry, DEFAULT_STEP_CAP,
+    truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, DEFAULT_STEP_CAP,
     DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
 };
 
@@ -380,7 +380,10 @@ impl AcpEngine {
             // (bridge -> MCP gateway -> tools::dispatch), observed there.
             // The ACP engine drives only the ACP half of the turn.
             promotions: Vec::new(),
-            trace,
+            // ADR-0103 (issue #608): the flat trajectory wraps as one
+            // round until the per-runtime grouping slice; an empty
+            // trajectory stays an empty round list (no ghost round).
+            trace: LoopRound::flat_wrap(trace),
             round_trips,
             // ADR-0095: the handshake's extracted catalog rides every
             // post-handshake exit (None before / on handshake failure).
@@ -1260,7 +1263,10 @@ mod tests {
             }
             other => panic!("expected Transient from spawn failure, got {other:?}"),
         }
-        assert!(outcome.trace.is_empty());
+        assert!(
+            outcome.trace.is_empty(),
+            "a spawn failure dispatched nothing"
+        );
     }
 
     /// ADR-0097 dispatch seam: an adapter whose `stream_format` is
@@ -1306,6 +1312,9 @@ mod tests {
             }
             other => panic!("expected Transient from spawn failure, got {other:?}"),
         }
-        assert!(outcome.trace.is_empty());
+        assert!(
+            outcome.trace.is_empty(),
+            "a spawn failure dispatched nothing"
+        );
     }
 }

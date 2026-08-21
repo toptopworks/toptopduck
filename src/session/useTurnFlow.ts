@@ -9,7 +9,7 @@ import type { UseViewedResult } from "./useViewedResult";
 import type { AppError } from "../types/error";
 import type { ApprovalResponse, OperationKind } from "../types/approval";
 import type { TurnPhase } from "../types/session";
-import type { ThreadEntry, TraceEntry } from "../types/thread";
+import type { ThreadEntry, TraceRound } from "../types/thread";
 
 // The turn-orchestration domain (issue #230), extracted from useSessionState
 // (slice 2 of the three-slice deepening). This hook owns the turn-progress
@@ -41,6 +41,10 @@ const NO_ROWS: LiveTraceRow[] = [];
 export interface LiveCall {
   /** Stable render key: arrival order (`call-0`, `call-1`, ...). */
   key: string;
+  /** The 1-based round (provider round-trip) the call belongs to -- the
+   *  Thinking event's attempt at the moment the call arrived. Drives the
+   *  settled fold's round grouping (issue #608, ADR-0103). */
+  step: number;
   name: string;
   operationKind: OperationKind;
   summary: string;
@@ -60,6 +64,9 @@ export interface LiveTraceRow {
   /** Stable render key: the approval requestId for gated calls (the card's
    *  identity survives the started/completed merge), else the call key. */
   key: string;
+  /** The 1-based round (provider round-trip) the call belongs to; carried
+   *  through the merge so the settled fold can group rows into rounds. */
+  step: number;
   name: string;
   /** The external MCP server for gated calls; null for built-in calls. */
   server: string | null;
@@ -77,13 +84,19 @@ export interface LiveTraceRow {
 /** The in-flight turn the rail renders progressively (ADR-0078, issue #297):
  *  the asking question + the live trace rows + the current Thinking step.
  *  Client UI state only (ADR-0051/0059) -- never enters the thread cache; the
- *  settled turn folds the rows into its optimistic TurnRecord.trace. */
+ *  settled turn folds the rows into its optimistic round-grouped
+ *  TurnRecord.trace. */
 export interface LiveTurn {
   question: string;
   /** The 1-based step of the latest Thinking event (round-trip count,
    *  ADR-0081); null until the first event arrives. */
   step: number | null;
   rows: LiveTraceRow[];
+  /** The per-round connective prose seen so far (index = step-1, null when a
+   *  round emitted none), from the RoundText events (issue #608). The chat
+   *  live rendering consumes it; the settled fold attaches each entry to its
+   *  round. */
+  roundTexts: Array<string | null>;
 }
 
 /** Merge the two live channels into one ordered row list (pure -- unit-tested
@@ -107,6 +120,7 @@ export function mergeLiveTrace(
       merged.add(match.requestId);
       rows.push({
         key: match.requestId,
+        step: call.step,
         name: call.name,
         server: match.server,
         operationKind: call.operationKind,
@@ -122,6 +136,7 @@ export function mergeLiveTrace(
     } else {
       rows.push({
         key: call.key,
+        step: call.step,
         name: call.name,
         server: null,
         operationKind: call.operationKind,
@@ -137,6 +152,10 @@ export function mergeLiveTrace(
     if (merged.has(a.requestId)) continue;
     rows.push({
       key: a.requestId,
+      // Placeholder: an unmatched approval row never dispatches (pending,
+      // or gate-cancelled), so its success stays null and the settled fold
+      // drops it -- this step value is never read for these rows.
+      step: 1,
       name: a.tool,
       server: a.server,
       operationKind: a.operationKind,
@@ -153,17 +172,32 @@ export function mergeLiveTrace(
   return rows;
 }
 
-/** Project the settled rows onto the persisted TraceEntry shape for the
- *  optimistic thread append (issue #297): completed calls only -- a row still
- *  at success===null (a gate-cancelled call, resolved-deny with no dispatch)
- *  has NO backend trace entry, so including it would diverge from the refetch.
- *  The field mapping is identity with the ToolCallCompleted payload, so the
- *  optimistic trace equals the backend's recorded trace entry-for-entry. */
-export function rowsToTrace(rows: ReadonlyArray<LiveTraceRow>): TraceEntry[] {
-  const trace: TraceEntry[] = [];
+/** Project the settled rows + round texts onto the round-grouped
+ *  `TraceRound[]` shape for the optimistic thread append (issue #297;
+ *  round-grouped by #608, ADR-0103): completed calls only -- a row still at
+ *  success===null (a gate-cancelled call, resolved-deny with no dispatch) has
+ *  NO backend trace entry, so including it would diverge from the refetch.
+ *  Rows group by their round step in arrival order; each round attaches its
+ *  prose when the round emitted one. The call mapping is identity with the
+ *  ToolCallCompleted payload, so the optimistic trace equals the backend's
+ *  recorded rounds. */
+export function rowsToRounds(
+  rows: ReadonlyArray<LiveTraceRow>,
+  roundTexts: ReadonlyArray<string | null>,
+): TraceRound[] {
+  const rounds: TraceRound[] = [];
+  const byStep = new Map<number, TraceRound>();
+  const roundAt = (step: number): TraceRound => {
+    const existing = byStep.get(step);
+    if (existing) return existing;
+    const created: TraceRound = { calls: [] };
+    byStep.set(step, created);
+    rounds.push(created);
+    return created;
+  };
   for (const row of rows) {
     if (row.success === null) continue;
-    trace.push({
+    roundAt(row.step).calls.push({
       name: row.name,
       operation_kind: row.operationKind,
       summary: row.summary,
@@ -171,7 +205,14 @@ export function rowsToTrace(rows: ReadonlyArray<LiveTraceRow>): TraceEntry[] {
       result_excerpt: row.resultExcerpt,
     });
   }
-  return trace;
+  // Rounds that emitted prose attach it (a round may also exist with prose
+  // and no completed calls -- e.g. a cancel mid-batch).
+  roundTexts.forEach((text, i) => {
+    if (text === null) return;
+    const round = roundAt(i + 1);
+    round.text = text;
+  });
+  return rounds;
 }
 
 export interface UseTurnFlowDeps {
@@ -221,6 +262,9 @@ interface LiveState {
   question: string;
   step: number | null;
   calls: LiveCall[];
+  /** Per-round connective prose (index = step-1, null when none), from the
+   *  RoundText events (issue #608). */
+  roundTexts: Array<string | null>;
 }
 
 /** Mint a call row keyed by arrival order (the trace is append-only within
@@ -228,6 +272,7 @@ interface LiveState {
  *  append a row (a started call, a gate-denied completion with no start). */
 function callRow(
   seq: number,
+  step: number,
   name: string,
   operationKind: OperationKind,
   summary: string,
@@ -235,7 +280,16 @@ function callRow(
   success: boolean | null,
   resultExcerpt: string,
 ): LiveCall {
-  return { key: `call-${seq}`, name, operationKind, summary, running, success, resultExcerpt };
+  return {
+    key: `call-${seq}`,
+    step,
+    name,
+    operationKind,
+    summary,
+    running,
+    success,
+    resultExcerpt,
+  };
 }
 
 /** The index of the LAST running call matching (name, summary) -- the
@@ -259,11 +313,29 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
     // The LLM round-trip wait: surface the 1-based step.
     return { ...live, step: phase.Thinking.attempt };
   }
+  if ("RoundText" in phase) {
+    // ADR-0103 (issue #608): the round's connective prose, attached to the
+    // CURRENT round (the Thinking event that opened it has already arrived).
+    const step = live.step ?? 1;
+    const roundTexts = withRoundSlot(live.roundTexts, step, phase.RoundText.text);
+    return { ...live, roundTexts };
+  }
+  if ("ThinkingCompleted" in phase) {
+    // ADR-0103 (issue #608): the round's thinking block completed. The
+    // content feeds the chat live rendering (follow-up slices); here it is
+    // consumed so the event is observable on the live state without
+    // disturbing the row merge.
+    return live;
+  }
   if ("ToolCallStarted" in phase) {
     const { name, operation_kind, summary } = phase.ToolCallStarted;
+    const step = live.step ?? 1;
     return {
       ...live,
-      calls: [...live.calls, callRow(live.calls.length, name, operation_kind, summary, true, null, "")],
+      calls: [
+        ...live.calls,
+        callRow(live.calls.length, step, name, operation_kind, summary, true, null, ""),
+      ],
     };
   }
   // ToolCallCompleted: the trace entry as it lands. Completes the matching
@@ -281,12 +353,14 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
       ),
     };
   }
+  const step = live.step ?? 1;
   return {
     ...live,
     calls: [
       ...live.calls,
       callRow(
         live.calls.length,
+        step,
         entry.name,
         entry.operation_kind,
         entry.summary,
@@ -296,6 +370,19 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
       ),
     ],
   };
+}
+
+/** Extend the per-round slot array to `step` and set its text, padding the
+ *  untouched rounds with null (a round that emitted no prose). Pure. */
+function withRoundSlot(
+  roundTexts: ReadonlyArray<string | null>,
+  step: number,
+  text: string,
+): Array<string | null> {
+  const next = roundTexts.slice();
+  while (next.length < step - 1) next.push(null);
+  next[step - 1] = text;
+  return next;
 }
 
 export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFlow {
@@ -391,6 +478,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       question: live.question,
       step: live.step,
       rows: mergeLiveTrace(live.calls, approvals),
+      roundTexts: live.roundTexts,
     };
   }, [live, approvals]);
 
@@ -405,15 +493,19 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     async (question: string) => {
       setLoading(true);
       setError(null);
+      // ADR-0103 (issue #608): the ask timestamp, read at submit so the
+      // optimistic record carries the user's ask time (the backend stamps its
+      // own reading at record time; the next thread refetch replaces it).
+      const askedAt = Date.now();
       // The live turn card mounts with the question; events grow its trace.
-      commitLive({ question, step: null, calls: [] });
+      commitLive({ question, step: null, calls: [], roundTexts: [] });
       let outcome;
       // The settled trace, snapshotted in the finally BEFORE the live state
       // folds away (the optimistic append below reads it on the success
       // path; the failure path early-returns without appending). The
       // finally ALWAYS assigns it, so the definite-assignment needs no
       // initializer (which no-useless-assignment would flag as dead).
-      let settledTrace: TraceEntry[];
+      let settledTrace: TraceRound[];
       try {
         outcome = await askQuestion(sessionId, question);
       } catch (e) {
@@ -429,7 +521,10 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         // synchronously-mirrored settled rows (captured above, so the final
         // event's row survives even when its render is still pending), and
         // the app-level approval hook clears this session's folded cards.
-        settledTrace = rowsToTrace(rowsRef.current);
+        settledTrace = rowsToRounds(
+          rowsRef.current,
+          liveRef.current?.roundTexts ?? [],
+        );
         setPhase(null);
         commitLive(null);
         onApprovalsSettled?.();
@@ -446,7 +541,14 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         // left unset (the backend stamps the turn-top snapshot in
         // record_turn) -- the optimistic row renders no badge, and the refetch
         // replaces it with the real TurnRecord carrying both halves.
-        data: { question, outcome, trace: settledTrace, provenance: { skills: [] } },
+        data: {
+          question,
+          outcome,
+          trace: settledTrace,
+          provenance: { skills: [] },
+          asked_at: askedAt,
+          settled_at: Date.now(),
+        },
       };
       queryClient.setQueryData<ThreadEntry[]>(sessionKeys.thread(sessionId), (old) =>
         old ? [...old, newEntry] : [newEntry],

@@ -151,10 +151,28 @@ pub enum ToolTurnReply {
     /// each (via the gateway), collects [`ToolResult`]s, appends this
     /// assistant turn plus the result turns to the conversation, and issues
     /// the next [`ToolTurnRequest`].
-    ToolCalls(Vec<ToolUse>),
+    ///
+    /// `text` is the round's connective prose (ADR-0103, issue #608): text
+    /// the model emitted alongside the batch. The loop re-feeds it on the
+    /// assistant message (both wire protocols accept text + tool calls in
+    /// one assistant turn) and records it as the trace round's prose.
+    /// `None` when the reply carried tool calls and no text.
+    ToolCalls {
+        text: Option<String>,
+        calls: Vec<ToolUse>,
+    },
     /// The model's terminal text answer. No tool calls -- the conversation
     /// ends here. Carried verbatim to the turn outcome.
     Text(String),
+}
+
+impl ToolTurnReply {
+    /// Convenience constructor for a tool-call batch with no connective
+    /// prose -- the common scripted/test shape (a real adapter reply that
+    /// carried text constructs the struct variant explicitly).
+    pub fn tool_calls(calls: Vec<ToolUse>) -> Self {
+        Self::ToolCalls { text: None, calls }
+    }
 }
 
 #[cfg(test)]

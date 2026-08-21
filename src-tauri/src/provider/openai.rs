@@ -429,9 +429,11 @@ fn build_openai_messages(messages: &[ToolTurnMessage], system: &str) -> Vec<Valu
 /// Parse the OpenAI tool-calling response into a [`ToolTurnReply`]. If
 /// `choices[0].message.tool_calls` is present and non-empty ->
 /// [`ToolTurnReply::ToolCalls`] (each `arguments` JSON string parsed back to
-/// a [`Value`]). Otherwise the message `content` is the terminal
-/// [`ToolTurnReply::Text`]; empty choices surface an optional error envelope
-/// or a contract violation -> retried [`ProviderError::Unavailable`].
+/// a [`Value`]), with the message `content` riding alongside as the round's
+/// connective text (ADR-0103, issue #608; `None` when absent or empty).
+/// Otherwise the message `content` is the terminal [`ToolTurnReply::Text`];
+/// empty choices surface an optional error envelope or a contract violation
+/// -> retried [`ProviderError::Unavailable`].
 fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, ProviderError> {
     let message = raw
         .choices
@@ -472,7 +474,8 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
                     Ok(ToolUse { id, name, input })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(ToolTurnReply::ToolCalls(calls));
+            let text = message.content.filter(|t| !t.is_empty());
+            return Ok(ToolTurnReply::ToolCalls { text, calls });
         }
     }
     match message.content {
@@ -1147,7 +1150,7 @@ mod tests {
         let reply = OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("multi"))
             .expect("tool calls");
         match reply {
-            ToolTurnReply::ToolCalls(calls) => {
+            ToolTurnReply::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 2);
                 assert_eq!(calls[0].id, "call_1");
                 assert_eq!(calls[0].name, "run_sql");
@@ -1156,6 +1159,81 @@ mod tests {
             }
             other => panic!("expected ToolCalls, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_turn_carries_message_content_as_round_prose() {
+        // ADR-0103 (issue #608): message content alongside tool_calls is the
+        // round's connective prose -- parsed onto ToolCalls.text; null or
+        // empty content yields None.
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": "先看一眼数据。",
+            "tool_calls": [
+                {"id":"call_1","type":"function","function":{"name":"run_sql","arguments":"{\"sql\":\"SELECT 1\"}"}}
+            ]
+        })
+        .to_string();
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(tool_response_body(&message))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let reply = OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("narrated"))
+            .expect("tool calls");
+        match reply {
+            ToolTurnReply::ToolCalls { text, calls } => {
+                assert_eq!(text.as_deref(), Some("先看一眼数据。"));
+                assert_eq!(calls.len(), 1);
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_refeeds_prose_alongside_tool_calls_on_the_wire() {
+        // ADR-0103 (issue #608): the round's connective prose re-feeds on
+        // the assistant message -- one assistant turn carrying BOTH the
+        // `content` string and the `tool_calls` array, so the next
+        // round-trip's request shows the model its own narration.
+        // Body-regex pins both fields coexisting on the assistant turn.
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("count rows"),
+                ToolTurnMessage::Assistant {
+                    text: Some("先看一眼数据。".into()),
+                    tool_calls: vec![ToolUse {
+                        id: "call_1".into(),
+                        name: "run_sql".into(),
+                        input: serde_json::json!({"sql":"SELECT 1"}),
+                    }],
+                },
+            ],
+            tools: vec![ToolDefinition {
+                name: "run_sql".into(),
+                description: "run sql".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            max_tokens: 1024,
+        };
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::Regex(
+                r#""role":"assistant","content":"先看一眼数据。""#.into(),
+            ))
+            .match_body(mockito::Matcher::Regex(r#""tool_calls":"#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"{"role":"assistant","content":"1 row"}"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        OpenaiProvider::generate_tool_turn(&cfg, &request).expect("request lands");
+        _mock.assert();
     }
 
     #[test]
@@ -1394,7 +1472,7 @@ mod tests {
         match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("nullary"))
             .expect("calls")
         {
-            ToolTurnReply::ToolCalls(calls) => {
+            ToolTurnReply::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].input, Value::Null);
             }

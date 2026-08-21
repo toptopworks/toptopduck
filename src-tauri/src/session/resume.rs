@@ -38,8 +38,8 @@ use super::{
 use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadError, RectifyProvenance, TraceEntryView, TurnFailure,
-    TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime,
+    DatasetDescriptor, DatasetPrivacy, LoadError, RectifyProvenance, TraceEntryView, TraceRound,
+    TurnFailure, TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::read_duck;
 use crate::persistence::recipe::{
@@ -517,13 +517,29 @@ impl<'a> Resumer<'a> {
                         record: TurnRecord {
                             question: turn.question.clone(),
                             outcome,
-                            // ADR-0078 (issue #297): the display trace round-trips
-                            // from the recipe's persisted entries -- the same
-                            // bounded shape the live turn emitted, so a resumed
-                            // session expands identical trace rows. Empty for
-                            // v1-era migrated turns (their RecipeTurn carries no
-                            // trace; the v2+ synthetic single-call trace does).
-                            trace: turn.trace.iter().map(TraceEntryView::from).collect(),
+                            // ADR-0078 (issue #297; grouped per ADR-0103,
+                            // issue #608): the display trace round-trips from
+                            // the recipe's persisted rounds -- the same bounded
+                            // shape the live turn emitted, so a resumed session
+                            // expands identical trace rows. Empty for v1-era
+                            // migrated turns (their RecipeTurn carries no
+                            // trace; the v2+ synthetic single-call trace does,
+                            // wrapped into one round by the v4->v5 step).
+                            trace: turn
+                                .trace
+                                .iter()
+                                .map(|round| TraceRound {
+                                    thinking: round.thinking.clone(),
+                                    text: round.text.clone(),
+                                    calls: round.calls.iter().map(TraceEntryView::from).collect(),
+                                })
+                                .collect(),
+                            // ADR-0103 (issue #608): the turn's timestamps
+                            // round-trip verbatim; a pre-v5 turn carries None
+                            // and renders without a timestamp (honest degrade,
+                            // never a synthetic one).
+                            asked_at: turn.asked_at,
+                            settled_at: turn.settled_at,
                             // Issue #381 (skills) + ADR-0101 (attribution):
                             // the IPC provenance mirrors the persisted pair --
                             // skills (already the model::SkillProvenance
@@ -1529,6 +1545,8 @@ mod tests {
                     adapter_id: adapter_id.map(Into::into),
                     skills: Vec::new(),
                 },
+                None,
+                None,
             ))
         }
         let recipe = recipe_with(

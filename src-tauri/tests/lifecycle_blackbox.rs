@@ -41,7 +41,7 @@ fn load_source(session: &mut Session, path: &Path) {
 
 /// A materialize tool call promoting `sql` -- one round-trip's reply.
 fn materialize(sql: &str) -> ToolTurnReply {
-    ToolTurnReply::ToolCalls(vec![ToolUse {
+    ToolTurnReply::tool_calls(vec![ToolUse {
         id: "tu_1".into(),
         name: "materialize".into(),
         input: json!({ "sql": sql }),

@@ -33,7 +33,7 @@ use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
 use crate::session::agent_loop::{
-    truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry, TRACE_EXCERPT_MAX,
+    truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
 
 // ---------------------------------------------------------------------------
@@ -503,7 +503,10 @@ fn outcome(termination: Termination, trace: Vec<TraceEntry>, round_trips: u32) -
         // tools::dispatch path); the JSON event stream engine owns only the
         // event-driving half.
         promotions: Vec::new(),
-        trace,
+        // ADR-0103 (issue #608): the flat trajectory wraps as one round
+        // until the per-runtime grouping slice; an empty trajectory stays
+        // an empty round list (no ghost round).
+        trace: LoopRound::flat_wrap(trace),
         round_trips,
         // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
         discovered_runtime: None,

@@ -309,24 +309,80 @@ pub struct TurnProvenance {
 /// verbatim question, never an LLM-generated title).
 ///
 /// The [`trace`](Self::trace) is the turn's collapsible execution substructure
-/// (ADR-0078, issue #297): the display view of every tool call the turn made.
-/// The rail shows the question + outcome always and expands the trace on
-/// demand. This is the DISPLAY view -- bounded summaries + a failed-call
-/// excerpt only, the same shape the recipe persists ([`crate::persistence::
-/// recipe::RecipeTraceEntry`]); the full in-memory call payloads never cross
-/// IPC, and the far window still carries only the trace's summary (call
-/// count + failure summary), never the entries verbatim. The window assembler
-/// reads [`Self::question`] + [`Self::outcome`] alone, so the trace adds no
-/// LLM tokens. Empty for v1-era migrated turns and zero-call turns.
+/// (ADR-0078, issue #297; round-grouped by ADR-0103): the display view of the
+/// turn's tool calls grouped one round per provider round-trip. The rail shows
+/// the question + outcome always and expands the trace on demand. This is the
+/// DISPLAY view -- bounded summaries + a failed-call excerpt only, the same
+/// shape the recipe persists ([`crate::persistence::recipe::RecipeTraceRound`]);
+/// the full in-memory call payloads never cross IPC, and the far window still
+/// carries only the trace's summary (call count + failure summary), never the
+/// entries verbatim. The window assembler reads [`Self::question`] +
+/// [`Self::outcome`] alone, so the trace adds no LLM tokens. Empty for v1-era
+/// migrated turns and zero-call turns; a pre-v5 turn's migrated flat trace
+/// folds into one round (no prose, no thinking).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub question: String,
     pub outcome: TurnOutcome,
-    pub trace: Vec<TraceEntryView>,
+    pub trace: Vec<TraceRound>,
     /// The turn's skill provenance (issue #381): each mounted skill at assembly
     /// time, with its `content_hash` for drift comparison against the registry.
     /// Empty for turns that mounted no skill and for v3->v4 migrated turns.
     pub provenance: TurnProvenance,
+    /// When the user submitted the question (Unix epoch ms, ADR-0103).
+    /// `None` for turns recorded before v5 -- the frontend renders no
+    /// timestamp rather than a synthetic one (honest degrade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<u64>,
+    /// When the turn settled (its outcome landed, Unix epoch ms, ADR-0103).
+    /// Same honest-degrade rule as [`Self::asked_at`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
+}
+
+/// One round of a turn's execution trace (ADR-0103, calibrating ADR-0078):
+/// the thinking + connective prose + tool-call batch of ONE provider
+/// round-trip. The round boundary is the provider reply that requested the
+/// batch -- prose emitted alongside a terminal text reply is the outcome
+/// body, not a round. Optional members are absent (not empty) when the
+/// runtime offered no source for them: no thinking block, or a reply with
+/// tool calls and no prose. A pre-v5 turn's migrated flat trace is a single
+/// round carrying only its calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceRound {
+    /// The round's model reasoning (ADR-0103 thinking substructure):
+    /// duration + the raw thinking text, carried only when the runtime
+    /// provides a thinking data source (built-in wiring per ADR-0095/0100
+    /// posture; adapters per ADR-0094/0097). `None` = no data source or a
+    /// runtime that does not expose one -- rendered without the thinking
+    /// fold (honest degrade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingTrace>,
+    /// The round's connective prose (ADR-0078): text the model emitted
+    /// alongside its tool-call batch, before the calls dispatched. Part of
+    /// the conversational discourse, so it persists with the trace (never
+    /// enters the far window verbatim). `None` when the reply carried tool
+    /// calls and no text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// The round's tool calls, dispatch order, in the same bounded display
+    /// shape as the pre-grouping flat trace.
+    pub calls: Vec<TraceEntryView>,
+}
+
+/// A round's persisted thinking block (ADR-0103): how long the model
+/// reasoned plus its raw reasoning text. Plain data shared by the display
+/// round and the persisted round -- unlike a tool call there is no
+/// lossy projection between them (no `tool_use_id` to drop, no success
+/// excerpt to empty), so one type serves both forms. The text carries no
+/// length cap: it is process retrospect, and its cost governance is the
+/// posture thought-level entry's concern (ADR-0095/0100), not the trace's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingTrace {
+    /// Wall-clock thinking duration in milliseconds.
+    pub duration_ms: u64,
+    /// The raw thinking text, verbatim.
+    pub text: String,
 }
 
 /// The display form of one execution-trace entry (ADR-0078, issue #297): what
@@ -394,6 +450,20 @@ pub enum TurnPhase {
     /// this, with `success: false`). The excerpt follows the persisted shape
     /// -- empty on success, the bounded failure / denial message on failure.
     ToolCallCompleted(TraceEntryView),
+    /// The connective prose of one provider round (ADR-0103, issue #608):
+    /// text the model emitted alongside its tool-call batch, fired after the
+    /// round's `Thinking` wait and BEFORE the batch's `ToolCallStarted`
+    /// events -- the live counterpart of [`TraceRound::text`], so the rail
+    /// can render the round's prose as it happens. Only fired when the reply
+    /// carried prose; a bare tool-call batch fires nothing here.
+    RoundText { text: String },
+    /// One round's thinking block completed (ADR-0103, issue #608): its
+    /// duration and raw reasoning text, the live counterpart of
+    /// [`ThinkingTrace`]. Fired after the round's `Thinking` wait and before
+    /// [`RoundText`] / the batch's call events, only when the runtime
+    /// exposes a thinking data source -- otherwise nothing fires and the
+    /// frontend renders the round without a thinking fold (honest degrade).
+    ThinkingCompleted { duration_ms: u64, text: String },
 }
 
 /// One `turn-progress` side-channel event (ADR-0059, issue #76). Wraps a

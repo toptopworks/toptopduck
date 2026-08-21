@@ -154,8 +154,12 @@ fn native_tool_rides_engine_trace_as_failure() {
         Termination::Text(t) => assert_eq!(t, "done without native tools"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert_eq!(outcome.trace.len(), 1, "one native call -> one trace entry");
-    let entry = &outcome.trace[0];
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "one round wrapping the flat trajectory"
+    );
+    let entry = &outcome.trace[0].calls[0];
     assert_eq!(entry.name, "Bash");
     assert!(!entry.success, "headless auto-refusal fails the call");
     assert!(

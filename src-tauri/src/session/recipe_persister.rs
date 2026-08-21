@@ -228,6 +228,11 @@ impl RecipePersister {
                         outcome,
                         audit.trace().to_vec(),
                         audit.provenance().clone(),
+                        // ADR-0103 (issue #608): the turn's timestamps ride
+                        // the IPC record; a resumed pre-v5 turn carries None
+                        // and re-persists as absent (honest degrade).
+                        record.asked_at,
+                        record.settled_at,
                     )))
                 }
                 TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
@@ -528,7 +533,7 @@ mod tests {
         TurnRecord,
     };
     use crate::persistence::recipe::{
-        RecipeEntry, RecipeOutcome, RecipeTraceEntry, RuntimeKind,
+        RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RuntimeKind,
         TurnProvenance as PersistedTurnProvenance,
     };
     use crate::persistence::RECIPE_FORMAT_VERSION;
@@ -561,6 +566,8 @@ mod tests {
                 outcome,
                 trace: Vec::new(),
                 provenance: Default::default(),
+                asked_at: None,
+                settled_at: None,
             },
             audit: TurnAudit::test_new(
                 Vec::new(),
@@ -726,12 +733,16 @@ mod tests {
     #[test]
     fn build_recipe_harvests_trace_and_provenance_from_audit() {
         // A turn whose audit carries a non-empty trace + External provenance.
-        let trace = vec![RecipeTraceEntry {
-            name: "explore".into(),
-            operation_kind: crate::approval::OperationKind::Read,
-            summary: "SELECT 1".into(),
-            success: true,
-            result_excerpt: String::new(),
+        let trace = vec![RecipeTraceRound {
+            thinking: None,
+            text: None,
+            calls: vec![RecipeTraceEntry {
+                name: "explore".into(),
+                operation_kind: crate::approval::OperationKind::Read,
+                summary: "SELECT 1".into(),
+                success: true,
+                result_excerpt: String::new(),
+            }],
         }];
         let provenance = PersistedTurnProvenance {
             runtime: Some(RuntimeKind::External),
@@ -749,6 +760,8 @@ mod tests {
                 },
                 trace: Vec::new(),
                 provenance: Default::default(),
+                asked_at: None,
+                settled_at: None,
             },
             audit: TurnAudit::test_new(trace.clone(), provenance.clone()),
         }];
@@ -791,6 +804,8 @@ mod tests {
                 },
                 trace: Vec::new(),
                 provenance: Default::default(),
+                asked_at: None,
+                settled_at: None,
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
         }];

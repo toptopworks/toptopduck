@@ -76,7 +76,13 @@ export function TurnCard({
   // on the TurnRecord / recipe, the toggle does not). Zero-call turns (a
   // plain textual answer) carry no trace, hence no toggle.
   const [traceExpanded, setTraceExpanded] = useState(false);
-  const hasTrace = record.trace.length > 0;
+  // ADR-0103 (issue #608): the trace is round-grouped, but the card's
+  // rendering stays call-flat for this slice -- the rounds' calls flatten in
+  // dispatch order (a pre-v5 single-round turn renders identically). The
+  // chat-projection rendering (prose + thinking folds) is the follow-up
+  // slices' surface.
+  const traceCalls = record.trace.flatMap((round) => round.calls);
+  const hasTrace = traceCalls.length > 0;
   return (
     <div
       className={cn(
@@ -178,11 +184,11 @@ export function TurnCard({
           <FormattedMessage
             id="thread.trace.toggle"
             defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
-            values={{ count: record.trace.length }}
+            values={{ count: traceCalls.length }}
           />
         </button>
       )}
-      {hasTrace && traceExpanded && <TraceRowList entries={record.trace} />}
+      {hasTrace && traceExpanded && <TraceRowList entries={traceCalls} />}
       <TurnBody
         record={record}
         selectedResult={selectedResult}
