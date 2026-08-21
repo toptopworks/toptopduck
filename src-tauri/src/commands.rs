@@ -112,9 +112,9 @@ pub enum StoreCommandError {
     /// technical detail; no key is ever leaked in the message.
     #[error("{0}")]
     KeychainFailure(String),
-    /// An app-config write failed (serialize / temp-write / rename). Carries the
-    /// English technical detail for the fold; the three WriteError stages are
-    /// one refusal to the user, not three messages.
+    /// An app-config write failed (read / serialize / temp-write / rename).
+    /// Carries the English technical detail for the fold; the four WriteError
+    /// stages are one refusal to the user, not four messages.
     #[error("{0}")]
     ConfigWriteFailure(String),
     /// An active-profile key write (`set_api_key` / `clear_api_key`) was refused
@@ -906,10 +906,8 @@ pub fn set_provider_config(
     live: State<'_, LiveProviderConfig>,
     config: ProviderConfig,
 ) -> Result<ProviderConfigView, StoreCommandError> {
-    let mut cfg = live.load();
-    cfg.provider = config;
     let stored = live
-        .store(cfg)
+        .set_provider_section(config)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))?;
     Ok(stored.provider.view(live.has_key()))
 }

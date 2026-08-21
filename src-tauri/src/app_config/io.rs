@@ -55,8 +55,12 @@ const SECRET_KEY_NAMES: &[&str] = &[
 ];
 
 /// Why a typed parse failed. Internal: [`read_at`] maps every variant to
-/// [`AppConfig::defaults`] + a `log::warn!`, so this never crosses a module or
-/// IPC boundary. Exposed only so the unit tests can pin each failure mode.
+/// [`AppConfig::defaults`] + a `log::warn!` for the READ consumers, while the
+/// crate's read-modify-write read source (issue #602) matches `Missing` (the
+/// defaults branch) and lifts every other variant as a `WriteError::Read` --
+/// so this crosses module boundaries inside the crate, never an IPC boundary.
+/// Exposed at crate visibility so `provider` and the unit tests can pin each
+/// failure mode.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AppConfigReadError {
     /// File not found (first launch, or deleted). Not really an error -- the
@@ -139,7 +143,7 @@ pub fn write_at(target: &Path, cfg: &AppConfig) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// Why a write failed. Every failure leaves the prior config file (if any)
+/// Why a write failed. Every failure leaves the target config file (if any)
 /// untouched: a read failure happens before any write is attempted; a
 /// serialize error happens before any IO; an IO failure leaves the temp file
 /// behind but the target unchanged; a rename failure leaves the target
@@ -149,6 +153,8 @@ pub enum WriteError {
     /// The read half of a read-modify-write failed (corrupt file, version
     /// mismatch, transient IO). Surfaced instead of degrading to defaults so
     /// a rewrite can never persist "defaults + this one write" (issue #602).
+    /// A missing file deliberately does NOT surface here -- it is the correct
+    /// starting value and goes through the defaults branch.
     Read(String),
     Serialize(String),
     Io(String),
