@@ -20,7 +20,12 @@ import { FoldToggle } from "./FoldToggle";
 import { ThinkingFold } from "./ThinkingFold";
 import { UserBubble } from "./UserBubble";
 import { StaleChip } from "./StaleChip";
-import { outcomeVisual, selectDriftedSkills, type DatasetLabel } from "./turn-visual";
+import {
+  HOVER_REVEAL_CLASS,
+  outcomeVisual,
+  selectDriftedSkills,
+  type DatasetLabel,
+} from "./turn-visual";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
 import type { TraceRound, TurnRecord } from "../../types/thread";
@@ -89,7 +94,12 @@ export function TurnCard({
       data-stale={isStale ? "true" : undefined}
     >
       <UserBubble question={record.question} askedAt={record.asked_at} isStale={isStale} />
-      <div className={cn("assistant-stream mt-1 flex flex-col items-start", weakened && "opacity-60")}>
+      <div
+        className={cn(
+          "assistant-stream group mt-1 flex flex-col items-start",
+          weakened && "opacity-60",
+        )}
+      >
         {/* Header annotations (ADR-0103): the app's read of the question --
             which dataset it named (ADR-0047 active chip) and which mounted
             skills drifted since the answer (issue #381) -- open the stream,
@@ -145,9 +155,11 @@ export function TurnCard({
           hasJumpTarget={hasJumpTarget}
           onStaleChipJump={onStaleChipJump}
         />
-        {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange,
-            flanked by the reply copy + the settle stamp (honest degrade: no
-            settled_at recorded -> no time element). */}
+        {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
+            state, always visible. The settle facts (reply copy + stamp, honest
+            degrade: no settled_at recorded -> no time element) are
+            hover-revealed alongside it (HOVER_REVEAL_CLASS rides the
+            assistant-stream group). */}
         <p className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
           <span
             className={cn(
@@ -159,17 +171,22 @@ export function TurnCard({
           >
             <Icon aria-hidden="true" className="w-4 h-4" />
           </span>
-          {replyText !== null && (
-            <CopyButton
-              text={replyText}
-              label={intl.formatMessage({ id: "thread.copy.reply", defaultMessage: "Copy reply" })}
-            />
-          )}
-          {record.settled_at !== undefined && (
-            <time dateTime={new Date(record.settled_at).toISOString()}>
-              {intl.formatTime(record.settled_at)}
-            </time>
-          )}
+          <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
+            {replyText !== null && (
+              <CopyButton
+                text={replyText}
+                label={intl.formatMessage({
+                  id: "thread.copy.reply",
+                  defaultMessage: "Copy reply",
+                })}
+              />
+            )}
+            {record.settled_at !== undefined && (
+              <time dateTime={new Date(record.settled_at).toISOString()}>
+                {intl.formatTime(record.settled_at)}
+              </time>
+            )}
+          </span>
         </p>
       </div>
     </div>
