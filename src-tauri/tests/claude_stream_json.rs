@@ -98,10 +98,7 @@ fn text_reply_yields_text_outcome_and_init_model() {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
-        "no tool calls -> no recorded calls in any round"
-    );
+    assert!(outcome.trace.is_empty(), "no tool calls -> empty trace");
     assert!(
         phases
             .iter()
@@ -132,7 +129,7 @@ fn gateway_tool_call_emits_phases_without_engine_trace() {
         other => panic!("expected Text, got {other:?}"),
     }
     assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        outcome.trace.is_empty(),
         "gateway-routed calls own their trace rows: {:?}",
         outcome.trace
     );

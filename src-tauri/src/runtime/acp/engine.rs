@@ -381,8 +381,9 @@ impl AcpEngine {
             // The ACP engine drives only the ACP half of the turn.
             promotions: Vec::new(),
             // ADR-0103 (issue #608): the flat trajectory wraps as one
-            // round until the per-runtime grouping slice.
-            trace: vec![LoopRound::flat(trace)],
+            // round until the per-runtime grouping slice; an empty
+            // trajectory stays an empty round list (no ghost round).
+            trace: LoopRound::flat_wrap(trace),
             round_trips,
             // ADR-0095: the handshake's extracted catalog rides every
             // post-handshake exit (None before / on handshake failure).
@@ -1262,13 +1263,8 @@ mod tests {
             }
             other => panic!("expected Transient from spawn failure, got {other:?}"),
         }
-        assert_eq!(
-            outcome.trace.len(),
-            1,
-            "the flat trajectory wraps into one round"
-        );
         assert!(
-            outcome.trace[0].calls.is_empty(),
+            outcome.trace.is_empty(),
             "a spawn failure dispatched nothing"
         );
     }
@@ -1316,13 +1312,8 @@ mod tests {
             }
             other => panic!("expected Transient from spawn failure, got {other:?}"),
         }
-        assert_eq!(
-            outcome.trace.len(),
-            1,
-            "the flat trajectory wraps into one round"
-        );
         assert!(
-            outcome.trace[0].calls.is_empty(),
+            outcome.trace.is_empty(),
             "a spawn failure dispatched nothing"
         );
     }

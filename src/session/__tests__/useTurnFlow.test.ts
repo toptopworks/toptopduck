@@ -421,6 +421,12 @@ describe("useTurnFlow", () => {
           ],
         },
       ]);
+      // The optimistic record carries client-clock timestamps (the ask
+      // read at submit, the settle at fold time) until the refetch
+      // replaces them with the backend's stamps.
+      expect(typeof entry.data.asked_at).toBe("number");
+      expect(typeof entry.data.settled_at).toBe("number");
+      expect(entry.data.asked_at).toBeLessThanOrEqual(entry.data.settled_at!);
     });
   });
 

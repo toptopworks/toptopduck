@@ -1941,7 +1941,7 @@ fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome 
             }
         }
     }
-    acp.trace = vec![LoopRound::flat(calls)];
+    acp.trace = LoopRound::flat_wrap(calls);
     acp
 }
 
@@ -2127,7 +2127,7 @@ mod tests {
         LoopOutcome {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
-            trace: vec![LoopRound::flat(trace)],
+            trace: LoopRound::flat_wrap(trace),
             round_trips: 1,
             discovered_runtime: None,
         }

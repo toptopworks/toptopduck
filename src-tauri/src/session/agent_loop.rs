@@ -353,7 +353,17 @@ impl<'p> AgentLoop<'p> {
 /// Every exit path funnels through here so the `LoopOutcome` shape has one
 /// source of truth (trace, promotions, and round-trip count always travel
 /// together); each branch contributes only its [`Termination`].
-fn outcome(termination: Termination, outputs: CallOutputs, round_trips: u32) -> LoopOutcome {
+fn outcome(termination: Termination, mut outputs: CallOutputs, round_trips: u32) -> LoopOutcome {
+    // ADR-0103 (issue #608): drop a round the reply opened but nothing
+    // landed on -- no thinking, no prose, no completed call (a cancel
+    // between the reply and the first dispatch, a gate-cancelled first
+    // call). The recorded trace then matches the frontend fold, which
+    // cannot see such a round (none of its events ever fired); a
+    // prose-bearing round survives (the prose-only round of a mid-batch
+    // cancel).
+    outputs.rounds.retain(|round| {
+        round.thinking.is_some() || round.text.is_some() || !round.calls.is_empty()
+    });
     LoopOutcome {
         termination,
         promotions: outputs.promotions,
@@ -482,6 +492,21 @@ impl LoopRound {
             thinking: None,
             text: None,
             calls,
+        }
+    }
+
+    /// Wrap a flat call trajectory into the round-grouped trace form: ONE
+    /// [`LoopRound::flat`] round when the trajectory is non-empty, an EMPTY
+    /// round list when it is empty (ADR-0103, issue #608). The
+    /// empty-stays-empty rule matches the v4->v5 migration (`[]` never
+    /// becomes a round with no calls) and the built-in loop (a zero-call
+    /// turn records no round), so a zero-call turn's trace is `[]` on every
+    /// runtime path -- no ghost round persisted as `[{}]`.
+    pub fn flat_wrap(calls: Vec<TraceEntry>) -> Vec<Self> {
+        if calls.is_empty() {
+            Vec::new()
+        } else {
+            vec![Self::flat(calls)]
         }
     }
 }
@@ -1966,6 +1991,111 @@ mod tests {
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Cancelled);
+    }
+
+    #[test]
+    fn cancel_keeps_the_prose_round_of_a_narrated_turn() {
+        // ADR-0103 (issue #608): the round a narrated reply opens survives a
+        // cancel after the batch -- its prose + the completed calls stay on
+        // the recorded trace, matching the frontend fold (which keeps the
+        // prose-only round of a mid-batch cancel).
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        // The sequence clamps to the last (bare) reply, so the loop keeps
+        // round-tripping until the cancel lands -- the turn can only end
+        // Cancelled, after the narrated first round completed.
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "narrated-cancel",
+            vec![
+                Ok(ToolTurnReply::ToolCalls {
+                    text: Some("先看一眼数据。".into()),
+                    calls: vec![ToolUse {
+                        id: "tu_1".into(),
+                        name: "explore".into(),
+                        input: json!({"sql": "SELECT 1"}),
+                    }],
+                }),
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
+                    id: "tu_2".into(),
+                    name: "explore".into(),
+                    input: json!({"sql": "SELECT 1 AS x"}),
+                }])),
+            ],
+        );
+        let cancel_for_thread = cancel.clone();
+        thread::spawn(move || {
+            // Wait for the turn to be in-flight, then cancel after a sleep
+            // long enough for the first round-trip + its explore to land.
+            while !cancel_for_thread.is_in_flight() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            thread::sleep(Duration::from_millis(50));
+            cancel_for_thread.request();
+        });
+        let outcome = run_loop(
+            &provider,
+            cancel,
+            24,
+            "narrated-cancel",
+            &mut ws,
+            &engine.conn,
+            engine.temp.path(),
+        );
+        assert_eq!(outcome.termination, Termination::Cancelled);
+        assert!(
+            !outcome.trace.is_empty(),
+            "the narrated round survives the cancel: {:?}",
+            outcome.trace
+        );
+        let round = &outcome.trace[0];
+        assert_eq!(round.text.as_deref(), Some("先看一眼数据。"));
+        assert!(
+            !round.calls.is_empty(),
+            "the completed explore call rides the round"
+        );
+    }
+
+    #[test]
+    fn cancelled_turn_records_no_empty_round() {
+        // ADR-0103 (issue #608): a reply that carried no prose opens a round
+        // at arrival; if the cancel lands before the batch's first call
+        // completes, nothing ever lands on that round -- the outcome drops
+        // it, so the recorded trace never carries an empty round (the
+        // frontend fold cannot see one either; optimistic/backend parity).
+        // Holds at every cancel landing point: a round that survives always
+        // carries its completed calls.
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new()
+            .scripted_tool_turn("bare-cancel", call("explore", json!({"sql": "SELECT 1"})));
+        let cancel_for_thread = cancel.clone();
+        thread::spawn(move || {
+            while !cancel_for_thread.is_in_flight() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            thread::sleep(Duration::from_millis(10));
+            cancel_for_thread.request();
+        });
+        let outcome = run_loop(
+            &provider,
+            cancel,
+            24,
+            "bare-cancel",
+            &mut ws,
+            &engine.conn,
+            engine.temp.path(),
+        );
+        assert_eq!(outcome.termination, Termination::Cancelled);
+        assert!(
+            outcome
+                .trace
+                .iter()
+                .all(|round| round.text.is_some() || !round.calls.is_empty()),
+            "no empty round survives the cancel: {:?}",
+            outcome.trace
+        );
     }
 
     #[test]

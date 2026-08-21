@@ -138,10 +138,7 @@ fn text_reply_yields_text_outcome_and_no_trace() {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
-        "no tool calls -> no recorded calls in any round"
-    );
+    assert!(outcome.trace.is_empty(), "no tool calls -> empty trace");
     assert!(
         phases
             .iter()
@@ -475,7 +472,7 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
             other => panic!("{} text_reply -> Text, got {other:?}", spec.id),
         }
         assert!(
-            outcome.trace.iter().all(|r| r.calls.is_empty()),
+            outcome.trace.is_empty(),
             "{}: no tool calls -> empty trace",
             spec.id
         );

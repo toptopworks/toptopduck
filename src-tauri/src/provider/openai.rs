@@ -1193,6 +1193,50 @@ mod tests {
     }
 
     #[test]
+    fn tool_turn_refeeds_prose_alongside_tool_calls_on_the_wire() {
+        // ADR-0103 (issue #608): the round's connective prose re-feeds on
+        // the assistant message -- one assistant turn carrying BOTH the
+        // `content` string and the `tool_calls` array, so the next
+        // round-trip's request shows the model its own narration.
+        // Body-regex pins both fields coexisting on the assistant turn.
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("count rows"),
+                ToolTurnMessage::Assistant {
+                    text: Some("先看一眼数据。".into()),
+                    tool_calls: vec![ToolUse {
+                        id: "call_1".into(),
+                        name: "run_sql".into(),
+                        input: serde_json::json!({"sql":"SELECT 1"}),
+                    }],
+                },
+            ],
+            tools: vec![ToolDefinition {
+                name: "run_sql".into(),
+                description: "run sql".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            max_tokens: 1024,
+        };
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::Regex(
+                r#""role":"assistant","content":"先看一眼数据。""#.into(),
+            ))
+            .match_body(mockito::Matcher::Regex(r#""tool_calls":"#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"{"role":"assistant","content":"1 row"}"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        OpenaiProvider::generate_tool_turn(&cfg, &request).expect("request lands");
+        _mock.assert();
+    }
+
+    #[test]
     fn tool_turn_round_trips_tool_result_as_tool_role_message() {
         // AC #291: a fed-back ToolResult is serialized as a role="tool"
         // message carrying tool_call_id + content; the assistant's prior

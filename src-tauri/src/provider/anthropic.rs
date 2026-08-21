@@ -942,6 +942,48 @@ mod tests {
     }
 
     #[test]
+    fn tool_turn_refeeds_prose_alongside_tool_use_on_the_wire() {
+        // ADR-0103 (issue #608): the round's connective prose re-feeds on
+        // the assistant message -- one assistant turn carrying BOTH a text
+        // block and the tool_use block, so the next round-trip's request
+        // shows the model its own narration. Body-regex pins both blocks
+        // coexisting in the same assistant turn.
+        let request = ToolTurnRequest {
+            system: "agent".into(),
+            messages: vec![
+                ToolTurnMessage::user("count rows"),
+                ToolTurnMessage::Assistant {
+                    text: Some("先看一眼数据。".into()),
+                    tool_calls: vec![ToolUse {
+                        id: "tu_1".into(),
+                        name: "run_sql".into(),
+                        input: serde_json::json!({"sql":"SELECT 1"}),
+                    }],
+                },
+            ],
+            tools: vec![ToolDefinition {
+                name: "run_sql".into(),
+                description: "run sql".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            max_tokens: 1024,
+        };
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::Regex(
+                r#""type":"text","text":"先看一眼数据。""#.into(),
+            ))
+            .match_body(mockito::Matcher::Regex(r#""type":"tool_use""#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(r#"[{"type":"text","text":"1 row"}]"#))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        AnthropicProvider::generate_tool_turn(&cfg, &request).expect("request lands");
+        _mock.assert();
+    }
+
+    #[test]
     fn tool_turn_round_trips_tool_result_into_user_role() {
         // AC #291: a fed-back ToolResult is serialized as an anthropic
         // tool_result block inside a user turn, paired with its tool_use id;

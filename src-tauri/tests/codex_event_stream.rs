@@ -92,10 +92,7 @@ fn text_reply_yields_text_outcome_and_no_trace() {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
-        "no tool calls -> no recorded calls in any round"
-    );
+    assert!(outcome.trace.is_empty(), "no tool calls -> empty trace");
     assert!(
         phases
             .iter()

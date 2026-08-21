@@ -483,7 +483,20 @@ fn resume_round_trips_the_real_multi_call_trace_and_builtin_provenance() {
         "a live turn records the built-in runtime"
     );
     assert!(turn.provenance.skills.is_empty(), "skill tracking unwired");
-    let before = (turn.trace.clone(), turn.provenance.clone());
+    // ADR-0103 (issue #608): a live-recorded turn carries both timestamps
+    // (stamped at submit / settle), in order.
+    let asked_at = turn.asked_at.expect("asked_at stamped at submit");
+    let settled_at = turn.settled_at.expect("settled_at stamped at record time");
+    assert!(
+        asked_at <= settled_at,
+        "the ask precedes (or ties) the settle: {asked_at} vs {settled_at}"
+    );
+    let before = (
+        turn.trace.clone(),
+        turn.provenance.clone(),
+        turn.asked_at,
+        turn.settled_at,
+    );
 
     // Resume re-persists the harvested audit verbatim (phase 5's post-resume
     // write reads the session's per-turn audit, seeded from this very recipe).
@@ -492,9 +505,29 @@ fn resume_round_trips_the_real_multi_call_trace_and_builtin_provenance() {
     let repersisted = read_duck(&duck).expect("read re-persisted");
     let turn = materialized_turn(&repersisted);
     assert_eq!(
-        (turn.trace.clone(), turn.provenance.clone()),
+        (
+            turn.trace.clone(),
+            turn.provenance.clone(),
+            turn.asked_at,
+            turn.settled_at
+        ),
         before,
-        "trace + provenance round-trip the restart boundary unchanged"
+        "trace + provenance + timestamps round-trip the restart boundary unchanged"
+    );
+    // The IPC-visible record carries the same timestamps -- resume seeds
+    // the TurnRecord's asked_at/settled_at from the recipe turn.
+    let conversation = resumed.conversation();
+    let resumed_record = conversation
+        .iter()
+        .find_map(|e| match e {
+            ThreadEntry::Turn(t) if !t.trace.is_empty() => Some(t),
+            _ => None,
+        })
+        .expect("the resumed thread carries the traced turn");
+    assert_eq!(
+        (resumed_record.asked_at, resumed_record.settled_at),
+        (Some(asked_at), Some(settled_at)),
+        "the resumed TurnRecord keeps the recorded timestamps"
     );
     drop(resumed);
 }

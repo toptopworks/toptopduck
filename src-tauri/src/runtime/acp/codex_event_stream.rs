@@ -504,8 +504,9 @@ fn outcome(termination: Termination, trace: Vec<TraceEntry>, round_trips: u32) -
         // event-driving half.
         promotions: Vec::new(),
         // ADR-0103 (issue #608): the flat trajectory wraps as one round
-        // until the per-runtime grouping slice.
-        trace: vec![LoopRound::flat(trace)],
+        // until the per-runtime grouping slice; an empty trajectory stays
+        // an empty round list (no ghost round).
+        trace: LoopRound::flat_wrap(trace),
         round_trips,
         // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
         discovered_runtime: None,

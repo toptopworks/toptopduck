@@ -675,8 +675,9 @@ fn outcome(
         // only the frame-driving half.
         promotions: Vec::new(),
         // ADR-0103 (issue #608): the flat trajectory wraps as one round
-        // until the per-runtime grouping slice.
-        trace: vec![LoopRound::flat(trace)],
+        // until the per-runtime grouping slice; an empty trajectory stays
+        // an empty round list (no ghost round).
+        trace: LoopRound::flat_wrap(trace),
         round_trips,
         discovered_runtime: discovered,
     }
