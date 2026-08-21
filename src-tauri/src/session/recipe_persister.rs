@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::persistence::recipe::{
-    Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef,
+    Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef, TurnTimestamps,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::persistence::{save_atomic, SaveError};
@@ -231,8 +231,10 @@ impl RecipePersister {
                         // ADR-0103 (issue #608): the turn's timestamps ride
                         // the IPC record; a resumed pre-v5 turn carries None
                         // and re-persists as absent (honest degrade).
-                        record.asked_at,
-                        record.settled_at,
+                        TurnTimestamps {
+                            asked_at: record.asked_at,
+                            settled_at: record.settled_at,
+                        },
                     )))
                 }
                 TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),

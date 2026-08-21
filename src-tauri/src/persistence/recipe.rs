@@ -216,6 +216,19 @@ pub struct RecipeTraceRound {
     pub calls: Vec<RecipeTraceEntry>,
 }
 
+/// The turn's wall-clock pair (ADR-0103, issue #608). A named struct
+/// instead of two trailing `Option<u64>` params on [`RecipeTurn::with_audit`],
+/// so the pair travels as one unit and a construction site fills it by
+/// field name (issue #617; the `PosturePair` precedent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TurnTimestamps {
+    /// The ask stamp: when the turn's question was accepted.
+    pub asked_at: Option<u64>,
+    /// The settle stamp: when the outcome was recorded, clamped onto the
+    /// ask so the pair stays monotonic.
+    pub settled_at: Option<u64>,
+}
+
 /// Which runtime drove a turn (ADR-0078/0081). Recorded on each turn's
 /// [`TurnProvenance`] so the thread can surface "this answer came from the
 /// built-in loop / an external CLI agent" -- the audit anchor for how a result
@@ -415,16 +428,15 @@ impl RecipeTurn {
         outcome: RecipeOutcome,
         trace: Vec<RecipeTraceRound>,
         provenance: TurnProvenance,
-        asked_at: Option<u64>,
-        settled_at: Option<u64>,
+        timestamps: TurnTimestamps,
     ) -> Self {
         Self {
             question: question.into(),
             outcome,
             trace,
             provenance,
-            asked_at,
-            settled_at,
+            asked_at: timestamps.asked_at,
+            settled_at: timestamps.settled_at,
         }
     }
 }
@@ -921,6 +933,30 @@ mod tests {
         // check stays in sync with what save writes.
         assert_eq!(RECIPE_FORMAT_VERSION, 5);
         assert_eq!(build_recipe().format_version, 5);
+    }
+
+    #[test]
+    fn prose_only_trace_round_round_trips_with_calls_omitted() {
+        // Issue #617 seed: a prose-only round (connective prose, no thinking,
+        // no calls) is the shape a multi-round turn's middle rounds take when
+        // the model narrated between tool batches -- the loop's outcome
+        // retention deliberately keeps them. The wire form is the minimal
+        // `{"text": ...}` (thinking skips when absent, calls when empty) and
+        // that exact shape round-trips, so a .duck carrying it reads back
+        // with neither a ghost round nor dropped prose.
+        let round = RecipeTraceRound {
+            thinking: None,
+            text: Some("先看一眼数据。".into()),
+            calls: Vec::new(),
+        };
+        let value = serde_json::to_value(&round).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({ "text": "先看一眼数据。" }),
+            "the wire form omits absent thinking and empty calls",
+        );
+        let back: RecipeTraceRound = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, round);
     }
 
     #[test]
@@ -1521,8 +1557,7 @@ mod tests {
             },
             trace.clone(),
             provenance.clone(),
-            None,
-            None,
+            TurnTimestamps::default(),
         );
         assert_eq!(turn.question, "多少人");
         assert_eq!(turn.trace, trace, "the recorded trace rides verbatim");

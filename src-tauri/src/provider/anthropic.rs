@@ -384,11 +384,12 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
         }
     }
     if !tool_calls.is_empty() {
-        let text = text_parts.join("");
-        Ok(ToolTurnReply::ToolCalls {
-            text: (!text.is_empty()).then_some(text),
-            calls: tool_calls,
-        })
+        // The empty-text -> None normalization lives in the constructor
+        // (issue #617), shared with the openai adapter's parse point.
+        Ok(ToolTurnReply::tool_calls_with(
+            Some(text_parts.join("")),
+            tool_calls,
+        ))
     } else {
         let text = text_parts.join("");
         if text.is_empty() {

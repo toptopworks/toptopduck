@@ -30,8 +30,8 @@ use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, RenameError, RowPage, RowReadError, SkillLifecycleEvent,
-    SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry, TraceEntryView, TraceRound,
-    TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
+    SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry, TraceRound, TurnFailure,
+    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::recipe::{
     LastRuntime, Recipe, RecipeTraceRound, RecipeTurn, RuntimeKind,
@@ -621,7 +621,7 @@ impl TurnAudit {
         };
         Self {
             trace: rounds
-                .iter()
+                .into_iter()
                 .map(RecipeTraceRound::from_live_round)
                 .collect(),
             provenance: PersistedTurnProvenance {
@@ -1615,14 +1615,7 @@ impl Session {
         // (bounded summaries + the failed-call message; the full in-memory
         // payloads never cross IPC). Mapped before the audit consumes the
         // in-memory entries below.
-        let trace_view: Vec<TraceRound> = rounds
-            .iter()
-            .map(|round| TraceRound {
-                thinking: round.thinking.clone(),
-                text: round.text.clone(),
-                calls: round.calls.iter().map(TraceEntryView::from).collect(),
-            })
-            .collect();
+        let trace_view: Vec<TraceRound> = rounds.iter().map(TraceRound::from).collect();
         self.timeline.push(TimelineEntry::Turn {
             record: TurnRecord {
                 question: question.to_string(),
@@ -1630,11 +1623,13 @@ impl Session {
                 trace: trace_view,
                 // ADR-0103 (issue #608): the turn's own timestamps -- the
                 // ask (stamped at `ask_with_phase`'s top) and the settle
-                // (now, at record time). A live-recorded turn carries both
-                // (barring an unreadable clock); resumed pre-v5 turns carry
-                // neither (honest degrade).
+                // (now, at record time, clamped onto the ask so a backward
+                // clock correction cannot invert the pair, issue #617). A
+                // live-recorded turn carries both (barring an unreadable
+                // clock); resumed pre-v5 turns carry neither (honest
+                // degrade).
                 asked_at,
-                settled_at: now_epoch_ms(),
+                settled_at: clamp_settle(now_epoch_ms(), asked_at),
                 // Issue #381 (skills) + ADR-0101 (attribution): the IPC
                 // provenance carries the mounted skills AND the turn's
                 // executing runtime -- the thread renders the attribution as
@@ -1934,13 +1929,12 @@ fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome 
     // CLI's own built-ins, the same order the pre-grouping flat merge kept.
     // Per-runtime round grouping is the adapter-specific follow-up slices.
     let mut calls = gateway.trace;
-    for round in acp.trace {
-        for entry in round.calls {
-            if builtin_metadata(&entry.name).is_none() {
-                calls.push(entry);
-            }
-        }
-    }
+    calls.extend(
+        acp.trace
+            .into_iter()
+            .flat_map(|round| round.calls)
+            .filter(|entry| builtin_metadata(&entry.name).is_none()),
+    );
     acp.trace = LoopRound::flat_wrap(calls);
     acp
 }
@@ -1957,6 +1951,19 @@ fn now_epoch_ms() -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|d| d.as_millis() as u64)
+}
+
+/// Clamp the settle stamp onto the ask stamp (issue #617): the two reads
+/// hit the wall clock separately (ask at submit, settle at record time), so
+/// a backward clock correction in between could yield `settled_at <
+/// asked_at` for the same turn. The settle floors at the ask; an unreadable
+/// clock at settle time stays `None` (the same honest-degrade shape as
+/// [`now_epoch_ms`], never a synthetic epoch-0).
+fn clamp_settle(now: Option<u64>, asked: Option<u64>) -> Option<u64> {
+    match (now, asked) {
+        (Some(now), Some(asked)) => Some(now.max(asked)),
+        (now, _) => now,
+    }
 }
 
 /// Resolve the ACP bridge binary path (issue #299 slice 9c, ADR-0085).
@@ -2039,10 +2046,25 @@ mod tests {
     // composes -- tested in isolation here so a regression in the dedup
     // contract surfaces without driving the full Session -> AcpEngine -> bridge
     // chain.
-    use super::merge_outcomes;
+    use super::{clamp_settle, merge_outcomes};
     use crate::approval::OperationKind;
     use crate::runtime::gateway::server::GatewayOutcome;
     use crate::session::agent_loop::{LoopOutcome, LoopRound, Termination, TraceEntry};
+
+    // Issue #617: the settle stamp reads the wall clock a second time after
+    // the ask stamp, so a backward clock correction (NTP, a manual change)
+    // could record settled_at < asked_at for the same turn. The clamp keeps
+    // the pair monotonic; an unreadable clock stays None (honest degrade,
+    // never a synthetic value).
+    #[test]
+    fn clamp_settle_keeps_the_pair_monotonic() {
+        assert_eq!(clamp_settle(Some(150), Some(100)), Some(150));
+        // Clock stepped backward between the two reads: settle floors at ask.
+        assert_eq!(clamp_settle(Some(90), Some(100)), Some(100));
+        assert_eq!(clamp_settle(None, Some(100)), None);
+        assert_eq!(clamp_settle(Some(150), None), Some(150));
+        assert_eq!(clamp_settle(None, None), None);
+    }
 
     /// A materialize tool call promoting `sql` -- the tool-calling contract's
     /// equivalent of the retired single-shot `ProviderReply::Sql`.
@@ -2725,7 +2747,7 @@ mod tests {
         use crate::model::{TextKind, TurnOutcome, TurnRecord};
         use crate::persistence::recipe::{
             RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RecipeTurn,
-            RuntimeKind, TurnProvenance as PersistedTurnProvenance,
+            RuntimeKind, TurnProvenance as PersistedTurnProvenance, TurnTimestamps,
         };
 
         // A recipe turn carrying data that must survive the round-trip.
@@ -2756,8 +2778,7 @@ mod tests {
                 calls: harvested_trace.clone(),
             }],
             harvested_provenance.clone(),
-            None,
-            None,
+            TurnTimestamps::default(),
         );
         let audit = TurnAudit::from_recipe_turn(&source_turn);
 

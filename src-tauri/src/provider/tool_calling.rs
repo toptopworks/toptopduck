@@ -168,10 +168,27 @@ pub enum ToolTurnReply {
 
 impl ToolTurnReply {
     /// Convenience constructor for a tool-call batch with no connective
-    /// prose -- the common scripted/test shape (a real adapter reply that
-    /// carried text constructs the struct variant explicitly).
+    /// prose -- the common scripted/test shape. Delegates to
+    /// [`tool_calls_with`], so the non-empty-calls assertion and the
+    /// empty-text normalization cover both constructors.
     pub fn tool_calls(calls: Vec<ToolUse>) -> Self {
-        Self::ToolCalls { text: None, calls }
+        Self::tool_calls_with(None, calls)
+    }
+
+    /// Construct a tool-call batch with its connective prose, normalizing an
+    /// empty string to `None` (issue #617): the adapters' parse points route
+    /// through here so the empty-text -> no-prose contract lives once -- a
+    /// later construction site passing a parsed `Some("")` cannot emit an
+    /// empty `RoundText` event and persist `"text": ""` in the recipe round.
+    pub fn tool_calls_with(text: Option<String>, calls: Vec<ToolUse>) -> Self {
+        debug_assert!(
+            !calls.is_empty(),
+            "a ToolCalls batch carries at least one call"
+        );
+        Self::ToolCalls {
+            text: text.filter(|t| !t.is_empty()),
+            calls,
+        }
     }
 }
 
@@ -206,6 +223,42 @@ mod tests {
                 tool_use_id: "tu_1".into(),
                 content: "42".into(),
                 is_error: false,
+            }
+        );
+    }
+
+    /// Issue #617: the empty-string -> None prose normalization lives in the
+    /// constructor (not at each parse point), so a later construction site
+    /// passing a parsed `Some("")` cannot emit an empty `RoundText` event
+    /// and persist `"text": ""` in the recipe round.
+    #[test]
+    fn tool_calls_with_normalizes_empty_text_to_none() {
+        let calls = || {
+            vec![ToolUse {
+                id: "tu_1".into(),
+                name: "explore".into(),
+                input: Value::Null,
+            }]
+        };
+        assert_eq!(
+            ToolTurnReply::tool_calls_with(Some(String::new()), calls()),
+            ToolTurnReply::ToolCalls {
+                text: None,
+                calls: calls(),
+            }
+        );
+        assert_eq!(
+            ToolTurnReply::tool_calls_with(None, calls()),
+            ToolTurnReply::ToolCalls {
+                text: None,
+                calls: calls(),
+            }
+        );
+        assert_eq!(
+            ToolTurnReply::tool_calls_with(Some("先看一眼数据。".into()), calls()),
+            ToolTurnReply::ToolCalls {
+                text: Some("先看一眼数据。".into()),
+                calls: calls(),
             }
         );
     }

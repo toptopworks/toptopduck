@@ -474,8 +474,9 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
                     Ok(ToolUse { id, name, input })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let text = message.content.filter(|t| !t.is_empty());
-            return Ok(ToolTurnReply::ToolCalls { text, calls });
+            // The empty-text -> None normalization lives in the constructor
+            // (issue #617), shared with the anthropic adapter's parse point.
+            return Ok(ToolTurnReply::tool_calls_with(message.content, calls));
         }
     }
     match message.content {
