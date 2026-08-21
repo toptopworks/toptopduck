@@ -13,6 +13,7 @@ import { sessionKeys } from "../../session/queryKeys";
 import type { AuthMode } from "../../types/approval";
 import { AUTH_MODE_DEFAULT } from "../../types/approval";
 import { Select, SelectContent, SelectTrigger, SelectValue } from "../ui/select";
+import { LABEL_HIDE_NARROW } from "./composer-visual";
 
 // Composer authorization-mode selector (ADR-0080, issue #352 / #482). The
 // session's execution posture at the turn-launch point (ADR-0083 puts the
@@ -64,12 +65,6 @@ export type ComposerAuthModeChipProps = {
 const TRIGGER_NEUTRAL = "border-border bg-card hover:bg-muted";
 const TRIGGER_WARNING =
   "border-warning/40 bg-warning/10 text-warning hover:bg-warning/20";
-
-// Hides the mode label when the question-bar @container (set on the QuestionBar
-// form) drops below the narrow-rail threshold, leaving the mode icon + chevron
-// visible. The portaled dropdown panel sits outside the container so its label
-// copy is unaffected.
-const LABEL_HIDE_NARROW = "@max-[320px]:hidden";
 
 export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChange }: ComposerAuthModeChipProps) {
   const intl = useIntl();

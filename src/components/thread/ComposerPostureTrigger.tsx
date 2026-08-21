@@ -17,6 +17,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { LABEL_HIDE_NARROW } from "./composer-visual";
 
 // The next-turn posture text button (ADR-0099 Decision 3, issue #574/#573): a
 // resident text control seated BEFORE the runtime trigger on the QuestionBar
@@ -129,7 +130,7 @@ export function ComposerPostureTrigger({
   // identically instead of this one degrading to an ellipsis.
   if (catalog === null) {
     return (
-      <span className="@max-[320px]:hidden text-muted-foreground max-w-44 truncate text-sm">
+      <span className={`${LABEL_HIDE_NARROW} text-muted-foreground max-w-44 truncate text-sm`}>
         {label}
       </span>
     );
@@ -205,7 +206,7 @@ export function ComposerPostureTrigger({
           chevron-only button (aria-label keeps the full readout) --
           the same collapse the auth-mode chip's label performs
           (LABEL_HIDE_NARROW). */}
-      <span className="@max-[320px]:hidden truncate">{label}</span>
+      <span className={`${LABEL_HIDE_NARROW} truncate`}>{label}</span>
       <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
     </button>
   );
