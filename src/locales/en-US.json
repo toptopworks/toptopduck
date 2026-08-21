@@ -470,7 +470,7 @@
   "thread.ariaLabel": "Conversation history",
   "thread.assumption": "Assumption: {text}",
   "thread.copy.copied": "Copied",
-  "thread.copy.question": "Copy question",
+  "thread.copy.question": "Copy message",
   "thread.copy.reply": "Copy reply",
   "thread.live.thinkingStep": "Thinking (step {step})…",
   "thread.outcome.agent": "Answered",

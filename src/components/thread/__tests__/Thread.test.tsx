@@ -1113,11 +1113,15 @@ describe("Thread", () => {
       // restores the navigator between tests.
       vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
       renderChat(chatRecord());
-      fireEvent.click(screen.getByRole("button", { name: "复制问话" }));
+      fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
       expect(writeText).toHaveBeenCalledWith("第一行问话\n第二行问话");
-      // The flip lands after the awaited clipboard write (async state).
+      // The flip lands after the awaited clipboard write (async state); the
+      // accessible name follows it via the sr-only span.
       expect(await screen.findByRole("button", { name: "已复制" })).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "复制答复" }));
+      // The ack pops the tooltip open on its own -- no hover/focus needed
+      // (touch never opens a hover tooltip otherwise).
+      expect(screen.getByRole("tooltip").textContent).toBe("已复制");
+      fireEvent.click(screen.getByRole("button", { name: "复制回复" }));
       await waitFor(() => expect(writeText).toHaveBeenCalledWith("答复正文"));
     });
 
@@ -1125,18 +1129,46 @@ describe("Thread", () => {
       const writeText = vi.fn().mockRejectedValue(new Error("denied"));
       vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
       renderChat(chatRecord());
-      fireEvent.click(screen.getByRole("button", { name: "复制问话" }));
+      fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
       await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
       // No ack flip: the accessible name stays the idle label.
       expect(screen.queryByRole("button", { name: "已复制" })).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "复制问话" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "复制消息" })).toBeInTheDocument();
+      // And no popped tooltip -- a denial must not fabricate an ack.
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
     });
 
     it("omits the reply copy on a turn with no textual reply (Materialized)", () => {
       renderChat(chatRecord({ outcome: materializedRecord("result_1", null).outcome }));
       // The question copy is the bubble's conversation fact -- always present.
-      expect(screen.getByRole("button", { name: "复制问话" })).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "复制答复" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "复制消息" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "复制回复" })).not.toBeInTheDocument();
+    });
+
+    it("hover-reveals the meta stamps + copy affordances on both sides (glyph stays)", () => {
+      const { container } = renderChat(chatRecord());
+      // Both conversation-fact rows carry the reveal contract: hidden at
+      // rest, shown on the side's hover / focus-within, always shown on
+      // no-hover pointers. Pure CSS choreography -- asserted as the class
+      // contract on the meta-reveal hooks.
+      const reveals = container.querySelectorAll(".meta-reveal");
+      expect(reveals).toHaveLength(2);
+      reveals.forEach((el) => {
+        expect(el.className).toContain("opacity-0");
+        expect(el.className).toContain("group-hover:opacity-100");
+        expect(el.className).toContain("group-focus-within:opacity-100");
+      });
+      // The outcome glyph is state, not chrome: it lives outside the reveal.
+      expect(container.querySelector(".meta-reveal .outcome-icon")).toBeNull();
+      expect(container.querySelector(".turn-meta .outcome-icon")).not.toBeNull();
+    });
+
+    it("tooltips the copy affordance by type (message vs reply)", () => {
+      renderChat(chatRecord());
+      fireEvent.focus(screen.getByRole("button", { name: "复制消息" }));
+      expect(screen.getByRole("tooltip").textContent).toBe("复制消息");
+      fireEvent.focus(screen.getByRole("button", { name: "复制回复" }));
+      expect(screen.getByRole("tooltip").textContent).toBe("复制回复");
     });
 
     it("renders each round's prose always expanded with thinking + steps folds default collapsed", () => {

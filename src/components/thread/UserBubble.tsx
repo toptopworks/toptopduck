@@ -13,6 +13,7 @@
 import { useIntl } from "react-intl";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
+import { HOVER_REVEAL_CLASS } from "./turn-visual";
 
 export function UserBubble({
   question,
@@ -28,7 +29,7 @@ export function UserBubble({
 }) {
   const intl = useIntl();
   return (
-    <div className="user-bubble flex flex-col items-end">
+    <div className="user-bubble group flex flex-col items-end">
       {/* The bubble box rides the question element itself (the .turn-question
           hook stays for selector / test stability): secondary surface + lg
           radius per the conversation-surface tokens, the top-right corner
@@ -45,8 +46,15 @@ export function UserBubble({
       >
         {question}
       </p>
-      {/* The conversation-fact meta row: the ask stamp + the copy affordance. */}
-      <span className="mt-0.5 flex items-center gap-0.5 text-xs text-muted-foreground">
+      {/* The conversation-fact meta row: the ask stamp + the copy affordance,
+          hover-revealed (HOVER_REVEAL_CLASS rides the user-bubble group) so
+          the bubble reads as pure conversation at rest. */}
+      <span
+        className={cn(
+          "meta-reveal mt-0.5 flex items-center gap-0.5 text-xs text-muted-foreground",
+          HOVER_REVEAL_CLASS,
+        )}
+      >
         {askedAt !== undefined && (
           <time dateTime={new Date(askedAt).toISOString()}>{intl.formatTime(askedAt)}</time>
         )}
@@ -54,7 +62,7 @@ export function UserBubble({
           text={question}
           label={intl.formatMessage({
             id: "thread.copy.question",
-            defaultMessage: "Copy question",
+            defaultMessage: "Copy message",
           })}
         />
       </span>

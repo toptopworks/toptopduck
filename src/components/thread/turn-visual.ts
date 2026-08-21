@@ -23,6 +23,15 @@ import type { ThreadEntry, TurnOutcome, TurnRecord, TurnRuntime } from "../../ty
 // field names that would silently drift on a rename.
 export type DatasetLabel = Pick<DatasetDescriptor, "reference_name" | "display_name">;
 
+// The thread's conversation-fact chrome (the ask/settle stamps and the copy
+// affordances flanking them) is hover-choreographed: hidden at rest so the
+// exchange reads as pure conversation, revealed while its side is hovered or
+// holds focus (keyboard parity), always revealed on devices without a hover
+// pointer (touch). Opacity only -- layout and the a11y tree are unchanged and
+// the reveal stays compositor-cheap. Carried by the `meta-reveal` elements.
+export const HOVER_REVEAL_CLASS =
+  "opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100";
+
 // The reference name of a Materialized turn's primary result (ADR-0084): the
 // promotion chain's tail -- the result the turn's answer references. The stale
 // ghost and the result link both key on the primary; antecedent promotions
