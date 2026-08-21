@@ -1659,7 +1659,7 @@ impl Session {
     }
 
     /// Non-consuming snapshot of the persist outcome right after the
-    /// caller's own [`Self::persist_if_bound`] (the ADR-0095 set commands,
+    /// caller's own [`Self::persist_if_bound`] (the ADR-0095 set command,
     /// issue #529): `Err` = the write failed (typed), `Ok(false)` = the
     /// write was suspended on a pending ADR-0035 conflict, `Ok(true)` = a
     /// write landed (or the session is unbound -- in-memory-only, nothing

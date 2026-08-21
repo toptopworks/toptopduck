@@ -638,12 +638,13 @@ impl SessionHandle {
 
     /// Read the runtime choice + the posture pair under the ONE slot lock
     /// (issue #600): the pair is namespaced by the runtime it was selected
-    /// under, so the two are one unit at every consumer that keys off both --
-    /// the `ask` mirror at turn top and the posture set commands (whose
-    /// segment-header stamp + backfill entry both derive from this single
-    /// read). Atomic against [`Self::set_runtime_and_posture`]: a switch can
-    /// never interleave between the two reads, so the caller sees one
-    /// segment's (runtime, pair), never a mix.
+    /// under, so the two are one unit at the `ask` mirror at turn top; the
+    /// posture set command reads the same lock for its runtime half (its
+    /// stamp + backfill + write-back all key off that read; the pair itself
+    /// comes whole off the wire, issue #603). Atomic against
+    /// [`Self::set_runtime_and_posture`]: a switch can never interleave
+    /// between the two reads, so the caller sees one segment's (runtime,
+    /// pair), never a mix.
     pub fn runtime_and_posture(&self) -> (Option<AdapterSpec>, PosturePair) {
         let slot = self
             .runtime_posture
@@ -668,7 +669,7 @@ impl SessionHandle {
     /// Conditionally write the posture pair under the ONE slot lock (issue
     /// #600): the write lands only while the slot's runtime still equals
     /// `expected` -- the runtime the caller read the held pair under. The
-    /// set commands use this for their handle write-back so a switch landing
+    /// set command uses this for its handle write-back so a switch landing
     /// between the combined read and the write-back cannot pair the new
     /// runtime with the OLD namespace's pair: the switch has already
     /// re-seeded the slot with the target adapter's posture (#590 segment
@@ -1312,7 +1313,7 @@ mod tests {
 
         // The conditional write keys off the same slot state: it lands
         // while the runtime still matches the read, and drops after a
-        // combined write changed the runtime (the set commands' write-back
+        // combined write changed the runtime (the set command's write-back
         // guard).
         let pair = PosturePair {
             model: Some("fake-sonnet".into()),

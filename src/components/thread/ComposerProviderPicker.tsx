@@ -221,7 +221,11 @@ export function ComposerProviderPicker({
   // session-prefix ownership as the runtime choice; null sessionId disables
   // the query (the cold-start posture comes from the pending pair + the
   // backfill entry below).
-  const { data: modelConfigData, error: modelConfigError } = useQuery({
+  const {
+    data: modelConfigData,
+    error: modelConfigError,
+    isFetching: modelConfigFetching,
+  } = useQuery({
     queryKey: sessionKeys.modelConfig(sessionId ?? ""),
     queryFn: () => getSessionModelConfig(sessionId as string),
     enabled: sessionId !== null,
@@ -399,6 +403,19 @@ export function ComposerProviderPicker({
       ? { model: modelConfig.model, thought_level: modelConfig.thought_level }
       : (pendingModelPosture ?? backfillData ?? EMPTY_POSTURE);
 
+  // The posture read's settle gate (issue #603 review): the full-pair wire
+  // makes this cache the authority for the UNTOUCHED field of every submit,
+  // so an unsettled read must never feed one. Two windows: the first fetch
+  // (data undefined -> the DEFAULT fallback would coerce the server-held
+  // value into an explicit clear) and any refetch in flight (selectRuntime
+  // invalidates this key -> the stale pair would overwrite the freshly
+  // seeded slot). The error state is excluded: configFault replaces the
+  // control outright. Gates the trigger (the menu cannot open) AND the
+  // handlers -- a menu already open when a refetch starts still drops the
+  // gesture, since Radix items ignore the trigger's disabled.
+  const postureReadUnsettled =
+    isExternal && sessionId !== null && modelConfigFetching;
+
   // Latest caller-held pending posture, mirrored in an effect for the async
   // rollback guard below: the IPC reject handler must compare against the
   // CURRENT pair, not the render snapshot its closure captured (issue #592).
@@ -497,7 +514,7 @@ export function ComposerProviderPicker({
     write: () => Promise<SetPosturePersistOutcome>,
     next: ModelPosture,
   ): Promise<void> {
-    if (sessionId === null || modelSwitching) return;
+    if (sessionId === null || modelSwitching || postureReadUnsettled) return;
     setModelSwitching(true);
     setModelSetError(null);
     setModelPersistFault(null);
@@ -815,7 +832,7 @@ export function ComposerProviderPicker({
         persistFault={modelPersistFault}
         persistSuspended={modelPersistSuspended}
         catalogNote={catalogNote}
-        disabled={modelSwitching}
+        disabled={modelSwitching || postureReadUnsettled}
       />
       {runtimeError != null ? (
         // Honest read failure (issue #600): a rejected runtime read must not

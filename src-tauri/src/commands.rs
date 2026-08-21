@@ -685,7 +685,7 @@ pub async fn ask(
         // Issue #353 + ADR-0095: feed the session's runtime choice and the
         // session-level model + thought-level pair into the turn's dispatch
         // at the turn boundary. Both live on the handle (lock-light writes
-        // via set_session_runtime / the set commands); the Session consumes
+        // via set_session_runtime / set_session_posture); the Session consumes
         // them for THIS turn only -- a switch lands between turns, never
         // mid-turn, and a resumed Session reads the restored choice. The
         // combined read takes the one slot lock (issue #600), so the pair
@@ -2601,7 +2601,7 @@ pub fn set_session_runtime(
 /// into the new CLI, and a switch back to a previously used adapter
 /// recovers its held selection. The runtime choice + the seeded posture land
 /// under the ONE slot lock (issue #600 folded the two former slot mutexes):
-/// every reader (the `ask` mirror, the set commands) takes the same lock, so
+/// every reader (the `ask` mirror, the set command) takes the same lock, so
 /// no reader can observe the new runtime paired with the old posture -- a
 /// torn pair would inject the stale id into the new CLI for one turn and
 /// persist into the recipe. Handle-only (lock-light): the pair reaches the Session
@@ -2962,12 +2962,18 @@ pub fn get_session_model_config(
     })
 }
 
-/// Set the session's model selection for the next external-runtime turn
-/// (ADR-0095). `None` clears (the CLI's own default). Takes effect at the
-/// turn boundary; rejected while resuming. NOT validated against the
-/// discovered catalog at this boundary (ADR-0095 Decision 7): the picker only
-/// offers discovered ids, so an unknown id means a stale cache or a manual
-/// call -- the CLI deals with it at spawn.
+/// Set the session's model + thought-level selections for the next
+/// external-runtime turn (ADR-0095; a single full-pair command since issue
+/// #603). The wire IS the complete posture: every field is an explicit
+/// intent value -- `None` is the user's explicit clear (the CLI's own
+/// default) and an untouched field arrives as its current value -- so the
+/// backend never derives off the held slot (two concurrent sets cannot
+/// interleave a read-modify-write; the #600 conditional write-back keeps
+/// guarding the set-vs-switch direction). Takes effect at the next turn
+/// boundary. The model id is NOT validated against the discovered catalog
+/// at this boundary (ADR-0095 Decision 7): the picker only offers
+/// discovered ids, so an unknown id means a stale cache or a manual call --
+/// the CLI deals with it at spawn.
 ///
 /// Persistence: the selection is mirrored into the Session's recipe-header
 /// facts + persisted immediately, so a close-without-another-turn keeps the
@@ -2985,27 +2991,16 @@ pub fn get_session_model_config(
 /// the new pair on the session's runtime adapter's app-config entry (the
 /// single write point shared with the cold-start pre-selection) via
 /// [`record_last_model_posture`] -- best-effort, never fails this command.
-/// The runtime choice and the held pair come off the ONE slot read (issue
-/// #600): the header stamp and the backfill entry both key off that atomic
-/// read, so a concurrent switch can never interleave between the two and
-/// pair this set's posture with the other runtime's namespace. The handle
-/// write-back that follows is conditional on the runtime being unchanged,
-/// so a switch landing mid-set keeps its own seeded pair.
+/// The runtime choice comes off the ONE slot read (issue #600): the header
+/// stamp, the write-back guard, and the backfill entry all key off that
+/// atomic read, so a concurrent switch can never interleave between them
+/// and pair this set's posture with the other runtime's namespace. The
+/// handle write-back that follows is conditional on the runtime being
+/// unchanged, so a switch landing mid-set keeps its own seeded pair.
 ///
 /// Returns the persist-now verdict (issue #529): the write failure or the
 /// ADR-0035 suspension read in-process right after the persist, so the
 /// picker can warn without a second IPC racing the banner poll.
-/// Set the session's model + thought-level selections for the next
-/// external-runtime turn (ADR-0095). The wire IS the complete pair (issue
-/// #603): every field is an explicit intent value -- `None` is the user's
-/// explicit clear (the CLI's own default) and an untouched field arrives as
-/// its current value -- so the backend never derives off the held slot (two
-/// concurrent sets cannot interleave a read-modify-write; the #600
-/// conditional write-back keeps guarding the set-vs-switch direction).
-/// Takes effect at the next turn boundary; rejected while resuming or while
-/// a turn is in flight. The ADR-0035 suspension read is in-process right
-/// after the persist, so the picker can warn without a second IPC racing
-/// the banner poll.
 #[tauri::command]
 pub fn set_session_posture(
     store: State<'_, Arc<SessionStore>>,
@@ -3077,7 +3072,7 @@ fn apply_posture_set(
 /// The single backfill write point (ADR-0100 Decision 3, issue #581): every
 /// successful posture set lands the new pair on the session's runtime
 /// adapter's app-config entry, so a session-level selection and the
-/// cold-start pre-selection (which reaches the set IPCs right after session
+/// cold-start pre-selection (which reaches the set IPC right after session
 /// creation) share one writer. A built-in session has no adapter namespace
 /// to record under -- the posture is a no-op there (ADR-0095) -- so the write
 /// is skipped, not refused. Best-effort: the session posture itself already
@@ -3885,7 +3880,7 @@ mod tests {
         let codex = resolve_adapter("codex").expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini.clone()), &live);
         // An explicit selection while on gemini lands on its entry (the
-        // same helper the set commands call -- the write point stays ONE).
+        // same helper the set command calls -- the write point stays ONE).
         record_last_model_posture(
             &live,
             Some(gemini.clone()),

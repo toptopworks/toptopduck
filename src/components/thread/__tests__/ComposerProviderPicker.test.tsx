@@ -26,6 +26,7 @@ import type {
   AdapterCatalogs,
   CatalogModel,
   DiscoveredRuntime,
+  SessionModelConfig,
   SessionRuntimeChoice,
 } from "../../../types/runtime";
 
@@ -1153,6 +1154,57 @@ describe("ComposerProviderPicker posture menu writes (ADR-0095 in-session)", () 
     await waitFor(() =>
       expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "gpt-5-codex", thought_level: null }),
     );
+  });
+
+  it("keeps a held effort the picked model supports in the same submit (codex, issue #603)", async () => {
+    // The untouched dimension arrives as its CURRENT value: the held
+    // "medium" IS in gpt-5's supported set, so the model pick submits the
+    // pair verbatim -- no linkage clear, no null coercion. Pins the
+    // retained-field branch of the full-pair wire in the model direction
+    // (a degenerate unconditional null would pass every other test).
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
+    vi.mocked(getSessionModelConfig).mockResolvedValue({
+      model: null,
+      thought_level: "medium",
+      cached_discovered: null,
+    });
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: codex/ });
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5" }));
+    await waitFor(() =>
+      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "gpt-5", thought_level: "medium" }),
+    );
+  });
+
+  it("never submits while the model-config read is unsettled (issue #603 review)", async () => {
+    // The full-pair wire makes the client cache the authority for the
+    // UNTOUCHED field of every submit: while the first fetch is in flight
+    // the DEFAULT fallback ({null, null}) must not become a submit -- a
+    // click would coerce the server-held level into an explicit clear and
+    // persist it. The catalog is independently live (the probe cache), so
+    // the read is the only gate: the trigger disables AND the handler
+    // drops the gesture (the menu mock renders rows regardless of the
+    // trigger's disabled state).
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "codex",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
+    vi.mocked(getSessionModelConfig).mockImplementation(
+      () => new Promise<SessionModelConfig>(() => {}),
+    );
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: /Runtime: codex/ });
+    const trigger = screen.getByRole("button", { name: /^Model: / });
+    expect((trigger as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "gpt-5" }));
+    expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
   it("keeps the held effort when the write itself rejects (codex linkage)", async () => {
