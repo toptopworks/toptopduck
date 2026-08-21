@@ -3,18 +3,19 @@ import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { Check, Loader2, ShieldQuestion, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { LiveTraceRow, LiveTurn } from "../../session/useTurnFlow";
+import type { LiveTraceRow } from "../../session/useTurnFlow";
 import type { OperationKind, ApprovalResponse } from "../../types/approval";
 import type { TraceEntry } from "../../types/thread";
 
 // The execution-trace renderers (ADR-0078, issue #297): the expanded tool-call
-// chain of a settled turn (TraceRowList) and the in-flight turn's progressive
-// card (LiveTurnCard) -- one rendering path for both the recorded trace and
-// the live event stream, per ADR-0083 ("the decision moment and the trace
-// record share one rendering path"). Rows render the operation badge +
-// argument summary + success/failure; live rows additionally carry the
-// approval card chrome (three buttons pending -> resolved badge) when the
-// call went through the gateway gate (ADR-0080/0083).
+// chain of a settled turn (TraceRowList) and the live stream's per-row
+// renderer (LiveRow, consumed by the live chat exchange, issue #610) -- one
+// rendering path for both the recorded trace and the live event stream, per
+// ADR-0083 ("the decision moment and the trace record share one rendering
+// path"). Rows render the operation badge + argument summary +
+// success/failure; live rows additionally carry the approval card chrome
+// (three buttons pending -> resolved badge) when the call went through the
+// gateway gate (ADR-0080/0083).
 //
 // i18n (ADR-0052): every chrome string (badge labels, button copy, resolved
 // markers) routes through react-intl with a static literal id; the layer-4
@@ -162,7 +163,9 @@ function resolvedLabel(intl: IntlShape, response: ApprovalResponse): string {
 // One live trace row: a pending approval renders the three-button card
 // (ADR-0083); a resolved approval merges its badge with the call's state;
 // plain built-in calls render as a running spinner or a completed trace row.
-function LiveRow({
+// Exported for the live chat exchange (issue #610), which streams the rows
+// unfurled inside the current round's block.
+export function LiveRow({
   row,
   onRespond,
 }: {
@@ -262,65 +265,5 @@ function LiveRow({
       }}
       afterName={resolvedBadge}
     />
-  );
-}
-
-// The in-flight turn's progressive card (ADR-0078/0083, issue #297): rendered
-// at the thread's tail while a turn runs -- the asking question (verbatim
-// handle, ADR-0039) with a spinner in the outcome-glyph slot (the outcome is
-// not yet decided) and the live trace rows beneath (tool calls + approval
-// cards). Folds away when the turn settles; the settled TurnRecord takes its
-// place with the recorded trace.
-export function LiveTurnCard({
-  liveTurn,
-  onRespondApproval,
-}: {
-  liveTurn: LiveTurn;
-  onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
-}) {
-  const intl = useIntl();
-  const hasRows = liveTurn.rows.length > 0;
-  return (
-    <div className="live-turn-card turn-card rounded-md py-1.5" data-live="true">
-      <div className="turn-head flex items-center gap-1.5 min-w-0">
-        <span
-          className="outcome-icon inline-flex items-center justify-center w-4 h-4 shrink-0 text-muted-foreground"
-          role="img"
-          aria-label={intl.formatMessage({
-            id: "thread.live.running",
-            defaultMessage: "Running",
-          })}
-        >
-          <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
-        </span>
-        <span className="turn-question live-question flex-1 min-w-0 truncate text-sm text-foreground">
-          {liveTurn.question}
-        </span>
-      </div>
-      {/* The thinking hint shows while no call rows exist yet (the first
-          provider round-trip); once rows land they carry the motion. The
-          step surfaces past the first round-trip so a multi-step trajectory
-          reads honestly ("step N", ADR-0081). */}
-      {!hasRows && (
-        <p className="live-thinking mt-1 ml-6 text-xs text-muted-foreground" role="status">
-          {liveTurn.step !== null && liveTurn.step > 1 ? (
-            <FormattedMessage
-              id="thread.live.thinkingStep"
-              defaultMessage="Thinking (step {step})…"
-              values={{ step: liveTurn.step }}
-            />
-          ) : (
-            <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
-          )}
-        </p>
-      )}
-      {hasRows && (
-        <ul className="trace-list live-trace mt-1 ml-6 list-none m-0 p-0 border-l border-border pl-2">
-          {liveTurn.rows.map((row) => (
-            <LiveRow key={row.key} row={row} onRespond={onRespondApproval} />
-          ))}
-        </ul>
-      )}
-    </div>
   );
 }

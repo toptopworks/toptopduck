@@ -472,7 +472,6 @@
   "thread.copy.copied": "Copied",
   "thread.copy.question": "Copy question",
   "thread.copy.reply": "Copy reply",
-  "thread.live.running": "Running",
   "thread.live.thinkingStep": "Thinking (step {step})…",
   "thread.outcome.agent": "Answered",
   "thread.outcome.cancelled": "Cancelled",

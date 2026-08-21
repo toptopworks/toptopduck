@@ -182,12 +182,16 @@ describe("useTurnFlow", () => {
       act(() => {
         void result.current.handleAsk("多少行？");
       });
-      expect(result.current.liveTurn).toEqual({
+      // askedAt is the client's submit stamp (#610): the live bubble's
+      // asked_at source, present before any progress event lands.
+      expect(result.current.liveTurn).toMatchObject({
         question: "多少行？",
         step: null,
         rows: [],
         roundTexts: [],
+        roundThinkings: [],
       });
+      expect(typeof result.current.liveTurn?.askedAt).toBe("number");
     });
 
     it("attaches RoundText to the current round (issue #608)", async () => {
@@ -213,7 +217,7 @@ describe("useTurnFlow", () => {
       expect(result.current.liveTurn?.rows[0]?.step).toBe(2);
     });
 
-    it("consumes ThinkingCompleted without disturbing the rows (issue #608)", async () => {
+    it("keeps the round's thinking on the live state (issues #608/#610)", async () => {
       const { deps } = setup();
       vi.mocked(askQuestion).mockImplementation(
         () => new Promise<TurnOutcome>(() => {}),
@@ -232,6 +236,45 @@ describe("useTurnFlow", () => {
         ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
       });
       expect(result.current.liveTurn?.rows).toEqual([]);
+      // The thinking block rides the live state per round (#610): the live
+      // fold renders from it, so it must not be dropped.
+      expect(result.current.liveTurn?.roundThinkings).toEqual([
+        { duration_ms: 900, text: "reasoning" },
+      ]);
+      // A second round's thinking slots by round, padding the round that
+      // emitted none.
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      emitProgress(SID, { ThinkingCompleted: { duration_ms: 1200, text: "more" } });
+      expect(result.current.liveTurn?.roundThinkings).toEqual([
+        { duration_ms: 900, text: "reasoning" },
+        { duration_ms: 1200, text: "more" },
+      ]);
+      // A repeated completion for the same round is last-wins (the slot is
+      // overwritten in place, the array does not grow).
+      emitProgress(SID, { ThinkingCompleted: { duration_ms: 1500, text: "revised" } });
+      expect(result.current.liveTurn?.roundThinkings).toEqual([
+        { duration_ms: 900, text: "reasoning" },
+        { duration_ms: 1500, text: "revised" },
+      ]);
+    });
+
+    it("falls a ThinkingCompleted that precedes any Thinking back to round 1", async () => {
+      // Same ordering fallback the call-event handlers use (step ?? 1):
+      // structurally unreachable from the loop (Thinking opens the round),
+      // but the state layer stays total rather than dropping the block.
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { ThinkingCompleted: { duration_ms: 300, text: "early" } });
+      expect(result.current.liveTurn?.roundThinkings).toEqual([
+        { duration_ms: 300, text: "early" },
+      ]);
     });
 
     it("grows rows from the tool-call event stream (started -> completed)", async () => {
@@ -388,6 +431,11 @@ describe("useTurnFlow", () => {
       act(() => {
         askDone = result.current.handleAsk("q");
       });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ThinkingCompleted: { duration_ms: 500, text: "hmm" },
+      });
+      emitProgress(SID, { RoundText: { text: "先看一眼数据。" } });
       emitProgress(SID, {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
@@ -408,8 +456,13 @@ describe("useTurnFlow", () => {
       expect(thread).toHaveLength(1);
       const entry = thread?.[0];
       if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
+      // #610: the fold carries thinking + prose + calls onto the optimistic
+      // record's round, so the settled round renders exactly what the live
+      // exchange showed (the no-jump settle swap).
       expect(entry.data.trace).toEqual([
         {
+          thinking: { duration_ms: 500, text: "hmm" },
+          text: "先看一眼数据。",
           calls: [
             {
               name: "explore",
@@ -453,19 +506,30 @@ describe("useTurnFlow", () => {
     });
 
     it("passes plain calls through as ungated rows", () => {
-      expect(mergeLiveTrace([call()], [])).toEqual([
+      expect(mergeLiveTrace([call()], [], null)).toEqual([
         expect.objectContaining({ key: "call-0", approval: null, success: true }),
       ]);
     });
 
     it("trails unmatched approvals (still pending at the gate)", () => {
-      const rows = mergeLiveTrace([call()], [approval()]);
+      const rows = mergeLiveTrace([call()], [approval()], null);
       expect(rows).toHaveLength(2);
       expect(rows[1]).toMatchObject({
         key: "req-1",
         approval: { requestId: "req-1", response: null },
         success: null,
       });
+    });
+
+    it("stamps a trailing approval row with the current round (issue #610)", () => {
+      // The trailing card belongs to the round whose gate holds the turn:
+      // the live round grouping reads the step, so a round-2 gate wait must
+      // not strand the card in round 1's block.
+      const rows = mergeLiveTrace([], [approval()], 2);
+      expect(rows[0]?.step).toBe(2);
+      // No Thinking yet (step null): falls back to round 1, matching the
+      // event handlers' own fallback.
+      expect(mergeLiveTrace([], [approval()], null)[0]?.step).toBe(1);
     });
 
     it("merges by tool name + summary, consuming each approval once", () => {
@@ -476,6 +540,7 @@ describe("useTurnFlow", () => {
           call({ key: "call-1", name: "fetch", operationKind: "network", summary: "GET /x" }),
         ],
         [a, approval({ requestId: "req-2" })],
+        1,
       );
       // Two calls + two approvals -> two merged rows (no trailing card).
       expect(rows.map((r) => r.key)).toEqual(["req-1", "req-2"]);
@@ -502,7 +567,7 @@ describe("useTurnFlow", () => {
         row({ key: "call-2", step: 2, name: "materialize", operationKind: "write", summary: "SELECT 1", success: true, resultExcerpt: "" }),
       ];
       // Round 2 emitted prose (the RoundText event); round 1 emitted none.
-      expect(rowsToRounds(rows, [null, "先看一眼数据。"])).toEqual([
+      expect(rowsToRounds(rows, [null, "先看一眼数据。"], [])).toEqual([
         {
           calls: [
             {
@@ -533,8 +598,20 @@ describe("useTurnFlow", () => {
       // A round that emitted prose but completed no calls still records as a
       // round carrying the text -- matching the backend, which opens the
       // round when the tool-call reply arrives, not when a call completes.
-      expect(rowsToRounds([], [null, "先看一眼数据。"])).toEqual([
+      expect(rowsToRounds([], [null, "先看一眼数据。"], [])).toEqual([
         { text: "先看一眼数据。", calls: [] },
+      ]);
+    });
+
+    it("rowsToRounds attaches per-round thinking to its round (issue #610)", () => {
+      // The live thinking fold survives the settle swap: the round's thinking
+      // block lands on the optimistic record's round, not dropped at fold
+      // time. Rounds without thinking stay thinking-free (honest degrade).
+      expect(
+        rowsToRounds([], ["先看一眼数据。"], [null, { duration_ms: 900, text: "reasoning" }]),
+      ).toEqual([
+        { text: "先看一眼数据。", calls: [] },
+        { thinking: { duration_ms: 900, text: "reasoning" }, calls: [] },
       ]);
     });
   });
