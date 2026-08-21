@@ -83,6 +83,7 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
             1 => transforms::v1_to_v2(current)?,
             2 => transforms::v2_to_v3(current)?,
             3 => transforms::v3_to_v4(current)?,
+            4 => transforms::v4_to_v5(current)?,
             other => {
                 return Err(MigrationError::NoTransform {
                     from: other,
@@ -388,6 +389,51 @@ mod transforms {
             });
             *skill = wrapped;
         }
+    }
+
+    /// v4 -> v5 (ADR-0103, issue #608): group each Turn entry's flat
+    /// `data.trace` array into a one-round `[{ calls: [...] }]` shape. A v4
+    /// trace recorded only call entries -- no connective prose, no thinking
+    /// -- so the wrapped round carries the calls verbatim and no optional
+    /// member; the turn's new `asked_at` / `settled_at` fields are left
+    /// absent (an old turn honest-degrades to "no timestamp" on resume,
+    /// never a synthetic one). A turn with no trace field keeps it absent
+    /// (`#[serde(default)]` deserializes empty). Lossless for the call
+    /// trajectory: every entry survives the wrap with its fields untouched.
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub(super) fn v4_to_v5(mut value: Value) -> Result<Value, MigrationError> {
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                wrap_flat_trace_into_round_in_place(entry);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Wrap one Turn entry's flat `data.trace` entry array into a one-round
+    /// shape, in place (ADR-0103). No-op for Source / Skill entries (no
+    /// `data.trace`) and for turns whose trace is absent / empty (`[]` stays
+    /// `[]` -- an empty round list, not a round with no calls) / not an array
+    /// (a corrupt shape surfaces as an honest typed-deserialize error
+    /// downstream; the transform stays side-effect-free rather than
+    /// guessing). Per-entry defensive so the caller loop stays a flat map.
+    fn wrap_flat_trace_into_round_in_place(entry: &mut Value) {
+        // A Turn entry's trace lives at `data.trace` (the adjacently-tagged
+        // RecipeEntry shape `{entry, data}`); Source / Skill entries have no
+        // trace and skip.
+        let Some(data_obj) = entry.get_mut("data").and_then(|d| d.as_object_mut()) else {
+            return;
+        };
+        let Some(trace) = data_obj.get_mut("trace").and_then(Value::as_array_mut) else {
+            return;
+        };
+        if trace.is_empty() {
+            return;
+        }
+        let calls = std::mem::take(trace);
+        *trace = vec![serde_json::json!({ "calls": calls })];
     }
 }
 
@@ -824,7 +870,7 @@ mod tests {
             1,
             "synthesized trace survives deserialize"
         );
-        assert_eq!(turn.trace[0].name, "materialize");
+        assert_eq!(turn.trace[0].calls[0].name, "materialize");
         // Replay chain is unchanged -- the promotion entry still carries the
         // same SQL + reference, so resume re-materializes identically.
         let chain = recipe.productive_chain();
@@ -1293,5 +1339,145 @@ mod tests {
         assert_eq!(arr[1], 42, "non-string element left as-is");
         assert_eq!(arr[2]["name"], "also-ok");
         assert_eq!(arr[2]["content_hash"], "");
+    }
+
+    // --- v4 -> v5 (ADR-0103, issue #608) --------------------------------------
+
+    /// Build a synthetic v4 Turn entry: the adjacently-tagged outcome plus a
+    /// v4 FLAT trace (a bare array of call entries -- the pre-round shape).
+    fn v4_turn_with_flat_trace(question: &str, trace: Value) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {"text_kind": "Agent", "body": "ok", "assumption": null},
+                },
+                "trace": trace,
+            },
+        })
+    }
+
+    #[test]
+    fn v4_to_v5_wraps_a_flat_trace_into_one_round() {
+        // ADR-0103: a v4 turn's flat call array wraps into a one-round
+        // `[{ calls: [...] }]` shape -- the calls survive verbatim, and no
+        // prose / thinking / timestamp is synthesized (a v4 file recorded
+        // none of them).
+        let v4 = serde_json::json!({
+            "format_version": 4,
+            "session_name": "v4",
+            "sources": [],
+            "history": [v4_turn_with_flat_trace(
+                "多少人",
+                serde_json::json!([
+                    {"name": "explore", "operation_kind": "read",
+                     "summary": "SELECT 1", "success": true, "result_excerpt": ""},
+                    {"name": "materialize", "operation_kind": "write",
+                     "summary": "SELECT COUNT(*) AS n", "success": true, "result_excerpt": ""}
+                ]),
+            )],
+            "active": null,
+        });
+        let v5 = transforms::v4_to_v5(v4).expect("migrate");
+        let trace = &v5["history"][0]["data"]["trace"];
+        let rounds = trace.as_array().expect("trace is an array of rounds");
+        assert_eq!(rounds.len(), 1, "the flat trace folds into ONE round");
+        let round = &rounds[0];
+        assert!(round.get("thinking").is_none(), "no thinking synthesized");
+        assert!(round.get("text").is_none(), "no prose synthesized");
+        let calls = round["calls"].as_array().expect("calls preserved");
+        assert_eq!(calls.len(), 2, "every call survives the wrap");
+        assert_eq!(calls[0]["name"], "explore");
+        assert_eq!(calls[1]["name"], "materialize");
+        // No turn timestamps are synthesized for migrated turns.
+        let data = &v5["history"][0]["data"];
+        assert!(data.get("asked_at").is_none(), "asked_at left absent");
+        assert!(data.get("settled_at").is_none(), "settled_at left absent");
+    }
+
+    #[test]
+    fn v4_to_v5_leaves_absent_and_empty_traces_untouched() {
+        // A turn with no trace field (a no-tool turn) keeps it absent; an
+        // empty `[]` stays empty (no empty round is synthesized). Source /
+        // Skill entries have no `data.trace` and pass through. A null trace
+        // is not an array -> the wrap skips it (defensive no-op, honest
+        // parse downstream).
+        let v4 = serde_json::json!({
+            "format_version": 4,
+            "session_name": "v4-mixed",
+            "sources": [],
+            "history": [
+                v4_turn_with_flat_trace("no tools", Value::Null),
+                v4_turn_with_flat_trace("empty", serde_json::json!([])),
+                {
+                    "entry": "Source",
+                    "data": {
+                        "kind": "Added",
+                        "reference_name": "people",
+                        "display_name": "people",
+                    },
+                },
+            ],
+            "active": null,
+        });
+        let v5 = transforms::v4_to_v5(v4).expect("migrate");
+        assert!(
+            v5["history"][0]["data"].get("trace").is_none()
+                || v5["history"][0]["data"]["trace"].is_null(),
+            "a null trace is not wrapped"
+        );
+        assert_eq!(
+            v5["history"][1]["data"]["trace"],
+            serde_json::json!([]),
+            "an empty trace stays empty -- no empty round"
+        );
+        assert_eq!(
+            v5["history"][2]["entry"], "Source",
+            "source entry untouched"
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_from_v4_round_trips_through_recipe_deserialize() {
+        // End-to-end: a synthetic v4 fixture migrates to v5 and deserializes
+        // as the current Recipe. The flat trace reads back as one round with
+        // no prose / thinking / timestamps -- the honest-degrade shape the
+        // chat projection renders without them.
+        use crate::persistence::recipe::{Recipe, RecipeEntry};
+        let v4 = serde_json::json!({
+            "format_version": 4,
+            "session_name": "v4 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v4_turn_with_flat_trace(
+                "多少人",
+                serde_json::json!([
+                    {"name": "materialize", "operation_kind": "write",
+                     "summary": "SELECT 1", "success": true, "result_excerpt": ""}
+                ]),
+            )],
+            "active": "people",
+        });
+        let v5 = migrate_to_current(v4, 4).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v5).expect("migrated shape deserializes as the current Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        let turn = match &recipe.history[0] {
+            RecipeEntry::Turn(t) => t,
+            other => panic!("expected Turn, got {other:?}"),
+        };
+        assert_eq!(turn.trace.len(), 1, "one round");
+        assert_eq!(turn.trace[0].thinking, None, "no thinking baseline");
+        assert_eq!(turn.trace[0].text, None, "no prose baseline");
+        assert_eq!(turn.trace[0].calls.len(), 1);
+        assert_eq!(turn.trace[0].calls[0].name, "materialize");
+        assert_eq!(turn.asked_at, None, "migrated turns carry no asked_at");
+        assert_eq!(turn.settled_at, None, "migrated turns carry no settled_at");
     }
 }

@@ -111,7 +111,7 @@ fn assert_save_atomic_left_no_residue(duck: &Path) {
 
 /// A materialize tool call promoting `sql` -- one round-trip's reply.
 fn materialize(sql: &str) -> ToolTurnReply {
-    ToolTurnReply::ToolCalls(vec![ToolUse {
+    ToolTurnReply::tool_calls(vec![ToolUse {
         id: "tu_1".into(),
         name: "materialize".into(),
         input: json!({ "sql": sql }),
@@ -121,7 +121,7 @@ fn materialize(sql: &str) -> ToolTurnReply {
 /// An explore tool call running `sql` -- a read-classified call, so an
 /// explore-then-materialize script exercises a MULTI-call turn trace (#319).
 fn explore(sql: &str) -> ToolTurnReply {
-    ToolTurnReply::ToolCalls(vec![ToolUse {
+    ToolTurnReply::tool_calls(vec![ToolUse {
         id: "tu_e".into(),
         name: "explore".into(),
         input: json!({ "sql": sql }),
@@ -455,15 +455,25 @@ fn resume_round_trips_the_real_multi_call_trace_and_builtin_provenance() {
         2,
         "the real multi-call trace, not a synthetic single call"
     );
-    assert_eq!(turn.trace[0].name, "explore", "call order preserved");
-    assert_eq!(turn.trace[1].name, "materialize");
     assert_eq!(
-        turn.trace[1].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
+        turn.trace[0].calls[0].name, "explore",
+        "call order preserved"
+    );
+    assert_eq!(turn.trace[1].calls[0].name, "materialize");
+    assert_eq!(
+        turn.trace[1].calls[0].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
         "summary is the verbatim SQL"
     );
-    assert!(turn.trace.iter().all(|e| e.success));
+    assert!(turn
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .all(|e| e.success));
     assert!(
-        turn.trace.iter().all(|e| e.result_excerpt.is_empty()),
+        turn.trace
+            .iter()
+            .flat_map(|r| r.calls.iter())
+            .all(|e| e.result_excerpt.is_empty()),
         "success payloads are data-bearing (columns/row_count) -- the .duck \
          carries no materialized data (ADR-0036), so success excerpts stay empty"
     );
@@ -1982,9 +1992,9 @@ fn open_duck_migrates_a_v1_recipe_to_v2_and_synthesizes_trace() {
         .collect();
     assert_eq!(turns.len(), 2, "both turns preserved");
     assert_eq!(turns[0].trace.len(), 1, "result_1 gained a synthetic trace");
-    assert_eq!(turns[0].trace[0].name, "materialize");
+    assert_eq!(turns[0].trace[0].calls[0].name, "materialize");
     assert_eq!(turns[1].trace.len(), 1, "result_2 gained a synthetic trace");
-    assert_eq!(turns[1].trace[0].name, "materialize");
+    assert_eq!(turns[1].trace[0].calls[0].name, "materialize");
     // AC2 (replay identity) is also pinned at the recipe level: the productive
     // chain is unchanged, so a future resume re-materializes the same results.
     let chain = persisted.productive_chain();

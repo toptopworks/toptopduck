@@ -52,7 +52,8 @@ use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
 use crate::session::agent_loop::{
-    classify_call, truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry, TRACE_EXCERPT_MAX,
+    classify_call, truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry,
+    TRACE_EXCERPT_MAX,
 };
 
 // ---------------------------------------------------------------------------
@@ -673,7 +674,9 @@ fn outcome(
         // Promotions are gateway-side (ADR-0085); the stream engine owns
         // only the frame-driving half.
         promotions: Vec::new(),
-        trace,
+        // ADR-0103 (issue #608): the flat trajectory wraps as one round
+        // until the per-runtime grouping slice.
+        trace: vec![LoopRound::flat(trace)],
         round_trips,
         discovered_runtime: discovered,
     }

@@ -521,7 +521,7 @@ mod tests {
         let provider = FakeProvider::new().scripted_tool_turn_seq(
             "two-step",
             vec![
-                Ok(ToolTurnReply::ToolCalls(vec![ToolUse {
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
                     id: "tu_1".into(),
                     name: "explore".into(),
                     input: json!({"sql": "SELECT 1"}),
@@ -532,7 +532,7 @@ mod tests {
         let first = provider
             .generate_tool_turn(&tool_request("two-step"))
             .expect("first");
-        assert!(matches!(first, ToolTurnReply::ToolCalls(_)));
+        assert!(matches!(first, ToolTurnReply::ToolCalls { .. }));
         let second = provider
             .generate_tool_turn(&tool_request("two-step"))
             .expect("second");

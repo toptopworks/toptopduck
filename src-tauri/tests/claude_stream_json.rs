@@ -98,7 +98,10 @@ fn text_reply_yields_text_outcome_and_init_model() {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert!(outcome.trace.is_empty(), "no tool calls -> empty trace");
+    assert!(
+        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        "no tool calls -> no recorded calls in any round"
+    );
     assert!(
         phases
             .iter()
@@ -129,7 +132,7 @@ fn gateway_tool_call_emits_phases_without_engine_trace() {
         other => panic!("expected Text, got {other:?}"),
     }
     assert!(
-        outcome.trace.is_empty(),
+        outcome.trace.iter().all(|r| r.calls.is_empty()),
         "gateway-routed calls own their trace rows: {:?}",
         outcome.trace
     );
@@ -154,8 +157,12 @@ fn native_tool_rides_engine_trace_as_failure() {
         Termination::Text(t) => assert_eq!(t, "done without native tools"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert_eq!(outcome.trace.len(), 1, "one native call -> one trace entry");
-    let entry = &outcome.trace[0];
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "one round wrapping the flat trajectory"
+    );
+    let entry = &outcome.trace[0].calls[0];
     assert_eq!(entry.name, "Bash");
     assert!(!entry.success, "headless auto-refusal fails the call");
     assert!(

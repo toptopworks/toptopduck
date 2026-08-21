@@ -192,7 +192,13 @@ export type TurnPhase =
       summary: string;
     };
   }
-  | { ToolCallCompleted: TraceEntry };
+  | { ToolCallCompleted: TraceEntry }
+  // ADR-0103 (issue #608): the round's connective prose, fired after the
+  // round's Thinking wait and before the batch's call events; and the
+  // round's completed thinking block (duration + raw text), fired only when
+  // the runtime exposes a thinking data source.
+  | { RoundText: { text: string } }
+  | { ThinkingCompleted: { duration_ms: number; text: string } };
 
 // A `turn-progress` side-channel event addressed by sessionId (ADR-0059,
 // issue #76). Mirrors the Rust `TurnProgress`. The phase never enters the

@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::approval::OperationKind;
+use crate::model::ThinkingTrace;
 use crate::model::{
     RectifyProvenance, SkillLifecycleEvent, SkillLifecycleKind, SkillProvenance,
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, TextKind, TurnFailure,
@@ -62,7 +63,19 @@ use crate::model::{
 /// hash = no baseline, never trips the stale-degrade check); older clients
 /// reading a v4 file hit the existing higher-version honest-refuse path
 /// (ADR-0036).
-pub const RECIPE_FORMAT_VERSION: u32 = 4;
+///
+/// v5 (ADR-0103, issue #608) groups the persisted trace by provider round and
+/// adds turn timestamps: [`RecipeTurn::trace`] becomes a list of
+/// [`RecipeTraceRound`]s (each an optional thinking block + optional
+/// connective prose + that round's tool calls), and [`RecipeTurn`] gains
+/// optional `asked_at` / `settled_at` (Unix epoch ms). The v4->v5 mapping is
+/// lossless for the call trajectory: a v4 turn's flat entry array wraps into
+/// one round carrying the same calls (no prose, no thinking -- a v4 file
+/// recorded neither); the timestamps are absent for migrated turns (the
+/// honest degrade: rendered without a timestamp, never a synthetic one).
+/// Older clients reading a v5 file hit the existing higher-version
+/// honest-refuse path (ADR-0036).
+pub const RECIPE_FORMAT_VERSION: u32 = 5;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
@@ -178,6 +191,29 @@ pub struct RecipeTraceEntry {
     /// success payload is rebuilt on resume anyway), so persisting it would
     /// add noise without value.
     pub result_excerpt: String,
+}
+
+/// One round of a turn's persisted execution trace (ADR-0078, grouped per
+/// provider round-trip by ADR-0103, issue #608): the round's optional
+/// thinking block + optional connective prose + its tool-call batch. The
+/// persisted counterpart of the model's `TraceRound` -- field-for-field the
+/// same shape (there is no lossy projection between them; the per-call
+/// reduction already happened in `RecipeTraceEntry::from_live_trace`). A
+/// v4-era migrated turn's flat trace wraps into one round carrying only its
+/// calls; the optional members deserialize as absent for it (honest degrade).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeTraceRound {
+    /// The round's thinking block (duration + raw reasoning text,
+    /// ADR-0103). Absent when the runtime offered no thinking data source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingTrace>,
+    /// The round's connective prose: text the model emitted alongside its
+    /// tool-call batch. Absent when the reply carried tool calls and no text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// The round's tool calls, dispatch order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<RecipeTraceEntry>,
 }
 
 /// Which runtime drove a turn (ADR-0078/0081). Recorded on each turn's
@@ -325,17 +361,28 @@ pub struct RecipeTurn {
     /// (explore / materialize / external), each with its operation badge,
     /// argument summary, success flag, and a bounded result excerpt. Collapsible
     /// in the thread rail; never enters the far window verbatim. A live
-    /// agent-loop turn carries the loop's recorded multi-call trace (issue
-    /// #319); a v1-era migrated turn carries the migration's synthetic
-    /// single-call trace (see [`synthetic_materialize_trace`]); empty for
-    /// no-tool turns (a textual answer with no exploration).
+    /// agent-loop turn carries the loop's recorded round-grouped trace
+    /// (issue #608, ADR-0103): one round per provider round-trip; a v1-era
+    /// migrated turn carries the migration's synthetic single-call trace
+    /// (wrapped into one round by the v4->v5 step, see
+    /// [`synthetic_materialize_trace`]); empty for no-tool turns (a textual
+    /// answer with no exploration).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trace: Vec<RecipeTraceEntry>,
+    pub trace: Vec<RecipeTraceRound>,
     /// The turn's runtime + skill provenance (ADR-0078). A live built-in loop
     /// turn records [`RuntimeKind::BuiltIn`] (issue #319); default (no runtime,
     /// no skills) for v1-era migrated turns.
     #[serde(default, skip_serializing_if = "TurnProvenance::is_empty")]
     pub provenance: TurnProvenance,
+    /// When the user submitted the question (Unix epoch ms, ADR-0103).
+    /// Absent for turns recorded before v5 -- resumed without a timestamp
+    /// rather than a synthetic one (honest degrade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<u64>,
+    /// When the turn settled (Unix epoch ms, ADR-0103). Same honest-degrade
+    /// rule as [`Self::asked_at`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
 }
 
 impl RecipeTurn {
@@ -351,6 +398,8 @@ impl RecipeTurn {
             outcome,
             trace: Vec::new(),
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         }
     }
 
@@ -364,14 +413,18 @@ impl RecipeTurn {
     pub fn with_audit(
         question: impl Into<String>,
         outcome: RecipeOutcome,
-        trace: Vec<RecipeTraceEntry>,
+        trace: Vec<RecipeTraceRound>,
         provenance: TurnProvenance,
+        asked_at: Option<u64>,
+        settled_at: Option<u64>,
     ) -> Self {
         Self {
             question: question.into(),
             outcome,
             trace,
             provenance,
+            asked_at,
+            settled_at,
         }
     }
 }
@@ -862,13 +915,12 @@ mod tests {
     }
 
     #[test]
-    fn recipe_format_version_is_four() {
-        // ADR-0086 (issue #363): v4 carries format_version = 4 (skill lifecycle
-        // entries on the timeline + per-skill content_hash on turn provenance).
-        // Pin the constant so the open-path version check stays in sync with
-        // what save writes.
-        assert_eq!(RECIPE_FORMAT_VERSION, 4);
-        assert_eq!(build_recipe().format_version, 4);
+    fn recipe_format_version_is_five() {
+        // ADR-0103 (issue #608): v5 carries format_version = 5 (round-grouped
+        // trace + turn timestamps). Pin the constant so the open-path version
+        // check stays in sync with what save writes.
+        assert_eq!(RECIPE_FORMAT_VERSION, 5);
+        assert_eq!(build_recipe().format_version, 5);
     }
 
     #[test]
@@ -1420,15 +1472,21 @@ mod tests {
                 }],
                 assumption: None,
             },
-            trace: synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data"),
+            trace: vec![RecipeTraceRound {
+                thinking: None,
+                text: None,
+                calls: synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data"),
+            }],
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         };
         let json = serde_json::to_string(&turn).expect("serialize");
         assert!(json.contains("\"trace\""), "trace key present");
         let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, turn);
         assert_eq!(back.trace.len(), 1);
-        assert_eq!(back.trace[0].name, "materialize");
+        assert_eq!(back.trace[0].calls[0].name, "materialize");
     }
 
     #[test]
@@ -1437,7 +1495,11 @@ mod tests {
         // pairs each turn with its recorded audit (ADR-0078) -- the loop's
         // real multi-call trace + runtime/skill provenance -- through this
         // constructor instead of a bare struct literal.
-        let trace = synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data");
+        let trace = vec![RecipeTraceRound {
+            thinking: None,
+            text: None,
+            calls: synthetic_materialize_trace("SELECT COUNT(*) AS n FROM \"people\".data"),
+        }];
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
             adapter_id: None,
@@ -1459,6 +1521,8 @@ mod tests {
             },
             trace.clone(),
             provenance.clone(),
+            None,
+            None,
         );
         assert_eq!(turn.question, "多少人");
         assert_eq!(turn.trace, trace, "the recorded trace rides verbatim");

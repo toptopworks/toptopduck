@@ -3,7 +3,13 @@ import { QueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IntlShape } from "react-intl";
 import { sessionKeys } from "../queryKeys";
-import { mergeLiveTrace, rowsToTrace, useTurnFlow, type LiveCall, type LiveTraceRow } from "../useTurnFlow";
+import {
+  mergeLiveTrace,
+  rowsToRounds,
+  useTurnFlow,
+  type LiveCall,
+  type LiveTraceRow,
+} from "../useTurnFlow";
 import { materialized, textual } from "./fixtures";
 import type { ApprovalEntry } from "../useApprovalEvents";
 import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
@@ -176,7 +182,56 @@ describe("useTurnFlow", () => {
       act(() => {
         void result.current.handleAsk("多少行？");
       });
-      expect(result.current.liveTurn).toEqual({ question: "多少行？", step: null, rows: [] });
+      expect(result.current.liveTurn).toEqual({
+        question: "多少行？",
+        step: null,
+        rows: [],
+        roundTexts: [],
+      });
+    });
+
+    it("attaches RoundText to the current round (issue #608)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, { RoundText: { text: "先看一眼数据。" } });
+      expect(result.current.liveTurn?.roundTexts).toEqual(["先看一眼数据。"]);
+      // A second round without prose pads nothing; a started call there
+      // lands on round 2.
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.liveTurn?.roundTexts).toEqual(["先看一眼数据。"]);
+      expect(result.current.liveTurn?.rows[0]?.step).toBe(2);
+    });
+
+    it("consumes ThinkingCompleted without disturbing the rows (issue #608)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
+      });
+      // Observable as the latest phase; the rows stay untouched.
+      expect(result.current.phase).toEqual({
+        ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
+      });
+      expect(result.current.liveTurn?.rows).toEqual([]);
     });
 
     it("grows rows from the tool-call event stream (started -> completed)", async () => {
@@ -197,6 +252,7 @@ describe("useTurnFlow", () => {
       expect(result.current.liveTurn?.rows).toEqual([
         {
           key: "call-0",
+          step: 1,
           name: "explore",
           server: null,
           operationKind: "read",
@@ -354,19 +410,24 @@ describe("useTurnFlow", () => {
       if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
       expect(entry.data.trace).toEqual([
         {
-          name: "explore",
-          operation_kind: "read",
-          summary: "SELECT 1",
-          success: false,
-          result_excerpt: "no such table",
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "no such table",
+            },
+          ],
         },
       ]);
     });
   });
 
-  describe("mergeLiveTrace + rowsToTrace (pure helpers)", () => {
+  describe("mergeLiveTrace + rowsToRounds (pure helpers)", () => {
     const call = (over: Partial<LiveCall> = {}): LiveCall => ({
       key: "call-0",
+      step: 1,
       name: "explore",
       operationKind: "read",
       summary: "SELECT 1",
@@ -414,39 +475,60 @@ describe("useTurnFlow", () => {
       expect(rows.map((r) => r.key)).toEqual(["req-1", "req-2"]);
     });
 
-    it("rowsToTrace keeps completed calls and drops unsettled rows", () => {
+    it("rowsToRounds keeps completed calls, drops unsettled rows, groups by round", () => {
+      const row = (over: Partial<LiveTraceRow> = {}): LiveTraceRow => ({
+        key: "call-0",
+        step: 1,
+        name: "explore",
+        server: null,
+        operationKind: "read",
+        summary: "SELECT 1",
+        approval: null,
+        running: false,
+        success: false,
+        resultExcerpt: "boom",
+        ...over,
+      });
       const rows: LiveTraceRow[] = [
-        {
-          key: "call-0",
-          name: "explore",
-          server: null,
-          operationKind: "read",
-          summary: "SELECT 1",
-          approval: null,
-          running: false,
-          success: false,
-          resultExcerpt: "boom",
-        },
-        {
-          key: "req-1",
-          name: "fetch",
-          server: "acme",
-          operationKind: "network",
-          summary: "GET /x",
-          approval: { requestId: "req-1", response: "deny" },
-          running: false,
-          success: null, // gate-cancelled: no backend trace entry
-          resultExcerpt: "",
-        },
+        row(),
+        // gate-cancelled: no backend trace entry
+        row({ key: "req-1", step: 2, name: "fetch", server: "acme", operationKind: "network", summary: "GET /x", approval: { requestId: "req-1", response: "deny" }, success: null }),
+        row({ key: "call-2", step: 2, name: "materialize", operationKind: "write", summary: "SELECT 1", success: true, resultExcerpt: "" }),
       ];
-      expect(rowsToTrace(rows)).toEqual([
+      // Round 2 emitted prose (the RoundText event); round 1 emitted none.
+      expect(rowsToRounds(rows, [null, "先看一眼数据。"])).toEqual([
         {
-          name: "explore",
-          operation_kind: "read",
-          summary: "SELECT 1",
-          success: false,
-          result_excerpt: "boom",
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
         },
+        {
+          text: "先看一眼数据。",
+          calls: [
+            {
+              name: "materialize",
+              operation_kind: "write",
+              summary: "SELECT 1",
+              success: true,
+              result_excerpt: "",
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("rowsToRounds keeps a prose-only round (a cancel mid-batch)", () => {
+      // A round that emitted prose but completed no calls still records as a
+      // round carrying the text -- matching the backend, which opens the
+      // round when the tool-call reply arrives, not when a call completes.
+      expect(rowsToRounds([], [null, "先看一眼数据。"])).toEqual([
+        { text: "先看一眼数据。", calls: [] },
       ]);
     });
   });

@@ -30,11 +30,11 @@ use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, RenameError, RowPage, RowReadError, SkillLifecycleEvent,
-    SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry, TraceEntryView, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
+    SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry, TraceEntryView, TraceRound,
+    TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::recipe::{
-    LastRuntime, Recipe, RecipeTraceEntry, RecipeTurn, RuntimeKind,
+    LastRuntime, Recipe, RecipeTraceRound, RecipeTurn, RuntimeKind,
     TurnProvenance as PersistedTurnProvenance,
 };
 use crate::persistence::SaveError;
@@ -45,7 +45,7 @@ use crate::runtime::acp::adapter::{detect_adapter, AdapterSpec};
 use crate::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx, GatewayOutcome};
-use crate::session::agent_loop::{AgentLoop, LoopOutcome, Termination, TraceEntry};
+use crate::session::agent_loop::{AgentLoop, LoopOutcome, LoopRound, Termination};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
@@ -543,6 +543,13 @@ pub struct Session {
 /// alignment is structural (compile-time): a turn entry CANNOT exist without
 /// its audit, and a non-turn entry (Source/Skill lifecycle) CANNOT carry
 /// audit data. The `TurnAudit::default()` sentinel is eliminated.
+// A deliberately un-boxed variant: the Turn arm (record + round-grouped
+// audit) is large, but the timeline holds one entry per turn and each
+// projection clones it once per turn / active read (see `turns`'s clone
+// note) -- negligible next to the LLM call it feeds. Boxing would churn
+// every match site for no measurable win (same stance as the
+// `too_many_arguments` allows below).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(super) enum TimelineEntry {
     /// A conversation turn: the IPC-visible [`TurnRecord`] paired with the
@@ -582,8 +589,9 @@ impl TimelineEntry {
 /// recipe so persisted values round-trip verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TurnAudit {
-    /// The turn's persisted execution trace (ADR-0078); empty for no-tool turns.
-    trace: Vec<RecipeTraceEntry>,
+    /// The turn's persisted round-grouped execution trace (ADR-0078, grouped
+    /// per ADR-0103); empty for no-tool turns.
+    trace: Vec<RecipeTraceRound>,
     /// The turn's runtime + skill provenance (ADR-0078/0081/0101). The
     /// PERSISTED shape (recipe::TurnProvenance, aliased here): the runtime
     /// kind + the external adapter id + the mounted skills, for the .duck
@@ -603,7 +611,7 @@ impl TurnAudit {
     /// external adapter id) happens inside, so callers pass the one wire
     /// attribution.
     fn from_execution(
-        trace: Vec<TraceEntry>,
+        rounds: Vec<LoopRound>,
         skills: Vec<SkillProvenance>,
         runtime: TurnRuntime,
     ) -> Self {
@@ -612,9 +620,9 @@ impl TurnAudit {
             TurnRuntime::External { adapter_id } => (RuntimeKind::External, adapter_id.clone()),
         };
         Self {
-            trace: trace
+            trace: rounds
                 .iter()
-                .map(RecipeTraceEntry::from_live_trace)
+                .map(RecipeTraceRound::from_live_round)
                 .collect(),
             provenance: PersistedTurnProvenance {
                 runtime: Some(runtime_kind),
@@ -637,7 +645,7 @@ impl TurnAudit {
 
     /// Read-only access to the persisted trace (for RecipePersister's
     /// projection, issue #415).
-    pub(super) fn trace(&self) -> &[RecipeTraceEntry] {
+    pub(super) fn trace(&self) -> &[RecipeTraceRound] {
         &self.trace
     }
 
@@ -650,7 +658,7 @@ impl TurnAudit {
     /// Test-only constructor with explicit trace + provenance (issue #415).
     #[cfg(test)]
     pub(super) fn test_new(
-        trace: Vec<RecipeTraceEntry>,
+        trace: Vec<RecipeTraceRound>,
         provenance: PersistedTurnProvenance,
     ) -> Self {
         Self { trace, provenance }
@@ -1229,6 +1237,11 @@ impl Session {
             },
             None => TurnRuntime::BuiltIn,
         };
+        // ADR-0103 (issue #608): the turn's asked-at timestamp, captured at
+        // submit (before any round-trip starts) so the recorded value marks
+        // the user's ask, not the first provider reply. Stamped onto the
+        // TurnRecord + recipe turn at `record_turn`.
+        let asked_at = now_epoch_ms();
         // The external-runtime branch (issue #299 slice 9c, ADR-0085) replaces
         // the built-in agent loop when an adapter is set; otherwise the built-in
         // loop runs (ADR-0081). Both return a `(outcome, trace)` pair; the
@@ -1336,7 +1349,14 @@ impl Session {
             );
             return outcome;
         }
-        self.record_turn(question, outcome, trace, skill_provenance, attribution)
+        self.record_turn(
+            question,
+            outcome,
+            trace,
+            skill_provenance,
+            attribution,
+            asked_at,
+        )
     }
 
     /// Drive one external-runtime turn (issue #299 slice 9c, ADR-0085).
@@ -1367,7 +1387,7 @@ impl Session {
         sink: &dyn ApprovalSink,
         on_phase: O,
         inputs: &TurnInputs<'_>,
-    ) -> (TurnOutcome, Vec<TraceEntry>) {
+    ) -> (TurnOutcome, Vec<LoopRound>) {
         // 1. Resolve the CLI binary. Not-on-PATH -> a transient turn failure
         //    (the engine never spawns; nothing to clean up).
         let binary = match detect_adapter(&adapter) {
@@ -1554,9 +1574,10 @@ impl Session {
         &mut self,
         question: &str,
         outcome: TurnOutcome,
-        trace: Vec<TraceEntry>,
+        rounds: Vec<LoopRound>,
         skills: Vec<SkillProvenance>,
         runtime: TurnRuntime,
+        asked_at: Option<u64>,
     ) -> TurnOutcome {
         // ADR-0102 Decision 1 (issue #589): stamp the turn's executing runtime
         // into the recipe-header facts, so the per-terminal-turn persist below
@@ -1594,12 +1615,26 @@ impl Session {
         // (bounded summaries + the failed-call message; the full in-memory
         // payloads never cross IPC). Mapped before the audit consumes the
         // in-memory entries below.
-        let trace_view: Vec<TraceEntryView> = trace.iter().map(TraceEntryView::from).collect();
+        let trace_view: Vec<TraceRound> = rounds
+            .iter()
+            .map(|round| TraceRound {
+                thinking: round.thinking.clone(),
+                text: round.text.clone(),
+                calls: round.calls.iter().map(TraceEntryView::from).collect(),
+            })
+            .collect();
         self.timeline.push(TimelineEntry::Turn {
             record: TurnRecord {
                 question: question.to_string(),
                 outcome: outcome.clone(),
                 trace: trace_view,
+                // ADR-0103 (issue #608): the turn's own timestamps -- the
+                // ask (stamped at `ask_with_phase`'s top) and the settle
+                // (now, at record time). A live-recorded turn carries both
+                // (barring an unreadable clock); resumed pre-v5 turns carry
+                // neither (honest degrade).
+                asked_at,
+                settled_at: now_epoch_ms(),
                 // Issue #381 (skills) + ADR-0101 (attribution): the IPC
                 // provenance carries the mounted skills AND the turn's
                 // executing runtime -- the thread renders the attribution as
@@ -1617,7 +1652,7 @@ impl Session {
             // PERSISTED form rides the Session (the recipe is its .duck
             // layer, read by build_recipe); the TurnRecord's display view
             // above is the same bounded shape.
-            audit: TurnAudit::from_execution(trace, skills, runtime),
+            audit: TurnAudit::from_execution(rounds, skills, runtime),
         });
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck
@@ -1893,15 +1928,35 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// follow-up if the E2E shows a prefix.
 fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
     acp.promotions = gateway.promotions;
-    let non_gateway: Vec<TraceEntry> = acp
-        .trace
-        .into_iter()
-        .filter(|e| builtin_metadata(&e.name).is_none())
-        .collect();
-    let mut trace = gateway.trace;
-    trace.extend(non_gateway);
-    acp.trace = trace;
+    // ADR-0103 (issue #608): flatten the ACP rounds' calls, drop the
+    // gateway-routed names (the gateway's own rows are the truth for those),
+    // then rebuild ONE merged round -- the gateway's rows followed by the
+    // CLI's own built-ins, the same order the pre-grouping flat merge kept.
+    // Per-runtime round grouping is the adapter-specific follow-up slices.
+    let mut calls = gateway.trace;
+    for round in acp.trace {
+        for entry in round.calls {
+            if builtin_metadata(&entry.name).is_none() {
+                calls.push(entry);
+            }
+        }
+    }
+    acp.trace = vec![LoopRound::flat(calls)];
     acp
+}
+
+/// Current Unix epoch time in milliseconds (ADR-0103, issue #608): the
+/// clock the turn's `asked_at` / `settled_at` timestamps read. Millisecond
+/// precision matches the timestamp grain the chat projection renders. A
+/// clock read that fails (unreachable before 2038 on every supported
+/// platform) degrades to `None` -- the same honest-degrade shape as a
+/// pre-v5 turn (rendered without a timestamp), never a synthetic epoch-0.
+fn now_epoch_ms() -> Option<u64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
 }
 
 /// Resolve the ACP bridge binary path (issue #299 slice 9c, ADR-0085).
@@ -1987,12 +2042,12 @@ mod tests {
     use super::merge_outcomes;
     use crate::approval::OperationKind;
     use crate::runtime::gateway::server::GatewayOutcome;
-    use crate::session::agent_loop::{LoopOutcome, Termination, TraceEntry};
+    use crate::session::agent_loop::{LoopOutcome, LoopRound, Termination, TraceEntry};
 
     /// A materialize tool call promoting `sql` -- the tool-calling contract's
     /// equivalent of the retired single-shot `ProviderReply::Sql`.
     fn materialize_call(sql: &str) -> ToolTurnReply {
-        ToolTurnReply::ToolCalls(vec![ToolUse {
+        ToolTurnReply::tool_calls(vec![ToolUse {
             id: "tu_1".into(),
             name: "materialize".into(),
             input: json!({ "sql": sql }),
@@ -2002,7 +2057,7 @@ mod tests {
     /// An explore tool call running `sql` -- a read-classified call, so a
     /// scripted explore-then-materialize turn exercises a MULTI-call trace.
     fn explore_call(sql: &str) -> ToolTurnReply {
-        ToolTurnReply::ToolCalls(vec![ToolUse {
+        ToolTurnReply::tool_calls(vec![ToolUse {
             id: "tu_e".into(),
             name: "explore".into(),
             input: json!({ "sql": sql }),
@@ -2072,7 +2127,7 @@ mod tests {
         LoopOutcome {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
-            trace,
+            trace: vec![LoopRound::flat(trace)],
             round_trips: 1,
             discovered_runtime: None,
         }
@@ -2088,8 +2143,11 @@ mod tests {
         let acp = acp_outcome(vec![trace_entry("a1", "explore", false)]);
         let merged = merge_outcomes(gateway, acp);
         assert_eq!(merged.trace.len(), 1, "the ACP duplicate is dropped");
-        assert_eq!(merged.trace[0].tool_use_id, "g1");
-        assert!(merged.trace[0].success, "the gateway success flag wins");
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
+        assert!(
+            merged.trace[0].calls[0].success,
+            "the gateway success flag wins"
+        );
     }
 
     /// The CLI's own non-builtin tool calls (bash / edit / etc., which never
@@ -2101,7 +2159,7 @@ mod tests {
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
         let merged = merge_outcomes(gateway, acp);
         assert_eq!(merged.trace.len(), 1);
-        assert_eq!(merged.trace[0].name, "bash");
+        assert_eq!(merged.trace[0].calls[0].name, "bash");
     }
 
     /// A mixed turn: the gateway routed an `explore` (builtin) AND the CLI
@@ -2112,9 +2170,9 @@ mod tests {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
         let merged = merge_outcomes(gateway, acp);
-        assert_eq!(merged.trace.len(), 2);
-        assert_eq!(merged.trace[0].name, "explore");
-        assert_eq!(merged.trace[1].name, "bash");
+        assert_eq!(merged.trace.len(), 1, "the merge folds into one round");
+        assert_eq!(merged.trace[0].calls[0].name, "explore");
+        assert_eq!(merged.trace[0].calls[1].name, "bash");
     }
 
     /// Termination + round_trips are ACP-only (the gateway serves tools, it
@@ -2272,15 +2330,15 @@ mod tests {
         let recipe = session.build_recipe();
         let turn = materialized_turn(&recipe);
         assert_eq!(turn.trace.len(), 1, "the loop's recorded single call");
-        assert_eq!(turn.trace[0].name, "materialize");
-        assert_eq!(turn.trace[0].operation_kind, OperationKind::Write);
+        assert_eq!(turn.trace[0].calls[0].name, "materialize");
+        assert_eq!(turn.trace[0].calls[0].operation_kind, OperationKind::Write);
         assert_eq!(
-            turn.trace[0].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
+            turn.trace[0].calls[0].summary, "SELECT COUNT(*) AS n FROM \"people\".data",
             "summary is the verbatim SQL",
         );
-        assert!(turn.trace[0].success, "the call succeeded");
+        assert!(turn.trace[0].calls[0].success, "the call succeeded");
         assert!(
-            turn.trace[0].result_excerpt.is_empty(),
+            turn.trace[0].calls[0].result_excerpt.is_empty(),
             "a success payload is data-bearing (columns/sample/row_count) -- \
              the .duck carries no materialized data (ADR-0036), so the \
              persisted success excerpt stays empty"
@@ -2324,13 +2382,23 @@ mod tests {
             2,
             "both calls persist -- not a synthetic single call"
         );
-        assert_eq!(turn.trace[0].name, "explore", "call order preserved");
-        assert_eq!(turn.trace[0].operation_kind, OperationKind::Read);
-        assert_eq!(turn.trace[1].name, "materialize");
-        assert_eq!(turn.trace[1].operation_kind, OperationKind::Write);
-        assert!(turn.trace.iter().all(|e| e.success));
+        assert_eq!(
+            turn.trace[0].calls[0].name, "explore",
+            "call order preserved"
+        );
+        assert_eq!(turn.trace[0].calls[0].operation_kind, OperationKind::Read);
+        assert_eq!(turn.trace[1].calls[0].name, "materialize");
+        assert_eq!(turn.trace[1].calls[0].operation_kind, OperationKind::Write);
+        assert!(turn
+            .trace
+            .iter()
+            .flat_map(|r| r.calls.iter())
+            .all(|e| e.success));
         assert!(
-            turn.trace.iter().all(|e| e.result_excerpt.is_empty()),
+            turn.trace
+                .iter()
+                .flat_map(|r| r.calls.iter())
+                .all(|e| e.result_excerpt.is_empty()),
             "success excerpts stay empty (ADR-0036 contents boundary)"
         );
         assert_eq!(turn.provenance.runtime, Some(RuntimeKind::BuiltIn));
@@ -2364,14 +2432,17 @@ mod tests {
         let recipe = session.build_recipe();
         let turn = materialized_turn(&recipe);
         assert_eq!(turn.trace.len(), 2, "the failed attempt is recorded too");
-        assert!(!turn.trace[0].success, "first attempt failed (bad SQL)");
         assert!(
-            !turn.trace[0].result_excerpt.is_empty(),
+            !turn.trace[0].calls[0].success,
+            "first attempt failed (bad SQL)"
+        );
+        assert!(
+            !turn.trace[0].calls[0].result_excerpt.is_empty(),
             "the failure carries its error string for cross-turn retrospection"
         );
-        assert!(turn.trace[1].success, "the retry succeeded");
+        assert!(turn.trace[1].calls[0].success, "the retry succeeded");
         assert!(
-            turn.trace[1].result_excerpt.is_empty(),
+            turn.trace[1].calls[0].result_excerpt.is_empty(),
             "the success payload never enters the .duck (ADR-0036)"
         );
     }
@@ -2407,7 +2478,7 @@ mod tests {
             })
             .expect("a Textual turn in history");
         assert_eq!(turn.trace.len(), 1, "the explore call rode the turn");
-        assert_eq!(turn.trace[0].name, "explore");
+        assert_eq!(turn.trace[0].calls[0].name, "explore");
     }
 
     #[test]
@@ -2653,8 +2724,8 @@ mod tests {
         use crate::approval::OperationKind;
         use crate::model::{TextKind, TurnOutcome, TurnRecord};
         use crate::persistence::recipe::{
-            RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTurn, RuntimeKind,
-            TurnProvenance as PersistedTurnProvenance,
+            RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RecipeTurn,
+            RuntimeKind, TurnProvenance as PersistedTurnProvenance,
         };
 
         // A recipe turn carrying data that must survive the round-trip.
@@ -2679,8 +2750,14 @@ mod tests {
                 body: "resumed body".into(),
                 assumption: None,
             },
-            harvested_trace.clone(),
+            vec![RecipeTraceRound {
+                thinking: None,
+                text: None,
+                calls: harvested_trace.clone(),
+            }],
             harvested_provenance.clone(),
+            None,
+            None,
         );
         let audit = TurnAudit::from_recipe_turn(&source_turn);
 
@@ -2702,6 +2779,8 @@ mod tests {
             },
             trace: vec![],
             provenance: Default::default(),
+            asked_at: None,
+            settled_at: None,
         };
 
         // Inject the timeline entry -- simulates a resumed session whose
@@ -2719,7 +2798,12 @@ mod tests {
             })
             .expect("a turn in history");
         assert_eq!(
-            turn.trace, harvested_trace,
+            turn.trace,
+            vec![RecipeTraceRound {
+                thinking: None,
+                text: None,
+                calls: harvested_trace,
+            }],
             "the harvested trace round-trips verbatim through build_recipe"
         );
         assert_eq!(
@@ -2756,6 +2840,7 @@ mod tests {
             TurnRuntime::External {
                 adapter_id: Some("gemini-cli".into()),
             },
+            None,
         );
         // ADR-0102 (issue #589): the same attribution snapshot stamps the
         // recipe-header `last_runtime` -- here the external turn's adapter.
@@ -2770,6 +2855,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
 
         let external = match &session.timeline[0] {
@@ -3086,6 +3172,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
 
         assert_eq!(
@@ -3108,6 +3195,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert_eq!(session.session_name(), Some("first question"));
 
@@ -3121,6 +3209,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert_eq!(
             session.session_name(),
@@ -3143,6 +3232,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         let name = session.session_name().expect("name set");
         let chars: Vec<char> = name.chars().collect();
@@ -3176,6 +3266,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert_eq!(
             session.session_name(),
@@ -3196,6 +3287,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert_eq!(
             session.session_name(),
@@ -3229,6 +3321,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert_eq!(
             session.session_name(),
@@ -3253,6 +3346,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert_eq!(
             session_a.session_name(),
@@ -3267,6 +3361,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert_eq!(
             session_b.session_name(),
@@ -3313,6 +3408,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
+            None,
         );
         assert!(
             !session.is_timeline_empty(),

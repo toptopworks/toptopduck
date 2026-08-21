@@ -954,18 +954,22 @@ describe("Thread", () => {
         outcome: { kind: "Cancelled" },
         trace: [
           {
-            name: "explore",
-            operation_kind: "read",
-            summary: "SELECT count(*) FROM people",
-            success: false,
-            result_excerpt: "no such table",
-          },
-          {
-            name: "materialize",
-            operation_kind: "write",
-            summary: "SELECT 1",
-            success: true,
-            result_excerpt: "",
+            calls: [
+              {
+                name: "explore",
+                operation_kind: "read",
+                summary: "SELECT count(*) FROM people",
+                success: false,
+                result_excerpt: "no such table",
+              },
+              {
+                name: "materialize",
+                operation_kind: "write",
+                summary: "SELECT 1",
+                success: true,
+                result_excerpt: "",
+              },
+            ],
           },
         ],
         provenance: { skills: [] },
@@ -1026,6 +1030,7 @@ describe("Thread", () => {
     function liveRow(over: Partial<LiveTraceRow> = {}): LiveTraceRow {
       return {
         key: "call-0",
+        step: 1,
         name: "explore",
         server: null,
         operationKind: "read",
@@ -1039,7 +1044,7 @@ describe("Thread", () => {
     }
 
     it("renders the asking question with a running glyph + thinking hint", () => {
-      const liveTurn: LiveTurn = { question: "统计一下", step: 1, rows: [] };
+      const liveTurn: LiveTurn = { question: "统计一下", step: 1, rows: [], roundTexts: [] };
       renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
@@ -1048,7 +1053,7 @@ describe("Thread", () => {
     });
 
     it("surfaces the step on a multi-round-trip turn (honest step N)", () => {
-      const liveTurn: LiveTurn = { question: "q", step: 2, rows: [] };
+      const liveTurn: LiveTurn = { question: "q", step: 2, rows: [], roundTexts: [] };
       renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
       );
@@ -1059,6 +1064,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         step: 1,
+        roundTexts: [],
         rows: [
           liveRow({
             key: "req-1",
@@ -1094,6 +1100,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         step: 1,
+        roundTexts: [],
         rows: [
           liveRow({
             key: "req-1",
@@ -1119,7 +1126,7 @@ describe("Thread", () => {
     });
 
     it("appends after recorded entries and renders alone on a first-turn session", () => {
-      const liveTurn: LiveTurn = { question: "第一问", step: null, rows: [] };
+      const liveTurn: LiveTurn = { question: "第一问", step: null, rows: [], roundTexts: [] };
       // entries empty (a brand-new session's first ask): the live card still
       // renders (the empty-thread bail-out must not swallow it).
       const { container } = renderThread(

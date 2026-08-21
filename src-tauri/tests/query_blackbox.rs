@@ -47,7 +47,7 @@ fn load_source(session: &mut Session, path: &Path) {
 /// A materialize tool call promoting `sql` -- one round-trip's reply. The
 /// tool-calling contract's equivalent of the retired single-shot SQL reply.
 fn materialize(sql: &str) -> ToolTurnReply {
-    ToolTurnReply::ToolCalls(vec![ToolUse {
+    ToolTurnReply::tool_calls(vec![ToolUse {
         id: "tu_1".into(),
         name: "materialize".into(),
         input: json!({ "sql": sql }),
@@ -56,7 +56,7 @@ fn materialize(sql: &str) -> ToolTurnReply {
 
 /// An explore tool call -- a scratch query that never promotes.
 fn explore(sql: &str) -> ToolTurnReply {
-    ToolTurnReply::ToolCalls(vec![ToolUse {
+    ToolTurnReply::tool_calls(vec![ToolUse {
         id: "tu_1".into(),
         name: "explore".into(),
         input: json!({ "sql": sql }),

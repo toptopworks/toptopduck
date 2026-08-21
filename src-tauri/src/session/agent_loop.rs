@@ -48,8 +48,8 @@ use crate::approval::{
 use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::aggregator::{self, McpAggregator, RouteError};
-use crate::model::{Promotion, TraceEntryView, TurnPhase};
-use crate::persistence::recipe::RecipeTraceEntry;
+use crate::model::{Promotion, ThinkingTrace, TraceEntryView, TurnPhase};
+use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 use crate::provider::tool_calling::{
     ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
 };
@@ -183,7 +183,7 @@ impl<'p> AgentLoop<'p> {
         // an Assistant turn + one ToolResult turn per executed call.
         let mut messages = request.messages.clone();
         let mut outputs = CallOutputs {
-            trace: Vec::new(),
+            rounds: Vec::new(),
             promotions: Vec::new(),
         };
         let mut round_trips = 0u32;
@@ -234,16 +234,32 @@ impl<'p> AgentLoop<'p> {
                     }
                     return outcome(Termination::Text(text), outputs, round_trips);
                 }
-                Ok(ToolTurnReply::ToolCalls(calls)) => {
+                Ok(ToolTurnReply::ToolCalls { text, calls }) => {
                     // Re-check after the (possibly slow) provider call.
                     if cancel.is_requested() {
                         return outcome(Termination::Cancelled, outputs, round_trips);
                     }
-                    // Append the assistant turn (owns a clone), then dispatch
-                    // each call serially (ADR-0021 single-flight within a
-                    // session).
+                    // ADR-0103 (issue #608): one round per provider reply.
+                    // The connective prose (when present) rides the live
+                    // channel BEFORE the batch's call events -- the rail can
+                    // render the round's prose as it happens -- then opens the
+                    // trace round the batch's calls land on. Thinking fires
+                    // here too once the built-in thinking data source is
+                    // wired (posture follow-up slice).
+                    if let Some(t) = text.as_ref() {
+                        on_phase(TurnPhase::RoundText { text: t.clone() });
+                    }
+                    outputs.rounds.push(LoopRound {
+                        thinking: None,
+                        text: text.clone(),
+                        calls: Vec::new(),
+                    });
+                    // Append the assistant turn (prose + calls -- the wire
+                    // protocols accept text alongside tool_use in one
+                    // assistant turn), then dispatch each call serially
+                    // (ADR-0021 single-flight within a session).
                     messages.push(ToolTurnMessage::Assistant {
-                        text: None,
+                        text,
                         tool_calls: calls.clone(),
                     });
                     let mut aborted = false;
@@ -341,7 +357,7 @@ fn outcome(termination: Termination, outputs: CallOutputs, round_trips: u32) -> 
     LoopOutcome {
         termination,
         promotions: outputs.promotions,
-        trace: outputs.trace,
+        trace: outputs.rounds,
         round_trips,
         // ADR-0095: the built-in runtime's model comes from the provider
         // profile -- there is no handshake catalog to discover.
@@ -408,13 +424,66 @@ fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
     deps.working_set.remove(&ghost);
 }
 
-/// The mutable per-turn outputs [`execute_call`] accumulates: the trace
-/// (ADR-0078) and the promotion list (ADR-0022). Bundled into one struct so
-/// [`execute_call`] stays under clippy's argument-count threshold and the two
-/// always-coupled accumulators move together.
+/// The mutable per-turn outputs [`execute_call`] accumulates: the round-
+/// grouped trace (ADR-0078, grouped per ADR-0103) and the promotion list
+/// (ADR-0022). Bundled into one struct so [`execute_call`] stays under
+/// clippy's argument-count threshold and the two always-coupled accumulators
+/// move together.
 struct CallOutputs {
-    trace: Vec<TraceEntry>,
+    rounds: Vec<LoopRound>,
     promotions: Vec<Promotion>,
+}
+
+impl CallOutputs {
+    /// Record one completed call on the CURRENT round. The loop opens a
+    /// round before dispatching its batch, so the last round is the current
+    /// one; the fallback folds a call that arrives with no open round
+    /// (structurally unreachable from the loop -- every dispatch site runs
+    /// after the round push) into a fresh one so no trace entry is dropped.
+    fn push_call(&mut self, entry: TraceEntry) {
+        match self.rounds.last_mut() {
+            Some(round) => round.calls.push(entry),
+            None => self.rounds.push(LoopRound::flat(vec![entry])),
+        }
+    }
+}
+
+/// One round's in-memory trace accumulation (ADR-0103, issue #608): the
+/// optional thinking + connective prose of one provider round-trip plus that
+/// round's tool calls, in the in-memory [`TraceEntry`] form (still carrying
+/// `tool_use_id` + the success payload -- the loop's own context; the
+/// persisted / IPC projections drop both via `reduced_trace`). The
+/// round-grouped counterpart of [`TraceEntry`]: `outcome` bundles these into
+/// [`LoopOutcome::trace`], and the wiring seam maps them onto the
+/// `TraceRound` view + the persisted recipe round.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopRound {
+    /// The round's thinking block. `None` until a thinking data source is
+    /// wired for the built-in runtime (ADR-0095/0100 posture, follow-up
+    /// slice); the shape + live variant land here first.
+    pub thinking: Option<ThinkingTrace>,
+    /// The round's connective prose (text the model emitted alongside its
+    /// tool-call batch), `None` when the reply carried tool calls and no
+    /// text.
+    pub text: Option<String>,
+    /// The round's tool calls, dispatch order.
+    pub calls: Vec<TraceEntry>,
+}
+
+impl LoopRound {
+    /// A round carrying only calls -- the flat-trajectory wrap the ACP
+    /// paths and the wiring merge emit (ADR-0103, issue #608): no prose,
+    /// no thinking, ONE round for the whole call list. Per-runtime round
+    /// grouping is the adapter-specific follow-up slices; until they land,
+    /// every flat path funnels through here so the wrap shape (and its
+    /// rationale) lives once.
+    pub fn flat(calls: Vec<TraceEntry>) -> Self {
+        Self {
+            thinking: None,
+            text: None,
+            calls,
+        }
+    }
 }
 
 /// The approval-gateway context [`execute_call`] routes every call through
@@ -481,7 +550,7 @@ fn execute_call(
             // keeps its message -- here the denial -- so the resolved card
             // and the recorded trace show the same why).
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-            outputs.trace.push(entry);
+            outputs.push_call(entry);
             return Ok(ToolResult {
                 tool_use_id: call.id.clone(),
                 content: "tool call denied by the approval gateway".to_string(),
@@ -549,7 +618,7 @@ fn execute_call(
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the
     // ToolCallStarted emitted pre-dispatch.
     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-    outputs.trace.push(entry);
+    outputs.push_call(entry);
     Ok(result)
 }
 
@@ -782,6 +851,26 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
     }
 }
 
+impl RecipeTraceRound {
+    /// Map a live in-memory [`LoopRound`] to its persisted recipe form
+    /// (ADR-0103, issue #608): the thinking block + connective prose carry
+    /// verbatim (no lossy projection -- neither has a `tool_use_id` to drop
+    /// or a success payload to empty), and each call maps through
+    /// [`RecipeTraceEntry::from_live_trace`]. Named (not `From`) to match
+    /// `from_live_trace`'s explicit-lossy-projection convention.
+    pub(crate) fn from_live_round(round: &LoopRound) -> Self {
+        Self {
+            thinking: round.thinking.clone(),
+            text: round.text.clone(),
+            calls: round
+                .calls
+                .iter()
+                .map(RecipeTraceEntry::from_live_trace)
+                .collect(),
+        }
+    }
+}
+
 impl RecipeTraceEntry {
     /// Map a live in-memory [`TraceEntry`] to its persisted recipe form
     /// (ADR-0078, issue #319): the reduced projection (drop the in-memory
@@ -823,11 +912,13 @@ pub struct LoopOutcome {
     /// a turn with several promotions records the LAST as the turn's primary
     /// result at the wiring seam.
     pub promotions: Vec<Promotion>,
-    /// The full execution trace (ADR-0078). Collapsible; never enters the far
-    /// window verbatim -- only its summary (call count + failure summary)
-    /// does. The wiring seam persists it on the turn's recipe entry (issue
-    /// #319): the real multi-call trajectory, mapped to [`RecipeTraceEntry`].
-    pub trace: Vec<TraceEntry>,
+    /// The full round-grouped execution trace (ADR-0078, grouped per
+    /// ADR-0103, issue #608): one [`LoopRound`] per provider round-trip.
+    /// Collapsible; never enters the far window verbatim -- only its summary
+    /// (call count + failure summary) does. The wiring seam persists it on
+    /// the turn's recipe entry (issue #319): the real multi-round trajectory,
+    /// mapped to [`crate::persistence::recipe::RecipeTraceRound`].
+    pub trace: Vec<LoopRound>,
     /// Count of provider round-trips executed (one per `generate_tool_turn`).
     /// A loop-diagnostic surface (the loop tests assert it); NOT persisted --
     /// the trace entries already tell the trajectory (ADR-0078, issue #319).
@@ -1127,7 +1218,7 @@ mod tests {
 
     /// A tool-call reply carrying one call.
     fn call(name: &str, input: serde_json::Value) -> ToolTurnReply {
-        ToolTurnReply::ToolCalls(vec![ToolUse {
+        ToolTurnReply::tool_calls(vec![ToolUse {
             id: "tu_1".into(),
             name: name.into(),
             input,
@@ -1140,7 +1231,7 @@ mod tests {
     /// multi-call batch path -- the loop's serial dispatch plus the
     /// Assistant-turn + per-call `ToolResult` ordering -- untested.
     fn calls(items: &[(&str, serde_json::Value)]) -> ToolTurnReply {
-        ToolTurnReply::ToolCalls(
+        ToolTurnReply::tool_calls(
             items
                 .iter()
                 .enumerate()
@@ -1461,6 +1552,104 @@ mod tests {
     // --- happy paths --------------------------------------------------------
 
     #[test]
+    fn round_text_rides_the_round_phase_stream_and_conversation() {
+        // ADR-0103 (issue #608): a tool-call reply carrying connective prose
+        // opens its round with that prose. The RoundText phase fires after
+        // the round's Thinking wait and BEFORE the batch's call events; the
+        // recorded round carries the text (and no thinking -- no data source
+        // is wired for the built-in runtime yet); the prose also re-feeds on
+        // the assistant message, so the next round-trip's request carries it
+        // ("taken from the loop conversation" -- the wire protocols accept
+        // text alongside tool_use in one assistant turn).
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "narrated",
+            vec![
+                Ok(ToolTurnReply::ToolCalls {
+                    text: Some("先看一眼数据。".into()),
+                    calls: vec![ToolUse {
+                        id: "tu_1".into(),
+                        name: "explore".into(),
+                        input: json!({"sql": "SELECT 1"}),
+                    }],
+                }),
+                Ok(ToolTurnReply::ToolCalls {
+                    text: None,
+                    calls: vec![ToolUse {
+                        id: "tu_2".into(),
+                        name: "materialize".into(),
+                        input: json!({"sql": "SELECT 1 AS x"}),
+                    }],
+                }),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let captured = provider.captured_tool_turns();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = deps(
+            &engine.conn,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let phases = std::sync::Mutex::new(Vec::new());
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("narrated"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &approval,
+            &sink,
+            |p| phases.lock().unwrap().push(p),
+        );
+        assert_eq!(outcome.termination, Termination::Text("done".into()));
+        // The round grouping: round 1 carries the prose + its explore call;
+        // round 2 is bare (no prose, no thinking).
+        assert_eq!(outcome.trace.len(), 2, "one round per tool-call reply");
+        assert_eq!(outcome.trace[0].text.as_deref(), Some("先看一眼数据。"));
+        assert_eq!(
+            outcome.trace[0].thinking, None,
+            "no thinking source wired yet"
+        );
+        assert_eq!(outcome.trace[0].calls.len(), 1);
+        assert_eq!(outcome.trace[1].text, None);
+        assert_eq!(outcome.trace[1].calls.len(), 1);
+        // The phase stream: RoundText fires after Thinking{1} and before the
+        // batch's Started/Completed; round 2 fires no RoundText.
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(phases[0], TurnPhase::Thinking { attempt: 1 });
+        assert_eq!(
+            phases[1],
+            TurnPhase::RoundText {
+                text: "先看一眼数据。".into()
+            },
+            "RoundText fires between the Thinking wait and the call events"
+        );
+        assert!(matches!(phases[2], TurnPhase::ToolCallStarted { .. }));
+        assert!(matches!(phases[3], TurnPhase::ToolCallCompleted { .. }));
+        assert_eq!(phases[4], TurnPhase::Thinking { attempt: 2 });
+        // The re-fed conversation carries the prose on the assistant turn.
+        let captured = captured.lock().unwrap();
+        let second = &captured[1];
+        let carries_prose = second.messages.iter().any(|m| match m {
+            ToolTurnMessage::Assistant { text, tool_calls } => {
+                text.as_deref() == Some("先看一眼数据。") && !tool_calls.is_empty()
+            }
+            _ => false,
+        });
+        assert!(
+            carries_prose,
+            "the prose re-feeds on the assistant message of the next request"
+        );
+    }
+
+    #[test]
     fn multi_step_explore_then_materialize_lands_text_with_one_promotion() {
         // AC #1: one question unfolds into multi-step exploration ->
         // materialize -> terminal text. The agent explores first (scratch, no
@@ -1496,9 +1685,13 @@ mod tests {
             outcome.promotions[0].sql, "SELECT 1 AS x",
             "the promotion carries its verbatim materialize SQL"
         );
-        assert_eq!(outcome.trace.len(), 2, "explore + materialize");
-        assert!(outcome.trace[0].success, "explore succeeded");
-        assert!(outcome.trace[1].success, "materialize succeeded");
+        assert_eq!(
+            outcome.trace.len(),
+            2,
+            "explore + materialize, one round each"
+        );
+        assert!(outcome.trace[0].calls[0].success, "explore succeeded");
+        assert!(outcome.trace[1].calls[0].success, "materialize succeeded");
         assert_eq!(outcome.round_trips, 3, "three round-trips");
     }
 
@@ -1540,11 +1733,14 @@ mod tests {
         );
         assert_eq!(outcome.trace.len(), 2);
         assert!(
-            !outcome.trace[0].success,
+            !outcome.trace[0].calls[0].success,
             "first call failed: {}",
-            outcome.trace[0].result_excerpt
+            outcome.trace[0].calls[0].result_excerpt
         );
-        assert!(outcome.trace[1].success, "corrected call succeeded");
+        assert!(
+            outcome.trace[1].calls[0].success,
+            "corrected call succeeded"
+        );
     }
 
     #[test]
@@ -1616,10 +1812,19 @@ mod tests {
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Text("done".into()));
-        assert_eq!(outcome.trace.len(), 2, "both calls in the batch dispatched");
-        assert_eq!(outcome.trace[0].name, "explore");
         assert_eq!(
-            outcome.trace[1].name, "materialize",
+            outcome.trace.len(),
+            1,
+            "one round: both calls of the batch dispatched together"
+        );
+        assert_eq!(
+            outcome.trace[0].calls.len(),
+            2,
+            "both calls in the batch dispatched"
+        );
+        assert_eq!(outcome.trace[0].calls[0].name, "explore");
+        assert_eq!(
+            outcome.trace[0].calls[1].name, "materialize",
             "serial dispatch order preserved"
         );
         assert_eq!(

@@ -612,6 +612,8 @@ fn turn_record_pairs_question_and_outcome() {
             outcome: TurnOutcome::Failed(TurnFailure::NotWired),
             trace: vec![],
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         },
         r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"NotWired"}},"trace":[],"provenance":{"skills":[]}}"#,
     );
@@ -771,6 +773,8 @@ fn thread_entry_turn_wraps_a_turn_record_under_data() {
             }),
             trace: vec![],
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         }),
         r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"StaleReference","data":{"reference_name":"result_1"}}},"trace":[],"provenance":{"skills":[]}}}"#,
     );
@@ -1005,6 +1009,73 @@ fn turn_phase_serializes_externally_tagged() {
             result_excerpt: String::new(),
         }),
         r#"{"ToolCallCompleted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1","success":true,"result_excerpt":""}}"#,
+    );
+    // ADR-0103 (issue #608): the round-content variants. RoundText carries
+    // the round's connective prose; ThinkingCompleted carries the thinking
+    // block's duration + raw text. Same externally-tagged shape as the rest.
+    assert_wire(
+        &TurnPhase::RoundText {
+            text: "先看一眼数据。".into(),
+        },
+        r#"{"RoundText":{"text":"先看一眼数据。"}}"#,
+    );
+    assert_wire(
+        &TurnPhase::ThinkingCompleted {
+            duration_ms: 1200,
+            text: "thinking through the schema".into(),
+        },
+        r#"{"ThinkingCompleted":{"duration_ms":1200,"text":"thinking through the schema"}}"#,
+    );
+}
+
+#[test]
+fn turn_record_carries_round_grouped_trace_and_timestamps() {
+    // ADR-0103 (issue #608): TurnRecord.trace is round-grouped -- each round
+    // an optional thinking block + optional prose + its calls -- and the
+    // record carries optional asked_at / settled_at (omitted when absent, so
+    // a pre-v5 turn honest-degrades on the wire with no synthetic values).
+    use toptopduck_lib::{
+        OperationKind, ThinkingTrace, TraceEntryView, TraceRound, TurnFailure, TurnOutcome,
+        TurnProvenance, TurnRecord,
+    };
+    let round = TraceRound {
+        thinking: Some(ThinkingTrace {
+            duration_ms: 900,
+            text: "reasoning".into(),
+        }),
+        text: Some("先看一眼数据。".into()),
+        calls: vec![TraceEntryView {
+            name: "explore".into(),
+            operation_kind: OperationKind::Read,
+            summary: "SELECT 1".into(),
+            success: true,
+            result_excerpt: String::new(),
+        }],
+    };
+    let record = TurnRecord {
+        question: "多少人".into(),
+        outcome: TurnOutcome::Failed(TurnFailure::NotWired),
+        trace: vec![round],
+        provenance: TurnProvenance::default(),
+        asked_at: Some(1_700_000_000_000),
+        settled_at: Some(1_700_000_002_400),
+    };
+    assert_wire(
+        &record,
+        r#"{"question":"多少人","outcome":{"kind":"Failed","data":{"kind":"NotWired"}},"trace":[{"thinking":{"duration_ms":900,"text":"reasoning"},"text":"先看一眼数据。","calls":[{"name":"explore","operation_kind":"read","summary":"SELECT 1","success":true,"result_excerpt":""}]}],"provenance":{"skills":[]},"asked_at":1700000000000,"settled_at":1700000002400}"#,
+    );
+    // The absent-timestamp form: no asked_at / settled_at keys on the wire.
+    let mut old = record.clone();
+    old.asked_at = None;
+    old.settled_at = None;
+    let json = serde_json::to_string(&old).expect("serialize");
+    assert!(
+        !json.contains("asked_at"),
+        "absent asked_at is omitted: {json}"
+    );
+    assert!(
+        !json.contains("settled_at"),
+        "absent settled_at is omitted: {json}"
     );
 }
 

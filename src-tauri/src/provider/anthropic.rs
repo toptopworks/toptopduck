@@ -354,8 +354,10 @@ fn build_anthropic_messages(messages: &[ToolTurnMessage]) -> Vec<Value> {
 /// Parse the Anthropic tool-calling response into a [`ToolTurnReply`]. A
 /// `tool_use` block yields a [`ToolUse`]; a `text` block accumulates prose.
 /// If any `tool_use` blocks are present -> [`ToolTurnReply::ToolCalls`]
-/// (intermediate step; the agent loop executes them). Otherwise the joined
-/// text is the terminal [`ToolTurnReply::Text`]; empty text is a contract
+/// (intermediate step; the agent loop executes them), with the joined prose
+/// riding alongside as the round's connective text (ADR-0103, issue #608;
+/// `None` when the reply carried no text block). Otherwise the joined text
+/// is the terminal [`ToolTurnReply::Text`]; empty text is a contract
 /// violation -> retried [`ProviderError::Unavailable`]. Unknown block kinds
 /// are ignored (forward-compat with server-added block types).
 fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, ProviderError> {
@@ -382,7 +384,11 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
         }
     }
     if !tool_calls.is_empty() {
-        Ok(ToolTurnReply::ToolCalls(tool_calls))
+        let text = text_parts.join("");
+        Ok(ToolTurnReply::ToolCalls {
+            text: (!text.is_empty()).then_some(text),
+            calls: tool_calls,
+        })
     } else {
         let text = text_parts.join("");
         if text.is_empty() {
@@ -896,12 +902,40 @@ mod tests {
         let reply = AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("multi"))
             .expect("tool calls");
         match reply {
-            ToolTurnReply::ToolCalls(calls) => {
+            ToolTurnReply::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 2);
                 assert_eq!(calls[0].id, "tu_1");
                 assert_eq!(calls[0].name, "run_sql");
                 assert_eq!(calls[0].input, serde_json::json!({"sql":"SELECT 1"}));
                 assert_eq!(calls[1].id, "tu_2");
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_carries_text_blocks_as_round_prose() {
+        // ADR-0103 (issue #608): text blocks alongside tool_use blocks are
+        // the round's connective prose -- parsed onto ToolCalls.text rather
+        // than dropped; a reply with tool calls and no text yields None.
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"[
+                    {"type":"text","text":"先看一眼数据。"},
+                    {"type":"tool_use","id":"tu_1","name":"run_sql","input":{"sql":"SELECT 1"}}
+                ]"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let reply = AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("narrated"))
+            .expect("tool calls");
+        match reply {
+            ToolTurnReply::ToolCalls { text, calls } => {
+                assert_eq!(text.as_deref(), Some("先看一眼数据。"));
+                assert_eq!(calls.len(), 1);
             }
             other => panic!("expected ToolCalls, got {other:?}"),
         }

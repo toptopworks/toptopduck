@@ -386,8 +386,8 @@ mod tests {
     use super::*;
     use crate::approval::OperationKind;
     use crate::model::{
-        DatasetPrivacy, Promotion, RectifyProvenance, TextKind, TraceEntryView, TurnFailure,
-        TurnOutcome, TurnProvenance,
+        DatasetPrivacy, Promotion, RectifyProvenance, TextKind, TraceEntryView, TraceRound,
+        TurnFailure, TurnOutcome, TurnProvenance,
     };
 
     /// Build column schemas from (name, type) pairs.
@@ -449,6 +449,8 @@ mod tests {
             // summary-only far window), so test turns carry an empty trace.
             trace: vec![],
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         }
     }
 
@@ -542,22 +544,26 @@ mod tests {
     fn window_history_carries_no_trace_data_adr_0078() {
         let trace_failure_excerpt = "SENTINEL_TRACE_FAILURE";
         let trace_summary = "SENTINEL_TRACE_SUMMARY";
-        let poisoned_trace = vec![
-            TraceEntryView {
-                name: "explore".into(),
-                operation_kind: OperationKind::Read,
-                summary: trace_summary.into(),
-                success: false,
-                result_excerpt: trace_failure_excerpt.into(),
-            },
-            TraceEntryView {
-                name: "materialize".into(),
-                operation_kind: OperationKind::Write,
-                summary: trace_summary.into(),
-                success: true,
-                result_excerpt: String::new(),
-            },
-        ];
+        let poisoned_trace = vec![TraceRound {
+            thinking: None,
+            text: None,
+            calls: vec![
+                TraceEntryView {
+                    name: "explore".into(),
+                    operation_kind: OperationKind::Read,
+                    summary: trace_summary.into(),
+                    success: false,
+                    result_excerpt: trace_failure_excerpt.into(),
+                },
+                TraceEntryView {
+                    name: "materialize".into(),
+                    operation_kind: OperationKind::Write,
+                    summary: trace_summary.into(),
+                    success: true,
+                    result_excerpt: String::new(),
+                },
+            ],
+        }];
 
         // In-window (Full payload): a single trace-bearing turn.
         let mut ws = WorkingSet::default();
@@ -579,6 +585,8 @@ mod tests {
             },
             trace: poisoned_trace.clone(),
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         }];
         let payload = assemble("probe", &ws, &history);
         let full = format!("{:?}", payload.history);
@@ -659,6 +667,8 @@ mod tests {
             },
             trace: vec![],
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         }];
         let payload = assemble("probe", &ws, &history);
         let find = |name: &str| {
@@ -802,6 +812,8 @@ mod tests {
             },
             trace: vec![],
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         }
     }
 
@@ -816,6 +828,8 @@ mod tests {
             }),
             trace: vec![],
             provenance: TurnProvenance::default(),
+            asked_at: None,
+            settled_at: None,
         }
     }
 

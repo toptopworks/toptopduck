@@ -87,6 +87,29 @@ export type TurnOutcome =
   | { kind: "Failed"; data: TurnFailure }
   | { kind: "Cancelled" };
 
+// A round's persisted thinking block (ADR-0103): how long the model
+// reasoned plus its raw reasoning text. Mirrors the Rust ThinkingTrace.
+// Plain data shared verbatim by the display round and the persisted round
+// (no lossy projection between them); the text carries no length cap --
+// cost governance is the posture thought-level entry's concern
+// (ADR-0095/0100), not the trace's.
+export interface ThinkingTrace {
+  duration_ms: number;
+  text: string;
+}
+
+// One round of a turn's execution trace (ADR-0103, calibrating ADR-0078):
+// the thinking + connective prose + tool-call batch of ONE provider
+// round-trip. Mirrors the Rust TraceRound. Optional members are absent
+// (never empty placeholders) when the runtime offered no source: no
+// thinking block, or a reply with tool calls and no prose. A pre-v5 turn's
+// migrated flat trace is a single round carrying only its calls.
+export interface TraceRound {
+  thinking?: ThinkingTrace;
+  text?: string;
+  calls: TraceEntry[];
+}
+
 // The display form of one execution-trace entry (ADR-0078, issue #297): a
 // completed tool call as the rail's expanded trace + the in-flight
 // turn-progress stream render it. Mirrors the Rust TraceEntryView (flat
@@ -139,16 +162,26 @@ export interface TurnProvenance {
 // paired with its outcome. Every turn appends exactly one -- always visible.
 // Mirrors the Rust TurnRecord; nested under ThreadEntry.Turn.data (see below).
 // The trace is the turn's collapsible execution substructure (ADR-0078,
-// issue #297): the rail shows the question + outcome always and expands the
-// tool-call chain on demand. Empty for v1-era turns and zero-call turns.
+// issue #297; round-grouped per ADR-0103): the rail shows the question +
+// outcome always and expands the tool-call chain on demand. Empty for v1-era
+// turns and zero-call turns; a pre-v5 turn's migrated flat trace is one
+// round of bare calls.
 export interface TurnRecord {
   question: string;
   outcome: TurnOutcome;
-  trace: TraceEntry[];
+  trace: TraceRound[];
   // Issue #381: the turn's skill provenance for drift comparison against the
   // registry. Empty `skills` for turns that mounted no skill and for v3->v4
   // migrated turns (no baseline -- never trips the drift check).
   provenance: TurnProvenance;
+  // When the user submitted the question, Unix epoch ms (ADR-0103). Absent
+  // for turns recorded before v5 -- rendered without a timestamp, never a
+  // synthetic one (honest degrade). The optimistic append stamps the client
+  // clock; the backend's own reading lands with the next thread refetch.
+  asked_at?: number;
+  // When the turn settled, Unix epoch ms (ADR-0103). Same honest-degrade
+  // rule as asked_at.
+  settled_at?: number;
 }
 
 // One entry of the unified conversation timeline (ADR-0040/0086): a Turn

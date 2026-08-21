@@ -92,7 +92,10 @@ fn text_reply_yields_text_outcome_and_no_trace() {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert!(outcome.trace.is_empty(), "no tool calls -> empty trace");
+    assert!(
+        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        "no tool calls -> no recorded calls in any round"
+    );
     assert!(
         phases
             .iter()
@@ -111,8 +114,12 @@ fn tool_call_yields_trace_with_one_successful_entry() {
         Termination::Text(t) => assert_eq!(t, "found 3 rows"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert_eq!(outcome.trace.len(), 1, "one tool call -> one trace entry");
-    let entry = &outcome.trace[0];
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "one round wrapping the flat trajectory"
+    );
+    let entry = &outcome.trace[0].calls[0];
     assert!(entry.success, "the call completed");
     assert_eq!(entry.name, "explore SELECT 1");
     assert!(phases.iter().any(
