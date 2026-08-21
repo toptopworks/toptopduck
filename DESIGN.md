@@ -416,11 +416,11 @@ The structural signature. Three independently collapsible columns:
 2. **Conversation rail** (320px): Thread of turns (questions + outcomes + source lifecycle events). Collapses to 0 width.
 3. **Workspace** (flexible): Result tables, charts, dataset detail, privacy controls. Default collapsed in cold-start; expands when a turn produces results.
 
-When the workspace folds, the rail promotes to primary surface with a `minmax(320px, 1fr)` width floor — it grows to fill but never narrows past the standard rail width.
+When the workspace folds, the conversation column promotes to primary surface and centers — a `minmax(0, 800px)` track capped at 800px with `1fr` spacers that shrink to 0 on narrow windows, so it centers at any viewport width.
 
 ### Grid
 - Shell: `grid-template-columns: 220px 1fr` (sidebar + main block).
-- Session pane: `grid-template-columns: 320px 1fr` (rail + workspace).
+- Session pane: 4-track conversation grid — `0fr minmax(0, var(--rail-width)) 1fr 0fr` (spacer / conversation rail / workspace / spacer); the workspace-folded form `1fr minmax(0, 800px) 0fr 1fr` centers the conversation column. The shell-level question bar mirrors the same tracks so the bar sits under the conversation column (ADR-0092).
 - Settings overlay: `grid-template-columns: 220px 1fr` (nav + content) — matches the sidebar width so the left boundary stays fixed when switching views.
 
 ### Whitespace Philosophy
