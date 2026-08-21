@@ -2072,6 +2072,135 @@ fn open_duck_migrates_a_v1_recipe_to_v2_and_synthesizes_trace() {
     assert_eq!(turns2[1].trace.len(), 1);
 }
 
+/// Issue #617 seed: a v4 `.duck` recorded with a REAL trajectory shape --
+/// mixed read/write calls where one write FAILED and kept its error excerpt
+/// -- migrates through the blackbox open path (the v4->v5 step previously
+/// had only migration-level unit tests): resume wraps the flat entry array
+/// into one round carrying the calls verbatim, the resumed conversation
+/// renders them through the same round projection a live turn's
+/// record_turn emits, and the post-resume persist lands the v5 shape with
+/// the failure bit + excerpt intact.
+#[test]
+fn open_duck_migrates_a_v4_real_recording_shape_into_one_round() {
+    use toptopduck_lib::persistence::{read_duck, RecipeEntry, RECIPE_FORMAT_VERSION};
+    use toptopduck_lib::OperationKind;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("v4.duck");
+    let csv = fixture("people.csv");
+
+    // Capture the post-rectify fingerprint under the same ingest path the v4
+    // recipe names, so phase 1 fingerprint verification passes on resume.
+    let session = build_single_source_session(&duck, &csv);
+    let fingerprint = session.get("people").expect("people").fingerprint.clone();
+    let csv_path = csv.to_string_lossy().to_string();
+    drop(session);
+
+    // A v4 recipe: the turn's `trace` is the pre-grouping FLAT entry array
+    // with a real recording shape -- a read-only explore, a successful write
+    // materialize, then a FAILED write that kept its error excerpt. No
+    // prose/thinking members and no timestamps (a v4 file recorded neither;
+    // v5 adds both). A Textual outcome so replay has no SQL to re-run -- the
+    // trace round-trip is the subject.
+    let v4 = serde_json::json!({
+        "format_version": 4,
+        "session_name": "v4 分析",
+        "sources": [{
+            "reference_name": "people",
+            "display_name": "people",
+            "source_path": csv_path,
+            "fingerprint": fingerprint,
+        }],
+        "history": [{
+            "entry": "Turn",
+            "data": {
+                "question": "表里有什么",
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {
+                        "text_kind": "Agent",
+                        "body": "三列：id、姓名、年龄。",
+                    },
+                },
+                "trace": [
+                    {
+                        "name": "explore",
+                        "operation_kind": "read",
+                        "summary": "SELECT * FROM \"people\".data LIMIT 5",
+                        "success": true,
+                        "result_excerpt": "",
+                    },
+                    {
+                        "name": "materialize",
+                        "operation_kind": "write",
+                        "summary": "SELECT id, name FROM \"people\".data",
+                        "success": true,
+                        "result_excerpt": "",
+                    },
+                    {
+                        "name": "materialize",
+                        "operation_kind": "write",
+                        "summary": "SELECT age FROM \"nonexistent\"",
+                        "success": false,
+                        "result_excerpt": "Catalog Error: Table with name nonexistent does not exist",
+                    },
+                ],
+            },
+        }],
+        "active": "people",
+    });
+    fs::write(&duck, serde_json::to_string(&v4).unwrap()).expect("write v4");
+
+    // Resume: forward-migrate v4->v5 -> re-ingest (fingerprint match) -> the
+    // Textual turn replays no SQL; the timeline rebuild reads the wrapped
+    // trace.
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+
+    // The resumed conversation's turn carries the wrapped trace: ONE round,
+    // no prose/thinking members, three calls in dispatch order with the
+    // failure bit + excerpt verbatim.
+    let turn = resumed
+        .conversation()
+        .into_iter()
+        .find_map(|e| match e {
+            ThreadEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("turn restored");
+    assert_eq!(turn.trace.len(), 1, "flat v4 trace wrapped into one round");
+    let round = &turn.trace[0];
+    assert_eq!(round.thinking, None);
+    assert_eq!(round.text, None);
+    assert_eq!(round.calls.len(), 3);
+    assert_eq!(round.calls[0].name, "explore");
+    assert_eq!(round.calls[0].operation_kind, OperationKind::Read);
+    assert!(round.calls[1].success);
+    assert!(
+        !round.calls[2].success,
+        "the failed write keeps its failure bit"
+    );
+    assert_eq!(
+        round.calls[2].result_excerpt,
+        "Catalog Error: Table with name nonexistent does not exist"
+    );
+    assert_eq!(
+        turn.asked_at, None,
+        "a v4 turn honest-degrades with no timestamps"
+    );
+
+    // The on-disk .duck re-persisted at v5: the wrapped round landed
+    // verbatim.
+    let persisted = read_duck(&duck).expect("read persisted");
+    assert_eq!(persisted.format_version(), RECIPE_FORMAT_VERSION);
+    let RecipeEntry::Turn(t) = &persisted.history[0] else {
+        panic!("first history entry is the turn");
+    };
+    assert_eq!(t.trace.len(), 1);
+    assert_eq!(t.trace[0].calls.len(), 3);
+    assert!(!t.trace[0].calls[2].success);
+}
+
 /// AC1: move the .duck AND its in-subtree source together -> the relative
 /// path resolves against the .duck's NEW parent, so no re-link fires and the
 /// source re-ingests cleanly. This is the "just works" portability promise

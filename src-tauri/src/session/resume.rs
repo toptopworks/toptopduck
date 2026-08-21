@@ -43,7 +43,7 @@ use crate::model::{
 };
 use crate::persistence::read_duck;
 use crate::persistence::recipe::{
-    Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RuntimeKind, SourceRef,
+    Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RuntimeKind, SourceRef,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::provider::Provider;
@@ -525,15 +525,7 @@ impl<'a> Resumer<'a> {
                             // migrated turns (their RecipeTurn carries no
                             // trace; the v2+ synthetic single-call trace does,
                             // wrapped into one round by the v4->v5 step).
-                            trace: turn
-                                .trace
-                                .iter()
-                                .map(|round| TraceRound {
-                                    thinking: round.thinking.clone(),
-                                    text: round.text.clone(),
-                                    calls: round.calls.iter().map(TraceEntryView::from).collect(),
-                                })
-                                .collect(),
+                            trace: turn.trace.iter().map(TraceRound::from).collect(),
                             // ADR-0103 (issue #608): the turn's timestamps
                             // round-trip verbatim; a pre-v5 turn carries None
                             // and renders without a timestamp (honest degrade,
@@ -588,6 +580,20 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
             summary: entry.summary.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
+        }
+    }
+}
+
+impl From<&RecipeTraceRound> for TraceRound {
+    /// The round-level resumed-trace mapping (ADR-0103, issue #608): the
+    /// persisted round round-trips onto the display view beside the
+    /// entry-level mapping above, so a resumed session renders the same
+    /// rounds the live turn recorded.
+    fn from(round: &RecipeTraceRound) -> Self {
+        Self {
+            thinking: round.thinking.clone(),
+            text: round.text.clone(),
+            calls: round.calls.iter().map(TraceEntryView::from).collect(),
         }
     }
 }
@@ -1116,7 +1122,7 @@ mod tests {
     use crate::guardrail::{ExecError, ExecErrorKind};
     use crate::model::{StaleAnchor, StaleReason, TextKind};
     use crate::persistence::recipe::{
-        RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef,
+        RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef, TurnTimestamps,
     };
     use crate::session::materializer::FakeMaterializer;
     use crate::session::{ActiveAbandoned, ActiveResolution};
@@ -1545,8 +1551,7 @@ mod tests {
                     adapter_id: adapter_id.map(Into::into),
                     skills: Vec::new(),
                 },
-                None,
-                None,
+                TurnTimestamps::default(),
             ))
         }
         let recipe = recipe_with(

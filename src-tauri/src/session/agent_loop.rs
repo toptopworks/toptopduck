@@ -48,7 +48,7 @@ use crate::approval::{
 use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::aggregator::{self, McpAggregator, RouteError};
-use crate::model::{Promotion, ThinkingTrace, TraceEntryView, TurnPhase};
+use crate::model::{Promotion, ThinkingTrace, TraceEntryView, TraceRound, TurnPhase};
 use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 use crate::provider::tool_calling::{
     ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
@@ -882,15 +882,17 @@ impl RecipeTraceRound {
     /// verbatim (no lossy projection -- neither has a `tool_use_id` to drop
     /// or a success payload to empty), and each call maps through
     /// [`RecipeTraceEntry::from_live_trace`]. Named (not `From`) to match
-    /// `from_live_trace`'s explicit-lossy-projection convention.
-    pub(crate) fn from_live_round(round: &LoopRound) -> Self {
+    /// `from_live_trace`'s explicit-lossy-projection convention. Takes the
+    /// round by value: the audit is the rounds' last consumer, so the
+    /// unbounded thinking/prose texts move instead of cloning (issue #617).
+    pub(crate) fn from_live_round(round: LoopRound) -> Self {
         Self {
-            thinking: round.thinking.clone(),
-            text: round.text.clone(),
+            thinking: round.thinking,
+            text: round.text,
             calls: round
                 .calls
-                .iter()
-                .map(RecipeTraceEntry::from_live_trace)
+                .into_iter()
+                .map(|entry| RecipeTraceEntry::from_live_trace(&entry))
                 .collect(),
         }
     }
@@ -922,6 +924,20 @@ impl From<&TraceEntry> for TraceEntryView {
     /// wire form, so a live row and the resumed trace render identically.
     fn from(entry: &TraceEntry) -> Self {
         reduced_trace(entry)
+    }
+}
+
+impl From<&LoopRound> for TraceRound {
+    /// The round-level display mapping (ADR-0103, issue #608): the live
+    /// round projects onto the IPC view beside the entry-level mapping
+    /// above, so `record_turn`'s trace view and the loop's recorded rounds
+    /// stay field-identical.
+    fn from(round: &LoopRound) -> Self {
+        Self {
+            thinking: round.thinking.clone(),
+            text: round.text.clone(),
+            calls: round.calls.iter().map(TraceEntryView::from).collect(),
+        }
     }
 }
 
