@@ -3042,10 +3042,13 @@ fn apply_posture_set(
     reject_if_resuming(handle)?;
     reject_if_in_flight(handle)?;
     // One atomic slot read: the runtime and the held pair are one unit (the
-    // pair is namespaced by the runtime it was selected under), so the
-    // stamp + backfill below key off the same read. Only the runtime half
-    // feeds the write -- the pair itself comes whole off the wire (issue
-    // #603), never mixed with the slot's held value.
+    // pair is namespaced by the runtime it was selected under). Every
+    // runtime consumer below keys off THIS read -- the segment-header
+    // stamp, the conditional write-back guard's expected runtime, and the
+    // backfill entry's namespace -- so the set's writes always land under
+    // the runtime it was read on. The held pair itself never feeds the
+    // write: the pair comes whole off the wire (issue #603), unmixed with
+    // the slot's held value.
     let (runtime, _) = handle.runtime_and_posture();
     let mut s = handle.session_lock()?;
     s.set_external_model_config(posture.clone());
