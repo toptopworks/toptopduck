@@ -14,6 +14,9 @@ pub mod io;
 pub mod model;
 
 pub use io::{read_at, write_at, WriteError};
+// Crate-internal: the strict (non-degrading) read that the read-modify-write
+// entries use as their source (issue #602). Read consumers keep `read_at`.
+pub(crate) use io::{parse_at, AppConfigReadError};
 pub use model::{
     AppConfig, DefaultRuntime, EngineDefaults, ExportDefaults, LocalePreference, ModelPosture,
     PrivacyDefaults, Theme, Tunables, APP_CONFIG_FORMAT_VERSION,

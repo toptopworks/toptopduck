@@ -55,8 +55,12 @@ const SECRET_KEY_NAMES: &[&str] = &[
 ];
 
 /// Why a typed parse failed. Internal: [`read_at`] maps every variant to
-/// [`AppConfig::defaults`] + a `log::warn!`, so this never crosses a module or
-/// IPC boundary. Exposed only so the unit tests can pin each failure mode.
+/// [`AppConfig::defaults`] + a `log::warn!` for the READ consumers, while the
+/// crate's read-modify-write read source (issue #602) matches `Missing` (the
+/// defaults branch) and lifts every other variant as a `WriteError::Read` --
+/// so this crosses module boundaries inside the crate, never an IPC boundary.
+/// Exposed at crate visibility so `provider` and the unit tests can pin each
+/// failure mode.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AppConfigReadError {
     /// File not found (first launch, or deleted). Not really an error -- the
@@ -139,12 +143,19 @@ pub fn write_at(target: &Path, cfg: &AppConfig) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// Why a write failed. Every failure leaves the prior config file (if any)
-/// untouched: a serialize error happens before any IO; an IO failure leaves the
-/// temp file behind but the target unchanged; a rename failure leaves the target
+/// Why a write failed. Every failure leaves the target config file (if any)
+/// untouched: a read failure happens before any write is attempted; a
+/// serialize error happens before any IO; an IO failure leaves the temp file
+/// behind but the target unchanged; a rename failure leaves the target
 /// unchanged (temp best-effort removed).
 #[derive(Debug)]
 pub enum WriteError {
+    /// The read half of a read-modify-write failed (corrupt file, version
+    /// mismatch, transient IO). Surfaced instead of degrading to defaults so
+    /// a rewrite can never persist "defaults + this one write" (issue #602).
+    /// A missing file deliberately does NOT surface here -- it is the correct
+    /// starting value and goes through the defaults branch.
+    Read(String),
     Serialize(String),
     Io(String),
     Rename(String),
@@ -153,6 +164,7 @@ pub enum WriteError {
 impl std::fmt::Display for WriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Self::Read(d) => write!(f, "read app-config for rewrite failed: {d}"),
             Self::Serialize(d) => write!(f, "serialize app-config failed: {d}"),
             Self::Io(d) => write!(f, "write app-config temp file failed: {d}"),
             Self::Rename(d) => write!(f, "replace app-config failed: {d}"),
@@ -185,9 +197,11 @@ pub fn read_at(path: &Path) -> AppConfig {
 }
 
 /// Parse the config file, routing on `format_version` and scanning for secret
-/// fields. Internal: the honest-degrade decision lives in [`read_at`]; this
-/// surfaced `Result` lets the tests pin each failure mode precisely.
-fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
+/// fields. The honest-degrade decision for READ consumers lives in
+/// [`read_at`]; this surfaced `Result` lets the tests pin each failure mode
+/// precisely and feeds the app-config read-modify-write entries, where a
+/// degraded read must never become the source of a rewrite (issue #602).
+pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
