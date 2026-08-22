@@ -23,9 +23,9 @@ use std::thread;
 
 use toptopduck_lib::runtime::acp::wire::{
     self, ContentBlock, InitializeResult, NewSessionResult, Notification, PermissionOption,
-    PermissionOptionKind, PermissionToolCall, PromptResult, RequestId, RequestPermissionOutcome,
-    RequestPermissionParams, RequestPermissionResult, Response, RpcError, SessionUpdate,
-    SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus, ToolKind,
+    PermissionOptionKind, PermissionToolCall, PromptResult, RequestId, RequestPermissionParams,
+    Response, RpcError, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent,
+    ToolCallStatus, ToolKind,
 };
 
 /// Tool-call starts emitted by the `step_cap_overflow` scenario. Must exceed
@@ -455,10 +455,7 @@ fn play_scenario(
         // land in the trace instead of being dropped whole.
         "tool_kind_read" => {
             raw_tool_call_start(out, "tc_r", "read the schema", "read");
-            notify(
-                out,
-                tool_call_finish("tc_r", "read the schema", ToolKind::Read, "42 lines"),
-            );
+            notify(out, tool_call_finish("tc_r", "read the schema", "42 lines"));
             notify(out, agent_message("read it"));
             respond_prompt(out, &id, StopReason::Success);
         }
@@ -472,10 +469,7 @@ fn play_scenario(
             );
             notify(out, agent_thought("the finish is still in flight"));
             notify(out, agent_message("round two prose"));
-            notify(
-                out,
-                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
-            );
+            notify(out, tool_call_finish("tc_1", "explore SELECT 1", "rows: 3"));
             respond_prompt(out, &id, StopReason::Success);
         }
         // A call left unresolved when the turn ends -- the drain lands it on
@@ -652,10 +646,7 @@ fn play_scenario(
             ));
             let _ = bridge_read();
             notify(out, tool_call_start("gw_1", "explore", ToolKind::Search));
-            notify(
-                out,
-                tool_call_finish("gw_1", "explore", ToolKind::Search, "rows: 1"),
-            );
+            notify(out, tool_call_finish("gw_1", "explore", "rows: 1"));
             notify(out, agent_message("done via gateway"));
             respond_prompt(out, &id, StopReason::Success);
         }
@@ -674,14 +665,8 @@ fn play_scenario(
                 out,
                 tool_call_start("tc_2", "explore SELECT 2", ToolKind::Search),
             );
-            notify(
-                out,
-                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
-            );
-            notify(
-                out,
-                tool_call_finish("tc_2", "explore SELECT 2", ToolKind::Search, "rows: 1"),
-            );
+            notify(out, tool_call_finish("tc_1", "explore SELECT 1", "rows: 3"));
+            notify(out, tool_call_finish("tc_2", "explore SELECT 2", "rows: 1"));
             respond_prompt(out, &id, StopReason::Success);
         }
         // `session_new_raw` (issue #630) differs only in the handshake's
@@ -814,7 +799,7 @@ fn tool_call_start(id: &str, title: &str, kind: ToolKind) -> SessionUpdate {
     }
 }
 
-fn tool_call_finish(id: &str, title: &str, _kind: ToolKind, output: &str) -> SessionUpdate {
+fn tool_call_finish(id: &str, title: &str, output: &str) -> SessionUpdate {
     SessionUpdate::ToolCallUpdate {
         tool_call_id: id.into(),
         status: Some(ToolCallStatus::Completed),
@@ -838,7 +823,7 @@ fn notify_tool_call_roundtrip(
     output: &str,
 ) {
     notify(out, tool_call_start(id, title, kind));
-    notify(out, tool_call_finish(id, title, kind, output));
+    notify(out, tool_call_finish(id, title, output));
 }
 
 fn tool_call_start_failed(id: &str, title: &str, kind: ToolKind, err: &str) -> SessionUpdate {
@@ -964,11 +949,6 @@ fn drain_once(reader: &mut BufReader<std::io::StdinLock<'_>>, cancel_seen: &mut 
             *cancel_seen = true;
         }
     }
-    // Touch the otherwise-unused permission-result type so the import stays
-    // meaningful (a future scenario may echo the decision back).
-    let _ = RequestPermissionResult {
-        outcome: RequestPermissionOutcome::Cancelled,
-    };
     true
 }
 

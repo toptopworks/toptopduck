@@ -99,18 +99,15 @@ pub(super) enum RowEnd {
 }
 
 impl RowEnd {
-    /// Map the wire status onto the row ending. Only the two terminal
-    /// statuses reach here -- the call sites gate on them first -- so the
-    /// non-terminal arms are a defensive fold, not a reachable mapping.
-    /// Exhaustive (no wildcard): adding a wire variant re-asks this question
-    /// at compile time instead of silently landing rows in `Failed`.
-    fn from_wire_status(status: ToolCallStatus) -> Self {
+    /// Map the wire status onto the row ending: the terminal statuses map
+    /// to their endings, the non-terminal ones return `None` (the row
+    /// stays pending). Exhaustive (no wildcard): adding a wire variant
+    /// re-asks this question at compile time.
+    fn from_wire_status(status: ToolCallStatus) -> Option<Self> {
         match status {
-            ToolCallStatus::Completed => RowEnd::Completed,
-            ToolCallStatus::Failed
-            | ToolCallStatus::Pending
-            | ToolCallStatus::InProgress
-            | ToolCallStatus::Unknown => RowEnd::Failed,
+            ToolCallStatus::Completed => Some(RowEnd::Completed),
+            ToolCallStatus::Failed => Some(RowEnd::Failed),
+            ToolCallStatus::Pending | ToolCallStatus::InProgress | ToolCallStatus::Unknown => None,
         }
     }
 }
@@ -379,26 +376,12 @@ impl AcpEngine {
             sink,
             &mut on_phase,
         );
-        // Finalize any tool rows still open at turn end with the honest
-        // unobserved marker (issue #630), each landing on the round it
-        // opened in. The take ends `pending`'s borrow so the loop can call
-        // back into `finalize_row` -- the single TraceEntry construction.
-        for row in std::mem::take(&mut pump.pending) {
-            pump.finalize_row(
-                row.round,
-                &row.tool_use_id,
-                &row.name,
-                row.operation_kind,
-                &row.summary,
-                &row.content,
-                RowEnd::Unobserved,
-                &mut on_phase,
-            );
-        }
-        // Close the trailing round's thought stream: its ThinkingCompleted
+        // Finalize any tool rows still open at turn end (issue #630), then
+        // close the trailing round's thought stream: its ThinkingCompleted
         // fires (the fold renders live), but no RoundText -- whether the
         // settle keeps the trailing prose on the round depends on the
         // termination (issues #611/#628).
+        pump.drain_unobserved(&mut on_phase);
         pump.tracker.freeze_trailing_thinking(&mut on_phase);
 
         let termination = match end {
@@ -942,13 +925,14 @@ impl RoundTracker {
 
     /// Freeze the trailing round's thought stream into its thinking block +
     /// emit the completion event. Idempotent: a second call finds an empty
-    /// buffer. Always the trailing round -- both call sites target it (the
-    /// prelude's round IS the current one), so the index parameter collapsed
-    /// into `last_mut` (issue #630).
-    fn freeze_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
-        let Some(round) = self.rounds.last_mut() else {
-            return;
-        };
+    /// buffer. Always the trailing round -- the prelude's round IS the
+    /// trailing one, so the index parameter collapsed into `last_mut`
+    /// (issue #630). The completion fires (the fold renders live), but no
+    /// RoundText -- the live channel never shows the trailing prose;
+    /// whether the settle keeps it on the round depends on the termination
+    /// (issues #611/#628).
+    pub(super) fn freeze_trailing_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        let round = self.rounds.last_mut().expect("round 1 opens at the prompt");
         if round.thinking_buf.is_empty() {
             return;
         }
@@ -967,14 +951,6 @@ impl RoundTracker {
         round.thinking = Some(trace);
     }
 
-    /// Close the trailing round's thought stream: its ThinkingCompleted
-    /// fires (the fold renders live), but no RoundText -- the live channel
-    /// never shows the trailing prose; whether the settle keeps it on the
-    /// round depends on the termination (issues #611/#628).
-    pub(super) fn freeze_trailing_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
-        self.freeze_thinking(on_phase);
-    }
-
     /// The prelude the round's first tool call fires (issue #611): the
     /// frozen thinking block, then the round's prose -- both BEFORE the
     /// batch's `ToolCallStarted` events, the ADR-0103 live order the
@@ -982,13 +958,12 @@ impl RoundTracker {
     /// neither. Fires on the current (trailing) round -- the same one
     /// `call_round` returns.
     fn fire_round_prelude(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
-        self.freeze_thinking(on_phase);
-        if let Some(round) = self.rounds.last() {
-            if !round.text.is_empty() {
-                on_phase(TurnPhase::RoundText {
-                    text: round.text.clone(),
-                });
-            }
+        self.freeze_trailing_thinking(on_phase);
+        let round = self.rounds.last().expect("round 1 opens at the prompt");
+        if !round.text.is_empty() {
+            on_phase(TurnPhase::RoundText {
+                text: round.text.clone(),
+            });
         }
     }
 
@@ -1106,7 +1081,7 @@ impl Pump {
                     operation_kind,
                     summary: summary.clone(),
                 });
-                if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
+                if let Some(end) = RowEnd::from_wire_status(*status) {
                     self.finalize_row(
                         idx,
                         tool_call_id,
@@ -1114,7 +1089,7 @@ impl Pump {
                         operation_kind,
                         &summary,
                         content,
-                        RowEnd::from_wire_status(*status),
+                        end,
                         on_phase,
                     );
                 } else {
@@ -1151,10 +1126,7 @@ impl Pump {
                         row.content = content.clone();
                     }
                     if let Some(final_status) = *status {
-                        if matches!(
-                            final_status,
-                            ToolCallStatus::Completed | ToolCallStatus::Failed
-                        ) {
+                        if let Some(end) = RowEnd::from_wire_status(final_status) {
                             self.finalize_row(
                                 row.round,
                                 &row.tool_use_id,
@@ -1162,7 +1134,7 @@ impl Pump {
                                 row.operation_kind,
                                 &row.summary,
                                 &row.content,
-                                RowEnd::from_wire_status(final_status),
+                                end,
                                 on_phase,
                             );
                             return;
@@ -1174,6 +1146,25 @@ impl Pump {
                 // dropped -- the trace stays consistent with the starts seen.
             }
             SessionUpdate::Other => {}
+        }
+    }
+
+    /// Close every still-open row at turn end with the honest unobserved
+    /// marker (issue #630), each landing on the round it opened in. The
+    /// take ends `pending`'s borrow so the loop can call back into
+    /// `finalize_row` -- the single TraceEntry construction.
+    fn drain_unobserved(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        for row in std::mem::take(&mut self.pending) {
+            self.finalize_row(
+                row.round,
+                &row.tool_use_id,
+                &row.name,
+                row.operation_kind,
+                &row.summary,
+                &row.content,
+                RowEnd::Unobserved,
+                on_phase,
+            );
         }
     }
 

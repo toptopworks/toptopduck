@@ -15,7 +15,9 @@ use std::sync::Arc;
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
-use toptopduck_lib::runtime::acp::adapter::{codex, gemini_cli, opencode, qwen_code, AdapterSpec};
+use toptopduck_lib::runtime::acp::adapter::{
+    codex, gemini_cli, opencode, qwen_code, AdapterSpec, DiscoveredRuntime,
+};
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
 use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
@@ -125,6 +127,22 @@ fn assert_not_via_watchdog(label: &str, start: std::time::Instant) {
     );
 }
 
+/// The discovery catalog the fake fixture's `configOptions` produce --
+/// shared by the typed and raw `session/new` paths (issue #630's raw pin
+/// asserts the same catalog the typed path discovers).
+fn assert_fake_catalog(d: &DiscoveredRuntime) {
+    assert_eq!(
+        d.models,
+        vec!["fake-opus".to_string(), "fake-sonnet".to_string()]
+    );
+    assert_eq!(d.current_model.as_deref(), Some("fake-opus"));
+    assert_eq!(
+        d.thought_levels,
+        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+    );
+    assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+}
+
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
@@ -227,42 +245,44 @@ fn round_prose_and_thinking_group_per_round() {
 
     // Live order: Thinking{1} < ThinkingCompleted < RoundText < Started{tc_1}
     // < Thinking{2} < ThinkingCompleted < RoundText < Started{tc_2}.
-    let i_think1 = phase_index(&phases, "Thinking{1}", |p| {
-        matches!(p, TurnPhase::Thinking { attempt: 1 })
-    });
-    let i_fold1 = phase_index(&phases, "ThinkingCompleted{1}", |p| {
+    let is_think1 = |p: &TurnPhase| matches!(p, TurnPhase::Thinking { attempt: 1 });
+    let is_fold1 = |p: &TurnPhase| {
         matches!(
             p,
             TurnPhase::ThinkingCompleted { text, .. } if text == "weighing schema options"
         )
-    });
-    let i_prose1 = phase_index(&phases, "RoundText{1}", |p| {
+    };
+    let is_prose1 = |p: &TurnPhase| {
         matches!(
             p,
             TurnPhase::RoundText { text } if text == "checking the data first"
         )
-    });
+    };
+    let is_think2 = |p: &TurnPhase| matches!(p, TurnPhase::Thinking { attempt: 2 });
+    let is_fold2 = |p: &TurnPhase| {
+        matches!(
+            p,
+            TurnPhase::ThinkingCompleted { text, .. } if text == "narrowing the filter"
+        )
+    };
+    let is_prose2 = |p: &TurnPhase| {
+        matches!(
+            p,
+            TurnPhase::RoundText { text } if text == "refining the query"
+        )
+    };
+    let i_think1 = phase_index(&phases, "Thinking{1}", is_think1);
+    let i_fold1 = phase_index(&phases, "ThinkingCompleted{1}", is_fold1);
+    let i_prose1 = phase_index(&phases, "RoundText{1}", is_prose1);
     let i_start1 = phase_index(&phases, "Started{tc_1}", |p| {
         matches!(
             p,
             TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"
         )
     });
-    let i_think2 = phase_index(&phases, "Thinking{2}", |p| {
-        matches!(p, TurnPhase::Thinking { attempt: 2 })
-    });
-    let i_fold2 = phase_index(&phases, "ThinkingCompleted{2}", |p| {
-        matches!(
-            p,
-            TurnPhase::ThinkingCompleted { text, .. } if text == "narrowing the filter"
-        )
-    });
-    let i_prose2 = phase_index(&phases, "RoundText{2}", |p| {
-        matches!(
-            p,
-            TurnPhase::RoundText { text } if text == "refining the query"
-        )
-    });
+    let i_think2 = phase_index(&phases, "Thinking{2}", is_think2);
+    let i_fold2 = phase_index(&phases, "ThinkingCompleted{2}", is_fold2);
+    let i_prose2 = phase_index(&phases, "RoundText{2}", is_prose2);
     let i_start2 = phase_index(&phases, "Started{tc_2}", |p| {
         matches!(
             p,
@@ -290,36 +310,12 @@ fn round_prose_and_thinking_group_per_round() {
     // occurrence, so a double-fired prelude or a repeated fold would hide.
     // Each round's ThinkingCompleted and RoundText fire exactly once, and
     // the pre-prompt round 1 marker is a single event.
-    phase_count(&phases, "Thinking{1}", |p| {
-        matches!(p, TurnPhase::Thinking { attempt: 1 })
-    });
-    phase_count(&phases, "ThinkingCompleted{1}", |p| {
-        matches!(
-            p,
-            TurnPhase::ThinkingCompleted { text, .. } if text == "weighing schema options"
-        )
-    });
-    phase_count(&phases, "RoundText{1}", |p| {
-        matches!(
-            p,
-            TurnPhase::RoundText { text } if text == "checking the data first"
-        )
-    });
-    phase_count(&phases, "Thinking{2}", |p| {
-        matches!(p, TurnPhase::Thinking { attempt: 2 })
-    });
-    phase_count(&phases, "ThinkingCompleted{2}", |p| {
-        matches!(
-            p,
-            TurnPhase::ThinkingCompleted { text, .. } if text == "narrowing the filter"
-        )
-    });
-    phase_count(&phases, "RoundText{2}", |p| {
-        matches!(
-            p,
-            TurnPhase::RoundText { text } if text == "refining the query"
-        )
-    });
+    phase_count(&phases, "Thinking{1}", is_think1);
+    phase_count(&phases, "ThinkingCompleted{1}", is_fold1);
+    phase_count(&phases, "RoundText{1}", is_prose1);
+    phase_count(&phases, "Thinking{2}", is_think2);
+    phase_count(&phases, "ThinkingCompleted{2}", is_fold2);
+    phase_count(&phases, "RoundText{2}", is_prose2);
 }
 
 /// One round, two calls in one batch (issue #630): the round's prelude --
@@ -1061,16 +1057,7 @@ fn acp_turn_returns_discovered_runtime_catalog() {
         .discovered_runtime
         .as_ref()
         .expect("ACP turns carry a discovered catalog");
-    assert_eq!(
-        d.models,
-        vec!["fake-opus".to_string(), "fake-sonnet".to_string()]
-    );
-    assert_eq!(d.current_model.as_deref(), Some("fake-opus"));
-    assert_eq!(
-        d.thought_levels,
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
-    assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+    assert_fake_catalog(d);
     // Issue #529: the engine stamps the producing adapter onto the catalog
     // (provenance for the frontend's stale-cache detection across a runtime
     // switch). The fake fixture runs under the gemini-cli spec.
@@ -1095,16 +1082,7 @@ fn raw_schema_session_new_shape_parses_and_discovers() {
         .discovered_runtime
         .as_ref()
         .expect("the raw shape carries the same discovery catalog");
-    assert_eq!(
-        d.models,
-        vec!["fake-opus".to_string(), "fake-sonnet".to_string()]
-    );
-    assert_eq!(d.current_model.as_deref(), Some("fake-opus"));
-    assert_eq!(
-        d.thought_levels,
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
-    assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+    assert_fake_catalog(d);
 }
 
 /// A handshake failure exits with `discovered_runtime: None` (discovery only

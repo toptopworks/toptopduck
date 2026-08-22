@@ -378,7 +378,7 @@ pub enum ToolCallStatus {
     /// update) -- the deliberate half of issue #630's leniency choice: the
     /// parse drop is answerable in the engine's session/update warn log,
     /// which covers every strict-parse miss in one place.
-    #[serde(other)]
+    #[serde(other, skip_serializing)]
     Unknown,
 }
 
@@ -827,6 +827,13 @@ mod tests {
     /// forward-compatibility stance `ToolKind` already carries on this
     /// side (the crate keeps a closed status with no fallback variant).
     /// The row simply never reaches a terminal status through this value.
+    /// `Unknown` is an inbound degrade only: serializing it is an error,
+    /// not a silent illegal wire value.
+    #[test]
+    fn unknown_status_is_not_serializable() {
+        assert!(serde_json::to_string(&ToolCallStatus::Unknown).is_err());
+    }
+
     #[test]
     fn unknown_tool_call_status_degrades_to_unknown() {
         let raw = serde_json::json!({
