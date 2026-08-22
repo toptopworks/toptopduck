@@ -1923,19 +1923,30 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// follow-up if the E2E shows a prefix.
 fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
     acp.promotions = gateway.promotions;
-    // ADR-0103 (issue #608): flatten the ACP rounds' calls, drop the
-    // gateway-routed names (the gateway's own rows are the truth for those),
-    // then rebuild ONE merged round -- the gateway's rows followed by the
-    // CLI's own built-ins, the same order the pre-grouping flat merge kept.
-    // Per-runtime round grouping is the adapter-specific follow-up slices.
-    let mut calls = gateway.trace;
-    calls.extend(
-        acp.trace
-            .into_iter()
-            .flat_map(|round| round.calls)
-            .filter(|entry| builtin_metadata(&entry.name).is_none()),
-    );
-    acp.trace = LoopRound::flat_wrap(calls);
+    // ADR-0103 (issues #608 + #611): the gateway's flat rows form a LEADING
+    // round (it serves tools; it offers no prose/thinking slots), and the
+    // CLI's per-round grouping survives the merge -- each ACP round keeps
+    // its thinking + prose + calls. The gateway-routed names drop from the
+    // ACP rounds' calls (the gateway's own rows are the truth for those),
+    // and a round the dedup leaves empty (no calls, no prose, no thinking)
+    // drops -- empty stays empty. Row order keeps the gateway's rows first,
+    // the same order the pre-grouping flat merge kept.
+    let mut rounds = Vec::new();
+    if !gateway.trace.is_empty() {
+        rounds.push(LoopRound::flat(gateway.trace));
+    }
+    for mut round in std::mem::take(&mut acp.trace) {
+        round
+            .calls
+            .retain(|entry| builtin_metadata(&entry.name).is_none());
+        let emptied = round.calls.is_empty()
+            && round.thinking.is_none()
+            && round.text.is_none();
+        if !emptied {
+            rounds.push(round);
+        }
+    }
+    acp.trace = rounds;
     acp
 }
 
@@ -2048,6 +2059,7 @@ mod tests {
     // chain.
     use super::{clamp_settle, merge_outcomes};
     use crate::approval::OperationKind;
+    use crate::model::ThinkingTrace;
     use crate::runtime::gateway::server::GatewayOutcome;
     use crate::session::agent_loop::{LoopOutcome, LoopRound, Termination, TraceEntry};
 
@@ -2185,16 +2197,60 @@ mod tests {
     }
 
     /// A mixed turn: the gateway routed an `explore` (builtin) AND the CLI
-    /// ran its own `bash` (non-builtin). The merged trace carries both in
-    /// gateway-first order.
+    /// ran its own `bash` (non-builtin). The gateway's rows lead as their
+    /// own round and the CLI's rounds follow -- gateway-first order, round
+    /// grouping intact.
     #[test]
     fn merge_outcomes_gateway_builtin_plus_acp_non_builtin() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
         let merged = merge_outcomes(gateway, acp);
-        assert_eq!(merged.trace.len(), 1, "the merge folds into one round");
+        assert_eq!(merged.trace.len(), 2, "gateway leading round + CLI round");
         assert_eq!(merged.trace[0].calls[0].name, "explore");
-        assert_eq!(merged.trace[0].calls[1].name, "bash");
+        assert_eq!(merged.trace[1].calls[0].name, "bash");
+    }
+
+    /// The CLI's per-round grouping survives the merge (issue #611): each
+    /// ACP round keeps its thinking + prose + calls, the gateway's rows form
+    /// the leading round, and a round the gateway dedup leaves empty drops.
+    #[test]
+    fn merge_outcomes_preserves_acp_round_prose_and_thinking() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
+        let acp = LoopOutcome {
+            termination: Termination::Text("acp reply".into()),
+            promotions: Vec::new(),
+            round_trips: 1,
+            discovered_runtime: None,
+            trace: vec![
+                LoopRound {
+                    thinking: Some(ThinkingTrace {
+                        duration_ms: 120,
+                        text: "weighing".into(),
+                    }),
+                    text: Some("checking first".into()),
+                    calls: vec![trace_entry("a1", "bash", true)],
+                },
+                // Dedup empties this round (its only call is a gateway
+                // builtin duplicate) -- it must drop, not ghost.
+                LoopRound {
+                    thinking: None,
+                    text: None,
+                    calls: vec![trace_entry("a2", "explore", true)],
+                },
+            ],
+        };
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 2, "leading round + the one ACP round");
+        let leading = &merged.trace[0];
+        assert!(leading.thinking.is_none() && leading.text.is_none());
+        assert_eq!(leading.calls[0].tool_use_id, "g1");
+        let r1 = &merged.trace[1];
+        assert_eq!(
+            r1.thinking.as_ref().expect("round thinking survives").text,
+            "weighing"
+        );
+        assert_eq!(r1.text.as_deref(), Some("checking first"));
+        assert_eq!(r1.calls[0].tool_use_id, "a1");
     }
 
     /// Termination + round_trips are ACP-only (the gateway serves tools, it
