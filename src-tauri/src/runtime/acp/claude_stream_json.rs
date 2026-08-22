@@ -476,10 +476,10 @@ pub(super) fn run_claude_stream_json(
                 // stdout closed before a `result` frame. With accumulated
                 // text, treat it as the answer (honest degrade); without, a
                 // transient failure.
-                termination = Some(text_or_transient(
-                    &pump.tracker,
-                    "claude closed stdout without a result frame",
-                ));
+                termination = Some(
+                    pump.tracker
+                        .text_or_transient("claude closed stdout without a result frame"),
+                );
                 break;
             }
         }
@@ -500,7 +500,8 @@ pub(super) fn run_claude_stream_json(
     super::process::kill_and_reap(&mut child);
 
     let term = termination.unwrap_or_else(|| {
-        text_or_transient(&pump.tracker, "claude turn ended without a result frame")
+        pump.tracker
+            .text_or_transient("claude turn ended without a result frame")
     });
 
     // ADR-0097 Decision 5: `system{init}` reports the model this turn
@@ -683,19 +684,6 @@ impl ClaudePump {
         for row in std::mem::take(&mut self.pending) {
             self.finalize_row(row, true, on_phase);
         }
-    }
-}
-
-/// The turn's closing shape when no `result` frame settled it: the pump's
-/// terminal text (trailing prose, else the accumulated stream text) becomes
-/// the answer (the honest degrade); without any, a transient failure
-/// carrying `message`. Shared by the EOF path and the post-pump fallback.
-fn text_or_transient(tracker: &RoundTracker, message: &str) -> Termination {
-    let text = tracker.terminal_text();
-    if !text.is_empty() {
-        Termination::Text(text)
-    } else {
-        Termination::Transient(message.to_string())
     }
 }
 
@@ -1253,7 +1241,7 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert_eq!(
-            text_or_transient(&pump.tracker, "claude closed stdout"),
+            pump.tracker.text_or_transient("claude closed stdout"),
             Termination::Text("final answer".into())
         );
         // The mid-batch prose fired live as its round's RoundText.

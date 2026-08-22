@@ -414,10 +414,10 @@ pub(super) fn run_codex_event_stream(
                 // terminal text, treat it as success (codex may close stdout
                 // after the final message without an explicit turn.completed);
                 // otherwise it is a transient failure.
-                termination = Some(text_or_transient(
-                    &pump.tracker,
-                    "codex closed stdout without a terminal event",
-                ));
+                termination = Some(
+                    pump.tracker
+                        .text_or_transient("codex closed stdout without a terminal event"),
+                );
                 break;
             }
         }
@@ -433,7 +433,8 @@ pub(super) fn run_codex_event_stream(
     let term = termination.unwrap_or_else(|| {
         // No terminal event and no error — the pump exited without resolution.
         // Treat the terminal text as the answer if any; otherwise transient.
-        text_or_transient(&pump.tracker, "codex turn ended without a terminal event")
+        pump.tracker
+            .text_or_transient("codex turn ended without a terminal event")
     });
 
     outcome(term, pump.tracker.settle_rounds(), 1)
@@ -474,7 +475,13 @@ impl JsonPump {
             CodexEvent::TurnCompleted => Some(Termination::Text(self.tracker.terminal_text())),
             CodexEvent::TurnFailed { error } => Some(Termination::Transient(error)),
             CodexEvent::AgentMessage { text } => {
-                self.tracker.push_prose(&text, on_phase);
+                // Empty text (a wire event with no message/content payload)
+                // would open a ghost round and fire a phantom Thinking
+                // pointer; skip it (the claude path guards the same case
+                // before push_prose).
+                if !text.is_empty() {
+                    self.tracker.push_prose(&text, on_phase);
+                }
                 None
             }
             CodexEvent::CommandExecution { call_id, command } => {
@@ -504,21 +511,6 @@ impl JsonPump {
             }
             CodexEvent::Other => None,
         }
-    }
-}
-
-/// The turn's closing shape when no terminal event settled it: the tracker's
-/// terminal text (the trailing prose stretch, else the full accumulation --
-/// models that answer alongside the final batch) becomes the answer (the
-/// honest degrade); without any, a transient failure carrying `message`.
-/// Shared by the stdout-EOF path and the post-pump fallback (the claude
-/// path's helper of the same name).
-fn text_or_transient(tracker: &RoundTracker, message: &str) -> Termination {
-    let text = tracker.terminal_text();
-    if !text.is_empty() {
-        Termination::Text(text)
-    } else {
-        Termination::Transient(message.to_string())
     }
 }
 
@@ -978,9 +970,51 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert_eq!(pump.tracker.terminal_text(), "final answer");
+        assert_eq!(
+            pump.tracker.text_or_transient("eof"),
+            Termination::Text("final answer".into())
+        );
         assert!(phases
             .iter()
             .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking")));
+    }
+
+    /// An empty agent_message (no message/content payload on the wire)
+    /// opens no round and fires no phantom round pointer -- the pre-#613
+    /// no-op shape (the claude path guards the same case before
+    /// push_prose).
+    #[test]
+    fn empty_agent_message_opens_no_round() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: String::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: String::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = pump.tracker.settle_rounds();
+        assert_eq!(rounds.len(), 1, "the empty prose opens no extra round");
+        assert!(rounds[0].text.is_none());
+        assert!(
+            !phases
+                .iter()
+                .any(|p| matches!(p, TurnPhase::Thinking { .. })),
+            "no phantom round pointer"
+        );
     }
 
     /// stdout closing right after a batch (no trailing stretch) falls back
@@ -1005,7 +1039,7 @@ mod tests {
         );
         assert_eq!(pump.tracker.terminal_text(), "checking");
         assert_eq!(
-            text_or_transient(&pump.tracker, "eof"),
+            pump.tracker.text_or_transient("eof"),
             Termination::Text("checking".into())
         );
         let rounds = pump.tracker.settle_rounds();

@@ -935,6 +935,19 @@ impl RoundTracker {
         }
     }
 
+    /// The turn's closing shape when no terminal event settled it: the
+    /// terminal text becomes the answer (the honest degrade); without any,
+    /// a transient failure carrying `message`. Shared by the EOF and
+    /// post-pump fallback exits of the stream paths.
+    pub(super) fn text_or_transient(&self, message: &str) -> Termination {
+        let text = self.terminal_text();
+        if !text.is_empty() {
+            Termination::Text(text)
+        } else {
+            Termination::Transient(message.to_string())
+        }
+    }
+
     /// Project the accumulated rounds onto the loop's trace form. The
     /// trailing call-less round is not a round of its own: its prose rode
     /// the terminal text, so only a frozen thinking block keeps it -- a bare

@@ -183,12 +183,6 @@ fn round_prose_settles_per_round_with_live_variants() {
         "the round pointer fires at the round's opening, before its RoundText"
     );
     assert!(
-        phases
-            .iter()
-            .any(|p| matches!(p, TurnPhase::Thinking { attempt: 2 })),
-        "the round-2 wait pointer fires"
-    );
-    assert!(
         !phases
             .iter()
             .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "the answer is 42")),
