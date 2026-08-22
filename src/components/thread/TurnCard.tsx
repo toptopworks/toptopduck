@@ -16,6 +16,7 @@ import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
 import { FoldToggle } from "./FoldToggle";
 import { RoundProse } from "./RoundProse";
+import { StreamHeader } from "./StreamHeader";
 import { ThinkingFold } from "./ThinkingFold";
 import { TurnActiveChip } from "./TurnActiveChip";
 import { UserBubble } from "./UserBubble";
@@ -115,7 +116,7 @@ export function TurnCard({
             ahead of the rounds, so the reading order is question -> annotation
             -> execution -> reply. */}
         {(mentionedDataset || drifted.length > 0) && (
-          <div className="stream-header flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          <StreamHeader>
             {mentionedDataset && <TurnActiveChip dataset={mentionedDataset} />}
             {drifted.map((name) => (
               <span
@@ -130,7 +131,7 @@ export function TurnCard({
                 />
               </span>
             ))}
-          </div>
+          </StreamHeader>
         )}
         {record.trace.map((round, i) => (
           // The trace is append-only within a turn and never reordered, so the

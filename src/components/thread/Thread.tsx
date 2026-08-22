@@ -126,6 +126,10 @@ export function Thread({
     useState<ReadonlySet<ThinkingTrace>>(NO_EXPANDED_FOLDS);
   const handleLiveThinkingExpanded = useCallback((thinking: ThinkingTrace, expanded: boolean) => {
     setLiveThinkingExpanded((prev) => {
+      // Idempotent no-op: the fold reports on every posture/identity change
+      // (mount included), so a report matching the current state must return
+      // the SAME set (Object.is bailout) instead of churning a fresh one.
+      if (prev.has(thinking) === expanded) return prev;
       const next = new Set(prev);
       if (expanded) next.add(thinking);
       else next.delete(thinking);

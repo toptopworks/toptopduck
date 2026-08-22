@@ -6,10 +6,13 @@
 // state lives here, with two optional seams for the live -> settled
 // continuity (issue #620) -- `initialExpanded` seeds a fold mounted already
 // open (the settled round picks up the live fold the user left open), and
-// `onExpandedChange` reports toggles so the caller can snapshot the posture
-// across the swap. Fold state is session-ephemeral either way.
+// `onExpandedChange` reports the current posture whenever it or the block's
+// identity changes, so the caller can snapshot the posture across the swap
+// (a same-round repeated completion swaps the thinking reference -- the
+// report must follow the NEW one). Fold state is session-ephemeral either
+// way.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FormattedMessage } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import type { ThinkingTrace } from "../../types/thread";
@@ -24,11 +27,15 @@ export function ThinkingFold({
   onExpandedChange?: (expanded: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(initialExpanded);
-  const toggle = () => {
-    const next = !expanded;
-    setExpanded(next);
-    onExpandedChange?.(next);
-  };
+  // Report on every posture/identity change (idempotent -- the collector
+  // no-ops a report that matches its current state): a toggle flips
+  // `expanded`; a last-wins completion swaps `thinking` while the fold the
+  // user opened stays open, and the report must carry the new reference or
+  // the settle seed keys on a block the settled round no longer holds.
+  useEffect(() => {
+    onExpandedChange?.(expanded);
+  }, [expanded, thinking, onExpandedChange]);
+  const toggle = () => setExpanded((e) => !e);
   return (
     <>
       <FoldToggle hookClass="thinking-toggle" expanded={expanded} onToggle={toggle}>

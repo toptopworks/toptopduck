@@ -219,7 +219,10 @@ describe("useTurnFlow", () => {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
       expect(result.current.liveTurn?.rounds[0]?.text).toBe("先看一眼数据。");
-      expect(result.current.liveTurn?.rounds[1]?.rows[0]?.step).toBe(2);
+      // Round membership is positional (the row carries no step): the call
+      // lands inside round 2's block, round 1 keeps no row.
+      expect(result.current.liveTurn?.rounds[0]?.rows).toEqual([]);
+      expect(result.current.liveTurn?.rounds[1]?.rows[0]?.key).toBe("call-0");
     });
 
     it("keeps the round's thinking on the live state (issues #608/#610)", async () => {
@@ -301,7 +304,6 @@ describe("useTurnFlow", () => {
           rows: [
             {
               key: "call-0",
-              step: 1,
               name: "explore",
               server: null,
               operationKind: "read",
@@ -449,12 +451,10 @@ describe("useTurnFlow", () => {
       expect(result.current.liveTurn?.rounds).toHaveLength(2);
       expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
         key: "call-0",
-        step: 1,
         success: true,
       });
       expect(result.current.liveTurn?.rounds[1]?.rows[0]).toMatchObject({
         key: "req-1",
-        step: 2,
         approval: { requestId: "req-1", response: null },
         success: null,
       });
@@ -672,6 +672,22 @@ describe("useTurnFlow", () => {
       expect(liveRoundsToTrace([{ text: "先看一眼数据。", rows: [] }])).toEqual([
         { text: "先看一眼数据。", calls: [] },
       ]);
+    });
+
+    it("buildLiveRounds turns padded null slots into absent members (a round that emitted none)", () => {
+      // withRoundSlot pads skipped rounds with null (round 1 emitted nothing
+      // when round 2's event lands first); the derivation converts the
+      // padding to absent members -- round 1's round carries neither prose
+      // nor thinking, not null placeholders.
+      const rounds = buildLiveRounds(
+        { step: 2, calls: [], roundTexts: [null, "第二轮散文。"], roundThinkings: [null, null] },
+        [],
+      );
+      expect(rounds).toHaveLength(2);
+      expect(rounds[0]?.text).toBeUndefined();
+      expect(rounds[0]?.thinking).toBeUndefined();
+      expect(rounds[0]?.rows).toEqual([]);
+      expect(rounds[1]?.text).toBe("第二轮散文。");
     });
 
     it("liveRoundsToTrace attaches per-round thinking to its round (issue #610)", () => {

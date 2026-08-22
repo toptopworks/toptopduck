@@ -81,6 +81,11 @@ export interface LiveTraceRow {
   resultExcerpt: string;
 }
 
+/** One live round's row: a `LiveTraceRow` with the round membership stripped
+ *  -- the round array's position IS the round (index = round number - 1), so
+ *  no second step fact can drift from the grouping that placed the row. */
+export type LiveRoundRow = Omit<LiveTraceRow, "step">;
+
 /** One live round as the single grouping source derives it (issue #620): the
  *  round's thinking block + connective prose (the per-round slots) plus the
  *  round's merged rows. The array index IS the 1-based round number minus
@@ -90,7 +95,7 @@ export interface LiveTraceRow {
 export interface LiveRound {
   thinking?: ThinkingTrace;
   text?: string;
-  rows: LiveTraceRow[];
+  rows: LiveRoundRow[];
 }
 
 /** The in-flight turn the rail renders as a chat exchange (ADR-0078/0103,
@@ -211,7 +216,22 @@ export function buildLiveRounds(
   return Array.from({ length: lastStep }, (_, i) => ({
     thinking: live.roundThinkings[i] ?? undefined,
     text: live.roundTexts[i] ?? undefined,
-    rows: rows.filter((r) => r.step === i + 1),
+    // The step is deliberately NOT carried onto the row: once grouped, the
+    // array position is the round, and a stray step on the row would be a
+    // second, unvalidated round fact.
+    rows: rows
+      .filter((r) => r.step === i + 1)
+      .map((r) => ({
+        key: r.key,
+        name: r.name,
+        server: r.server,
+        operationKind: r.operationKind,
+        summary: r.summary,
+        approval: r.approval,
+        running: r.running,
+        success: r.success,
+        resultExcerpt: r.resultExcerpt,
+      })),
   }));
 }
 

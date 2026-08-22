@@ -4,7 +4,7 @@ import { Check, Loader2, ShieldQuestion, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TraceList } from "./TraceList";
-import type { LiveTraceRow } from "../../session/useTurnFlow";
+import type { LiveRoundRow } from "../../session/useTurnFlow";
 import type { OperationKind, ApprovalResponse } from "../../types/approval";
 import type { TraceEntry } from "../../types/thread";
 
@@ -172,7 +172,7 @@ export function LiveRow({
   row,
   onRespond,
 }: {
-  row: LiveTraceRow;
+  row: LiveRoundRow;
   onRespond: (requestId: string, response: ApprovalResponse) => void;
 }) {
   const intl = useIntl();

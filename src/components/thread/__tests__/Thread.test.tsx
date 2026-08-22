@@ -5,7 +5,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
 import { Thread } from "../Thread";
-import type { LiveRound, LiveTraceRow, LiveTurn } from "../../../session/useTurnFlow";
+import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { SkillEntry } from "../../../types/skills";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
@@ -1285,10 +1285,9 @@ describe("Thread", () => {
     // locale-rendered text.
     const ASKED_AT = 1_700_000_000_000;
 
-    function liveRow(over: Partial<LiveTraceRow> = {}): LiveTraceRow {
+    function liveRow(over: Partial<LiveRoundRow> = {}): LiveRoundRow {
       return {
         key: "call-0",
-        step: 1,
         name: "explore",
         server: null,
         operationKind: "read",
@@ -1358,7 +1357,6 @@ describe("Thread", () => {
             rows: [
               liveRow({
                 key: "call-1",
-                step: 2,
                 name: "materialize",
                 operationKind: "write",
                 summary: "SELECT 2",
@@ -1415,7 +1413,6 @@ describe("Thread", () => {
             rows: [
               liveRow({
                 key: "call-2",
-                step: 3,
                 name: "materialize",
                 operationKind: "write",
                 summary: "SELECT 3",
@@ -1592,6 +1589,31 @@ describe("Thread", () => {
       );
       expect(screen.getByText(/→员工表/)).toBeInTheDocument();
       expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(1);
+    });
+
+    it("renders no chip and no stream header on the live side when the question names no dataset (issue #620)", () => {
+      // The live chip read's negative branch (the mirror of the settled
+      // side's no-chip case): a question naming no dataset renders neither
+      // the chip nor the header row, so the settle swap removes no element
+      // either.
+      const labels = [{ reference_name: "people", display_name: "员工表" }];
+      const liveTurn: LiveTurn = {
+        question: "随便看看",
+        askedAt: ASKED_AT,
+        step: null,
+        rounds: [],
+      };
+      const { container } = renderThread(
+        <Thread
+          entries={[]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          datasetLabels={labels}
+          liveTurn={liveTurn}
+        />,
+      );
+      expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(0);
+      expect(container.querySelector(".live-turn-exchange .stream-header")).toBeNull();
     });
 
     it("keeps the live-opened thinking fold + prose across the settle swap (issue #620)", () => {
@@ -1804,7 +1826,7 @@ describe("Thread", () => {
                 step: 2,
                 rounds: [
                   liveRound({ thinking: openedThinking }),
-                  liveRound({ rows: [liveRow({ key: "call-0", step: 2 })] }),
+                  liveRound({ rows: [liveRow({ key: "call-0" })] }),
                 ],
               }}
             />
@@ -1828,6 +1850,67 @@ describe("Thread", () => {
       expect(toggles).toHaveLength(1);
       expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
       expect(screen.getByText("推理一")).toBeInTheDocument();
+    });
+
+    it("keeps the fold open across the settle when a same-round repeated completion swaps the thinking block (issue #620)", () => {
+      // Last-wins: a repeated ThinkingCompleted for the same round overwrites
+      // the slot with a NEW block. The live fold keeps its open posture (the
+      // round block is position-keyed), and the fold re-reports against the
+      // replacement reference so the settle seed still hits -- without the
+      // re-report the collector holds the dead reference and the fold snaps
+      // shut at the swap.
+      const firstThinking = { duration_ms: 900, text: "推理一版" };
+      const replacedThinking = { duration_ms: 900, text: "推理二版" };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 1,
+        rounds: [liveRound({ thinking: firstThinking })],
+      };
+      const record: TurnRecord = {
+        question: "q",
+        outcome: { kind: "Cancelled" },
+        trace: [{ thinking: replacedThinking, calls: [] }],
+        provenance: { skills: [] },
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      expect(screen.getByText("推理一版")).toBeInTheDocument();
+      // The same round completes again (last-wins): the slot now carries the
+      // replacement block and the fold stays open on it.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={{ ...liveTurn, rounds: [liveRound({ thinking: replacedThinking })] }}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const liveToggle = document.querySelector(".live-turn-exchange .thinking-toggle");
+      expect(liveToggle?.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("推理二版")).toBeInTheDocument();
+      // The settle swap: the seed keys on the replacement reference.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(record)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
+      expect(settledToggle?.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("推理二版")).toBeInTheDocument();
     });
 
     it("keeps a fold the user re-closed before the settle collapsed (issue #620)", () => {

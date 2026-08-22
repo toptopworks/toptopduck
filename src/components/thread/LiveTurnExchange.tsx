@@ -19,12 +19,14 @@
 // on the settled side via the onThinkingExpandedChange report (issue #620).
 
 import { FormattedMessage } from "react-intl";
+import { useCallback } from "react";
 import { Loader2 } from "lucide-react";
 import { UserBubble } from "./UserBubble";
 import { LiveRow } from "./TraceView";
 import { RoundProse } from "./RoundProse";
 import { TraceList } from "./TraceList";
 import { ThinkingFold } from "./ThinkingFold";
+import { StreamHeader } from "./StreamHeader";
 import { TurnActiveChip } from "./TurnActiveChip";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse } from "../../types/approval";
@@ -45,8 +47,14 @@ function LiveRoundBlock({
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
 }) {
   // Destructured const so the aliased guard narrows the binding itself; the
-  // fold's toggle report passes the reference (the settle seed's key).
+  // fold's posture report passes the reference (the settle seed's key).
   const { thinking, text, rows } = round;
+  // useCallback so the fold's report effect does not re-fire on an unrelated
+  // parent re-render (the identity must only change with the thinking block).
+  const reportThinkingExpanded = useCallback(
+    (expanded: boolean) => thinking !== undefined && onThinkingExpandedChange(thinking, expanded),
+    [thinking, onThinkingExpandedChange],
+  );
   const hasThinking = thinking !== undefined;
   if (!hasThinking && text === undefined && rows.length === 0) {
     return null;
@@ -54,10 +62,7 @@ function LiveRoundBlock({
   return (
     <div className="trace-round">
       {hasThinking && (
-        <ThinkingFold
-          thinking={thinking}
-          onExpandedChange={(expanded) => onThinkingExpandedChange(thinking, expanded)}
-        />
+        <ThinkingFold thinking={thinking} onExpandedChange={reportThinkingExpanded} />
       )}
       {text !== undefined && <RoundProse text={text} />}
       {rows.length > 0 && (
@@ -105,9 +110,9 @@ export function LiveTurnExchange({
           // The stream header opens with the dataset chip only -- the settled
           // header may add skill-drift badges at settle, but the chip itself
           // must already be here so the swap adds no element (issue #620).
-          <div className="stream-header flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          <StreamHeader>
             <TurnActiveChip dataset={mentionedDataset} />
-          </div>
+          </StreamHeader>
         )}
         {liveTurn.rounds.map((round, i) => (
           // The rounds array is append-only within a turn (round i is round
