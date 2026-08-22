@@ -35,7 +35,7 @@
 //! [`StreamFormat`]: super::adapter::StreamFormat
 //! [`ClaudeStreamJson`]: super::adapter::StreamFormat::ClaudeStreamJson
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -395,29 +395,9 @@ pub(super) fn run_claude_stream_json(
 
     let stdout = child.stdout.take().expect("piped stdout");
 
-    // Reader thread: blocking read_line on its own thread so the pump can
-    // check cancel / step-cap between reads (mirrors the codex pattern).
-    let (tx, rx) = mpsc::channel::<String>();
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    let trimmed = line.trim_end_matches(['\n', '\r']);
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if tx.send(trimmed.to_string()).is_err() {
-                        break; // pump gone
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    // Reader thread (shared, line-capped -- issue #639): forwards each
+    // non-empty line so the pump can check cancel / step-cap between reads.
+    let rx = super::process::spawn_line_reader(stdout);
 
     // Signal Thinking once before the frame pump (one headless invocation =
     // one turn = one thinking wait).

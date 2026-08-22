@@ -8,9 +8,15 @@
 //! reap the child under the same bounded deadline: extracting the spawn
 //! shapes, the constants, and the kill-reap logic here prevents drift -- a
 //! change to either lands in one place, not several.
+//!
+//! The stdout reader thread is shared here too (issues #629/#639): every
+//! adapter surface's reader -- the NDJSON channel and both native stream
+//! drivers -- is the same line-capped loop, so it lives once.
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Pump poll interval: how long the pump blocks on the stdout-reader channel
@@ -98,5 +104,206 @@ pub(super) fn kill_and_reap(child: &mut Child) {
             Ok(Some(_)) | Err(_) => return,
             Ok(None) => std::thread::sleep(KILL_REAP_POLL),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stdout reader thread (shared, line-capped)
+// ---------------------------------------------------------------------------
+
+/// The byte cap on a single incoming line (issue #629): an untrusted
+/// child cannot grow the reader's buffer past this; an over-long line is
+/// drained and dropped with a warning (the connection stays up -- the next
+/// line still arrives).
+const LINE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// One step of [`read_line_bounded`].
+#[derive(Debug)]
+enum LineRead {
+    /// A complete line (including a final unterminated line at EOF).
+    Line(String),
+    /// The line exceeded the cap; its remainder was drained.
+    Overlong,
+    /// The stream reached EOF.
+    Eof,
+}
+
+/// Read one line, buffering at most `max` bytes of it (issue #629). Within
+/// one call the over-long drain pass reuses `raw`; the accepted line is
+/// moved out of it for the UTF-8 conversion.
+fn read_line_bounded(
+    reader: &mut impl BufRead,
+    max: usize,
+    raw: &mut Vec<u8>,
+) -> std::io::Result<LineRead> {
+    raw.clear();
+    // `take(max)` bounds the read: the buffer never holds more than `max`
+    // bytes, so a hostile single line cannot grow it without limit.
+    let n = Read::take(&mut *reader, max as u64).read_until(b'\n', raw)?;
+    if n == 0 {
+        return Ok(LineRead::Eof);
+    }
+    // The budget was exhausted without a newline: the line is over-long.
+    // (A short line without a newline is the final line before EOF -- a
+    // normal line. A final line of exactly `max` bytes, newline excluded,
+    // is indistinguishable from an over-long one here and drops with the
+    // same warn -- the safe side of the ambiguity.) Drain the remainder in
+    // bounded chunks, then drop.
+    if n == max && !raw.ends_with(b"\n") {
+        loop {
+            raw.clear();
+            let n = Read::take(&mut *reader, max as u64).read_until(b'\n', raw)?;
+            // EOF mid-line, or the over-long line's own newline: done.
+            if n == 0 || raw.ends_with(b"\n") {
+                return Ok(LineRead::Overlong);
+            }
+        }
+    }
+    let line = String::from_utf8(std::mem::take(raw)).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })?;
+    Ok(LineRead::Line(line))
+}
+
+/// Spawn the stdout reader thread every adapter surface shares (issues
+/// #540/#639): owns `stdout` and forwards each non-empty trimmed line over
+/// the returned channel; EOF or a read error drops the sender so the pump's
+/// recv returns Disconnected -- every caller treats that as the child dying.
+/// Reading on its own thread is what lets the pump check cancel / step-cap
+/// between reads, and each line is capped at [`LINE_MAX_BYTES`]: an
+/// over-long line is drained and dropped with a warning, never silently.
+pub(super) fn spawn_line_reader(stdout: ChildStdout) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut raw: Vec<u8> = Vec::new();
+        loop {
+            match read_line_bounded(&mut reader, LINE_MAX_BYTES, &mut raw) {
+                Ok(LineRead::Line(line)) => {
+                    let trimmed = line.trim_end_matches(['\n', '\r']);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if tx.send(trimmed.to_string()).is_err() {
+                        break; // pump gone
+                    }
+                }
+                Ok(LineRead::Overlong) => {
+                    log::warn!(
+                        target: "toptopduck::acp",
+                        "line exceeded {LINE_MAX_BYTES} bytes, dropped"
+                    );
+                }
+                Ok(LineRead::Eof) => break, // EOF
+                // Unrecoverable (the channel closes either way); log it so
+                // "why did the turn end / why EOF" has an answer (issue
+                // #543's answerable-in-logs stance). Warn, not debug:
+                // release builds filter at Info, and the packaged app's
+                // absent console is exactly where this diagnosis matters.
+                Err(e) => {
+                    log::warn!(target: "toptopduck::acp", "stdout reader failed: {e}");
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Normal lines come through verbatim (newline included; the reader loop
+    /// trims), and EOF reports as such.
+    #[test]
+    fn reads_normal_lines() {
+        let mut cur = Cursor::new(b"one\ntwo\n".to_vec());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Line(l)) if l == "one\n"
+        ));
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Line(l)) if l == "two\n"
+        ));
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Eof)
+        ));
+    }
+
+    /// Issue #629: an over-long line is drained + dropped, and the reader
+    /// keeps going -- the NEXT line still arrives (the connection survives).
+    #[test]
+    fn drops_overlong_line_and_keeps_reading() {
+        let long = "x".repeat(100);
+        let mut cur = Cursor::new(format!("{long}\nok\n").into_bytes());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Overlong)
+        ));
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Line(l)) if l == "ok\n"
+        ));
+    }
+
+    /// A final line without a trailing newline is EOF-terminated, not
+    /// over-long -- it comes through like any other line.
+    #[test]
+    fn keeps_final_unterminated_line() {
+        let mut cur = Cursor::new(b"tail".to_vec());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Line(l)) if l == "tail"
+        ));
+    }
+
+    /// A line longer than the cap that never gets a newline (EOF mid-line)
+    /// is still over-long, and the stream is then at EOF.
+    #[test]
+    fn overlong_to_eof_is_overlong_then_eof() {
+        let long = "x".repeat(100);
+        let mut cur = Cursor::new(long.into_bytes());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Overlong)
+        ));
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Eof)
+        ));
+    }
+
+    /// A line exactly at the cap that IS newline-terminated is a normal
+    /// line -- the cap excludes the boundary false positive.
+    #[test]
+    fn cap_sized_terminated_line_is_normal() {
+        let exact = "x".repeat(63); // 63 x's + '\n' = 64 = the cap
+        let mut cur = Cursor::new(format!("{exact}\n").into_bytes());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64, &mut raw),
+            Ok(LineRead::Line(l)) if l == format!("{exact}\n")
+        ));
+    }
+
+    /// Invalid UTF-8 keeps the old `read_line` failure shape: an io error,
+    /// so the reader loop's break-on-error path is unchanged.
+    #[test]
+    fn invalid_utf8_is_an_io_error() {
+        let mut cur = Cursor::new(vec![0xff, 0xfe, b'\n']);
+        let mut raw = Vec::new();
+        let err = read_line_bounded(&mut cur, 64, &mut raw).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }
