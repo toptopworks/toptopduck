@@ -66,6 +66,18 @@ use crate::session::agent_loop::{
 /// agent cannot hang the turn past the watchdog.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// Byte cap on each prose / thinking accumulation track (issue #629): a
+/// runaway agent streaming file contents into `agent_message_chunk` /
+/// `agent_thought_chunk` cannot grow the buffers without limit within the
+/// cancel grace window. The first crossing latches the visible truncation
+/// marker; later chunks are dropped.
+const ACCUM_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The visible truncation marker appended when an accumulation track hits
+/// [`ACCUM_MAX_BYTES`] -- the `TRACE_EXCERPT_MAX` truncation-visible
+/// philosophy (never silently drop).
+const TRUNCATION_MARKER: &str = "\n[truncated]";
+
 /// One ACP turn input. The wiring seam assembles `prompt_blocks` from the
 /// same window the built-in loop reads; `mcp_servers` is the bridge
 /// descriptor.
@@ -682,6 +694,14 @@ impl AcpIo {
                         }
                         // Notification -- route session/update; ignore others.
                         if method == "session/update" {
+                            // After cancel, content updates are no longer
+                            // needed (issue #629): stop folding them so the
+                            // grace window cannot keep growing the
+                            // buffers. Only the prompt response (and the
+                            // permission handshake) still matters.
+                            if pump.cancel_sent_at.is_some() {
+                                continue;
+                            }
                             match serde_json::from_value::<SessionUpdateParams>(
                                 v.get("params").cloned().unwrap_or(Value::Null),
                             ) {
@@ -844,8 +864,9 @@ impl RoundTracker {
     /// accumulation (the terminal-text fallback) and the current round's
     /// prose slot.
     pub(super) fn push_prose(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
-        self.text.push_str(text);
-        self.open_round(on_phase).text.push_str(text);
+        push_capped(&mut self.text, text);
+        let round = self.open_round(on_phase);
+        push_capped(&mut round.text, text);
     }
 
     /// A thought chunk grows the current round's thinking stream; the first
@@ -858,7 +879,7 @@ impl RoundTracker {
         if round.thinking_since.is_none() {
             round.thinking_since = Some(Instant::now());
         }
-        round.thinking_buf.push_str(text);
+        push_capped(&mut round.thinking_buf, text);
     }
 
     /// The round a tool call belongs to (the current one) and its batch
@@ -1071,8 +1092,9 @@ impl Pump {
                     let mut row = self.pending.remove(i);
                     if let Some(t) = title.as_deref() {
                         if row.summary.is_empty() {
-                            row.summary = truncate_trace_excerpt(t, TRACE_EXCERPT_MAX);
-                            row.name = t.to_string();
+                            let (name, summary) = bounded_name_summary(t);
+                            row.name = name;
+                            row.summary = summary;
                         }
                     }
                     if !content.is_empty() {
@@ -1147,12 +1169,30 @@ impl Pump {
 /// Derive a (name, summary) pair from a tool call's title + id. The title is
 /// the human-readable description; we use it for both (the bridge's real tool
 /// name arrives MCP-side in slice 9b).
+/// Append `text` to `buf` under the accumulation byte cap (issue #629): the
+/// first crossing latches the visible truncation marker; appends afterwards
+/// are dropped.
+fn push_capped(buf: &mut String, text: &str) {
+    if buf.len() >= ACCUM_MAX_BYTES {
+        return;
+    }
+    buf.push_str(text);
+    if buf.len() >= ACCUM_MAX_BYTES {
+        buf.push_str(TRUNCATION_MARKER);
+    }
+}
+
+/// The bounded (name, summary) pair for a tool title: both ride the IPC
+/// event + the persisted recipe, so both carry the trace-excerpt cap (the
+/// name joins the summary's bounding in issue #629).
+fn bounded_name_summary(title: &str) -> (String, String) {
+    let bounded = truncate_trace_excerpt(title, TRACE_EXCERPT_MAX);
+    (bounded.clone(), bounded)
+}
+
 fn name_summary(title: Option<&str>, id: &str) -> (String, String) {
     match title.filter(|t| !t.is_empty()) {
-        Some(t) => {
-            let summary = truncate_trace_excerpt(t, TRACE_EXCERPT_MAX);
-            (t.to_string(), summary)
-        }
+        Some(t) => bounded_name_summary(t),
         None => (id.to_string(), id.to_string()),
     }
 }
@@ -1314,13 +1354,80 @@ mod tests {
         assert_eq!(name, "tc_3");
     }
 
-    /// A very long title is bounded to the trace-excerpt cap.
+    /// A very long title is bounded to the trace-excerpt cap -- BOTH the
+    /// summary and the name (the name rides the IPC + persisted recipe, so
+    /// an unbounded title grows them too, issue #629).
     #[test]
     fn name_summary_bounds_a_long_title() {
         let long = "x".repeat(TRACE_EXCERPT_MAX + 50);
-        let (_, summary) = name_summary(Some(&long), "tc");
+        let (name, summary) = name_summary(Some(&long), "tc");
         assert!(summary.chars().count() <= TRACE_EXCERPT_MAX);
         assert!(summary.ends_with('…'), "bounded summary ends with ellipsis");
+        assert!(name.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(name.ends_with('…'), "bounded name ends with ellipsis");
+    }
+
+    /// Issue #629: a prose track hitting the byte cap latches the visible
+    /// truncation marker and drops later chunks -- both the full-turn and
+    /// the per-round accumulation stay bounded, and the turn is not
+    /// disturbed.
+    #[test]
+    fn prose_accumulation_caps_with_a_visible_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES), &mut on_phase);
+        tracker.push_prose("post-cap chunk", &mut on_phase);
+        assert_eq!(
+            tracker.text.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len(),
+            "the full-turn track stops at the cap + marker"
+        );
+        assert!(tracker.text.ends_with(TRUNCATION_MARKER));
+        let round = &tracker.rounds[0];
+        assert_eq!(
+            round.text.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len(),
+            "the round track stops at the cap + marker"
+        );
+        assert!(round.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Issue #629: the thinking buffer hits the same byte cap, and the
+    /// marker survives the freeze so the truncation stays visible in the
+    /// trace's thinking block.
+    #[test]
+    fn thought_accumulation_caps_with_a_visible_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_thought(&"x".repeat(ACCUM_MAX_BYTES), &mut on_phase);
+        tracker.push_thought("post-cap chunk", &mut on_phase);
+        let round = &tracker.rounds[0];
+        assert_eq!(
+            round.thinking_buf.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len()
+        );
+        assert!(round.thinking_buf.ends_with(TRUNCATION_MARKER));
+        // The end-of-turn freeze + settle the run loop performs.
+        tracker.freeze_trailing_thinking(&mut on_phase);
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert!(
+            thinking.text.ends_with(TRUNCATION_MARKER),
+            "the marker survives the freeze"
+        );
+    }
+
+    /// Issue #629 regression pin: accumulation below the cap is untouched --
+    /// no marker, no dropped chunk.
+    #[test]
+    fn sub_cap_accumulation_stays_verbatim() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose("short", &mut on_phase);
+        tracker.push_thought("brief", &mut on_phase);
+        assert_eq!(tracker.text, "short");
+        assert_eq!(tracker.rounds[0].text, "short");
+        assert_eq!(tracker.rounds[0].thinking_buf, "brief");
     }
 
     /// Issue #628: a Text termination's trailing prose rode the terminal
