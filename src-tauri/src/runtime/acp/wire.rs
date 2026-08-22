@@ -573,15 +573,29 @@ impl ToolCallContent {
     /// its absence).
     pub fn collect_text(items: &[Self], max: usize) -> String {
         let mut buf = String::new();
-        for item in items {
+        // A CHAR budget, not a byte budget: `truncate_trace_excerpt` caps by
+        // chars, so the early exit must too -- a byte check would cut
+        // multi-byte content (CJK) at ~1/3 of the visible cap and diverge
+        // from the full concatenate-then-truncate result (issue #629). The
+        // budget is max + 1: the final truncate only emits its ellipsis when
+        // the buffer EXCEEDS max, so the exit must land one char past.
+        let mut remaining = max + 1;
+        'outer: for item in items {
             if let Self::Content {
                 content: ContentBlock::Text { text },
             } = item
             {
-                if !buf.is_empty() {
+                if !buf.is_empty() && remaining > 0 {
                     buf.push('\n');
+                    remaining -= 1;
                 }
-                buf.push_str(text);
+                for ch in text.chars() {
+                    if remaining == 0 {
+                        break 'outer;
+                    }
+                    buf.push(ch);
+                    remaining -= 1;
+                }
             }
         }
         crate::session::agent_loop::truncate_trace_excerpt(&buf, max)
@@ -601,6 +615,53 @@ mod tests {
         let v: Value = serde_json::to_value(&block).unwrap();
         assert_eq!(v["type"], "text");
         assert_eq!(v["text"], "hello");
+    }
+
+    /// collect_text stops concatenating once the excerpt budget is surely
+    /// exceeded (issue #629): blocks after the crossing cannot change the
+    /// result, so the bounded form returns exactly what a full
+    /// concatenate-then-truncate would produce.
+    #[test]
+    fn collect_text_exits_early_past_the_budget() {
+        let items = vec![
+            ToolCallContent::Content {
+                content: ContentBlock::text("a".repeat(200)),
+            },
+            ToolCallContent::Content {
+                content: ContentBlock::text("b".repeat(500)),
+            },
+            ToolCallContent::Content {
+                content: ContentBlock::text("tail"),
+            },
+        ];
+        let got = ToolCallContent::collect_text(&items, 240);
+        // 200 a's + newline + 38 b's + ellipsis = the truncated head of the
+        // full concatenation; the third block never reaches the result.
+        let want = format!("{}\n{}…", "a".repeat(200), "b".repeat(38));
+        assert_eq!(got, want);
+        assert!(got.chars().count() <= 240);
+    }
+
+    /// The early exit counts CHARS, not bytes (issue #629 review): CJK
+    /// blocks are 3 bytes per char, and a byte check would cut the excerpt
+    /// at ~1/3 of the visible cap and diverge from the full
+    /// concatenate-then-truncate result.
+    #[test]
+    fn collect_text_char_budget_not_bytes() {
+        let items = vec![
+            ToolCallContent::Content {
+                content: ContentBlock::text("中".repeat(200)),
+            },
+            ToolCallContent::Content {
+                content: ContentBlock::text("文".repeat(100)),
+            },
+        ];
+        let got = ToolCallContent::collect_text(&items, 240);
+        // 200 中 + newline + 38 文 + ellipsis = the char-truncated head of
+        // the 301-char concatenation.
+        let want = format!("{}\n{}…", "中".repeat(200), "文".repeat(38));
+        assert_eq!(got, want);
+        assert_eq!(got.chars().count(), 240);
     }
 
     /// The session/update payload discriminates on `sessionUpdate` (the

@@ -592,6 +592,43 @@ fn play_scenario(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
+        // Issue #629: after session/cancel, the pump stops folding content
+        // updates. Stream prose until the cancel notification arrives, then
+        // emit a post-cancel marker (which must NOT reach the trace) and
+        // respond Cancelled (cooperative).
+        "cancel_ignore_updates" => loop {
+            if *cancel_seen {
+                notify(out, agent_message("after-cancel"));
+                respond_prompt(out, &id, StopReason::Cancelled);
+                return;
+            }
+            notify(out, agent_message("before-cancel"));
+            if drain_once(reader, cancel_seen) {
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        },
+        // Issue #629: stream more prose than the engine's accumulation cap;
+        // the turn still completes normally and the answer carries the
+        // visible truncation marker. Three 3-MiB chunks clear the 8-MiB cap
+        // while each line stays under the 4-MiB line cap (JSON envelope
+        // included).
+        "accum_cap" => {
+            let chunk = "x".repeat(3 * 1024 * 1024);
+            for _ in 0..3 {
+                notify(out, agent_message(&chunk));
+            }
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // Issue #629 review: a line past the ndjson line cap is dropped and
+        // the connection stays up -- the prose on the NEXT line still
+        // arrives. The first line is raw non-JSON garbage (it is dropped
+        // before any parse, so no envelope is needed).
+        "line_cap_overlong" => {
+            let _ = writeln!(out, "{}", "g".repeat(5 * 1024 * 1024));
+            notify(out, agent_message("still alive"));
+            respond_prompt(out, &id, StopReason::Success);
+        }
         "crash" => {
             // Close stdout mid-turn (the engine sees reader EOF -> Eof path).
             notify(out, agent_message("about to crash"));

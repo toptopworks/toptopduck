@@ -732,6 +732,94 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     assert_not_via_watchdog("user_cancel_mid_prose", start);
 }
 
+/// Issue #629: once session/cancel is out, the pump stops folding content
+/// updates -- prose streamed AFTER the cancel never reaches the trace (the
+/// pre-cancel prose stays, per the #628 keep-partial contract).
+#[test]
+fn cancel_stops_folding_content_updates() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = engine(Arc::clone(&cancel), 24);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "cancel_ignore_updates");
+    // Same spawn-after-env pattern as the peer cancel tests: begin_turn
+    // clears a stale `requested`, so the cancel fires after the turn starts.
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    let texts: Vec<&str> = outcome
+        .trace
+        .iter()
+        .filter_map(|r| r.text.as_deref())
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("before-cancel")),
+        "the pre-cancel prose survives: {texts:?}"
+    );
+    assert!(
+        texts.iter().all(|t| !t.contains("after-cancel")),
+        "the post-cancel prose is not folded: {texts:?}"
+    );
+    // Same window pin as the peers: the cancel resolves in ~200ms, so a
+    // watchdog fallback (10s) turns into a loud failure.
+    assert_not_via_watchdog("cancel_stops_folding", start);
+}
+
+/// Issue #629: prose past the accumulation cap does not fail the turn -- it
+/// completes normally, and the answer carries the visible truncation marker
+/// (the cap never reaches the control flow).
+#[test]
+fn accum_cap_keeps_the_turn_completing_with_a_marker() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = engine(Arc::clone(&cancel), 24);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "accum_cap");
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
+    let text = match &outcome.termination {
+        Termination::Text(t) => t,
+        other => panic!("the capped turn completes with text: {other:?}"),
+    };
+    assert!(
+        text.ends_with("[truncated]"),
+        "the answer carries the visible truncation marker (tail: {})",
+        &text[text.len().saturating_sub(40)..]
+    );
+}
+
+/// Issue #629 review: a line past the ndjson line cap is dropped and the
+/// connection stays up -- the turn still completes with the prose that rode
+/// the line after the dropped one (the drop never kills the reader loop).
+#[test]
+fn overlong_line_is_dropped_and_reading_continues() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = engine(Arc::clone(&cancel), 24);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "line_cap_overlong");
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
+    let text = match &outcome.termination {
+        Termination::Text(t) => t,
+        other => panic!("the turn completes with text: {other:?}"),
+    };
+    assert!(
+        text.contains("still alive"),
+        "the line after the dropped one arrives: {text:?}"
+    );
+}
+
 /// The engine takes the adapter spec as data and never names the CLI: the same
 /// engine drives any spec. Smoke: a text_reply run completes (the spec's argv
 /// is what the spawn used; the fixture tolerates the `--experimental-acp` arg).
