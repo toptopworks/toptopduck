@@ -297,10 +297,22 @@ fn run_turn(scenario: &str) {
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         "cancel_with_prose" => {
-            // Stream assistant text, then hold stdout open (no result
-            // frame) so the pump's loop-top cancel check ends the turn
-            // mid-answer (issue #628's cancel-mid-prose shape).
+            // A native tool call, then assistant text, then hold stdout
+            // open (no result frame) so the pump's loop-top cancel check
+            // ends the turn mid-answer (issue #628's cancel-mid-prose
+            // shape). The call's ToolCallStarted phase is the cancel
+            // test's latch: once it fires, the prose frame (emitted in
+            // the same flush, behind the call) is already in the pipe, so
+            // a cancel that waits out one recv cycle lands strictly after
+            // the prose folds.
             emit(&mut out, &system_init());
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]}
+                }),
+            );
             emit(
                 &mut out,
                 &serde_json::json!({

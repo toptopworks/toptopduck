@@ -283,24 +283,47 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     let approval = ApprovalState::new();
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("CODEX_FAKE_SCENARIO", "cancel_with_prose");
-    // Same spawn-after-env pattern as the sibling harnesses: begin_turn
-    // clears a stale `requested`, so the cancel must fire after the turn
-    // starts. The 200ms delay covers spawn + the stdin write.
+    // Deterministic ordering instead of a wall-clock bet (the
+    // claude_stream_json.rs peer's rationale): the scenario emits a
+    // command execution and the text event in one flush, so once the
+    // call's ToolCallStarted phase fires the prose is already in the pipe
+    // behind it. The cancel thread latches on that phase, waits out one
+    // recv cycle (the pump polls at 50ms), and only then requests -- the
+    // cancel cannot overtake the prose fold. The latch also subsumes the
+    // spawn-after-env rule: phases only flow once the turn is live, and
+    // begin_turn has already cleared any stale `requested`. The fixture's
+    // 30s hold fails loudly if the latch never fires.
+    let phases: Arc<std::sync::Mutex<Vec<TurnPhase>>> = Arc::default();
+    let latch = Arc::clone(&phases);
     let cancel_for_thread = Arc::clone(&cancel);
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        while !latch
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. }))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
         cancel_for_thread.request();
     });
     let start = std::time::Instant::now();
-    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.lock().unwrap().push(p);
+    });
     assert!(
         matches!(outcome.termination, Termination::Cancelled),
         "user cancel -> Cancelled: {:?}",
         outcome.termination
     );
-    assert_eq!(outcome.trace.len(), 1, "the tail round survives");
+    // Round 1 carries the settled call row (command events carry no
+    // failure status, so it lands successful); the call-less tail round
+    // keeps the prose the cancel interrupted.
+    assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1, "{:?}", outcome.trace);
     assert_eq!(
-        outcome.trace[0].text.as_deref(),
+        outcome.trace[1].text.as_deref(),
         Some("partial answer"),
         "the streamed-so-far prose survives the cancel"
     );
