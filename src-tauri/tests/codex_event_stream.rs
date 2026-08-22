@@ -50,20 +50,23 @@ fn input() -> AcpTurnInput {
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Drive one scenario through the JSON event stream engine, returning the
-/// outcome + the phase stream. Uses a short wall-clock (5s) so a stuck
-/// scenario fails the test fast.
-fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>) {
+/// outcome, the phase stream, and the turn's elapsed time (measured AFTER the
+/// scenario lock is held -- the harness runs tests in parallel, and the
+/// lock-queue wait is not the engine's latency; the step-cap pin relies on
+/// this). Uses a short wall-clock (5s) so a stuck scenario fails fast.
+fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(codex(), cancel)
         .with_caps(step_cap, Some(std::time::Duration::from_secs(5)));
     let approval = ApprovalState::new();
     let mut phases = Vec::new();
     let _g = ENV_LOCK.lock().unwrap();
+    let start = std::time::Instant::now();
     std::env::set_var("CODEX_FAKE_SCENARIO", scenario);
     let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
         phases.push(p)
     });
-    (outcome, phases)
+    (outcome, phases, start.elapsed())
 }
 
 /// A no-op approval sink (unused by the JSON event stream path but required by
@@ -87,7 +90,7 @@ impl ApprovalSink for NoopSink {
 /// text; no tool calls -> empty trace.
 #[test]
 fn text_reply_yields_text_outcome_and_no_trace() {
-    let (outcome, phases) = run("text_reply", 24);
+    let (outcome, phases, _) = run("text_reply", 24);
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
@@ -106,16 +109,12 @@ fn text_reply_yields_text_outcome_and_no_trace() {
 /// Completed pair.
 #[test]
 fn tool_call_yields_trace_with_one_successful_entry() {
-    let (outcome, phases) = run("tool_call", 24);
+    let (outcome, phases, _) = run("tool_call", 24);
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "found 3 rows"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert_eq!(
-        outcome.trace.len(),
-        1,
-        "one round wrapping the flat trajectory"
-    );
+    assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
     let entry = &outcome.trace[0].calls[0];
     assert!(entry.success, "the call completed");
     assert_eq!(entry.name, "explore SELECT 1");
@@ -127,10 +126,80 @@ fn tool_call_yields_trace_with_one_successful_entry() {
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
 }
 
+/// A multi-round trajectory (issue #613): each batch round settles with its
+/// own prose + call, the trailing prose rides the terminal text, and the live
+/// channel fires each round's RoundText BEFORE its batch's ToolCallStarted
+/// plus the round-2 Thinking pointer. No thinking data source exists on this
+/// path, so no ThinkingCompleted phase ever fires.
+#[test]
+fn round_prose_settles_per_round_with_live_variants() {
+    let (outcome, phases, _) = run("round_prose", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 2, "two batch rounds settle");
+    assert_eq!(outcome.trace[0].text.as_deref(), Some("checking the table"));
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(
+        outcome.trace[1].text.as_deref(),
+        Some("verifying the count")
+    );
+    assert_eq!(outcome.trace[1].calls.len(), 1);
+    assert!(
+        outcome.trace.iter().all(|r| r.thinking.is_none()),
+        "no thinking data source -- honest degrade"
+    );
+    // Each round's RoundText precedes its batch's ToolCallStarted (the
+    // ADR-0103 live order the frontend's round grouping relies on).
+    let round1_text = phases
+        .iter()
+        .position(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking the table"))
+        .expect("round-1 RoundText fired");
+    let round1_call = phases
+        .iter()
+        .position(
+            |p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"),
+        )
+        .expect("round-1 ToolCallStarted fired");
+    assert!(round1_text < round1_call);
+    let round2_text = phases
+        .iter()
+        .position(|p| matches!(p, TurnPhase::RoundText { text } if text == "verifying the count"))
+        .expect("round-2 RoundText fired");
+    let round2_call = phases
+        .iter()
+        .position(
+            |p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT COUNT(*)"),
+        )
+        .expect("round-2 ToolCallStarted fired");
+    assert!(round2_text < round2_call);
+    let round2_pointer = phases
+        .iter()
+        .position(|p| matches!(p, TurnPhase::Thinking { attempt: 2 }))
+        .expect("the round-2 wait pointer fired");
+    assert!(
+        round2_pointer < round2_text,
+        "the round pointer fires at the round's opening, before its RoundText"
+    );
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "the answer is 42")),
+        "the trailing prose rides the terminal text"
+    );
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ThinkingCompleted { .. })),
+        "no thinking data source -- no ThinkingCompleted"
+    );
+}
+
 /// A turn_failed event maps to Transient with the error message.
 #[test]
 fn turn_failed_maps_to_transient() {
-    let (outcome, _) = run("turn_failed", 24);
+    let (outcome, _, _) = run("turn_failed", 24);
     match &outcome.termination {
         Termination::Transient(msg) => {
             assert!(msg.contains("rate limited"), "carries the error: {msg}");
@@ -143,18 +212,18 @@ fn turn_failed_maps_to_transient() {
 /// the engine's step cap -> StepCap termination.
 #[test]
 fn step_cap_overflow_yields_step_cap_termination() {
-    let start = std::time::Instant::now();
-    let (outcome, _) = run("step_cap_overflow", 3);
+    let (outcome, _, elapsed) = run("step_cap_overflow", 3);
     match outcome.termination {
         Termination::StepCap(n) => assert_eq!(n, 3),
         other => panic!("expected StepCap, got {other:?}"),
     }
     // The step-cap path resolves in well under 1s; a watchdog fallback takes
     // 5s. Pin it so a regression does not silently fall back to the watchdog.
+    // The elapsed time comes from `run` (measured after the scenario lock) so
+    // parallel tests' lock-queue wait does not pollute the pin.
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(3),
-        "took {:?} -- resolved via the wall-clock watchdog, not the step-cap path",
-        start.elapsed()
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- resolved via the wall-clock watchdog, not the step-cap path"
     );
 }
 
@@ -164,7 +233,7 @@ fn step_cap_overflow_yields_step_cap_termination() {
 /// turn_completed), so the outcome is Text — not Transient.
 #[test]
 fn crash_with_partial_text_treats_as_success() {
-    let (outcome, _) = run("crash", 24);
+    let (outcome, _, _) = run("crash", 24);
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "about to crash"),
         other => panic!("expected Text (Disconnected fallback), got {other:?}"),
@@ -176,7 +245,7 @@ fn crash_with_partial_text_treats_as_success() {
 /// may close stdout after the final message without an explicit terminal event).
 #[test]
 fn disconnected_with_text_treats_as_success() {
-    let (outcome, _) = run("disconnected_with_text", 24);
+    let (outcome, _, _) = run("disconnected_with_text", 24);
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "partial reply"),
         other => panic!("expected Text, got {other:?}"),
@@ -186,7 +255,7 @@ fn disconnected_with_text_treats_as_success() {
 /// Stdout closes with no events and no text -> Transient (no recovery possible).
 #[test]
 fn empty_stdout_lands_as_transient() {
-    let (outcome, _) = run("empty_stdout", 24);
+    let (outcome, _, _) = run("empty_stdout", 24);
     match outcome.termination {
         Termination::Transient(msg) => {
             assert!(msg.contains("without a terminal event"), "got: {msg}");

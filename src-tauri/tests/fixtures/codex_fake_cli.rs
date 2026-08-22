@@ -74,6 +74,31 @@ fn main() {
                 &serde_json::json!({"type": "turn_failed", "error": "rate limited"}),
             );
         }
+        "round_prose" => {
+            // Two batch rounds, each with its own prose, then the trailing
+            // answer stretch (issue #613's per-round grouping scenario).
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "agent_message", "message": "checking the table"}),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "command_execution", "call_id": "call_1", "command": "explore SELECT 1"}),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "agent_message", "message": "verifying the count"}),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "command_execution", "call_id": "call_2", "command": "explore SELECT COUNT(*)"}),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "agent_message", "message": "the answer is 42"}),
+            );
+            emit(&mut out, &serde_json::json!({"type": "turn_completed"}));
+        }
         "step_cap_overflow" => {
             // Emit more command_execution events than the step cap (tests pass
             // cap=3); the engine kills the child once tool_call_count exceeds
