@@ -172,6 +172,25 @@ components:
     backgroundColor: "{colors.card-dark}"
     textColor: "{colors.ink-dark}"
 
+  # --- Chat exchange (ADR-0103; full recipe under Components > Conversation
+  # Surfaces) ---
+  chat-exchange:
+    user-bubble:
+      backgroundColor: "{colors.secondary}"
+      textColor: "{colors.secondary-foreground}"
+      typography: "{typography.body-md}"
+      rounded: "{rounded.lg}"
+      maxWidth: 85%
+    round-prose:
+      textColor: "{colors.ink}"
+      typography: "{typography.body-md}"
+    thinking-fold:
+      textColor: "{colors.muted-foreground}"
+      typography: "{typography.caption}"
+      expandedBlock:
+        backgroundColor: "{colors.muted}"
+        rounded: "{rounded.md}"
+
   # --- Cards ---
   card:
     backgroundColor: "{colors.card}"
@@ -488,6 +507,8 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 ### Conversation Surfaces
 
 **`conversation-rail` / `conversation-rail-dark`** — The thread rail at 320px width. Background `{colors.card}` / `{colors.card-dark}` (one brightness step above canvas). Houses turn cards, source lifecycle markers, and the question bar at the bottom. Uses `{typography.body-sm}` as default text size.
+
+**`chat-exchange`** — One turn rendered as a chat exchange (ADR-0103), live and settled in the same form: the in-flight streaming exchange and the settled card share every piece of chrome, so the settle swap moves nothing. The user side is the **user bubble** — right-aligned, `{colors.secondary}` surface + `{colors.secondary-foreground}` text, type `{typography.body-md}`, rounded `{rounded.lg}` with the top-right corner stepped to `{rounded.sm}` (the bubble points at the user's side), max-width 85% of the rail, padding 8px × 12px, full-text wrap; the ask stamp and the copy affordance ride a hover-revealed `{typography.caption}` `{colors.muted-foreground}` meta row under the bubble. The assistant side is a left-aligned stream of, in reading order: the stream header (the active-dataset chip — `badge-primary` — plus skill-drift notes, `{typography.caption}` `{colors.muted-foreground}`); per-round blocks — a thinking fold (chevron toggle + honest duration label in `{typography.caption}` `{colors.muted-foreground}`; the expanded block is a `{colors.muted}`-surfaced, `{rounded.md}` 8px-padded, height-capped scroll box), always-expanded connective prose (`{typography.body-md}` `{colors.ink}`), and the round's call rows on a 1px `{colors.border}` left rail (tool name + operation badge + a truncated monospace summary); then the outcome body and the closing meta row (outcome glyph + hover-revealed reply copy + settle stamp). Live rounds stream their rows unfurled on the shared rail chrome; settled rounds fold them behind the same chrome by default (the long-rail posture, ADR-0078).
 
 ### Cards & Containers
 

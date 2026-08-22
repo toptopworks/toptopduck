@@ -2,23 +2,36 @@
 // one decimal), collapsed by default; the raw reasoning text is layer-4
 // content and passes through untranslated in a muted, scroll-capped block.
 // Extracted from the settled TraceRoundBlock (issue #609) so the live round
-// block (issue #610) renders the identical fold -- the live -> settled swap
-// keeps it in place, fold state being session-ephemeral either way.
+// block (issue #610) renders the identical fold. Uncontrolled: the fold
+// state lives here, with two optional seams for the live -> settled
+// continuity (issue #620) -- `initialExpanded` seeds a fold mounted already
+// open (the settled round picks up the live fold the user left open), and
+// `onExpandedChange` reports toggles so the caller can snapshot the posture
+// across the swap. Fold state is session-ephemeral either way.
 
 import { useState } from "react";
 import { FormattedMessage } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import type { ThinkingTrace } from "../../types/thread";
 
-export function ThinkingFold({ thinking }: { thinking: ThinkingTrace }) {
-  const [expanded, setExpanded] = useState(false);
+export function ThinkingFold({
+  thinking,
+  initialExpanded = false,
+  onExpandedChange,
+}: {
+  thinking: ThinkingTrace;
+  initialExpanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+}) {
+  const [expanded, setExpanded] = useState(initialExpanded);
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    onExpandedChange?.(next);
+  };
   return (
     <>
-      <FoldToggle
-        hookClass="thinking-toggle"
-        expanded={expanded}
-        onToggle={() => setExpanded((v) => !v)}
-      >
+      <FoldToggle hookClass="thinking-toggle" expanded={expanded} onToggle={toggle}>
         <FormattedMessage
           id="thread.trace.thinkingToggle"
           defaultMessage="Thinking · {sec}s"

@@ -4,10 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IntlShape } from "react-intl";
 import { sessionKeys } from "../queryKeys";
 import {
+  buildLiveRounds,
+  liveRoundsToTrace,
   mergeLiveTrace,
-  rowsToRounds,
   useTurnFlow,
   type LiveCall,
+  type LiveRound,
+  type LiveState,
   type LiveTraceRow,
 } from "../useTurnFlow";
 import { materialized, textual } from "./fixtures";
@@ -150,7 +153,7 @@ describe("useTurnFlow", () => {
     });
 
     it("clears phase to null even when askQuestion rejects (IPC failure)", async () => {
-      const { deps, setError } = setup();
+      const { deps, setError, queryClient } = setup();
       vi.mocked(askQuestion).mockRejectedValue(new Error("ipc down"));
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
@@ -168,6 +171,11 @@ describe("useTurnFlow", () => {
       // Error + loading teardown on the failure path: setError(null) clears the
       // prior error at the ask start, then the reject sets a fresh AppError.
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
+      // Issue #620: the failure path tears the exchange down too -- no live
+      // residue, and no optimistic record lands on the thread cache.
+      expect(result.current.liveTurn).toBeNull();
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread ?? []).toHaveLength(0);
     });
   });
 
@@ -187,9 +195,7 @@ describe("useTurnFlow", () => {
       expect(result.current.liveTurn).toMatchObject({
         question: "多少行？",
         step: null,
-        rows: [],
-        roundTexts: [],
-        roundThinkings: [],
+        rounds: [],
       });
       expect(typeof result.current.liveTurn?.askedAt).toBe("number");
     });
@@ -206,15 +212,15 @@ describe("useTurnFlow", () => {
       });
       emitProgress(SID, { Thinking: { attempt: 1 } });
       emitProgress(SID, { RoundText: { text: "先看一眼数据。" } });
-      expect(result.current.liveTurn?.roundTexts).toEqual(["先看一眼数据。"]);
+      expect(result.current.liveTurn?.rounds).toEqual([{ text: "先看一眼数据。", rows: [] }]);
       // A second round without prose pads nothing; a started call there
       // lands on round 2.
       emitProgress(SID, { Thinking: { attempt: 2 } });
       emitProgress(SID, {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
-      expect(result.current.liveTurn?.roundTexts).toEqual(["先看一眼数据。"]);
-      expect(result.current.liveTurn?.rows[0]?.step).toBe(2);
+      expect(result.current.liveTurn?.rounds[0]?.text).toBe("先看一眼数据。");
+      expect(result.current.liveTurn?.rounds[1]?.rows[0]?.step).toBe(2);
     });
 
     it("keeps the round's thinking on the live state (issues #608/#610)", async () => {
@@ -231,30 +237,29 @@ describe("useTurnFlow", () => {
       emitProgress(SID, {
         ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
       });
-      // Observable as the latest phase; the rows stay untouched.
+      // Observable as the latest phase; the round carries the block, no row.
       expect(result.current.phase).toEqual({
         ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
       });
-      expect(result.current.liveTurn?.rows).toEqual([]);
-      // The thinking block rides the live state per round (#610): the live
-      // fold renders from it, so it must not be dropped.
-      expect(result.current.liveTurn?.roundThinkings).toEqual([
-        { duration_ms: 900, text: "reasoning" },
+      // The thinking block rides the rounds (#610): the live fold renders
+      // from it, so it must not be dropped.
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
       ]);
       // A second round's thinking slots by round, padding the round that
       // emitted none.
       emitProgress(SID, { Thinking: { attempt: 2 } });
       emitProgress(SID, { ThinkingCompleted: { duration_ms: 1200, text: "more" } });
-      expect(result.current.liveTurn?.roundThinkings).toEqual([
-        { duration_ms: 900, text: "reasoning" },
-        { duration_ms: 1200, text: "more" },
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
+        { thinking: { duration_ms: 1200, text: "more" }, rows: [] },
       ]);
       // A repeated completion for the same round is last-wins (the slot is
       // overwritten in place, the array does not grow).
       emitProgress(SID, { ThinkingCompleted: { duration_ms: 1500, text: "revised" } });
-      expect(result.current.liveTurn?.roundThinkings).toEqual([
-        { duration_ms: 900, text: "reasoning" },
-        { duration_ms: 1500, text: "revised" },
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
+        { thinking: { duration_ms: 1500, text: "revised" }, rows: [] },
       ]);
     });
 
@@ -272,8 +277,8 @@ describe("useTurnFlow", () => {
         void result.current.handleAsk("q");
       });
       emitProgress(SID, { ThinkingCompleted: { duration_ms: 300, text: "early" } });
-      expect(result.current.liveTurn?.roundThinkings).toEqual([
-        { duration_ms: 300, text: "early" },
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 300, text: "early" }, rows: [] },
       ]);
     });
 
@@ -292,18 +297,22 @@ describe("useTurnFlow", () => {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
       expect(result.current.liveTurn?.step).toBe(1);
-      expect(result.current.liveTurn?.rows).toEqual([
+      expect(result.current.liveTurn?.rounds).toEqual([
         {
-          key: "call-0",
-          step: 1,
-          name: "explore",
-          server: null,
-          operationKind: "read",
-          summary: "SELECT 1",
-          approval: null,
-          running: true,
-          success: null,
-          resultExcerpt: "",
+          rows: [
+            {
+              key: "call-0",
+              step: 1,
+              name: "explore",
+              server: null,
+              operationKind: "read",
+              summary: "SELECT 1",
+              approval: null,
+              running: true,
+              success: null,
+              resultExcerpt: "",
+            },
+          ],
         },
       ]);
       emitProgress(SID, {
@@ -315,7 +324,7 @@ describe("useTurnFlow", () => {
           result_excerpt: "",
         },
       });
-      const row = result.current.liveTurn?.rows[0];
+      const row = result.current.liveTurn?.rounds[0]?.rows[0];
       expect(row).toMatchObject({ running: false, success: true, key: "call-0" });
     });
 
@@ -338,8 +347,8 @@ describe("useTurnFlow", () => {
           result_excerpt: "denied by approval gateway",
         },
       });
-      expect(result.current.liveTurn?.rows).toHaveLength(1);
-      expect(result.current.liveTurn?.rows[0]).toMatchObject({
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
         name: "fetch",
         success: false,
         resultExcerpt: "denied by approval gateway",
@@ -368,8 +377,12 @@ describe("useTurnFlow", () => {
         void result.current.handleAsk("q");
       });
       // Pending card row before any tool event (the gate suspends dispatch).
-      expect(result.current.liveTurn?.rows).toEqual([
-        expect.objectContaining({ key: "req-1", approval: { requestId: "req-1", response: "allow_once" }, success: null }),
+      expect(result.current.liveTurn?.rounds).toEqual([
+        {
+          rows: [
+            expect.objectContaining({ key: "req-1", approval: { requestId: "req-1", response: "allow_once" }, success: null }),
+          ],
+        },
       ]);
       emitProgress(SID, {
         ToolCallStarted: { name: "fetch", operation_kind: "network", summary: "GET /x" },
@@ -384,8 +397,8 @@ describe("useTurnFlow", () => {
         },
       });
       // ONE merged row: the card's identity + the call's outcome.
-      expect(result.current.liveTurn?.rows).toHaveLength(1);
-      expect(result.current.liveTurn?.rows[0]).toMatchObject({
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
         key: "req-1",
         server: "acme",
         approval: { requestId: "req-1", response: "allow_once" },
@@ -432,10 +445,15 @@ describe("useTurnFlow", () => {
         },
       });
       emitProgress(SID, { Thinking: { attempt: 2 } });
-      // Round 1's completed call, then the round-2 gate wait trailing in place.
-      expect(result.current.liveTurn?.rows).toHaveLength(2);
-      expect(result.current.liveTurn?.rows[0]).toMatchObject({ key: "call-0", step: 1, success: true });
-      expect(result.current.liveTurn?.rows[1]).toMatchObject({
+      // Round 1's completed call, then the round-2 gate wait trailing in
+      // place -- each inside its own round's block.
+      expect(result.current.liveTurn?.rounds).toHaveLength(2);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        key: "call-0",
+        step: 1,
+        success: true,
+      });
+      expect(result.current.liveTurn?.rounds[1]?.rows[0]).toMatchObject({
         key: "req-1",
         step: 2,
         approval: { requestId: "req-1", response: null },
@@ -533,7 +551,7 @@ describe("useTurnFlow", () => {
     });
   });
 
-  describe("mergeLiveTrace + rowsToRounds (pure helpers)", () => {
+  describe("mergeLiveTrace + buildLiveRounds + liveRoundsToTrace (pure helpers)", () => {
     const call = (over: Partial<LiveCall> = {}): LiveCall => ({
       key: "call-0",
       step: 1,
@@ -552,6 +570,15 @@ describe("useTurnFlow", () => {
       operationKind: "network",
       summary: "GET /x",
       status: { kind: "pending" },
+      ...over,
+    });
+    const liveState = (over: Partial<LiveState> = {}): LiveState => ({
+      question: "q",
+      askedAt: 0,
+      step: 1,
+      calls: [],
+      roundTexts: [],
+      roundThinkings: [],
       ...over,
     });
 
@@ -596,7 +623,7 @@ describe("useTurnFlow", () => {
       expect(rows.map((r) => r.key)).toEqual(["req-1", "req-2"]);
     });
 
-    it("rowsToRounds keeps completed calls, drops unsettled rows, groups by round", () => {
+    it("liveRoundsToTrace keeps completed calls, drops unsettled rows, groups by round", () => {
       const row = (over: Partial<LiveTraceRow> = {}): LiveTraceRow => ({
         key: "call-0",
         step: 1,
@@ -610,14 +637,19 @@ describe("useTurnFlow", () => {
         resultExcerpt: "boom",
         ...over,
       });
-      const rows: LiveTraceRow[] = [
-        row(),
-        // gate-cancelled: no backend trace entry
-        row({ key: "req-1", step: 2, name: "fetch", server: "acme", operationKind: "network", summary: "GET /x", approval: { requestId: "req-1", response: "deny" }, success: null }),
-        row({ key: "call-2", step: 2, name: "materialize", operationKind: "write", summary: "SELECT 1", success: true, resultExcerpt: "" }),
+      const rounds: LiveRound[] = [
+        { rows: [row()] },
+        {
+          text: "先看一眼数据。",
+          rows: [
+            // gate-cancelled: no backend trace entry
+            row({ key: "req-1", step: 2, name: "fetch", server: "acme", operationKind: "network", summary: "GET /x", approval: { requestId: "req-1", response: "deny" }, success: null }),
+            row({ key: "call-2", step: 2, name: "materialize", operationKind: "write", summary: "SELECT 1", success: true, resultExcerpt: "" }),
+          ],
+        },
       ];
       // Round 2 emitted prose (the RoundText event); round 1 emitted none.
-      expect(rowsToRounds(rows, [null, "先看一眼数据。"], [])).toEqual([
+      expect(liveRoundsToTrace(rounds)).toEqual([
         {
           calls: [
             {
@@ -644,24 +676,71 @@ describe("useTurnFlow", () => {
       ]);
     });
 
-    it("rowsToRounds keeps a prose-only round (a cancel mid-batch)", () => {
+    it("liveRoundsToTrace keeps a prose-only round (a cancel mid-batch)", () => {
       // A round that emitted prose but completed no calls still records as a
       // round carrying the text -- matching the backend, which opens the
       // round when the tool-call reply arrives, not when a call completes.
-      expect(rowsToRounds([], [null, "先看一眼数据。"], [])).toEqual([
+      expect(liveRoundsToTrace([{ text: "先看一眼数据。", rows: [] }])).toEqual([
         { text: "先看一眼数据。", calls: [] },
       ]);
     });
 
-    it("rowsToRounds attaches per-round thinking to its round (issue #610)", () => {
+    it("liveRoundsToTrace attaches per-round thinking to its round (issue #610)", () => {
       // The live thinking fold survives the settle swap: the round's thinking
       // block lands on the optimistic record's round, not dropped at fold
       // time. Rounds without thinking stay thinking-free (honest degrade).
       expect(
-        rowsToRounds([], ["先看一眼数据。"], [null, { duration_ms: 900, text: "reasoning" }]),
+        liveRoundsToTrace([
+          { text: "先看一眼数据。", rows: [] },
+          { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
+        ]),
       ).toEqual([
         { text: "先看一眼数据。", calls: [] },
         { thinking: { duration_ms: 900, text: "reasoning" }, calls: [] },
+      ]);
+    });
+
+    it("buildLiveRounds spans rows leading the slot arrays; the projection preserves the round order (issue #620)", () => {
+      // A call can land in round 3 while only round 1 emitted prose (the
+      // slot arrays lag the dispatch stream): the single derivation spans by
+      // step, and the settle projection walks the rounds in order -- the
+      // settled trace reads the same round sequence the exchange rendered,
+      // with the empty middle round dropped and no arrival-order artifacts.
+      const rounds = buildLiveRounds(
+        liveState({
+          step: 3,
+          calls: [
+            call({
+              key: "call-2",
+              step: 3,
+              name: "materialize",
+              operationKind: "write",
+              summary: "SELECT 3",
+            }),
+          ],
+          roundTexts: ["先看一眼数据。"],
+          roundThinkings: [],
+        }),
+        [],
+      );
+      expect(rounds.map((r) => [r.text, r.rows.map((row) => row.key)])).toEqual([
+        ["先看一眼数据。", []],
+        [undefined, []],
+        [undefined, ["call-2"]],
+      ]);
+      expect(liveRoundsToTrace(rounds)).toEqual([
+        { text: "先看一眼数据。", calls: [] },
+        {
+          calls: [
+            {
+              name: "materialize",
+              operation_kind: "write",
+              summary: "SELECT 3",
+              success: true,
+              result_excerpt: "",
+            },
+          ],
+        },
       ]);
     });
   });

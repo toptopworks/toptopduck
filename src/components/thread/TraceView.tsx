@@ -3,6 +3,7 @@ import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { Check, Loader2, ShieldQuestion, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { TraceList } from "./TraceList";
 import type { LiveTraceRow } from "../../session/useTurnFlow";
 import type { OperationKind, ApprovalResponse } from "../../types/approval";
 import type { TraceEntry } from "../../types/thread";
@@ -90,8 +91,9 @@ function SuccessGlyph({ success }: { success: boolean }) {
 // The summary is agent-generated layer-4 content and passes through in a
 // monospace face (it IS the SQL / reference the call ran). `afterName` is the
 // live card's resolved-approval badge slot (a settled TurnRecord trace has no
-// approval chrome -- the persisted entries carry the call alone).
-export function TraceRow({
+// approval chrome -- the persisted entries carry the call alone). Module-
+// scoped: the settled row list + the live row below are its only callers.
+function TraceRow({
   entry,
   afterName = null,
 }: {
@@ -124,16 +126,17 @@ export function TraceRow({
 
 // The expanded tool-call chain of a settled turn (ADR-0078): rendered beneath
 // the turn head when the card is expanded, hidden (not unmounted data -- the
-// TurnRecord carries it) when collapsed.
+// TurnRecord carries it) when collapsed. The chrome rides the shared
+// TraceList so the live exchange's row list renders identically (issue #620).
 export function TraceRowList({ entries }: { entries: ReadonlyArray<TraceEntry> }) {
   return (
-    <ul className="trace-list mt-1 ml-6 list-none m-0 p-0 border-l border-border pl-2">
+    <TraceList>
       {entries.map((entry, i) => (
         // The trace is append-only within a turn and never reordered, so the
         // index is a stable key (the same YAGNI call the thread makes).
         <TraceRow key={i} entry={entry} />
       ))}
-    </ul>
+    </TraceList>
   );
 }
 

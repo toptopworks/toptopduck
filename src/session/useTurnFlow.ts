@@ -9,7 +9,7 @@ import type { UseViewedResult } from "./useViewedResult";
 import type { AppError } from "../types/error";
 import type { ApprovalResponse, OperationKind } from "../types/approval";
 import type { TurnPhase } from "../types/session";
-import type { ThreadEntry, ThinkingTrace, TraceRound } from "../types/thread";
+import type { ThreadEntry, ThinkingTrace, TraceEntry, TraceRound } from "../types/thread";
 
 // The turn-orchestration domain (issue #230), extracted from useSessionState
 // (slice 2 of the three-slice deepening). This hook owns the turn-progress
@@ -31,7 +31,7 @@ import type { ThreadEntry, ThinkingTrace, TraceRound } from "../types/thread";
 // stable across renders (the useMemo over live state must not recompute on an
 // every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
-const NO_ROWS: LiveTraceRow[] = [];
+const NO_ROUNDS: LiveRound[] = [];
 
 /** One in-flight tool call as the turn-progress stream reports it: started
  *  (running spinner) then completed (success/failure + excerpt). The completed
@@ -81,11 +81,22 @@ export interface LiveTraceRow {
   resultExcerpt: string;
 }
 
-/** The in-flight turn the rail renders progressively (ADR-0078, issue #297):
- *  the asking question + the live trace rows + the current Thinking step.
+/** One live round as the single grouping source derives it (issue #620): the
+ *  round's thinking block + connective prose (the per-round slots) plus the
+ *  round's merged rows. The array index IS the 1-based round number minus
+ *  one -- no parallel slot arrays, no cross-collection alignment. The shape
+ *  mirrors TraceRound with live rows (running / gate-pending) in place of
+ *  settled calls, so the settle projection is a pure per-row mapping. */
+export interface LiveRound {
+  thinking?: ThinkingTrace;
+  text?: string;
+  rows: LiveTraceRow[];
+}
+
+/** The in-flight turn the rail renders as a chat exchange (ADR-0078/0103,
+ *  issues #297/#610): the asking question + the round-grouped live trace.
  *  Client UI state only (ADR-0051/0059) -- never enters the thread cache; the
- *  settled turn folds the rows into its optimistic round-grouped
- *  TurnRecord.trace. */
+ *  settled turn folds the rounds into its optimistic TurnRecord.trace. */
 export interface LiveTurn {
   question: string;
   /** The client's submit stamp (the live bubble's `asked_at`, ADR-0103 live
@@ -96,17 +107,11 @@ export interface LiveTurn {
   /** The 1-based step of the latest Thinking event (round-trip count,
    *  ADR-0081); null until the first event arrives. */
   step: number | null;
-  rows: LiveTraceRow[];
-  /** The per-round connective prose seen so far (index = step-1, null when a
-   *  round emitted none), from the RoundText events (issue #608). The chat
-   *  live rendering consumes it; the settled fold attaches each entry to its
-   *  round. */
-  roundTexts: Array<string | null>;
-  /** The per-round thinking blocks seen so far (index = step-1, null when the
-   *  round had no thinking data source), from the ThinkingCompleted events
-   *  (issues #608/#610). The live thinking folds render from it and the
-   *  settled fold reuses it, so the settle swap keeps the fold in place. */
-  roundThinkings: Array<ThinkingTrace | null>;
+  /** The round-grouped live trace -- the SINGLE derivation (issue #620): the
+   *  exchange renders it directly and the settle projection consumes it, so
+   *  the grouping exists once instead of twice with a shared-by-comment
+   *  invariant. */
+  rounds: LiveRound[];
 }
 
 /** Merge the two live channels into one ordered row list (pure -- unit-tested
@@ -187,56 +192,64 @@ export function mergeLiveTrace(
   return rows;
 }
 
-/** Project the settled rows + round texts + round thinkings onto the
- *  round-grouped `TraceRound[]` shape for the optimistic thread append
- *  (issue #297; round-grouped by #608, ADR-0103; thinking folded by #610):
- *  completed calls only -- a row still at success===null (a gate-cancelled
- *  call, resolved-deny with no dispatch) has NO backend trace entry, so
- *  including it would diverge from the refetch. Rows group by their round
- *  step in arrival order; each round attaches its prose and thinking block
- *  when the round emitted one. The call mapping is identity with the
+/** The SINGLE round grouping (issue #620): merge the two live channels, then
+ *  fold the merged rows + the per-round slots into one rounds array whose
+ *  index IS the round number minus one. Rows may lead the slot arrays (a
+ *  call can dispatch in round 3 before round 2 emits its prose), so the
+ *  array spans the furthest reach of any source; untouched slots stay
+ *  undefined. Pure -- unit-tested without the hook. */
+export function buildLiveRounds(
+  live: LiveState,
+  approvals: ReadonlyArray<ApprovalEntry>,
+): LiveRound[] {
+  const rows = mergeLiveTrace(live.calls, approvals, live.step);
+  const lastStep = Math.max(
+    rows.reduce((m, r) => Math.max(m, r.step), 0),
+    live.roundTexts.length,
+    live.roundThinkings.length,
+  );
+  return Array.from({ length: lastStep }, (_, i) => ({
+    thinking: live.roundThinkings[i] ?? undefined,
+    text: live.roundTexts[i] ?? undefined,
+    rows: rows.filter((r) => r.step === i + 1),
+  }));
+}
+
+/** Project the live rounds onto the round-grouped `TraceRound[]` for the
+ *  optimistic thread append (issue #297; round-grouped by #608, ADR-0103;
+ *  thinking folded by #610; single-source projection by #620): completed
+ *  calls only -- a row still at success===null (a gate-cancelled call,
+ *  resolved-deny with no dispatch) has NO backend trace entry, so including
+ *  it would diverge from the refetch. Order-preserving by construction (the
+ *  live rounds array is already step-ordered), each settled round keeps its
+ *  prose and thinking block. The row mapping is identity with the
  *  ToolCallCompleted payload, so the optimistic trace equals the backend's
  *  recorded rounds. */
-export function rowsToRounds(
-  rows: ReadonlyArray<LiveTraceRow>,
-  roundTexts: ReadonlyArray<string | null>,
-  roundThinkings: ReadonlyArray<ThinkingTrace | null>,
-): TraceRound[] {
-  const rounds: TraceRound[] = [];
-  const byStep = new Map<number, TraceRound>();
-  const roundAt = (step: number): TraceRound => {
-    const existing = byStep.get(step);
-    if (existing) return existing;
-    const created: TraceRound = { calls: [] };
-    byStep.set(step, created);
-    rounds.push(created);
-    return created;
-  };
-  for (const row of rows) {
-    if (row.success === null) continue;
-    roundAt(row.step).calls.push({
-      name: row.name,
-      operation_kind: row.operationKind,
-      summary: row.summary,
-      success: row.success,
-      result_excerpt: row.resultExcerpt,
-    });
+export function liveRoundsToTrace(rounds: ReadonlyArray<LiveRound>): TraceRound[] {
+  const trace: TraceRound[] = [];
+  for (const round of rounds) {
+    const calls: TraceEntry[] = [];
+    for (const row of round.rows) {
+      if (row.success === null) continue;
+      calls.push({
+        name: row.name,
+        operation_kind: row.operationKind,
+        summary: row.summary,
+        success: row.success,
+        result_excerpt: row.resultExcerpt,
+      });
+    }
+    // A round with prose or thinking but no completed calls still records
+    // (a cancel mid-batch); an entirely empty round drops.
+    if (calls.length === 0 && round.text === undefined && round.thinking === undefined) {
+      continue;
+    }
+    const settled: TraceRound = { calls };
+    if (round.text !== undefined) settled.text = round.text;
+    if (round.thinking !== undefined) settled.thinking = round.thinking;
+    trace.push(settled);
   }
-  // Rounds that emitted prose attach it (a round may also exist with prose
-  // and no completed calls -- e.g. a cancel mid-batch).
-  roundTexts.forEach((text, i) => {
-    if (text === null) return;
-    const round = roundAt(i + 1);
-    round.text = text;
-  });
-  // Rounds that completed a thinking block attach it the same way (#610: the
-  // live thinking fold must survive the settle swap into the optimistic
-  // record's fold).
-  roundThinkings.forEach((thinking, i) => {
-    if (thinking === null) return;
-    roundAt(i + 1).thinking = thinking;
-  });
-  return rounds;
+  return trace;
 }
 
 export interface UseTurnFlowDeps {
@@ -283,8 +296,9 @@ export interface UseTurnFlow {
 }
 
 /** The in-flight turn's raw progress state: the turn-progress channel alone
- *  (approval cards merge in at the liveTurn derivation). */
-interface LiveState {
+ *  (approval cards merge in at the liveTurn derivation). Exported for the
+ *  pure-helpers' unit tests. */
+export interface LiveState {
   question: string;
   askedAt: number;
   step: number | null;
@@ -355,8 +369,8 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
     // attached to the CURRENT round (the Thinking event that opened it has
     // already arrived, same ordering premise as RoundText). Kept per round
     // on the live state -- the live thinking fold renders from it and the
-    // settled fold reuses it via rowsToRounds; a runtime without a thinking
-    // data source never fires the event (honest degrade).
+    // settle projection reuses it via the rounds; a runtime without a
+    // thinking data source never fires the event (honest degrade).
     const step = live.step ?? 1;
     return {
       ...live,
@@ -453,7 +467,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // post-turn (ADR-0051), so the optimistic trace must capture the final
   // event even when its state update has not rendered yet.
   const liveRef = useRef<LiveState | null>(null);
-  const rowsRef = useRef<LiveTraceRow[]>(NO_ROWS);
+  const roundsRef = useRef<LiveRound[]>(NO_ROUNDS);
   // The approvals prop mirrored for the same synchronous-read reason (the
   // merge inside commitLive reads it; the prop itself drives the memo).
   const approvalsRef = useRef(approvals);
@@ -462,16 +476,15 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   }, [approvals]);
 
   // Advance the live state: refs first (the synchronous truth the ask tail
-  // reads), then the render state. The rows mirror merges the approvals
-  // channel in, so both event streams fold into one row list at the moment
-  // each event lands (the render-time memo recomputes the same value).
-  // useCallback-stable (it closes over refs + a setter + module constants
-  // only), so the listener effect mounts once and handleAsk keeps its
-  // identity across renders.
+  // reads), then the render state. The rounds mirror merges the approvals
+  // channel in and performs the single round grouping, so both event streams
+  // fold into one round list at the moment each event lands (the render-time
+  // memo recomputes the same value). useCallback-stable (it closes over refs
+  // + a setter + module constants only), so the listener effect mounts once
+  // and handleAsk keeps its identity across renders.
   const commitLive = useCallback((next: LiveState | null) => {
     liveRef.current = next;
-    rowsRef.current =
-      next === null ? NO_ROWS : mergeLiveTrace(next.calls, approvalsRef.current, next.step);
+    roundsRef.current = next === null ? NO_ROUNDS : buildLiveRounds(next, approvalsRef.current);
     setLive(next);
   }, []);
 
@@ -506,9 +519,10 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     };
   }, [sessionId, commitLive]);
 
-  // The merged live trace (tool-call rows + approval cards). Recomputed on
-  // either channel's change; null when no turn runs. The derivation is the
-  // only place the two event channels meet, so the render tree reads one row
+  // The round-grouped live trace (tool-call rows + approval cards merged,
+  // grouped once -- issue #620's single source). Recomputed on either
+  // channel's change; null when no turn runs. The derivation is the only
+  // place the two event channels meet, so the render tree reads one round
   // list (the rail never reconciles channels itself).
   const liveTurn = useMemo<LiveTurn | null>(() => {
     if (live === null) return null;
@@ -516,9 +530,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       question: live.question,
       askedAt: live.askedAt,
       step: live.step,
-      rows: mergeLiveTrace(live.calls, approvals, live.step),
-      roundTexts: live.roundTexts,
-      roundThinkings: live.roundThinkings,
+      rounds: buildLiveRounds(live, approvals),
     };
   }, [live, approvals]);
 
@@ -557,15 +569,11 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         // ADR-0059: clear the phase on every ask end (incl. Cancelled outcome /
         // IPC failure) -- the in-flight turn is done. Loading stays on through
         // the post-outcome invalidation below; phase is a turn-lifecycle hint,
-        // not a UI-busy flag. The live card folds here too: rowsRef holds the
-        // synchronously-mirrored settled rows (captured above, so the final
-        // event's row survives even when its render is still pending), and
-        // the app-level approval hook clears this session's folded cards.
-        settledTrace = rowsToRounds(
-          rowsRef.current,
-          liveRef.current?.roundTexts ?? [],
-          liveRef.current?.roundThinkings ?? [],
-        );
+        // not a UI-busy flag. The live card folds here too: roundsRef holds
+        // the synchronously-mirrored settled rounds (captured above, so the
+        // final event's row survives even when its render is still pending),
+        // and the app-level approval hook clears this session's folded cards.
+        settledTrace = liveRoundsToTrace(roundsRef.current);
         setPhase(null);
         commitLive(null);
         onApprovalsSettled?.();

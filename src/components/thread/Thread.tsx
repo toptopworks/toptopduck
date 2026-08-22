@@ -16,7 +16,7 @@ import type { LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse } from "../../types/approval";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
-import type { ThreadEntry } from "../../types/thread";
+import type { ThinkingTrace, ThreadEntry } from "../../types/thread";
 
 export type { DatasetLabel } from "./turn-visual";
 
@@ -57,11 +57,13 @@ interface ThreadProps {
    *  verb + name from the event alone (no MCP tooltip, no missing-skill
    *  warning). The timeline stays readable; the registry only enriches it. */
   skillIndex?: ReadonlyMap<string, SkillEntry>;
-  /** The in-flight turn's live trace (ADR-0078, issue #297): when non-null the
-   * thread renders a progressive turn card at its tail (question + tool-call
-   * rows + approval cards). Client UI state only -- the settled turn replaces
-   * it with its recorded TurnRecord. Optional for call sites / tests that do
-   * not exercise live rendering; defaults to null (no live card). */
+  /** The in-flight turn's live trace (ADR-0078/0103, issues #297/#610): when
+   * non-null the thread renders the turn's chat exchange at its tail (the
+   * user bubble + the streaming assistant side: round prose / thinking folds
+   * / tool rows + approval cards). Client UI state only -- the settled turn
+   * replaces it with its recorded TurnRecord in the same chat form. Optional
+   * for call sites / tests that do not exercise live rendering; defaults to
+   * null (no live exchange). */
   liveTurn?: LiveTurn | null;
   /** Answers a pending approval request (the live card's three buttons,
    * ADR-0083). Wired to the app-level approval hook; defaults to a no-op so
@@ -89,6 +91,9 @@ interface ThreadProps {
 // reference across renders (the module-level-constant convention the sidebar
 // / pane use for their empty defaults).
 const NOOP_RESPOND: (requestId: string, response: ApprovalResponse) => void = () => {};
+// The empty fold-posture set, module-level for the same identity-stability
+// reason (the live swap's collector starts and resets to it).
+const NO_EXPANDED_FOLDS: ReadonlySet<ThinkingTrace> = new Set();
 
 export function Thread({
   entries,
@@ -105,6 +110,47 @@ export function Thread({
   // (ADR-0047 chip-trace). Persistent so the user sees which event a stale chip
   // pointed at; a subsequent jump moves it. null when no chip has been clicked.
   const [highlightedSourceIdx, setHighlightedSourceIdx] = useState<number | null>(null);
+  // The live turn's open thinking folds (issue #620 settle continuity),
+  // keyed by the round's thinking block REFERENCE: the settle projection
+  // (liveRoundsToTrace) carries the same reference onto the optimistic
+  // record's round, so the key survives the projection's round drop (an
+  // entirely empty round vanishes from the trace, shifting array indices --
+  // a reference key cannot shift) and the seed maps the same fold on both
+  // sides. The exchange reports each toggle; the settle swap's mounting
+  // frame (liveTurn nulls while the optimistic entry appends, in one
+  // commit) seeds the appended entry's thinking folds with this set -- a
+  // fold the user opened while the turn ran mounts already open on the
+  // settled side, instead of snapping shut when the exchange's local fold
+  // state dies with it.
+  const [liveThinkingExpanded, setLiveThinkingExpanded] =
+    useState<ReadonlySet<ThinkingTrace>>(NO_EXPANDED_FOLDS);
+  const handleLiveThinkingExpanded = useCallback((thinking: ThinkingTrace, expanded: boolean) => {
+    setLiveThinkingExpanded((prev) => {
+      const next = new Set(prev);
+      if (expanded) next.add(thinking);
+      else next.delete(thinking);
+      return next;
+    });
+  }, []);
+  // Reset the posture set when a FRESH turn starts (liveTurn transitions to
+  // non-null), so a new turn never inherits the previous one's folds.
+  // Adjusted during render -- the React-blessed "state on prop change"
+  // pattern, no effect (an effect would land a frame too late for the seed
+  // below, which must ride the swap's mounting frame).
+  const [prevLiveTurn, setPrevLiveTurn] = useState<LiveTurn | null>(null);
+  if (prevLiveTurn !== liveTurn) {
+    setPrevLiveTurn(liveTurn);
+    if (liveTurn !== null) setLiveThinkingExpanded(NO_EXPANDED_FOLDS);
+  }
+  // The index of the last recorded turn -- on the swap frame this is the
+  // optimistic append the settle just landed (the timeline's tail turn).
+  let lastTurnIdx = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].entry === "Turn") {
+      lastTurnIdx = i;
+      break;
+    }
+  }
   // One ref per source-event <li> so a chip jump can scrollIntoView the match.
   // The thread is append-only (ADR-0028/0040) so indices are stable positions.
   // The cleanup nulls the slot so a future break of the append-only invariant
@@ -201,6 +247,17 @@ export function Thread({
                     jumpTargetIdx === null ? undefined : () => jumpToSource(jumpTargetIdx)
                   }
                   mentionedDataset={findMentionedDataset(entry.data.question, datasetLabels)}
+                  // The settle seed rides only the appended entry's MOUNTING
+                  // frame (the swap, one commit after the live turn's
+                  // folds); the uncontrolled folds take the initial once, so
+                  // re-passing the set on later frames is a no-op and no
+                  // swap-frame detection is needed -- only the last turn
+                  // entry is a fresh mount while no turn runs.
+                  thinkingInitiallyExpanded={
+                    liveTurn === null && i === lastTurnIdx && liveThinkingExpanded.size > 0
+                      ? liveThinkingExpanded
+                      : undefined
+                  }
                   skillIndex={skillIndex}
                 />
               </li>
@@ -252,14 +309,20 @@ export function Thread({
       </ol>
       {/* The in-flight turn's chat exchange (ADR-0103, issue #610): trails
           the recorded entries while a turn runs -- the user bubble mounts at
-          submit, the assistant side streams -- then folds away as the settled
-          TurnRecord appends (the same chat form, so the swap does not move
-          the bubble / prose / thinking folds). A distinct block (not an
-          <li>) -- the ol is the recorded timeline (append-only,
-          ADR-0028/0040), the live exchange is transient client state that
-          never enters it. */}
+          submit, the assistant side streams (the dataset chip included, so
+          the swap adds no element, issue #620) -- then folds away as the
+          settled TurnRecord appends (the same chat form, so the swap does
+          not move the bubble / chip / prose / thinking folds). A distinct
+          block (not an <li>) -- the ol is the recorded timeline
+          (append-only, ADR-0028/0040), the live exchange is transient
+          client state that never enters it. */}
       {liveTurn !== null && (
-        <LiveTurnExchange liveTurn={liveTurn} onRespondApproval={onRespondApproval} />
+        <LiveTurnExchange
+          liveTurn={liveTurn}
+          mentionedDataset={findMentionedDataset(liveTurn.question, datasetLabels)}
+          onRespondApproval={onRespondApproval}
+          onThinkingExpandedChange={handleLiveThinkingExpanded}
+        />
       )}
     </section>
   );
