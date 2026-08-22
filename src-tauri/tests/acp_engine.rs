@@ -903,7 +903,7 @@ fn accum_cap_keeps_the_turn_completing_with_a_marker() {
     );
 }
 
-/// Issue #629 review: a line past the ndjson line cap is dropped and the
+/// Issue #629 review: a line past the 4-MiB line cap is dropped and the
 /// connection stays up -- the turn still completes with the prose that rode
 /// the line after the dropped one (the drop never kills the reader loop).
 #[test]
