@@ -341,6 +341,91 @@ fn terminal_text_falls_back_to_accumulation_without_trailing_stretch() {
     assert_eq!(outcome.trace[0].text.as_deref(), Some("checking alongside"));
 }
 
+/// A schema-legal `kind: "read"` tool_call on the raw wire (a kind the typed
+/// fixture helpers never emit) parses and lands in the trace -- the variant
+/// set mirrors the schema crate, so the line is not dropped whole.
+#[test]
+fn schema_tool_kind_read_lands_in_the_trace() {
+    let (outcome, _) = run("tool_kind_read", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "read it"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1);
+    let entry = &outcome.trace[0].calls[0];
+    assert_eq!(entry.name, "read the schema");
+    assert!(entry.success, "the raw-kind call completed");
+}
+
+/// A completion arriving AFTER the next round opened lands on the round that
+/// opened the call, not whichever round is current when the finish arrives
+/// (`PendingToolCall.round` attribution); the turn-end freeze keeps the
+/// thinking-bearing trailing round as the trace's last round.
+#[test]
+fn pending_completion_lands_on_its_opening_round() {
+    let (outcome, phases) = run("pending_across_round", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "round two prose"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 2, "call round + thinking-bearing tail");
+    let r1 = &outcome.trace[0];
+    assert!(
+        r1.thinking.is_none() && r1.text.is_none(),
+        "round 1 carried neither thought nor prose"
+    );
+    assert_eq!(r1.calls.len(), 1, "the late completion lands on round 1");
+    assert_eq!(r1.calls[0].name, "explore SELECT 1");
+    let tail = &outcome.trace[1];
+    assert_eq!(
+        tail.thinking.as_ref().expect("tail thinking survives").text,
+        "the finish is still in flight"
+    );
+    assert!(tail.calls.is_empty(), "the tail round holds no call rows");
+    // The tail's ThinkingCompleted fires after the round-1 Started event
+    // (the turn-end freeze), so the live stream saw the fold too.
+    let i_start = phase_index(&phases, "Started{tc_1}", |p| {
+        matches!(
+            p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"
+        )
+    });
+    let i_fold = phase_index(&phases, "tail ThinkingCompleted", |p| {
+        matches!(
+            p,
+            TurnPhase::ThinkingCompleted { text, .. }
+                if text == "the finish is still in flight"
+        )
+    });
+    assert!(
+        i_fold > i_start,
+        "the tail fold at {i_fold} fires after the call started at {i_start}"
+    );
+}
+
+/// A call left unresolved when the turn ends drains onto its opening round
+/// as a completed row, with the round's prose still in its slot.
+#[test]
+fn unresolved_call_drains_onto_its_opening_round() {
+    let (outcome, phases) = run("pending_turn_end_drain", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "round one prose"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1);
+    assert_eq!(
+        outcome.trace[0].text.as_deref(),
+        Some("round one prose"),
+        "the round keeps its prose slot"
+    );
+    let entry = &outcome.trace[0].calls[0];
+    assert_eq!(entry.name, "explore SELECT 1");
+    assert!(phases.iter().any(|p| matches!(
+        p,
+        TurnPhase::ToolCallCompleted(e) if e.name == "explore SELECT 1"
+    )));
+}
+
 /// A failed tool call lands in the trace with success=false + the error
 /// message kept as the failure anchor (ADR-0078).
 #[test]

@@ -454,6 +454,44 @@ fn play_scenario(
             );
             respond_prompt(out, &id, StopReason::Success);
         }
+        // A schema-legal `kind: "read"` tool_call on the raw wire (the typed
+        // helpers never emit it) -- the line must parse and the call must
+        // land in the trace instead of being dropped whole.
+        "tool_kind_read" => {
+            raw_tool_call_start(out, "tc_r", "read the schema", "read");
+            notify(
+                out,
+                tool_call_finish("tc_r", "read the schema", ToolKind::Read, "42 lines"),
+            );
+            notify(out, agent_message("read it"));
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // A pending call whose completion arrives AFTER the next round
+        // opened -- the row must land on the round that opened it, not
+        // whichever round is current when the finish arrives.
+        "pending_across_round" => {
+            notify(
+                out,
+                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
+            );
+            notify(out, agent_thought("the finish is still in flight"));
+            notify(out, agent_message("round two prose"));
+            notify(
+                out,
+                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+            );
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // A call left unresolved when the turn ends -- the drain lands it on
+        // its opening round as a completed row.
+        "pending_turn_end_drain" => {
+            notify(out, agent_message("round one prose"));
+            notify(
+                out,
+                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
+            );
+            respond_prompt(out, &id, StopReason::Success);
+        }
         "max_turns" => {
             respond_prompt(out, &id, StopReason::MaxTurns);
         }
@@ -626,6 +664,28 @@ fn raw_session_update(out: &mut std::io::Stdout, kind: &str, text: &str) {
                 "sessionUpdate": kind,
                 "messageId": "m1",
                 "content": {"type": "text", "text": text},
+            },
+        },
+    });
+    write_line(out, &line);
+}
+
+/// Emit a `tool_call` start as a hand-built JSON line with a RAW kind string
+/// (not our `ToolKind` enum) -- pins that a schema-legal kind the typed
+/// helpers never emit still parses instead of dropping the whole line.
+fn raw_tool_call_start(out: &mut std::io::Stdout, id: &str, title: &str, kind: &str) {
+    let line = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "fake-session",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": id,
+                "title": title,
+                "status": "in_progress",
+                "kind": kind,
+                "content": [],
             },
         },
     });
