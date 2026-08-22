@@ -15,7 +15,9 @@ use std::sync::Arc;
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
-use toptopduck_lib::runtime::acp::adapter::{codex, gemini_cli, opencode, qwen_code, AdapterSpec};
+use toptopduck_lib::runtime::acp::adapter::{
+    codex, gemini_cli, opencode, qwen_code, AdapterSpec, DiscoveredRuntime,
+};
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
 use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
@@ -125,6 +127,22 @@ fn assert_not_via_watchdog(label: &str, start: std::time::Instant) {
     );
 }
 
+/// The discovery catalog the fake fixture's `configOptions` produce --
+/// shared by the typed and raw `session/new` paths (issue #630's raw pin
+/// asserts the same catalog the typed path discovers).
+fn assert_fake_catalog(d: &DiscoveredRuntime) {
+    assert_eq!(
+        d.models,
+        vec!["fake-opus".to_string(), "fake-sonnet".to_string()]
+    );
+    assert_eq!(d.current_model.as_deref(), Some("fake-opus"));
+    assert_eq!(
+        d.thought_levels,
+        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+    );
+    assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+}
+
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
@@ -183,6 +201,15 @@ fn phase_index(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> b
         .unwrap_or_else(|| panic!("phase {label} missing from the stream"))
 }
 
+/// Count-pin counterpart of [`phase_index`] (issue #630): asserts the phase
+/// fired exactly once. `phase_index` only finds the FIRST occurrence, so a
+/// double-fired prelude or repeated fold would hide behind it -- this closes
+/// that gap for the events whose multiplicity is part of the contract.
+fn phase_count(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> bool) {
+    let n = phases.iter().filter(|p| pred(p)).count();
+    assert_eq!(n, 1, "{label}: expected exactly one firing, got {n}");
+}
+
 /// Issue #611: thought + prose chunks ahead of each tool-call batch fold into
 /// per-round slots (round boundary = the tool-call batch split); the live
 /// channel carries ThinkingCompleted + RoundText between the round's Thinking
@@ -218,42 +245,44 @@ fn round_prose_and_thinking_group_per_round() {
 
     // Live order: Thinking{1} < ThinkingCompleted < RoundText < Started{tc_1}
     // < Thinking{2} < ThinkingCompleted < RoundText < Started{tc_2}.
-    let i_think1 = phase_index(&phases, "Thinking{1}", |p| {
-        matches!(p, TurnPhase::Thinking { attempt: 1 })
-    });
-    let i_fold1 = phase_index(&phases, "ThinkingCompleted{1}", |p| {
+    let is_think1 = |p: &TurnPhase| matches!(p, TurnPhase::Thinking { attempt: 1 });
+    let is_fold1 = |p: &TurnPhase| {
         matches!(
             p,
             TurnPhase::ThinkingCompleted { text, .. } if text == "weighing schema options"
         )
-    });
-    let i_prose1 = phase_index(&phases, "RoundText{1}", |p| {
+    };
+    let is_prose1 = |p: &TurnPhase| {
         matches!(
             p,
             TurnPhase::RoundText { text } if text == "checking the data first"
         )
-    });
+    };
+    let is_think2 = |p: &TurnPhase| matches!(p, TurnPhase::Thinking { attempt: 2 });
+    let is_fold2 = |p: &TurnPhase| {
+        matches!(
+            p,
+            TurnPhase::ThinkingCompleted { text, .. } if text == "narrowing the filter"
+        )
+    };
+    let is_prose2 = |p: &TurnPhase| {
+        matches!(
+            p,
+            TurnPhase::RoundText { text } if text == "refining the query"
+        )
+    };
+    let i_think1 = phase_index(&phases, "Thinking{1}", is_think1);
+    let i_fold1 = phase_index(&phases, "ThinkingCompleted{1}", is_fold1);
+    let i_prose1 = phase_index(&phases, "RoundText{1}", is_prose1);
     let i_start1 = phase_index(&phases, "Started{tc_1}", |p| {
         matches!(
             p,
             TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"
         )
     });
-    let i_think2 = phase_index(&phases, "Thinking{2}", |p| {
-        matches!(p, TurnPhase::Thinking { attempt: 2 })
-    });
-    let i_fold2 = phase_index(&phases, "ThinkingCompleted{2}", |p| {
-        matches!(
-            p,
-            TurnPhase::ThinkingCompleted { text, .. } if text == "narrowing the filter"
-        )
-    });
-    let i_prose2 = phase_index(&phases, "RoundText{2}", |p| {
-        matches!(
-            p,
-            TurnPhase::RoundText { text } if text == "refining the query"
-        )
-    });
+    let i_think2 = phase_index(&phases, "Thinking{2}", is_think2);
+    let i_fold2 = phase_index(&phases, "ThinkingCompleted{2}", is_fold2);
+    let i_prose2 = phase_index(&phases, "RoundText{2}", is_prose2);
     let i_start2 = phase_index(&phases, "Started{tc_2}", |p| {
         matches!(
             p,
@@ -276,6 +305,63 @@ fn round_prose_and_thinking_group_per_round() {
         );
         cursor = i;
     }
+
+    // Count pins (issue #630): the order chain above matches on FIRST
+    // occurrence, so a double-fired prelude or a repeated fold would hide.
+    // Each round's ThinkingCompleted and RoundText fire exactly once, and
+    // the pre-prompt round 1 marker is a single event.
+    phase_count(&phases, "Thinking{1}", is_think1);
+    phase_count(&phases, "ThinkingCompleted{1}", is_fold1);
+    phase_count(&phases, "RoundText{1}", is_prose1);
+    phase_count(&phases, "Thinking{2}", is_think2);
+    phase_count(&phases, "ThinkingCompleted{2}", is_fold2);
+    phase_count(&phases, "RoundText{2}", is_prose2);
+}
+
+/// One round, two calls in one batch (issue #630): the round's prelude --
+/// the frozen thinking block + the round prose -- fires once, before the
+/// FIRST call's Started event; the second call adds no second prelude. The
+/// starts and finishes interleave (start, start, finish, finish), the raw
+/// in-batch shape.
+#[test]
+fn single_round_two_calls_fire_the_prelude_once() {
+    let (outcome, phases) = run("single_round_two_calls", 24);
+    assert_eq!(outcome.trace.len(), 1, "both calls share one round");
+    assert_eq!(outcome.trace[0].calls.len(), 2);
+    assert_eq!(
+        outcome.trace[0].text.as_deref(),
+        Some("batch prelude prose"),
+        "the round keeps its prose slot"
+    );
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "batch prelude prose"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    let is_prelude_prose = |p: &TurnPhase| {
+        matches!(
+            p,
+            TurnPhase::RoundText { text } if text == "batch prelude prose"
+        )
+    };
+    phase_count(&phases, "RoundText", is_prelude_prose);
+    let i_prose = phase_index(&phases, "RoundText", is_prelude_prose);
+    let i_start1 = phase_index(&phases, "Started{tc_1}", |p| {
+        matches!(
+            p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"
+        )
+    });
+    let i_start2 = phase_index(&phases, "Started{tc_2}", |p| {
+        matches!(
+            p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 2"
+        )
+    });
+    assert!(i_prose < i_start1, "the prelude precedes the first call");
+    assert!(i_start1 < i_start2, "both starts land in the batch");
+    // Two completed rows, both successes.
+    let successes = outcome.trace[0].calls.iter().filter(|c| c.success).count();
+    assert_eq!(successes, 2);
 }
 
 /// Issue #611 honest degrade: an agent that never streams thought chunks (and
@@ -306,7 +392,8 @@ fn absent_thought_stream_degrades_honestly() {
 }
 
 /// Issue #611 schema verification, end to end: hand-built lines in the schema
-/// crate 0.13.8 v1 wire shape (`sessionUpdate` discriminator + ONE content
+/// crate shape named by `wire::MODELED_SCHEMA` (`sessionUpdate`
+/// discriminator + ONE content
 /// block) parse and fold exactly like the typed-helper chunks.
 #[test]
 fn schema_wire_shapes_parse_end_to_end() {
@@ -418,8 +505,26 @@ fn unresolved_call_drains_onto_its_opening_round() {
         Some("round one prose"),
         "the round keeps its prose slot"
     );
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "exactly the drained row: {:?}",
+        outcome.trace
+    );
     let entry = &outcome.trace[0].calls[0];
     assert_eq!(entry.name, "explore SELECT 1");
+    // The honest unobserved marker (issue #630): a row still open at turn
+    // end must not present as a bare success row (success=true with an
+    // empty excerpt is indistinguishable from a real completion), and the
+    // marker text must stay distinct from the failure excerpt.
+    assert!(
+        !entry.success,
+        "a drained row must not present as success: {entry:?}"
+    );
+    assert_eq!(
+        entry.result_excerpt, "turn ended before a final status",
+        "a drained row carries the unobserved marker: {entry:?}"
+    );
     assert!(phases.iter().any(|p| matches!(
         p,
         TurnPhase::ToolCallCompleted(e) if e.name == "explore SELECT 1"
@@ -952,20 +1057,32 @@ fn acp_turn_returns_discovered_runtime_catalog() {
         .discovered_runtime
         .as_ref()
         .expect("ACP turns carry a discovered catalog");
-    assert_eq!(
-        d.models,
-        vec!["fake-opus".to_string(), "fake-sonnet".to_string()]
-    );
-    assert_eq!(d.current_model.as_deref(), Some("fake-opus"));
-    assert_eq!(
-        d.thought_levels,
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
-    assert_eq!(d.current_thought_level.as_deref(), Some("medium"));
+    assert_fake_catalog(d);
     // Issue #529: the engine stamps the producing adapter onto the catalog
     // (provenance for the frontend's stale-cache detection across a runtime
     // switch). The fake fixture runs under the gemini-cli spec.
     assert_eq!(d.adapter_id.as_deref(), Some("gemini-cli"));
+}
+
+/// The raw schema-shaped session/new response (issue #630): the fixture's
+/// default respond serializes OUR `NewSessionResult` -- self-consistency,
+/// not a schema pin. This scenario writes the response as a raw line
+/// carrying the full field set the modeled schema crate defines
+/// (`sessionId` + `modes` + `_meta` around `configOptions`); the handshake
+/// must parse it (unknown fields ignored) and the discovery must extract
+/// the same catalog as the typed path.
+#[test]
+fn raw_schema_session_new_shape_parses_and_discovers() {
+    let (outcome, _, _) = run_with_spec(&gemini_cli(), "session_new_raw", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    let d = outcome
+        .discovered_runtime
+        .as_ref()
+        .expect("the raw shape carries the same discovery catalog");
+    assert_fake_catalog(d);
 }
 
 /// A handshake failure exits with `discovered_runtime: None` (discovery only

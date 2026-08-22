@@ -37,6 +37,12 @@ use serde_json::Value;
 /// negotiates v1 with the agent at [`InitializeParams::protocol_version`].
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// The schema crate release this wire module was modeled against -- the single
+/// anchor for every "verified against the schema" claim in the ACP module's
+/// docs (issue #630). Cite this constant instead of restating the version
+/// string, so a schema bump touches exactly one line.
+pub const MODELED_SCHEMA: &str = "agent-client-protocol-schema 0.13.8 (v1)";
+
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 envelopes
 // ---------------------------------------------------------------------------
@@ -186,7 +192,8 @@ impl Implementation {
 /// the working directory (`cwd`). The full windowed context is carried by the
 /// subsequent `session/prompt`, NOT here (ACP keeps session setup separate from
 /// the user message). The model / thought-level selections do NOT ride here
-/// either (ADR-0095: `NewSessionRequest` carries no model field, schema 0.13.8)
+/// either (ADR-0095: `NewSessionRequest` carries no model field in
+/// [`MODELED_SCHEMA`])
 /// -- the engine injects them via `session/set_config_option` after the
 /// handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,8 +286,9 @@ pub struct SessionUpdateParams {
 }
 
 /// One `session/update` payload. Modeled as an internally-tagged union on
-/// `sessionUpdate` -- the discriminator of the ACP schema crate 0.13.8 v1
-/// (verified against its own serialization fixtures, issue #611). Only the
+/// `sessionUpdate` -- the discriminator of the ACP schema crate named by
+/// [`MODELED_SCHEMA`] (verified against its own serialization fixtures,
+/// issue #611). Only the
 /// variants the engine consumes are named; an unknown kind deserializes to
 /// [`SessionUpdate::Other`] (forward compatibility with newer agents).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -359,11 +367,24 @@ pub enum ToolCallStatus {
     Completed,
     /// Failed with an error.
     Failed,
+    /// An unrecognized status string. The v1 schema crate keeps a closed
+    /// four-variant status; its update path degrades an unparseable one to
+    /// "absent" (`DefaultOnError` on the optional status field), while its
+    /// initial `ToolCall.status` field would reject the whole notification.
+    /// This side degrades both paths: an unknown string maps to
+    /// `Unknown`, which reads as "no terminal status yet" (issue #630). The
+    /// raw string is not kept: the engine reads only the four terminal
+    /// lifecycle points. `content` stays STRICT here (a bad item rejects the
+    /// update) -- the deliberate half of issue #630's leniency choice: the
+    /// parse drop is answerable in the engine's session/update warn log,
+    /// which covers every strict-parse miss in one place.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// Tool category (ACP `ToolKind`). Presentation-only -- maps to an
 /// [`crate::approval::OperationKind`] badge for the trace. The variant set
-/// mirrors the schema crate 0.13.8 v1 (its own `ToolKind` carries ten
+/// mirrors [`MODELED_SCHEMA`] (its own `ToolKind` carries ten
 /// variants with `Read`/`Delete` included), and an unknown kind degrades to
 /// `Other` rather than failing the whole update's parse -- the schema's own
 /// forward-compatibility default.
@@ -665,8 +686,9 @@ mod tests {
     }
 
     /// The session/update payload discriminates on `sessionUpdate` (the
-    /// schema crate 0.13.8 v1 shape, issue #611's schema verification) and a
-    /// ContentChunk carries ONE content block, not an array. The JSON below is
+    /// schema crate shape named by `MODELED_SCHEMA`, issue #611's schema
+    /// verification) and a ContentChunk carries ONE content block, not an
+    /// array. The JSON below is
     /// byte-for-byte the schema crate's own serialization test fixture -- the
     /// authoritative real-agent wire form. A regression here breaks every
     /// `session/update` against a real agent (the line fails to parse and the
@@ -695,8 +717,8 @@ mod tests {
         assert_eq!(v, raw);
     }
 
-    /// The agent_thought_chunk variant exists in the schema crate 0.13.8 v1
-    /// (issue #611's verification conclusion) and shares the ContentChunk
+    /// The agent_thought_chunk variant exists in the schema crate named by
+    /// `MODELED_SCHEMA` (issue #611's verification conclusion) and shares the ContentChunk
     /// shape: optional `messageId` + ONE content block. `messageId` is
     /// optional on the wire -- a chunk without one must still parse.
     #[test]
@@ -756,8 +778,8 @@ mod tests {
 
     /// An unknown session/update kind degrades to `Other` instead of rejecting
     /// the whole message -- forward compatibility with newer agents. The kind
-    /// rides the `sessionUpdate` discriminator (the schema crate 0.13.8 v1
-    /// shape, issue #611).
+    /// rides the `sessionUpdate` discriminator (the shape named by
+    /// `MODELED_SCHEMA`, issue #611).
     #[test]
     fn unknown_session_update_kind_degrades_to_other() {
         let raw = serde_json::json!({
@@ -800,7 +822,38 @@ mod tests {
         }
     }
 
-    /// ToolKind mirrors the schema crate 0.13.8 v1 variant set: `read` and
+    /// An unrecognized status string degrades to `ToolCallStatus::Unknown`
+    /// instead of failing the whole update's parse (issue #630) -- the same
+    /// forward-compatibility stance `ToolKind` already carries on this
+    /// side (the crate keeps a closed status with no fallback variant).
+    /// The row simply never reaches a terminal status through this value.
+    /// `Unknown` is an inbound degrade only: serializing it is an error,
+    /// not a silent illegal wire value.
+    #[test]
+    fn unknown_status_is_not_serializable() {
+        assert!(serde_json::to_string(&ToolCallStatus::Unknown).is_err());
+    }
+
+    #[test]
+    fn unknown_tool_call_status_degrades_to_unknown() {
+        let raw = serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc_1",
+            "status": "quantum-entangled",
+            "title": "explore SELECT 1",
+        });
+        let update: SessionUpdate =
+            serde_json::from_value(raw).expect("unknown status must not reject the whole update");
+        match update {
+            SessionUpdate::ToolCallUpdate { status, title, .. } => {
+                assert_eq!(status, Some(ToolCallStatus::Unknown));
+                assert_eq!(title.as_deref(), Some("explore SELECT 1"));
+            }
+            other => panic!("expected ToolCallUpdate, got {other:?}"),
+        }
+    }
+
+    /// ToolKind mirrors the `MODELED_SCHEMA` variant set: `read` and
     /// `delete` parse (a schema-legal kind must never fail the whole
     /// update's parse), an unknown kind degrades to `Other`, and the badge
     /// mapping lands read-class and write-class respectively.

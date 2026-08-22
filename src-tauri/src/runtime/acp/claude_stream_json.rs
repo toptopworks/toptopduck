@@ -56,7 +56,7 @@ use crate::session::agent_loop::{
     TRACE_EXCERPT_MAX,
 };
 
-use super::engine::RoundTracker;
+use super::engine::{RoundTracker, RowEnd, UNOBSERVED_EXCERPT};
 
 // ---------------------------------------------------------------------------
 // Frame parser (pure)
@@ -490,7 +490,7 @@ pub(super) fn run_claude_stream_json(
         termination = Some(Termination::StepCap(step_cap));
     }
 
-    // Finalize any tool rows still open at turn end (best-effort success,
+    // Finalize any tool rows still open at turn end (honestly unobserved,
     // each landing on the round it opened in), then close the trailing
     // round's thought stream -- its ThinkingCompleted renders live; whether
     // the settle keeps the trailing prose on the round depends on the
@@ -618,7 +618,12 @@ impl ClaudePump {
                 // dropped -- the trace stays consistent with the starts seen.
                 if let Some(pos) = self.pending.iter().position(|p| p.tool_use_id == id) {
                     let row = self.pending.remove(pos);
-                    self.finalize_row(row, success, on_phase);
+                    let end = if success {
+                        RowEnd::Completed
+                    } else {
+                        RowEnd::Failed
+                    };
+                    self.finalize_row(row, end, on_phase);
                 }
                 None
             }
@@ -656,7 +661,7 @@ impl ClaudePump {
     fn finalize_row(
         &mut self,
         row: PendingClaudeCall,
-        success: bool,
+        end: RowEnd,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
         let entry = TraceEntry {
@@ -664,14 +669,16 @@ impl ClaudePump {
             name: row.name.clone(),
             operation_kind: row.operation_kind,
             summary: row.summary.clone(),
-            success,
+            success: matches!(end, RowEnd::Completed),
             // The claude wire carries no per-call result text on the
             // tool_result frame; a failure still needs its bounded anchor
-            // (ADR-0078) -- the ACP pump's honest "failed" marker.
-            result_excerpt: if success {
-                String::new()
-            } else {
-                "failed".to_string()
+            // (ADR-0078) -- the ACP pump's honest "failed" marker. A row
+            // the agent never reported on carries the unobserved marker
+            // instead (issue #630).
+            result_excerpt: match end {
+                RowEnd::Completed => String::new(),
+                RowEnd::Failed => "failed".to_string(),
+                RowEnd::Unobserved => UNOBSERVED_EXCERPT.to_string(),
             },
         };
         on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
@@ -680,11 +687,12 @@ impl ClaudePump {
         }
     }
 
-    /// Close every still-open row at turn end (best-effort success -- the
-    //  ACP pump's precedent for rows that missed their terminal frame).
+    /// Close every still-open row at turn end -- honestly: the turn ended
+    //  before the agent reported a final status (the ACP pump's unobserved
+    //  marker, issue #630).
     fn finalize_pending(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
         for row in std::mem::take(&mut self.pending) {
-            self.finalize_row(row, true, on_phase);
+            self.finalize_row(row, RowEnd::Unobserved, on_phase);
         }
     }
 }
@@ -1290,7 +1298,10 @@ mod tests {
             1,
             "the open row drains into its round"
         );
-        assert!(rounds[0].calls[0].success, "best-effort success");
+        assert!(
+            !rounds[0].calls[0].success,
+            "a drained row must not present as success (issue #630)"
+        );
     }
 
     /// A gateway-routed tool_use + tool_result emits phases but NO engine
@@ -1444,7 +1455,8 @@ mod tests {
         assert_eq!(pump.current_model.as_deref(), Some("claude-sonnet-4"));
     }
 
-    /// Pending rows finalize best-effort at turn end (the ACP precedent).
+    /// Pending rows finalize honestly at turn end (issue #630): a row the
+    /// agent never reported on must not present as a bare success.
     #[test]
     fn pending_rows_finalize_at_turn_end() {
         let mut pump = pump_with_bridge();
@@ -1462,6 +1474,14 @@ mod tests {
         let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].calls.len(), 1);
-        assert!(rounds[0].calls[0].success, "best-effort success");
+        assert!(
+            !rounds[0].calls[0].success,
+            "a drained row must not present as success: {:?}",
+            rounds[0].calls[0]
+        );
+        assert_eq!(
+            rounds[0].calls[0].result_excerpt, UNOBSERVED_EXCERPT,
+            "a drained row carries the unobserved marker"
+        );
     }
 }
