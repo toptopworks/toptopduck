@@ -3,7 +3,8 @@
 //! Drives the real [`AcpEngine`] (via the `ClaudeStreamJson` dispatch arm)
 //! against the claude fake-CLI fixture (`claude-fake-cli`, declared as a
 //! `[[bin]]`) across every observable pump branch: clean text reply,
-//! gateway-routed tool trajectory (phases without engine trace rows), a
+//! headless thinking-block rounds (issue #612), a gateway-routed tool
+//! trajectory (phases + the prose round, no engine call rows), a
 //! native tool slipping past the deny list (engine trace row), hook-frame
 //! tolerance, result-frame errors, the max-turns cap mapping, crash /
 //! empty-stdout fallbacks, step-cap overflow, and the spawn argv injection
@@ -118,11 +119,11 @@ fn text_reply_yields_text_outcome_and_init_model() {
 }
 
 /// A gateway-routed tool call: the engine emits the Started/Completed phase
-/// pair naming the BARE tool, but the engine trace stays empty -- the
-/// gateway owns those rows (ADR-0085; the merged trace would drop a
-/// duplicate, so the driver never emits one).
+/// pair naming the BARE tool, and the trace keeps the round's prose but no
+/// engine-side call rows -- the gateway owns those rows (ADR-0085; the
+/// merged trace would drop a duplicate, so the driver never emits one).
 #[test]
-fn gateway_tool_call_emits_phases_without_engine_trace() {
+fn gateway_tool_call_emits_phases_keeps_prose_round() {
     let (outcome, phases) = run("tool_call", 24);
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "found 3 rows"),
@@ -151,6 +152,60 @@ fn gateway_tool_call_emits_phases_without_engine_trace() {
     assert!(phases
         .iter()
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
+}
+
+/// Headless thinking blocks riding the assistant frames, end-to-end (issue
+/// #612): round 1's thinking freezes at the batch prelude; the trailing
+/// round keeps its thinking through the REAL run loop's trailing freeze and
+/// settle (the unit tests mirror that tail with a hand-written helper).
+/// Pins the wired chain: two rounds carry their frozen thinking, the live
+/// stream sees both ThinkingCompleted events plus the round-2 wait pointer,
+/// and the trailing prose rides the terminal text (no round-2 RoundText).
+#[test]
+fn thinking_blocks_ride_rounds_end_to_end() {
+    let (outcome, phases) = run("thinking_rounds", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 2, "two rounds: {:#?}", outcome.trace);
+    let r1 = &outcome.trace[0];
+    assert_eq!(
+        r1.thinking.as_ref().map(|t| t.text.as_str()),
+        Some("plan the query"),
+        "round 1's thinking froze at the batch prelude"
+    );
+    assert_eq!(r1.text.as_deref(), Some("querying"));
+    assert!(r1.calls.is_empty(), "gateway-routed calls own their rows");
+    let r2 = &outcome.trace[1];
+    assert_eq!(
+        r2.thinking.as_ref().map(|t| t.text.as_str()),
+        Some("verify the rows"),
+        "the trailing round's thinking froze at turn end"
+    );
+    assert_eq!(r2.text, None, "the trailing prose rode the terminal text");
+    // The live stream: both thinking completions fire (the second only via
+    // the run loop's trailing freeze), the round-2 wait pointer fires, and
+    // no round-2 RoundText does.
+    let thinking_done: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ThinkingCompleted { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking_done, ["plan the query", "verify the rows"]);
+    assert!(phases
+        .iter()
+        .any(|p| matches!(p, TurnPhase::Thinking { attempt: 2 })));
+    assert_eq!(
+        phases
+            .iter()
+            .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
+            .count(),
+        1,
+        "no round-2 RoundText: {phases:?}"
+    );
 }
 
 /// A native tool that slipped past the deny list upstream rides the engine

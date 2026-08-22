@@ -714,7 +714,8 @@ fn outcome(
         // ADR-0103 (issue #612): rounds grouped at the assistant-frame
         // tool-call batch. A turn with no events settles to an empty list
         // (no ghost round); a gateway-routed-only round keeps its call-less
-        // shell here and drops at the wiring merge's empty-round pass.
+        // shell here -- a bare shell (no prose, no thinking) drops at the
+        // wiring merge's empty-round pass; one that carried prose survives.
         trace: rounds,
         round_trips,
         discovered_runtime: discovered,
@@ -1147,8 +1148,9 @@ mod tests {
     }
 
     /// The live channel's ADR-0103 order for one round: ThinkingCompleted,
-    /// then RoundText, then the batch's ToolCallStarted -- and the trailing
-    /// call-less prose fires nothing live (it is the terminal text).
+    /// then RoundText, then the batch's ToolCallStarted -- the trailing
+    /// call-less prose fires no content phase (it rides the terminal text);
+    /// only the round-2 Thinking wait pointer fires.
     #[test]
     fn live_order_thinking_round_text_then_call() {
         let mut pump = pump_with_bridge();

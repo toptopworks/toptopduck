@@ -53,6 +53,7 @@ const SCENARIOS: &[&str] = &[
     // Turn surface.
     "text_reply",
     "tool_call",
+    "thinking_rounds",
     "native_tool_denied",
     "hook_frames",
     "result_error",
@@ -153,6 +154,48 @@ fn run_turn(scenario: &str) {
                 }),
             );
             emit(&mut out, &result_success("found 3 rows"));
+        }
+        "thinking_rounds" => {
+            // Headless thinking blocks riding the assistant frames (issue
+            // #612, ADR-0103): round 1 opens with thinking + prose + a
+            // gateway-routed call batch, then the trailing round carries
+            // thinking + prose with no call -- the end-to-end pin for the
+            // pump's trailing-thinking freeze and round settle.
+            emit(&mut out, &system_init());
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "thinking", "thinking": "plan the query"},
+                        {"type": "text", "text": "querying"},
+                        {"type": "tool_use", "id": "toolu_1",
+                         "name": "mcp__toptopduck-gateway__explore",
+                         "input": {"sql": "SELECT 1"}}
+                    ]}
+                }),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "user",
+                    "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1",
+                         "content": "1"}
+                    ]}
+                }),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "thinking", "thinking": "verify the rows"},
+                        {"type": "text", "text": "the answer is 42"}
+                    ]}
+                }),
+            );
+            emit(&mut out, &result_success("the answer is 42"));
         }
         "native_tool_denied" => {
             // A native tool that slipped past the deny list upstream: the
