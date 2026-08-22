@@ -174,6 +174,173 @@ fn tool_calls_yields_trace_with_one_successful_entry() {
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
 }
 
+/// Index of the first phase matching `pred` -- the phase-stream order
+/// assertions need positions, not just membership (issue #611).
+fn phase_index(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> bool) -> usize {
+    phases
+        .iter()
+        .position(pred)
+        .unwrap_or_else(|| panic!("phase {label} missing from the stream"))
+}
+
+/// Issue #611: thought + prose chunks ahead of each tool-call batch fold into
+/// per-round slots (round boundary = the tool-call batch split); the live
+/// channel carries ThinkingCompleted + RoundText between the round's Thinking
+/// wait and its call events (the ADR-0103 order); the terminal text is the
+/// trailing stretch only, not the concatenation of every chunk.
+#[test]
+fn round_prose_and_thinking_group_per_round() {
+    let (outcome, phases) = run("round_prose_thinking", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "both rounds folded"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(
+        outcome.trace.len(),
+        2,
+        "two batch rounds; terminal prose rides the outcome"
+    );
+    let r1 = &outcome.trace[0];
+    assert_eq!(
+        r1.thinking.as_ref().expect("round 1 thinking").text,
+        "weighing schema options"
+    );
+    assert_eq!(r1.text.as_deref(), Some("checking the data first"));
+    assert_eq!(r1.calls.len(), 1);
+    assert_eq!(r1.calls[0].name, "explore SELECT 1");
+    let r2 = &outcome.trace[1];
+    assert_eq!(
+        r2.thinking.as_ref().expect("round 2 thinking").text,
+        "narrowing the filter"
+    );
+    assert_eq!(r2.text.as_deref(), Some("refining the query"));
+    assert_eq!(r2.calls.len(), 1);
+
+    // Live order: Thinking{1} < ThinkingCompleted < RoundText < Started{tc_1}
+    // < Thinking{2} < ThinkingCompleted < RoundText < Started{tc_2}.
+    let i_think1 = phase_index(&phases, "Thinking{1}", |p| {
+        matches!(p, TurnPhase::Thinking { attempt: 1 })
+    });
+    let i_fold1 = phase_index(&phases, "ThinkingCompleted{1}", |p| {
+        matches!(
+            p,
+            TurnPhase::ThinkingCompleted { text, .. } if text == "weighing schema options"
+        )
+    });
+    let i_prose1 = phase_index(&phases, "RoundText{1}", |p| {
+        matches!(
+            p,
+            TurnPhase::RoundText { text } if text == "checking the data first"
+        )
+    });
+    let i_start1 = phase_index(&phases, "Started{tc_1}", |p| {
+        matches!(
+            p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"
+        )
+    });
+    let i_think2 = phase_index(&phases, "Thinking{2}", |p| {
+        matches!(p, TurnPhase::Thinking { attempt: 2 })
+    });
+    let i_fold2 = phase_index(&phases, "ThinkingCompleted{2}", |p| {
+        matches!(
+            p,
+            TurnPhase::ThinkingCompleted { text, .. } if text == "narrowing the filter"
+        )
+    });
+    let i_prose2 = phase_index(&phases, "RoundText{2}", |p| {
+        matches!(
+            p,
+            TurnPhase::RoundText { text } if text == "refining the query"
+        )
+    });
+    let i_start2 = phase_index(&phases, "Started{tc_2}", |p| {
+        matches!(
+            p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 2"
+        )
+    });
+    let mut cursor = i_think1;
+    for (i, label) in [
+        (i_fold1, "ThinkingCompleted{1}"),
+        (i_prose1, "RoundText{1}"),
+        (i_start1, "Started{tc_1}"),
+        (i_think2, "Thinking{2}"),
+        (i_fold2, "ThinkingCompleted{2}"),
+        (i_prose2, "RoundText{2}"),
+        (i_start2, "Started{tc_2}"),
+    ] {
+        assert!(
+            i > cursor,
+            "{label} at {i} must come after the preceding phase at {cursor}"
+        );
+        cursor = i;
+    }
+}
+
+/// Issue #611 honest degrade: an agent that never streams thought chunks (and
+/// streams no prose ahead of its batch) yields no thinking folds, no round
+/// prose, and a turn that still succeeds -- the terminal prose AFTER the batch
+/// rides the outcome, not a round slot.
+#[test]
+fn absent_thought_stream_degrades_honestly() {
+    let (outcome, phases) = run("tool_calls", 24);
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ThinkingCompleted { .. })),
+        "no thought chunks -> no ThinkingCompleted"
+    );
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::RoundText { .. })),
+        "no batch-ahead prose -> no RoundText"
+    );
+    assert_eq!(outcome.trace.len(), 1);
+    assert_eq!(outcome.trace[0].thinking, None);
+    assert_eq!(
+        outcome.trace[0].text, None,
+        "terminal prose is not round prose"
+    );
+}
+
+/// Issue #611 schema verification, end to end: hand-built lines in the schema
+/// crate 0.13.8 v1 wire shape (`sessionUpdate` discriminator + ONE content
+/// block) parse and fold exactly like the typed-helper chunks.
+#[test]
+fn schema_wire_shapes_parse_end_to_end() {
+    let (outcome, phases) = run("real_wire_chunks", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "real terminal"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1);
+    assert_eq!(
+        outcome.trace[0].thinking.as_ref().expect("thinking").text,
+        "real thought"
+    );
+    assert_eq!(outcome.trace[0].text.as_deref(), Some("real prose"));
+    assert!(phases.iter().any(|p| matches!(
+        p,
+        TurnPhase::RoundText { text } if text == "real prose"
+    )));
+}
+
+/// Issue #611 fallback: prose that arrived alongside the final batch with no
+/// trailing stretch still yields it as the terminal text (the accumulation
+/// fallback), while the round carries it as its prose.
+#[test]
+fn terminal_text_falls_back_to_accumulation_without_trailing_stretch() {
+    let (outcome, _) = run("midturn_prose_no_terminal", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "checking alongside"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1);
+    assert_eq!(outcome.trace[0].text.as_deref(), Some("checking alongside"));
+}
+
 /// A failed tool call lands in the trace with success=false + the error
 /// message kept as the failure anchor (ADR-0078).
 #[test]

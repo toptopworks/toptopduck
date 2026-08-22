@@ -45,7 +45,7 @@ use crate::approval::{
     classify, ApprovalResponse, ApprovalSink, Classification, OperationKind, ToolKey,
 };
 use crate::cancel::CancelToken;
-use crate::model::{TraceEntryView, TurnPhase};
+use crate::model::{ThinkingTrace, TraceEntryView, TurnPhase};
 use crate::runtime::acp::adapter::{
     extract_discovered_runtime, AdapterSpec, DiscoveredRuntime, StreamFormat, MODEL_CATEGORY,
     THOUGHT_LEVEL_CATEGORY,
@@ -314,7 +314,7 @@ impl AcpEngine {
         }
 
         let mut pump = Pump {
-            trace: Vec::new(),
+            rounds: vec![RoundAcc::default()],
             text: String::new(),
             pending: Vec::new(),
             tool_call_count: 0,
@@ -330,7 +330,8 @@ impl AcpEngine {
             sink,
             &mut on_phase,
         );
-        // Finalize any tool rows still open at turn end (best-effort success).
+        // Finalize any tool rows still open at turn end (best-effort success),
+        // each landing on the round it opened in.
         for row in pump.pending.drain(..) {
             let entry = TraceEntry {
                 tool_use_id: row.tool_use_id,
@@ -341,12 +342,17 @@ impl AcpEngine {
                 result_excerpt: String::new(),
             };
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-            pump.trace.push(entry);
+            pump.rounds[row.round].calls.push(entry);
         }
+        // Close the trailing round's thought stream: its ThinkingCompleted
+        // fires (the fold renders live), but no RoundText -- the trailing
+        // prose rides the terminal text, not a round slot (issue #611).
+        let trailing = pump.rounds.len() - 1;
+        pump.freeze_thinking(trailing, &mut on_phase);
 
         let termination = match end {
             PromptEnd::Stop(StopReason::Success | StopReason::Refusal) => {
-                Termination::Text(std::mem::take(&mut pump.text))
+                Termination::Text(pump.terminal_text())
             }
             PromptEnd::Stop(StopReason::Cancelled) => Termination::Cancelled,
             // The agent's own turn/token ceilings are execution-level caps;
@@ -362,7 +368,7 @@ impl AcpEngine {
             // result -- surface the real diagnostic, NOT "closed stdout".
             PromptEnd::Failed(reason) => Termination::Transient(reason),
         };
-        let outcome = self.outcome(termination, pump.trace, 1, discovered);
+        let outcome = self.outcome(termination, pump.settle_rounds(), 1, discovered);
         child.kill_and_wait();
         outcome
     }
@@ -370,7 +376,7 @@ impl AcpEngine {
     fn outcome(
         &self,
         termination: Termination,
-        trace: Vec<TraceEntry>,
+        rounds: Vec<LoopRound>,
         round_trips: u32,
         discovered: Option<DiscoveredRuntime>,
     ) -> LoopOutcome {
@@ -380,10 +386,10 @@ impl AcpEngine {
             // (bridge -> MCP gateway -> tools::dispatch), observed there.
             // The ACP engine drives only the ACP half of the turn.
             promotions: Vec::new(),
-            // ADR-0103 (issue #608): the flat trajectory wraps as one
-            // round until the per-runtime grouping slice; an empty
-            // trajectory stays an empty round list (no ghost round).
-            trace: LoopRound::flat_wrap(trace),
+            // ADR-0103 (issue #611): rounds grouped at the tool-call batch
+            // boundary, with per-round thinking + prose slots; the built-in
+            // loop's flat wrap no longer funnels through here.
+            trace: rounds,
             round_trips,
             // ADR-0095: the handshake's extracted catalog rides every
             // post-handshake exit (None before / on handshake failure).
@@ -745,10 +751,16 @@ enum PromptEnd {
 // ---------------------------------------------------------------------------
 
 /// The mutable per-turn state the pump accumulates. Mirrors the built-in
-/// loop's `CallOutputs` (trace + promotions); promotions stay empty (gateway
-/// side, slice 9c) so only the trace + terminal text live here.
+/// loop's `CallOutputs` (round-grouped trace); promotions stay empty (gateway
+/// side, slice 9c) so only the rounds + terminal text live here.
 struct Pump {
-    trace: Vec<TraceEntry>,
+    /// The per-round accumulation, oldest first. Round 1 opens at the prompt
+    /// (the pre-prompt `Thinking { attempt: 1 }` covers it); a thought or
+    /// prose chunk arriving after a round that observed a call opens the next
+    /// one (ADR-0103 round boundary = the tool-call batch split, issue #611).
+    rounds: Vec<RoundAcc>,
+    /// The full agent-message accumulation across the turn -- the terminal
+    /// text's fallback when no prose stretch followed the last batch.
     text: String,
     /// Tool calls that started but have not yet reached a terminal status.
     pending: Vec<PendingToolCall>,
@@ -759,9 +771,33 @@ struct Pump {
     step_cap: u32,
 }
 
+/// One round's in-flight accumulation (issue #611): the thought + prose
+/// streams the agent emitted since the last tool-call batch, plus the batch's
+/// landed calls.
+#[derive(Default)]
+struct RoundAcc {
+    /// The round's frozen thinking block, set when its thought stream ends
+    /// (the batch's first tool call, or turn end).
+    thinking: Option<ThinkingTrace>,
+    /// The live thought accumulation, and when it started (the fold's
+    /// duration is measured to the stream's end).
+    thinking_buf: String,
+    thinking_since: Option<Instant>,
+    /// The round's connective prose accumulation (empty = the round carried
+    /// no prose).
+    text: String,
+    /// Whether the round has observed a tool call (landed or pending) -- the
+    /// seal that makes a following thought/prose chunk open the next round.
+    saw_call: bool,
+    calls: Vec<TraceEntry>,
+}
+
 /// A tool call that opened a trace row but has not finalized (Completed /
-/// Failed).
+/// Failed). Carries the index of the round it opened in -- a late completion
+/// (or the turn-end drain) lands the entry on that round, not whichever round
+/// happens to be current.
 struct PendingToolCall {
+    round: usize,
     tool_use_id: String,
     name: String,
     operation_kind: OperationKind,
@@ -770,13 +806,75 @@ struct PendingToolCall {
 }
 
 impl Pump {
+    /// The round a thought/prose chunk belongs to: the current one, or a
+    /// freshly opened one when the current round already observed a call (the
+    /// batch boundary). Opening fires the new round's `Thinking` wait -- the
+    /// live channel's round pointer, mirroring the built-in loop's per
+    /// round-trip marker.
+    fn open_round(&mut self, on_phase: &mut impl FnMut(TurnPhase)) -> &mut RoundAcc {
+        if self.rounds.last().is_some_and(|r| r.saw_call) {
+            self.rounds.push(RoundAcc::default());
+            on_phase(TurnPhase::Thinking {
+                attempt: self.rounds.len() as u32,
+            });
+        }
+        self.rounds.last_mut().expect("round 1 opens at the prompt")
+    }
+
+    /// Freeze the round's thought stream into its thinking block + emit the
+    /// completion event. Idempotent: a second call finds an empty buffer.
+    fn freeze_thinking(&mut self, idx: usize, on_phase: &mut impl FnMut(TurnPhase)) {
+        let Some(round) = self.rounds.get_mut(idx) else {
+            return;
+        };
+        if round.thinking_buf.is_empty() {
+            return;
+        }
+        let duration_ms = round
+            .thinking_since
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let trace = ThinkingTrace {
+            duration_ms,
+            text: std::mem::take(&mut round.thinking_buf),
+        };
+        on_phase(TurnPhase::ThinkingCompleted {
+            duration_ms: trace.duration_ms,
+            text: trace.text.clone(),
+        });
+        round.thinking = Some(trace);
+    }
+
+    /// The prelude the round's first tool call fires (issue #611): the frozen
+    /// thinking block, then the round's prose -- both BEFORE the batch's
+    /// `ToolCallStarted` events, the ADR-0103 live order the frontend's round
+    /// grouping relies on. Skipped when the round offered neither.
+    fn fire_round_prelude(&mut self, idx: usize, on_phase: &mut impl FnMut(TurnPhase)) {
+        self.freeze_thinking(idx, on_phase);
+        if let Some(round) = self.rounds.get(idx) {
+            if !round.text.is_empty() {
+                on_phase(TurnPhase::RoundText {
+                    text: round.text.clone(),
+                });
+            }
+        }
+    }
+
     fn fold_update(&mut self, update: &SessionUpdate, on_phase: &mut impl FnMut(TurnPhase)) {
         match update {
             SessionUpdate::AgentMessageChunk { content, .. } => {
-                for block in content {
-                    if let Some(text) = block.as_text() {
-                        self.text.push_str(text);
+                if let Some(text) = content.as_text() {
+                    self.text.push_str(text);
+                    self.open_round(on_phase).text.push_str(text);
+                }
+            }
+            SessionUpdate::AgentThoughtChunk { content, .. } => {
+                if let Some(text) = content.as_text() {
+                    let round = self.open_round(on_phase);
+                    if round.thinking_since.is_none() {
+                        round.thinking_since = Some(Instant::now());
                     }
+                    round.thinking_buf.push_str(text);
                 }
             }
             SessionUpdate::ToolCall {
@@ -787,6 +885,13 @@ impl Pump {
                 content,
             } => {
                 self.tool_call_count += 1;
+                let idx = self.rounds.len() - 1;
+                // The batch boundary: the round's prelude fires once, before
+                // this call's Started event.
+                if !self.rounds[idx].saw_call {
+                    self.rounds[idx].saw_call = true;
+                    self.fire_round_prelude(idx, on_phase);
+                }
                 let (name, summary) = name_summary(title.as_deref(), tool_call_id);
                 let operation_kind = kind
                     .map(|k| k.to_operation_kind())
@@ -798,6 +903,7 @@ impl Pump {
                 });
                 if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
                     self.finalize_row(
+                        idx,
                         tool_call_id,
                         &name,
                         operation_kind,
@@ -808,6 +914,7 @@ impl Pump {
                     );
                 } else {
                     self.pending.push(PendingToolCall {
+                        round: idx,
                         tool_use_id: tool_call_id.clone(),
                         name,
                         operation_kind,
@@ -843,6 +950,7 @@ impl Pump {
                             ToolCallStatus::Completed | ToolCallStatus::Failed
                         ) {
                             self.finalize_row(
+                                row.round,
                                 &row.tool_use_id,
                                 &row.name,
                                 row.operation_kind,
@@ -863,9 +971,48 @@ impl Pump {
         }
     }
 
+    /// The terminal reply text: the trailing prose stretch (the call-less
+    /// last round's chunks) when the agent sent one, else the full
+    /// accumulation -- the fallback semantics this slice preserves for agents
+    /// that put their answer alongside the final batch.
+    fn terminal_text(&self) -> String {
+        match self.rounds.last() {
+            Some(r) if !r.saw_call && !r.text.is_empty() => r.text.clone(),
+            _ => self.text.clone(),
+        }
+    }
+
+    /// Project the accumulated rounds onto the loop's trace form. The
+    /// trailing call-less round is not a round of its own: its prose rode the
+    /// terminal text, so only a frozen thinking block keeps it -- a bare
+    /// prose-only (or empty) tail drops, keeping the zero-call turn's trace
+    /// empty.
+    fn settle_rounds(mut self) -> Vec<LoopRound> {
+        if self.rounds.last().is_some_and(|r| !r.saw_call) {
+            let last = self.rounds.last_mut().expect("checked above");
+            last.text.clear();
+            if last.thinking.is_none() {
+                self.rounds.pop();
+            }
+        }
+        self.rounds
+            .into_iter()
+            .map(|r| LoopRound {
+                thinking: r.thinking,
+                text: if r.text.is_empty() {
+                    None
+                } else {
+                    Some(r.text)
+                },
+                calls: r.calls,
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn finalize_row(
         &mut self,
+        round: usize,
         tool_use_id: &str,
         name: &str,
         operation_kind: OperationKind,
@@ -897,7 +1044,7 @@ impl Pump {
             result_excerpt,
         };
         on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-        self.trace.push(entry);
+        self.rounds[round].calls.push(entry);
     }
 }
 

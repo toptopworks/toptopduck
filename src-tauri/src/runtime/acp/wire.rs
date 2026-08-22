@@ -278,26 +278,40 @@ pub struct SessionUpdateParams {
     pub update: SessionUpdate,
 }
 
-/// One `session/update` payload. Modeled as an internally-tagged union
-/// (`"type": <variant>`) to match the ACP schema's discriminator. Only the
+/// One `session/update` payload. Modeled as an internally-tagged union on
+/// `sessionUpdate` -- the discriminator of the ACP schema crate 0.13.8 v1
+/// (verified against its own serialization fixtures, issue #611). Only the
 /// variants the engine consumes are named; an unknown kind deserializes to
 /// [`SessionUpdate::Other`] (forward compatibility with newer agents).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
-    tag = "type",
+    tag = "sessionUpdate",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
 pub enum SessionUpdate {
-    /// A chunk of the agent's final answer text. Accumulated into the turn's
-    /// terminal [`crate::session::agent_loop::Termination::Text`] payload.
+    /// A chunk of the agent's streamed response text. Grouped per round into
+    /// the trace prose + accumulated for the terminal text (ADR-0103,
+    /// issue #611).
     AgentMessageChunk {
         /// ACP carries `messageId`; the engine ignores it (one terminal message
         /// per turn is the v1 contract).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
-        #[serde(default)]
-        content: Vec<ContentBlock>,
+        /// The schema's `ContentChunk` carries ONE content block, not an
+        /// array. A non-text block folds nothing (the engine's only consumed
+        /// form is text).
+        content: ContentBlock,
+    },
+    /// A chunk of the agent's internal reasoning (issue #611). Accumulated per
+    /// round and folded into a thinking-complete block at the round boundary;
+    /// an agent that never emits thoughts degrades honestly (no fold, no
+    /// error).
+    AgentThoughtChunk {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// ONE content block, same `ContentChunk` shape as the message chunk.
+        content: ContentBlock,
     },
     /// A new tool call started. Maps to a `ToolCallStarted` phase event + opens
     /// a trace row.
@@ -325,7 +339,7 @@ pub enum SessionUpdate {
         #[serde(default)]
         content: Vec<ToolCallContent>,
     },
-    /// Any other update kind (user_message_chunk, agent_thought_chunk, plan,
+    /// Any other update kind (user_message_chunk, plan,
     /// available_commands_update, current_mode_update, config_option_update,
     /// session_info_update, usage_update). Ignored by the engine.
     #[serde(other)]
@@ -581,6 +595,63 @@ mod tests {
         assert_eq!(v["text"], "hello");
     }
 
+    /// The session/update payload discriminates on `sessionUpdate` (the
+    /// schema crate 0.13.8 v1 shape, issue #611's schema verification) and a
+    /// ContentChunk carries ONE content block, not an array. The JSON below is
+    /// byte-for-byte the schema crate's own serialization test fixture -- the
+    /// authoritative real-agent wire form. A regression here breaks every
+    /// `session/update` against a real agent (the line fails to parse and the
+    /// pump drops it silently).
+    #[test]
+    fn agent_message_chunk_matches_schema_wire_shape() {
+        let raw = serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "msg_agent_c42b9",
+            "content": {"type": "text", "text": "Hello"},
+        });
+        let update: SessionUpdate =
+            serde_json::from_value(raw.clone()).expect("schema shape must parse");
+        match &update {
+            SessionUpdate::AgentMessageChunk {
+                message_id,
+                content,
+            } => {
+                assert_eq!(message_id.as_deref(), Some("msg_agent_c42b9"));
+                assert_eq!(content.as_text(), Some("Hello"));
+            }
+            other => panic!("expected AgentMessageChunk, got {other:?}"),
+        }
+        // Round-trip: our serialization is the same shape we parse.
+        let v: Value = serde_json::to_value(&update).unwrap();
+        assert_eq!(v, raw);
+    }
+
+    /// The agent_thought_chunk variant exists in the schema crate 0.13.8 v1
+    /// (issue #611's verification conclusion) and shares the ContentChunk
+    /// shape: optional `messageId` + ONE content block. `messageId` is
+    /// optional on the wire -- a chunk without one must still parse.
+    #[test]
+    fn agent_thought_chunk_round_trips_schema_shape() {
+        let raw = serde_json::json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "weighing options"},
+        });
+        let update: SessionUpdate =
+            serde_json::from_value(raw.clone()).expect("thought chunk must parse");
+        match &update {
+            SessionUpdate::AgentThoughtChunk {
+                message_id,
+                content,
+            } => {
+                assert_eq!(message_id, &None, "messageId absent -> None");
+                assert_eq!(content.as_text(), Some("weighing options"));
+            }
+            other => panic!("expected AgentThoughtChunk, got {other:?}"),
+        }
+        let v: Value = serde_json::to_value(&update).unwrap();
+        assert_eq!(v, raw);
+    }
+
     #[test]
     fn mcp_server_stdio_serializes_with_type_tag_and_fields() {
         let server = McpServer::stdio_bridge(
@@ -615,12 +686,18 @@ mod tests {
     }
 
     /// An unknown session/update kind degrades to `Other` instead of rejecting
-    /// the whole message -- forward compatibility with newer agents.
+    /// the whole message -- forward compatibility with newer agents. The kind
+    /// rides the `sessionUpdate` discriminator (the schema crate 0.13.8 v1
+    /// shape, issue #611).
     #[test]
     fn unknown_session_update_kind_degrades_to_other() {
         let raw = serde_json::json!({
             "sessionId": "s1",
-            "update": {"type": "usage_update", "contextWindow": 200000, "tokensUsed": 42},
+            "update": {
+                "sessionUpdate": "usage_update",
+                "contextWindow": 200000,
+                "tokensUsed": 42,
+            },
         });
         let params: SessionUpdateParams =
             serde_json::from_value(raw).expect("unknown update kind must not reject");
@@ -631,7 +708,7 @@ mod tests {
     #[test]
     fn tool_call_update_deserializes_fields() {
         let raw = serde_json::json!({
-            "type": "tool_call_update",
+            "sessionUpdate": "tool_call_update",
             "toolCallId": "tc_1",
             "status": "completed",
             "title": "explore SELECT 1",
