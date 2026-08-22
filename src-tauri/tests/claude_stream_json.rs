@@ -55,20 +55,23 @@ fn input() -> AcpTurnInput {
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Drive one scenario through the claude stream engine, returning the
-/// outcome + the phase stream. Uses a short wall-clock (5s) so a stuck
-/// scenario fails the test fast.
-fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>) {
+/// outcome, the phase stream, and the turn's elapsed time (measured AFTER the
+/// scenario lock is held -- the harness runs tests in parallel, and the
+/// lock-queue wait is not the engine's latency; the step-cap pin relies on
+/// this). Uses a short wall-clock (5s) so a stuck scenario fails fast.
+fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(claude_code(), cancel)
         .with_caps(step_cap, Some(std::time::Duration::from_secs(5)));
     let approval = ApprovalState::new();
     let mut phases = Vec::new();
     let _g = ENV_LOCK.lock().unwrap();
+    let start = std::time::Instant::now();
     std::env::set_var("CLAUDE_FAKE_SCENARIO", scenario);
     let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
         phases.push(p)
     });
-    (outcome, phases)
+    (outcome, phases, start.elapsed())
 }
 
 /// A no-op approval sink (unused by the claude path but required by the
@@ -94,7 +97,7 @@ impl ApprovalSink for NoopSink {
 /// honest-rendering current model, ADR-0097 Decision 5).
 #[test]
 fn text_reply_yields_text_outcome_and_init_model() {
-    let (outcome, phases) = run("text_reply", 24);
+    let (outcome, phases, _) = run("text_reply", 24);
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
@@ -124,7 +127,7 @@ fn text_reply_yields_text_outcome_and_init_model() {
 /// merged trace would drop a duplicate, so the driver never emits one).
 #[test]
 fn gateway_tool_call_emits_phases_keeps_prose_round() {
-    let (outcome, phases) = run("tool_call", 24);
+    let (outcome, phases, _) = run("tool_call", 24);
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "found 3 rows"),
         other => panic!("expected Text, got {other:?}"),
@@ -163,7 +166,7 @@ fn gateway_tool_call_emits_phases_keeps_prose_round() {
 /// and the trailing prose rides the terminal text (no round-2 RoundText).
 #[test]
 fn thinking_blocks_ride_rounds_end_to_end() {
-    let (outcome, phases) = run("thinking_rounds", 24);
+    let (outcome, phases, _) = run("thinking_rounds", 24);
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
@@ -213,7 +216,7 @@ fn thinking_blocks_ride_rounds_end_to_end() {
 /// backstop surface -- the trace shows the refusal honestly).
 #[test]
 fn native_tool_rides_engine_trace_as_failure() {
-    let (outcome, _) = run("native_tool_denied", 24);
+    let (outcome, _, _) = run("native_tool_denied", 24);
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "done without native tools"),
         other => panic!("expected Text, got {other:?}"),
@@ -236,7 +239,7 @@ fn native_tool_rides_engine_trace_as_failure() {
 /// same stream (measured) -- the turn still resolves end-to-end.
 #[test]
 fn hook_frames_are_tolerated_end_to_end() {
-    let (outcome, _) = run("hook_frames", 24);
+    let (outcome, _, _) = run("hook_frames", 24);
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "hooked but fine"),
         other => panic!("expected Text despite hook frames, got {other:?}"),
@@ -250,7 +253,7 @@ fn hook_frames_are_tolerated_end_to_end() {
 /// would kill whole turns.
 #[test]
 fn garbage_lines_are_skipped_not_fatal() {
-    let (outcome, _) = run("garbage_lines", 24);
+    let (outcome, _, _) = run("garbage_lines", 24);
     match &outcome.termination {
         Termination::Text(t) => {
             assert_eq!(t, "the answer is 42");
@@ -263,7 +266,7 @@ fn garbage_lines_are_skipped_not_fatal() {
 /// An error result frame maps to Transient carrying the CLI's detail.
 #[test]
 fn result_error_maps_to_transient() {
-    let (outcome, _) = run("result_error", 24);
+    let (outcome, _, _) = run("result_error", 24);
     match &outcome.termination {
         Termination::Transient(msg) => {
             assert!(msg.contains("rate limited"), "carries the detail: {msg}");
@@ -276,7 +279,7 @@ fn result_error_maps_to_transient() {
 /// (the ACP path's MaxTurns precedent).
 #[test]
 fn max_turns_maps_to_step_cap() {
-    let (outcome, _) = run("max_turns", 24);
+    let (outcome, _, _) = run("max_turns", 24);
     match outcome.termination {
         Termination::StepCap(n) => assert_eq!(n, 24),
         other => panic!("expected StepCap, got {other:?}"),
@@ -287,7 +290,7 @@ fn max_turns_maps_to_step_cap() {
 /// pump's EOF fallback treats the accumulated text as the answer.
 #[test]
 fn crash_with_text_treats_as_success() {
-    let (outcome, _) = run("crash_with_text", 24);
+    let (outcome, _, _) = run("crash_with_text", 24);
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "about to crash"),
         other => panic!("expected Text (EOF fallback), got {other:?}"),
@@ -297,7 +300,7 @@ fn crash_with_text_treats_as_success() {
 /// Stdout closes with no frames and no text -> Transient.
 #[test]
 fn empty_stdout_lands_as_transient() {
-    let (outcome, _) = run("empty_stdout", 24);
+    let (outcome, _, _) = run("empty_stdout", 24);
     match outcome.termination {
         Termination::Transient(msg) => {
             assert!(msg.contains("without a result frame"), "got: {msg}");
@@ -310,19 +313,19 @@ fn empty_stdout_lands_as_transient() {
 /// engine's step cap -> StepCap termination.
 #[test]
 fn step_cap_overflow_yields_step_cap_termination() {
-    let start = std::time::Instant::now();
-    let (outcome, _) = run("step_cap_overflow", 3);
+    let (outcome, _, elapsed) = run("step_cap_overflow", 3);
     match outcome.termination {
         Termination::StepCap(n) => assert_eq!(n, 3),
         other => panic!("expected StepCap, got {other:?}"),
     }
     // The step-cap path resolves in well under 1s; a watchdog fallback
     // takes 5s. Pin it so a regression does not silently fall back to the
-    // watchdog (the codex test's precedent).
+    // watchdog. The elapsed time comes from `run` (measured after the
+    // scenario lock) so parallel tests' lock-queue wait does not pollute
+    // the pin.
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(3),
-        "took {:?} -- resolved via the wall-clock watchdog, not the step-cap path",
-        start.elapsed()
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- resolved via the wall-clock watchdog, not the step-cap path"
     );
 }
 
