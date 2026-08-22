@@ -10,7 +10,6 @@ import {
   useTurnFlow,
   type LiveCall,
   type LiveRound,
-  type LiveState,
   type LiveTraceRow,
 } from "../useTurnFlow";
 import { materialized, textual } from "./fixtures";
@@ -572,16 +571,6 @@ describe("useTurnFlow", () => {
       status: { kind: "pending" },
       ...over,
     });
-    const liveState = (over: Partial<LiveState> = {}): LiveState => ({
-      question: "q",
-      askedAt: 0,
-      step: 1,
-      calls: [],
-      roundTexts: [],
-      roundThinkings: [],
-      ...over,
-    });
-
     it("passes plain calls through as ungated rows", () => {
       expect(mergeLiveTrace([call()], [], null)).toEqual([
         expect.objectContaining({ key: "call-0", approval: null, success: true }),
@@ -689,15 +678,20 @@ describe("useTurnFlow", () => {
       // The live thinking fold survives the settle swap: the round's thinking
       // block lands on the optimistic record's round, not dropped at fold
       // time. Rounds without thinking stay thinking-free (honest degrade).
-      expect(
-        liveRoundsToTrace([
-          { text: "先看一眼数据。", rows: [] },
-          { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
-        ]),
-      ).toEqual([
+      const thinking = { duration_ms: 900, text: "reasoning" };
+      const trace = liveRoundsToTrace([
+        { text: "先看一眼数据。", rows: [] },
+        { thinking, rows: [] },
+      ]);
+      expect(trace).toEqual([
         { text: "先看一眼数据。", calls: [] },
         { thinking: { duration_ms: 900, text: "reasoning" }, calls: [] },
       ]);
+      // Identity, not just structure (issue #620): the settle seed keys on
+      // the thinking block's REFERENCE, so the projection must carry the
+      // same object -- a structurally-equal clone would break the seed while
+      // this toEqual above stays green.
+      expect(trace[1]?.thinking).toBe(thinking);
     });
 
     it("buildLiveRounds spans rows leading the slot arrays; the projection preserves the round order (issue #620)", () => {
@@ -707,7 +701,9 @@ describe("useTurnFlow", () => {
       // settled trace reads the same round sequence the exchange rendered,
       // with the empty middle round dropped and no arrival-order artifacts.
       const rounds = buildLiveRounds(
-        liveState({
+        // The grouping inputs only (the derivation's Pick): no question /
+        // askedAt -- the turn identity is not the derivation's concern.
+        {
           step: 3,
           calls: [
             call({
@@ -720,7 +716,7 @@ describe("useTurnFlow", () => {
           ],
           roundTexts: ["先看一眼数据。"],
           roundThinkings: [],
-        }),
+        },
         [],
       );
       expect(rounds.map((r) => [r.text, r.rows.map((row) => row.key)])).toEqual([

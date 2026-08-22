@@ -61,7 +61,7 @@ function LiveRoundBlock({
       )}
       {text !== undefined && <RoundProse text={text} />}
       {rows.length > 0 && (
-        <TraceList hookClass="live-trace">
+        <TraceList>
           {rows.map((row) => (
             <LiveRow key={row.key} row={row} onRespond={onRespondApproval} />
           ))}

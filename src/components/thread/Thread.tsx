@@ -133,14 +133,20 @@ export function Thread({
     });
   }, []);
   // Reset the posture set when a FRESH turn starts (liveTurn transitions to
-  // non-null), so a new turn never inherits the previous one's folds.
-  // Adjusted during render -- the React-blessed "state on prop change"
-  // pattern, no effect (an effect would land a frame too late for the seed
-  // below, which must ride the swap's mounting frame).
-  const [prevLiveTurn, setPrevLiveTurn] = useState<LiveTurn | null>(null);
-  if (prevLiveTurn !== liveTurn) {
-    setPrevLiveTurn(liveTurn);
-    if (liveTurn !== null) setLiveThinkingExpanded(NO_EXPANDED_FOLDS);
+  // non-null), so a new turn never inherits the previous one's folds. The
+  // edge is keyed by the submit stamp, NOT the liveTurn object identity:
+  // the memoized liveTurn takes a new identity on EVERY progress event, so
+  // an identity edge would wipe the collector mid-turn and the settle seed
+  // below would arrive empty. askedAt is read once at submit and constant
+  // within the turn, so it IS the turn identity (issue #620). Adjusted
+  // during render -- the React-blessed "state on prop change" pattern, no
+  // effect (an effect would land a frame too late for the seed below,
+  // which must ride the swap's mounting frame).
+  const [prevAskedAt, setPrevAskedAt] = useState<number | null>(null);
+  const askedAt = liveTurn?.askedAt ?? null;
+  if (prevAskedAt !== askedAt) {
+    setPrevAskedAt(askedAt);
+    if (askedAt !== null) setLiveThinkingExpanded(NO_EXPANDED_FOLDS);
   }
   // The index of the last recorded turn -- on the swap frame this is the
   // optimistic append the settle just landed (the timeline's tail turn).

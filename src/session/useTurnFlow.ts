@@ -199,7 +199,7 @@ export function mergeLiveTrace(
  *  array spans the furthest reach of any source; untouched slots stay
  *  undefined. Pure -- unit-tested without the hook. */
 export function buildLiveRounds(
-  live: LiveState,
+  live: Pick<LiveState, "calls" | "step" | "roundTexts" | "roundThinkings">,
   approvals: ReadonlyArray<ApprovalEntry>,
 ): LiveRound[] {
   const rows = mergeLiveTrace(live.calls, approvals, live.step);
@@ -296,9 +296,11 @@ export interface UseTurnFlow {
 }
 
 /** The in-flight turn's raw progress state: the turn-progress channel alone
- *  (approval cards merge in at the liveTurn derivation). Exported for the
- *  pure-helpers' unit tests. */
-export interface LiveState {
+ *  (approval cards merge in at the liveTurn derivation). Internal to the
+ *  hook module -- the pure helpers take only the grouping inputs (see
+ *  buildLiveRounds' Pick), so this shape stays free to evolve with the
+ *  event stream. */
+interface LiveState {
   question: string;
   askedAt: number;
   step: number | null;
