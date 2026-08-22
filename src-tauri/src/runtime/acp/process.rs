@@ -128,38 +128,36 @@ enum LineRead {
     Eof,
 }
 
-/// Read one line, buffering at most `max` bytes of it (issue #629). Within
-/// one call the over-long drain pass reuses `raw`; the accepted line is
-/// moved out of it for the UTF-8 conversion.
-fn read_line_bounded(
-    reader: &mut impl BufRead,
-    max: usize,
-    raw: &mut Vec<u8>,
-) -> std::io::Result<LineRead> {
-    raw.clear();
+/// Read one line, buffering at most `max` bytes of it (issue #629). The
+/// scratch buffer is function-local: the over-long drain pass reuses it
+/// within one call, and the accepted line is moved out of it for the
+/// UTF-8 conversion.
+fn read_line_bounded(reader: &mut impl BufRead, max: usize) -> std::io::Result<LineRead> {
+    let mut raw: Vec<u8> = Vec::new();
     // `take(max)` bounds the read: the buffer never holds more than `max`
     // bytes, so a hostile single line cannot grow it without limit.
-    let n = Read::take(&mut *reader, max as u64).read_until(b'\n', raw)?;
+    let n = Read::take(&mut *reader, max as u64).read_until(b'\n', &mut raw)?;
     if n == 0 {
         return Ok(LineRead::Eof);
     }
     // The budget was exhausted without a newline: the line is over-long.
     // (A short line without a newline is the final line before EOF -- a
-    // normal line. A final line of exactly `max` bytes, newline excluded,
-    // is indistinguishable from an over-long one here and drops with the
-    // same warn -- the safe side of the ambiguity.) Drain the remainder in
-    // bounded chunks, then drop.
+    // normal line. A line whose payload reaches `max` bytes drops as
+    // over-long either way: mid-stream its newline lands one byte past
+    // the budget, and an exactly-`max` final line is not distinguishable
+    // from an over-long one before the drain -- the safe side of both.)
+    // Drain the remainder in bounded chunks, then drop.
     if n == max && !raw.ends_with(b"\n") {
         loop {
             raw.clear();
-            let n = Read::take(&mut *reader, max as u64).read_until(b'\n', raw)?;
+            let n = Read::take(&mut *reader, max as u64).read_until(b'\n', &mut raw)?;
             // EOF mid-line, or the over-long line's own newline: done.
             if n == 0 || raw.ends_with(b"\n") {
                 return Ok(LineRead::Overlong);
             }
         }
     }
-    let line = String::from_utf8(std::mem::take(raw)).map_err(|_| {
+    let line = String::from_utf8(std::mem::take(&mut raw)).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "stream did not contain valid UTF-8",
@@ -179,9 +177,8 @@ pub(super) fn spawn_line_reader(stdout: ChildStdout) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
-        let mut raw: Vec<u8> = Vec::new();
         loop {
-            match read_line_bounded(&mut reader, LINE_MAX_BYTES, &mut raw) {
+            match read_line_bounded(&mut reader, LINE_MAX_BYTES) {
                 Ok(LineRead::Line(line)) => {
                     let trimmed = line.trim_end_matches(['\n', '\r']);
                     if trimmed.is_empty() {
@@ -223,19 +220,15 @@ mod tests {
     #[test]
     fn reads_normal_lines() {
         let mut cur = Cursor::new(b"one\ntwo\n".to_vec());
-        let mut raw = Vec::new();
         assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
+            read_line_bounded(&mut cur, 64),
             Ok(LineRead::Line(l)) if l == "one\n"
         ));
         assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
+            read_line_bounded(&mut cur, 64),
             Ok(LineRead::Line(l)) if l == "two\n"
         ));
-        assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
-            Ok(LineRead::Eof)
-        ));
+        assert!(matches!(read_line_bounded(&mut cur, 64), Ok(LineRead::Eof)));
     }
 
     /// Issue #629: an over-long line is drained + dropped, and the reader
@@ -244,13 +237,12 @@ mod tests {
     fn drops_overlong_line_and_keeps_reading() {
         let long = "x".repeat(100);
         let mut cur = Cursor::new(format!("{long}\nok\n").into_bytes());
-        let mut raw = Vec::new();
         assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
+            read_line_bounded(&mut cur, 64),
             Ok(LineRead::Overlong)
         ));
         assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
+            read_line_bounded(&mut cur, 64),
             Ok(LineRead::Line(l)) if l == "ok\n"
         ));
     }
@@ -260,9 +252,8 @@ mod tests {
     #[test]
     fn keeps_final_unterminated_line() {
         let mut cur = Cursor::new(b"tail".to_vec());
-        let mut raw = Vec::new();
         assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
+            read_line_bounded(&mut cur, 64),
             Ok(LineRead::Line(l)) if l == "tail"
         ));
     }
@@ -273,15 +264,11 @@ mod tests {
     fn overlong_to_eof_is_overlong_then_eof() {
         let long = "x".repeat(100);
         let mut cur = Cursor::new(long.into_bytes());
-        let mut raw = Vec::new();
         assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
+            read_line_bounded(&mut cur, 64),
             Ok(LineRead::Overlong)
         ));
-        assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
-            Ok(LineRead::Eof)
-        ));
+        assert!(matches!(read_line_bounded(&mut cur, 64), Ok(LineRead::Eof)));
     }
 
     /// A line exactly at the cap that IS newline-terminated is a normal
@@ -290,9 +277,8 @@ mod tests {
     fn cap_sized_terminated_line_is_normal() {
         let exact = "x".repeat(63); // 63 x's + '\n' = 64 = the cap
         let mut cur = Cursor::new(format!("{exact}\n").into_bytes());
-        let mut raw = Vec::new();
         assert!(matches!(
-            read_line_bounded(&mut cur, 64, &mut raw),
+            read_line_bounded(&mut cur, 64),
             Ok(LineRead::Line(l)) if l == format!("{exact}\n")
         ));
     }
@@ -302,8 +288,7 @@ mod tests {
     #[test]
     fn invalid_utf8_is_an_io_error() {
         let mut cur = Cursor::new(vec![0xff, 0xfe, b'\n']);
-        let mut raw = Vec::new();
-        let err = read_line_bounded(&mut cur, 64, &mut raw).unwrap_err();
+        let err = read_line_bounded(&mut cur, 64).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

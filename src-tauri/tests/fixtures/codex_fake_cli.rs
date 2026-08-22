@@ -116,6 +116,19 @@ fn main() {
             // Disconnected instead of the step-cap path.
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
+        "line_cap_overlong" => {
+            // A single line past the 4-MiB line cap (issue #639's cap
+            // reaching the stream path): the shared reader drops it and
+            // the connection stays up -- the events after it still
+            // arrive. The over-long line is raw non-JSON garbage (dropped
+            // before any parse, so no envelope is needed).
+            let _ = writeln!(out, "{}", "g".repeat(5 * 1024 * 1024));
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "agent_message", "message": "still alive"}),
+            );
+            emit(&mut out, &serde_json::json!({"type": "turn_completed"}));
+        }
         "crash" => {
             emit(
                 &mut out,

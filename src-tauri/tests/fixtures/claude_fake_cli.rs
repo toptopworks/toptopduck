@@ -64,6 +64,7 @@ const SCENARIOS: &[&str] = &[
     "turn_silent",
     "cancel_with_prose",
     "garbage_lines",
+    "line_cap_overlong",
     // Probe surface.
     "catalog_success",
     "catalog_hook_noise",
@@ -342,6 +343,23 @@ fn run_turn(scenario: &str) {
             );
             let _ = writeln!(out, "usage: 10 input tokens, 5 output tokens");
             emit(&mut out, &result_success("the answer is 42"));
+        }
+        "line_cap_overlong" => {
+            // A single line past the 4-MiB line cap (issue #639's cap
+            // reaching the stream path): the shared reader drops it and
+            // the connection stays up -- the frames on the lines after it
+            // still arrive. The over-long line is raw non-JSON garbage
+            // (dropped before any parse, so no envelope is needed).
+            let _ = writeln!(out, "{}", "g".repeat(5 * 1024 * 1024));
+            emit(&mut out, &system_init());
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "still alive"}]}
+                }),
+            );
+            emit(&mut out, &result_success("still alive"));
         }
         "step_cap_overflow" => {
             // Emit more gateway tool_use frames than the step cap (tests pass

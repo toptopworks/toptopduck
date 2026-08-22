@@ -610,7 +610,7 @@ fn play_scenario(
             }
             respond_prompt(out, &id, StopReason::Success);
         }
-        // Issue #629 review: a line past the ndjson line cap is dropped and
+        // Issue #629 review: a line past the 4-MiB line cap is dropped and
         // the connection stays up -- the prose on the NEXT line still
         // arrives. The first line is raw non-JSON garbage (it is dropped
         // before any parse, so no envelope is needed).

@@ -258,6 +258,18 @@ fn disconnected_with_text_treats_as_success() {
     assert!(outcome.trace.is_empty(), "{:?}", outcome.trace);
 }
 
+/// A single line past the 4-MiB line cap is dropped by the shared reader
+/// and the connection stays up: the events after it still arrive and the
+/// turn completes with their text (issue #639's stream-path cap pin).
+#[test]
+fn overlong_line_is_dropped_and_reading_continues() {
+    let (outcome, _, _) = run("line_cap_overlong", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "still alive"),
+        other => panic!("expected Text despite the overlong line, got {other:?}"),
+    }
+}
+
 /// Stdout closes with no events and no text -> Transient (no recovery possible).
 #[test]
 fn empty_stdout_lands_as_transient() {

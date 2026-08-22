@@ -349,8 +349,7 @@ pub(super) fn run_codex_event_stream(
 
     let stdout = child.stdout.take().expect("piped stdout");
 
-    // Reader thread (shared, line-capped -- issue #639): forwards each
-    // non-empty line so the pump can check cancel / step-cap between reads.
+    // Reader thread (shared, line-capped -- issue #639).
     let rx = super::process::spawn_line_reader(stdout);
 
     // Signal Thinking once before the event pump (one exec invocation = one

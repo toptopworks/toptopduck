@@ -59,8 +59,8 @@ pub(super) struct NdjsonIo {
 
 impl NdjsonIo {
     pub(super) fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
-        // The reader thread owns stdout; EOF drops tx so the pump's recv
-        // returns Disconnected.
+        // Shared line-capped reader (see `spawn_line_reader`); EOF drops
+        // the sender.
         let rx = super::process::spawn_line_reader(stdout);
         Self { stdin, rx }
     }
