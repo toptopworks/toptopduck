@@ -295,6 +295,9 @@ fn crash_with_text_treats_as_success() {
         Termination::Text(t) => assert_eq!(t, "about to crash"),
         other => panic!("expected Text (EOF fallback), got {other:?}"),
     }
+    // The promoted text rode the terminal -- no round double-carries it
+    // (issue #628's Text settle stays consistent with the fallback).
+    assert!(outcome.trace.is_empty(), "{:?}", outcome.trace);
 }
 
 /// Stdout closes with no frames and no text -> Transient.
@@ -398,6 +401,69 @@ fn user_cancel_aborts_the_whole_turn() {
     assert!(
         elapsed < std::time::Duration::from_secs(3),
         "took {elapsed:?} -- the cancel was not observed; the fixture sleeps 30s"
+    );
+}
+
+/// Issue #628: a user cancel mid-answer keeps the partial prose on the tail
+/// round -- the Cancelled termination carries no text for the prose to ride,
+/// so the trace is its only home.
+#[test]
+fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
+    let cancel = Arc::new(CancelToken::new());
+    // No wall-clock: the user-cancel path alone (the
+    // `user_cancel_aborts_the_whole_turn` peer's rationale).
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "cancel_with_prose");
+    // Deterministic ordering instead of a wall-clock bet: the scenario
+    // emits a native call frame and the prose frame in one flush, so once
+    // the call's ToolCallStarted phase fires the prose is already in the
+    // pipe behind it. The cancel thread latches on that phase, waits out
+    // one recv cycle (the pump polls at 50ms), and only then requests --
+    // the cancel cannot overtake the prose fold. The latch also subsumes
+    // the spawn-after-env rule: phases only flow once the turn is live,
+    // and begin_turn has already cleared any stale `requested`.
+    let phases: Arc<std::sync::Mutex<Vec<TurnPhase>>> = Arc::default();
+    let latch = Arc::clone(&phases);
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        while !latch
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. }))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.lock().unwrap().push(p);
+    });
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Round 1 carries the drained call row (best-effort success -- the
+    // result frame never came); the call-less tail round keeps the prose
+    // the cancel interrupted.
+    assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1, "{:?}", outcome.trace);
+    assert_eq!(
+        outcome.trace[1].text.as_deref(),
+        Some("partial answer"),
+        "the streamed-so-far prose survives the cancel"
+    );
+    // Same window pin as the peer: catch a slow-but-correct resolution,
+    // not the outright miss (the Cancelled assert catches that).
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- a slow cancel resolution; the fixture sleeps 30s"
     );
 }
 

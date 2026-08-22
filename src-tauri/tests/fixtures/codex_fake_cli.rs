@@ -138,6 +138,26 @@ fn main() {
             // Close stdout immediately — no events, no text. The pump sees
             // Disconnected with no text -> Transient.
         }
+        "cancel_with_prose" => {
+            // A command execution, then agent text, then hold stdout open
+            // (no terminal event) so the pump's loop-top cancel check ends
+            // the turn mid-answer (issue #628's cancel-mid-prose shape).
+            // The call's ToolCallStarted phase is the cancel test's latch:
+            // once it fires, the text event (emitted in the same flush,
+            // behind the call) is already in the pipe, so a cancel that
+            // waits out one recv cycle lands strictly after the prose
+            // folds.
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "command_execution", "call_id": "call_1", "command": "explore SELECT 1"}),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "agent_message", "message": "partial answer"}),
+            );
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
         other => {
             emit(
                 &mut out,

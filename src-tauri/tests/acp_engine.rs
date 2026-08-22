@@ -534,6 +534,27 @@ fn crash_mid_turn_lands_as_transient() {
     }
 }
 
+/// Issue #628: a crash after partial prose keeps the prose on the trace's
+/// tail round. The Eof exit lands Transient (the ACP-native path never
+/// promotes partial prose to Text, unlike the stream paths' EOF fallback),
+/// so the trace is the prose's only home -- clearing it there would lose it
+/// from every surface at once.
+#[test]
+fn crash_mid_prose_keeps_partial_prose_in_trace() {
+    let (outcome, _) = run("crash", 24);
+    assert!(
+        matches!(outcome.termination, Termination::Transient(_)),
+        "the Eof exit stays Transient: {:?}",
+        outcome.termination
+    );
+    assert_eq!(outcome.trace.len(), 1, "the tail round survives");
+    assert_eq!(
+        outcome.trace[0].text.as_deref(),
+        Some("about to crash"),
+        "the partial prose rides the tail round"
+    );
+}
+
 /// A crash between initialize and session/new exercises the round-trip's own
 /// EOF path (distinct from the prompt pump's): the shared loop's Disconnected
 /// maps onto the frozen "ACP agent closed stdout" transient (issue #540 pins
@@ -669,6 +690,46 @@ fn user_cancel_aborts_the_whole_turn() {
     // The user-cancel path resolves in ~200ms (the spawn delay); a watchdog
     // fallback takes ~10s. Same rationale as the step-cap test above.
     assert_not_via_watchdog("user_cancel", start);
+}
+
+/// Issue #628: a user cancel mid-answer keeps the partial prose on the
+/// tail round -- the Cancelled termination carries no text for the prose to
+/// ride, so the trace is its only home.
+#[test]
+fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = engine(Arc::clone(&cancel), 24);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "cancel");
+    // Same spawn-after-env pattern as `user_cancel_aborts_the_whole_turn`:
+    // begin_turn clears a stale `requested`, so the cancel must fire after
+    // the turn starts.
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    assert_eq!(outcome.trace.len(), 1, "the tail round survives");
+    assert!(
+        outcome.trace[0]
+            .text
+            .as_deref()
+            .is_some_and(|t| t.contains("working...")),
+        "the prose streamed before the cancel survives: {:?}",
+        outcome.trace[0].text
+    );
+    // Same window pin as the peer: the cancel resolves in ~200ms, so a
+    // watchdog fallback (10s) turns into a loud failure.
+    assert_not_via_watchdog("user_cancel_mid_prose", start);
 }
 
 /// The engine takes the adapter spec as data and never names the CLI: the same

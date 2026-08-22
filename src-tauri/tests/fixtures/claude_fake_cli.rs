@@ -62,6 +62,7 @@ const SCENARIOS: &[&str] = &[
     "empty_stdout",
     "step_cap_overflow",
     "turn_silent",
+    "cancel_with_prose",
     "garbage_lines",
     // Probe surface.
     "catalog_success",
@@ -293,6 +294,33 @@ fn run_turn(scenario: &str) {
             // keeps polling until the watchdog (or a user cancel) ends the
             // turn -- the stuck-agent shape the interrupt tests drive.
             emit(&mut out, &system_init());
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        "cancel_with_prose" => {
+            // A native tool call, then assistant text, then hold stdout
+            // open (no result frame) so the pump's loop-top cancel check
+            // ends the turn mid-answer (issue #628's cancel-mid-prose
+            // shape). The call's ToolCallStarted phase is the cancel
+            // test's latch: once it fires, the prose frame (emitted in
+            // the same flush, behind the call) is already in the pipe, so
+            // a cancel that waits out one recv cycle lands strictly after
+            // the prose folds.
+            emit(&mut out, &system_init());
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]}
+                }),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "partial answer"}]}
+                }),
+            );
+            let _ = out.flush();
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         "garbage_lines" => {

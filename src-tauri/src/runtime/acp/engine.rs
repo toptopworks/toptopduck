@@ -344,8 +344,9 @@ impl AcpEngine {
             pump.tracker.land_call(row.round, entry);
         }
         // Close the trailing round's thought stream: its ThinkingCompleted
-        // fires (the fold renders live), but no RoundText -- the trailing
-        // prose rides the terminal text, not a round slot (issue #611).
+        // fires (the fold renders live), but no RoundText -- whether the
+        // settle keeps the trailing prose on the round depends on the
+        // termination (issues #611/#628).
         pump.tracker.freeze_trailing_thinking(&mut on_phase);
 
         let termination = match end {
@@ -366,7 +367,8 @@ impl AcpEngine {
             // result -- surface the real diagnostic, NOT "closed stdout".
             PromptEnd::Failed(reason) => Termination::Transient(reason),
         };
-        let outcome = self.outcome(termination, pump.tracker.settle_rounds(), 1, discovered);
+        let rounds = pump.tracker.settle_rounds(&termination);
+        let outcome = self.outcome(termination, rounds, 1, discovered);
         child.kill_and_wait();
         outcome
     }
@@ -901,8 +903,9 @@ impl RoundTracker {
     }
 
     /// Close the trailing round's thought stream: its ThinkingCompleted
-    /// fires (the fold renders live), but no RoundText -- the trailing
-    /// prose rides the terminal text, not a round slot (issue #611).
+    /// fires (the fold renders live), but no RoundText -- the live channel
+    /// never shows the trailing prose; whether the settle keeps it on the
+    /// round depends on the termination (issues #611/#628).
     pub(super) fn freeze_trailing_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
         let trailing = self.rounds.len() - 1;
         self.freeze_thinking(trailing, on_phase);
@@ -948,18 +951,27 @@ impl RoundTracker {
         }
     }
 
-    /// Project the accumulated rounds onto the loop's trace form. The
-    /// trailing call-less round is not a round of its own: its prose rode
-    /// the terminal text, so only a frozen thinking block keeps it -- a bare
-    /// prose-only (or empty) tail drops, keeping the zero-call turn's trace
-    /// empty.
-    pub(super) fn settle_rounds(self) -> Vec<LoopRound> {
+    /// Project the accumulated rounds onto the loop's trace form. How the
+    /// trailing call-less round's prose settles depends on the termination:
+    /// a `Text` termination means the prose rode the terminal text, so it
+    /// is cleared (only a frozen thinking block keeps the round -- a bare
+    /// prose-only or empty tail drops, keeping the zero-call turn's trace
+    /// empty); any other termination carries no text, so the partial prose
+    /// stays on the round -- otherwise it would vanish from the trace, the
+    /// termination, and the live channel at once, exactly when partial
+    /// output is most valuable for diagnosis. Symmetric with the trailing
+    /// thinking block, which always survives: on a non-Text exit the tail
+    /// keeps both or neither (issue #628).
+    pub(super) fn settle_rounds(self, termination: &Termination) -> Vec<LoopRound> {
         let mut rounds = self.rounds;
-        if rounds.last().is_some_and(|r| !r.saw_call) {
-            let last = rounds.last_mut().expect("checked above");
-            last.text.clear();
-            if last.thinking.is_none() {
-                rounds.pop();
+        if let Some(last) = rounds.last_mut() {
+            if !last.saw_call {
+                if matches!(termination, Termination::Text(_)) {
+                    last.text.clear();
+                }
+                if last.text.is_empty() && last.thinking.is_none() {
+                    rounds.pop();
+                }
             }
         }
         rounds
@@ -1309,6 +1321,68 @@ mod tests {
         let (_, summary) = name_summary(Some(&long), "tc");
         assert!(summary.chars().count() <= TRACE_EXCERPT_MAX);
         assert!(summary.ends_with('…'), "bounded summary ends with ellipsis");
+    }
+
+    /// Issue #628: a Text termination's trailing prose rode the terminal
+    /// text, so the settle clears it -- a prose-only tail drops (the pinned
+    /// shape the stream paths' EOF promotion also relies on).
+    #[test]
+    fn text_settle_drops_the_trailing_prose_round() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose("working on it", &mut on_phase);
+        let _ = tracker.call_round(&mut on_phase);
+        tracker.push_prose("partial answer", &mut on_phase);
+        let rounds = tracker.settle_rounds(&Termination::Text("partial answer".into()));
+        assert_eq!(rounds.len(), 1, "the prose-only tail drops: {rounds:?}");
+        assert_eq!(rounds[0].text.as_deref(), Some("working on it"));
+    }
+
+    /// Issue #628: a non-Text termination carries no text, so the trailing
+    /// round keeps its partial prose -- symmetric with its thinking, which
+    /// the turn-end freeze always keeps. Holds for Cancelled, StepCap, and
+    /// Transient alike (the policy matches only Text).
+    #[test]
+    fn non_text_settle_keeps_trailing_prose_and_thinking() {
+        for termination in [
+            Termination::Cancelled,
+            Termination::StepCap(24),
+            Termination::Transient("agent closed stdout".into()),
+        ] {
+            let mut tracker = RoundTracker::new();
+            let mut on_phase = |_p: TurnPhase| {};
+            tracker.push_prose("working on it", &mut on_phase);
+            let _ = tracker.call_round(&mut on_phase);
+            tracker.push_thought("final thought", &mut on_phase);
+            tracker.push_prose("partial answer", &mut on_phase);
+            tracker.freeze_trailing_thinking(&mut on_phase);
+            let rounds = tracker.settle_rounds(&termination);
+            assert_eq!(rounds.len(), 2, "{termination:?}: the tail round survives");
+            assert_eq!(rounds[0].text.as_deref(), Some("working on it"));
+            assert_eq!(
+                rounds[1].text.as_deref(),
+                Some("partial answer"),
+                "{termination:?}: the partial prose stays on the tail"
+            );
+            assert_eq!(
+                rounds[1]
+                    .thinking
+                    .as_ref()
+                    .expect("frozen tail thinking")
+                    .text,
+                "final thought",
+                "{termination:?}: prose and thinking survive together"
+            );
+        }
+    }
+
+    /// Issue #628: an empty tail (no prose, no thinking, no calls) still
+    /// drops under a non-Text termination -- a zero-call cancelled turn
+    /// records no round.
+    #[test]
+    fn non_text_settle_still_drops_an_empty_tail() {
+        let rounds = RoundTracker::new().settle_rounds(&Termination::Cancelled);
+        assert!(rounds.is_empty(), "{rounds:?}");
     }
 
     /// decide_permission under no-confirmation selects an allow option.
