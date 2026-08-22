@@ -5,7 +5,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
 import { Thread } from "../Thread";
-import type { LiveTraceRow, LiveTurn } from "../../../session/useTurnFlow";
+import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { SkillEntry } from "../../../types/skills";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
@@ -1285,10 +1285,9 @@ describe("Thread", () => {
     // locale-rendered text.
     const ASKED_AT = 1_700_000_000_000;
 
-    function liveRow(over: Partial<LiveTraceRow> = {}): LiveTraceRow {
+    function liveRow(over: Partial<LiveRoundRow> = {}): LiveRoundRow {
       return {
         key: "call-0",
-        step: 1,
         name: "explore",
         server: null,
         operationKind: "read",
@@ -1301,14 +1300,16 @@ describe("Thread", () => {
       };
     }
 
+    function liveRound(over: Partial<LiveRound> = {}): LiveRound {
+      return { rows: [], ...over };
+    }
+
     it("mounts the user bubble at submit with the thinking status (chat live form)", () => {
       const liveTurn: LiveTurn = {
         question: "统计一下",
         askedAt: ASKED_AT,
         step: null,
-        rows: [],
-        roundTexts: [],
-        roundThinkings: [],
+        rounds: [],
       };
       const { container } = renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
@@ -1331,9 +1332,7 @@ describe("Thread", () => {
         question: "q",
         askedAt: ASKED_AT,
         step: 2,
-        rows: [],
-        roundTexts: [],
-        roundThinkings: [],
+        rounds: [],
       };
       renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
@@ -1346,21 +1345,23 @@ describe("Thread", () => {
         question: "q",
         askedAt: ASKED_AT,
         step: 2,
-        roundTexts: ["先看一眼数据。", null],
-        roundThinkings: [{ duration_ms: 900, text: "推理" }, null],
-        rows: [
-          liveRow({
-            key: "call-0",
-            running: false,
-            success: false,
-            resultExcerpt: "boom",
+        rounds: [
+          liveRound({
+            thinking: { duration_ms: 900, text: "推理" },
+            text: "先看一眼数据。",
+            rows: [
+              liveRow({ key: "call-0", running: false, success: false, resultExcerpt: "boom" }),
+            ],
           }),
-          liveRow({
-            key: "call-1",
-            step: 2,
-            name: "materialize",
-            operationKind: "write",
-            summary: "SELECT 2",
+          liveRound({
+            rows: [
+              liveRow({
+                key: "call-1",
+                name: "materialize",
+                operationKind: "write",
+                summary: "SELECT 2",
+              }),
+            ],
           }),
         ],
       };
@@ -1372,8 +1373,9 @@ describe("Thread", () => {
       // the settle swap does not move them.
       expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
       expect(screen.getByText("思考 · 0.9s")).toBeInTheDocument();
-      // The grouping itself is the contract (rowsToRounds groups the same
-      // way at settle): one block per round, each row inside ITS round.
+      // The grouping itself is the contract (liveRoundsToTrace projects the
+      // same rounds at settle): one block per round, each row inside ITS
+      // round.
       const roundBlocks = container.querySelectorAll(".trace-round");
       expect(roundBlocks).toHaveLength(2);
       const round1 = within(roundBlocks[0] as HTMLElement);
@@ -1395,18 +1397,28 @@ describe("Thread", () => {
       expect(screen.queryByText("思考中（第 2 步）…")).not.toBeInTheDocument();
     });
 
-    it("derives rounds from rows beyond the slot arrays (rows lead the slots)", () => {
-      // A call can land in round 3 while only round 1 emitted prose (the
-      // slot arrays lag the dispatch stream): the block count follows the
-      // rows, so the newest call still groups into its own round.
+    it("renders rounds whose rows lead the slot arrays (a round with rows but no prose)", () => {
+      // The single derivation (buildLiveRounds) already spanned by step; this
+      // pins the rendering side: a round carrying only rows renders its own
+      // block after the prose round, so the newest call still lands in its
+      // own block (the DOM contract the derivation's unit test asserts
+      // structurally).
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
         step: 3,
-        roundTexts: ["先看一眼数据。"],
-        roundThinkings: [],
-        rows: [
-          liveRow({ key: "call-2", step: 3, name: "materialize", operationKind: "write", summary: "SELECT 3" }),
+        rounds: [
+          liveRound({ text: "先看一眼数据。" }),
+          liveRound({
+            rows: [
+              liveRow({
+                key: "call-2",
+                name: "materialize",
+                operationKind: "write",
+                summary: "SELECT 3",
+              }),
+            ],
+          }),
         ],
       };
       const { container } = renderThread(
@@ -1428,9 +1440,7 @@ describe("Thread", () => {
         question: "q",
         askedAt: ASKED_AT,
         step: 2,
-        roundTexts: [],
-        roundThinkings: [],
-        rows: [liveRow({ key: "call-0", running: false, success: true })],
+        rounds: [liveRound({ rows: [liveRow({ key: "call-0", running: false, success: true })] })],
       };
       renderThread(
         <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
@@ -1443,17 +1453,19 @@ describe("Thread", () => {
         question: "q",
         askedAt: ASKED_AT,
         step: 1,
-        roundTexts: [],
-        roundThinkings: [],
-        rows: [
-          liveRow({
-            key: "req-1",
-            name: "fetch",
-            server: "acme",
-            operationKind: "network",
-            summary: "GET /x",
-            approval: { requestId: "req-1", response: null },
-            running: false,
+        rounds: [
+          liveRound({
+            rows: [
+              liveRow({
+                key: "req-1",
+                name: "fetch",
+                server: "acme",
+                operationKind: "network",
+                summary: "GET /x",
+                approval: { requestId: "req-1", response: null },
+                running: false,
+              }),
+            ],
           }),
         ],
       };
@@ -1485,19 +1497,21 @@ describe("Thread", () => {
         question: "q",
         askedAt: ASKED_AT,
         step: 1,
-        roundTexts: [],
-        roundThinkings: [],
-        rows: [
-          liveRow({
-            key: "req-1",
-            name: "fetch",
-            server: "acme",
-            operationKind: "network",
-            summary: "GET /x",
-            approval: { requestId: "req-1", response: "deny" },
-            running: false,
-            success: false,
-            resultExcerpt: "denied by approval gateway",
+        rounds: [
+          liveRound({
+            rows: [
+              liveRow({
+                key: "req-1",
+                name: "fetch",
+                server: "acme",
+                operationKind: "network",
+                summary: "GET /x",
+                approval: { requestId: "req-1", response: "deny" },
+                running: false,
+                success: false,
+                resultExcerpt: "denied by approval gateway",
+              }),
+            ],
           }),
         ],
       };
@@ -1516,9 +1530,7 @@ describe("Thread", () => {
         question: "第一问",
         askedAt: ASKED_AT,
         step: null,
-        rows: [],
-        roundTexts: [],
-        roundThinkings: [],
+        rounds: [],
       };
       // entries empty (a brand-new session's first ask): the live exchange
       // still renders (the empty-thread bail-out must not swallow it).
@@ -1527,6 +1539,504 @@ describe("Thread", () => {
       );
       expect(screen.getByText("第一问")).toBeInTheDocument();
       expect(container.querySelector(".live-turn-exchange")).not.toBeNull();
+    });
+
+    it("renders the dataset chip on the live side; the settle swap keeps the chip set unchanged (issue #620)", () => {
+      // The live stream header opens with the same active chip the settled
+      // header renders (the same findMentionedDataset read), so the settle
+      // swap adds no element: the chip count before and after is one and the
+      // same.
+      const labels = [{ reference_name: "people", display_name: "员工表" }];
+      const liveTurn: LiveTurn = {
+        question: "在员工表上统计总销售额",
+        askedAt: ASKED_AT,
+        step: null,
+        rounds: [],
+      };
+      const record: TurnRecord = {
+        question: "在员工表上统计总销售额",
+        outcome: { kind: "Cancelled" },
+        trace: [],
+        provenance: { skills: [] },
+      };
+      const { container, rerender } = renderThread(
+        <Thread
+          entries={[]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          datasetLabels={labels}
+          liveTurn={liveTurn}
+        />,
+      );
+      // The live side carries the chip (the header renders before any
+      // progress event).
+      expect(screen.getByText(/→员工表/)).toBeInTheDocument();
+      expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(1);
+      // The settle swap: the live exchange folds away as the optimistic
+      // record appends -- the chip count stays one, now on the settled side.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(record)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              datasetLabels={labels}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      expect(screen.getByText(/→员工表/)).toBeInTheDocument();
+      expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(1);
+    });
+
+    it("renders no chip and no stream header on the live side when the question names no dataset (issue #620)", () => {
+      // The live chip read's negative branch (the mirror of the settled
+      // side's no-chip case): a question naming no dataset renders neither
+      // the chip nor the header row, so the settle swap removes no element
+      // either.
+      const labels = [{ reference_name: "people", display_name: "员工表" }];
+      const liveTurn: LiveTurn = {
+        question: "随便看看",
+        askedAt: ASKED_AT,
+        step: null,
+        rounds: [],
+      };
+      const { container } = renderThread(
+        <Thread
+          entries={[]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          datasetLabels={labels}
+          liveTurn={liveTurn}
+        />,
+      );
+      expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(0);
+      expect(container.querySelector(".live-turn-exchange .stream-header")).toBeNull();
+    });
+
+    it("keeps the live-opened thinking fold + prose across the settle swap (issue #620)", () => {
+      // The settle continuity: the exchange reports its open folds, and the
+      // swap frame seeds the appended entry's thinking folds with them. The
+      // prose stays by shared markup; the fold the user opened stays open,
+      // the one they left closed stays closed. The thinking blocks are the
+      // SAME references on both sides (the projection carries them), which
+      // is what the reference-keyed seed matches on.
+      const openedThinking = { duration_ms: 900, text: "推理一" };
+      const closedThinking = { duration_ms: 1200, text: "推理二" };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 2,
+        rounds: [
+          liveRound({ thinking: openedThinking, text: "先看一眼数据。" }),
+          liveRound({ thinking: closedThinking }),
+        ],
+      };
+      const record: TurnRecord = {
+        question: "q",
+        outcome: { kind: "Textual", data: { text_kind: "Agent", body: "答", assumption: null } },
+        trace: [
+          { thinking: openedThinking, text: "先看一眼数据。", calls: [] },
+          { thinking: closedThinking, calls: [] },
+        ],
+        provenance: { skills: [] },
+        asked_at: ASKED_AT,
+        settled_at: ASKED_AT,
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      // Open round 1's fold only; round 2's stays collapsed.
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      expect(screen.getByText("推理一")).toBeInTheDocument();
+      expect(screen.queryByText("推理二")).not.toBeInTheDocument();
+      // The settle swap in one commit: the live turn nulls AND the
+      // optimistic record appends (the same single rerender the hook's batch
+      // produces).
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(record)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      // The prose stays (identical markup) and the opened fold stays open;
+      // the untouched fold stays collapsed. The answer body closes the turn.
+      expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
+      expect(screen.getByText("答")).toBeInTheDocument();
+      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
+      expect(toggles).toHaveLength(2);
+      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
+      expect(toggles[1]?.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.getByText("推理一")).toBeInTheDocument();
+      expect(screen.queryByText("推理二")).not.toBeInTheDocument();
+    });
+
+    it("maps the settle seed through the projection's round drop (issue #620)", () => {
+      // The seed keys on the thinking block's reference, not an array index:
+      // a gate-cancelled round (rows all unsettled, no prose, no thinking)
+      // renders on the live side but the projection drops it, shifting the
+      // settled trace's indices -- the reference key still finds the same
+      // fold. An index-keyed seed flips these assertions (the opened fold
+      // snaps shut, the next round's fold pops open).
+      const openedThinking = { duration_ms: 900, text: "推理一" };
+      const closedThinking = { duration_ms: 1200, text: "推理二" };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 3,
+        rounds: [
+          // The round the projection drops: a pending card that never
+          // settled (denied at the gate, no dispatch).
+          liveRound({
+            rows: [
+              liveRow({
+                key: "req-1",
+                name: "fetch",
+                server: "acme",
+                operationKind: "network",
+                summary: "GET /x",
+                approval: { requestId: "req-1", response: null },
+                running: false,
+                success: null,
+              }),
+            ],
+          }),
+          liveRound({ thinking: openedThinking }),
+          liveRound({ thinking: closedThinking }),
+        ],
+      };
+      const record: TurnRecord = {
+        question: "q",
+        outcome: { kind: "Cancelled" },
+        trace: [
+          { thinking: openedThinking, calls: [] },
+          { thinking: closedThinking, calls: [] },
+        ],
+        provenance: { skills: [] },
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      // Open the middle round's fold (live index 1).
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(record)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      // The opened fold now sits at trace index 0 (the gate round dropped);
+      // the reference seed keeps it open and leaves the other collapsed.
+      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
+      expect(toggles).toHaveLength(2);
+      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
+      expect(toggles[1]?.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.getByText("推理一")).toBeInTheDocument();
+      expect(screen.queryByText("推理二")).not.toBeInTheDocument();
+    });
+
+    it("keeps an opened live thinking fold mounted when new rows land in its round (issue #620)", () => {
+      // The round block's key is the round number: a row landing in the same
+      // round re-derives the rounds array but never remounts the block, so
+      // the fold's local state (open) survives the growth.
+      const thinking = { duration_ms: 900, text: "推理" };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 1,
+        rounds: [liveRound({ thinking })],
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      expect(screen.getByText("推理")).toBeInTheDocument();
+      // A call starts in the same round: the fold must not snap shut.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={{
+                ...liveTurn,
+                rounds: [liveRound({ thinking, rows: [liveRow({ key: "call-0" })] })],
+              }}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const toggle = document.querySelector(".live-turn-exchange .thinking-toggle");
+      expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("推理")).toBeInTheDocument();
+      expect(screen.getByText("explore")).toBeInTheDocument();
+    });
+
+    it("keeps the live-opened thinking fold across progress events landing after the open (issue #620)", () => {
+      // The collector's reset edge keys on the submit stamp, NOT the liveTurn
+      // identity: the memoized liveTurn takes a NEW identity on every
+      // progress event, so an identity-keyed reset would wipe the collector
+      // mid-turn and the settle seed would arrive empty -- the opened fold
+      // would snap shut. Open, then a progress event, then the settle: the
+      // exact sequence the swap tests above leave uncovered.
+      const openedThinking = { duration_ms: 900, text: "推理一" };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 1,
+        rounds: [liveRound({ thinking: openedThinking })],
+      };
+      const record: TurnRecord = {
+        question: "q",
+        outcome: { kind: "Cancelled" },
+        trace: [{ thinking: openedThinking, calls: [] }],
+        provenance: { skills: [] },
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      // A later progress event (same turn -- the SAME submit stamp, a NEW
+      // liveTurn object: the memo rebuilds on every event): the collector
+      // must survive it.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={{
+                ...liveTurn,
+                step: 2,
+                rounds: [
+                  liveRound({ thinking: openedThinking }),
+                  liveRound({ rows: [liveRow({ key: "call-0" })] }),
+                ],
+              }}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      // The settle swap in one commit: the opened fold still seeds.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(record)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
+      expect(toggles).toHaveLength(1);
+      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("推理一")).toBeInTheDocument();
+    });
+
+    it("keeps the fold open across the settle when a same-round repeated completion swaps the thinking block (issue #620)", () => {
+      // Last-wins: a repeated ThinkingCompleted for the same round overwrites
+      // the slot with a NEW block. The live fold keeps its open posture (the
+      // round block is position-keyed), and the fold re-reports against the
+      // replacement reference so the settle seed still hits -- without the
+      // re-report the collector holds the dead reference and the fold snaps
+      // shut at the swap.
+      const firstThinking = { duration_ms: 900, text: "推理一版" };
+      const replacedThinking = { duration_ms: 900, text: "推理二版" };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 1,
+        rounds: [liveRound({ thinking: firstThinking })],
+      };
+      const record: TurnRecord = {
+        question: "q",
+        outcome: { kind: "Cancelled" },
+        trace: [{ thinking: replacedThinking, calls: [] }],
+        provenance: { skills: [] },
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      expect(screen.getByText("推理一版")).toBeInTheDocument();
+      // The same round completes again (last-wins): the slot now carries the
+      // replacement block and the fold stays open on it.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={{ ...liveTurn, rounds: [liveRound({ thinking: replacedThinking })] }}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const liveToggle = document.querySelector(".live-turn-exchange .thinking-toggle");
+      expect(liveToggle?.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("推理二版")).toBeInTheDocument();
+      // The settle swap: the seed keys on the replacement reference.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(record)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
+      expect(settledToggle?.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("推理二版")).toBeInTheDocument();
+    });
+
+    it("keeps a fold the user re-closed before the settle collapsed (issue #620)", () => {
+      // The collector tracks both directions: re-closing removes the block
+      // from the set, so the settle seeds nothing and the fold mounts
+      // collapsed -- a growing-only collector would wrongly mount it open.
+      const thinking = { duration_ms: 900, text: "推理" };
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        step: 1,
+        rounds: [liveRound({ thinking })],
+      };
+      const record: TurnRecord = {
+        question: "q",
+        outcome: { kind: "Cancelled" },
+        trace: [{ thinking, calls: [] }],
+        provenance: { skills: [] },
+      };
+      const { rerender } = renderThread(
+        <Thread entries={[]} selectedResult={null} onSelectResult={() => {}} liveTurn={liveTurn} />,
+      );
+      const toggle = screen.getByRole("button", { name: "思考 · 0.9s" });
+      fireEvent.click(toggle); // open
+      fireEvent.click(toggle); // re-close before the settle
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(record)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
+      expect(settledToggle?.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("推理")).not.toBeInTheDocument();
+    });
+
+    it("resets the collected posture on a fresh turn so its folds mount collapsed (issue #620)", () => {
+      // Turn A's opened fold settles open (its card mounts seeded); the NEXT
+      // turn's folds mount collapsed -- the collector resets on the fresh
+      // turn's submit stamp, so turn B never inherits turn A's set.
+      const thinkingA = { duration_ms: 900, text: "推理甲" };
+      const thinkingB = { duration_ms: 1200, text: "推理乙" };
+      const recordA: TurnRecord = {
+        question: "问甲",
+        outcome: { kind: "Cancelled" },
+        trace: [{ thinking: thinkingA, calls: [] }],
+        provenance: { skills: [] },
+      };
+      const recordB: TurnRecord = {
+        question: "问乙",
+        outcome: { kind: "Cancelled" },
+        trace: [{ thinking: thinkingB, calls: [] }],
+        provenance: { skills: [] },
+      };
+      const { rerender } = renderThread(
+        <Thread
+          entries={[]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          liveTurn={{
+            question: "问甲",
+            askedAt: ASKED_AT,
+            step: 1,
+            rounds: [liveRound({ thinking: thinkingA })],
+          }}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
+      // Turn A settles: its fold mounts already open.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(recordA)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      expect(document.querySelector(".turn-entry .thinking-toggle")?.getAttribute("aria-expanded")).toBe(
+        "true",
+      );
+      // Turn B goes live (a NEW submit stamp) with its own thinking block,
+      // then settles: B's fold mounts collapsed, A's stays open.
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(recordA)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={{
+                question: "问乙",
+                askedAt: ASKED_AT + 1000,
+                step: 1,
+                rounds: [liveRound({ thinking: thinkingB })],
+              }}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <Thread
+              entries={[turnEntry(recordA), turnEntry(recordB)]}
+              selectedResult={null}
+              onSelectResult={() => {}}
+              liveTurn={null}
+            />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
+      expect(toggles).toHaveLength(2);
+      expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
+      expect(toggles[1]?.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("推理乙")).not.toBeInTheDocument();
     });
   });
 

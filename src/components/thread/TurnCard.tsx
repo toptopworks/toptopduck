@@ -10,14 +10,15 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { PencilLine } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { TraceRowList } from "./TraceView";
 import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
 import { FoldToggle } from "./FoldToggle";
+import { RoundProse } from "./RoundProse";
+import { StreamHeader } from "./StreamHeader";
 import { ThinkingFold } from "./ThinkingFold";
+import { TurnActiveChip } from "./TurnActiveChip";
 import { UserBubble } from "./UserBubble";
 import { StaleChip } from "./StaleChip";
 import {
@@ -28,7 +29,7 @@ import {
 } from "./turn-visual";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
-import type { TraceRound, TurnRecord } from "../../types/thread";
+import type { ThinkingTrace, TraceRound, TurnRecord } from "../../types/thread";
 import { formatTurnFailure, turnFailureDetail } from "../../lib/error-presentation";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 
@@ -45,6 +46,14 @@ interface TurnCardProps {
    * when hasJumpTarget is false (the chip is disabled, so no handler is wired). */
   onStaleChipJump: (() => void) | undefined;
   mentionedDataset: DatasetLabel | null;
+  /** The thinking blocks whose fold mounts already expanded -- the live ->
+   *  settled continuity (issue #620): the thread injects the live turn's
+   *  open folds (keyed by the thinking block reference, which the settle
+   *  projection carries onto the trace's own round) into the entry appended
+   *  at the settle swap, so a fold the user opened while the turn ran stays
+   *  open across the swap. Undefined (or an empty set) is the default
+   *  collapsed posture. */
+  thinkingInitiallyExpanded?: ReadonlySet<ThinkingTrace>;
   /** The registry index for skill drift detection (issue #381). undefined when
    *  the caller does not wire the registry: drift detection is skipped (honest
    *  degrade -- the timeline stays readable, mirroring SkillMarker's #366
@@ -75,6 +84,7 @@ export function TurnCard({
   hasJumpTarget,
   onStaleChipJump,
   mentionedDataset,
+  thinkingInitiallyExpanded,
   skillIndex,
 }: TurnCardProps) {
   const intl = useIntl();
@@ -106,27 +116,8 @@ export function TurnCard({
             ahead of the rounds, so the reading order is question -> annotation
             -> execution -> reply. */}
         {(mentionedDataset || drifted.length > 0) && (
-          <div className="stream-header flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-            {mentionedDataset && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  {/* Badge default = teal --primary (ADR-0050 active semantic); the
-                      turn-active-chip class carries layout only (flex-shrink,
-                      8rem tail-ellipsis + the test selector), the variant owns the
-                      color so the chip recolors with .dark alongside the token. */}
-                  <Badge variant="default" className="turn-active-chip shrink-0 max-w-32 truncate">
-                    →{mentionedDataset.display_name}
-                  </Badge>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-xs">
-                  <FormattedMessage
-                    id="thread.activeChip.title"
-                    defaultMessage={`Question names "{name}"`}
-                    values={{ name: mentionedDataset.display_name }}
-                  />
-                </TooltipContent>
-              </Tooltip>
-            )}
+          <StreamHeader>
+            {mentionedDataset && <TurnActiveChip dataset={mentionedDataset} />}
             {drifted.map((name) => (
               <span
                 key={name}
@@ -140,12 +131,12 @@ export function TurnCard({
                 />
               </span>
             ))}
-          </div>
+          </StreamHeader>
         )}
         {record.trace.map((round, i) => (
           // The trace is append-only within a turn and never reordered, so the
           // index is a stable key (the same YAGNI call the thread makes).
-          <TraceRoundBlock key={i} round={round} />
+          <TraceRoundBlock key={i} round={round} thinkingInitiallyExpanded={thinkingInitiallyExpanded} />
         ))}
         <TurnBody
           record={record}
@@ -201,9 +192,17 @@ export function TurnCard({
 // render nothing (honest degrade: no thinking source -> no thinking fold; a
 // pre-v5 migrated round is a bare call list -> just the step fold; an entirely
 // empty round -> no chrome at all). The thinking fold + prose are shared with
-// the live round block (issue #610) via ThinkingFold + the identical prose
-// markup, so the settle swap does not move them.
-function TraceRoundBlock({ round }: { round: TraceRound }) {
+// the live round block (issue #610) via ThinkingFold + RoundProse, so the
+// settle swap does not move them; `thinkingInitiallyExpanded` seeds the
+// thinking fold with the live turn's open posture at the settle swap
+// (issue #620).
+function TraceRoundBlock({
+  round,
+  thinkingInitiallyExpanded,
+}: {
+  round: TraceRound;
+  thinkingInitiallyExpanded: ReadonlySet<ThinkingTrace> | undefined;
+}) {
   const [stepsExpanded, setStepsExpanded] = useState(false);
   // Destructured const so the aliased guard narrows the binding itself (a
   // boolean alias of `round.thinking !== undefined` does not narrow the
@@ -214,14 +213,13 @@ function TraceRoundBlock({ round }: { round: TraceRound }) {
   if (!hasThinking && text === undefined && !hasCalls) return null;
   return (
     <div className="trace-round">
-      {hasThinking && <ThinkingFold thinking={thinking} />}
-      {text !== undefined && (
-        // The round's connective prose: always expanded (ADR-0103 -- prose is
-        // the conversational discourse, folding it would hide the narrative).
-        <p className="round-text m-0 mt-0.5 text-sm leading-snug text-foreground whitespace-pre-wrap break-words">
-          {text}
-        </p>
+      {hasThinking && (
+        <ThinkingFold
+          thinking={thinking}
+          initialExpanded={thinkingInitiallyExpanded?.has(thinking) ?? false}
+        />
       )}
+      {text !== undefined && <RoundProse text={text} />}
       {hasCalls && (
         // The round's step fold: the call count reads "Trace · N calls" so a
         // rail scan shows which rounds made multiple calls without expanding.

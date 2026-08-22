@@ -6,7 +6,7 @@
 
 import type { OperationKind } from "./approval";
 import type { SkillMountError } from "./skills";
-import type { TraceEntry } from "./thread";
+import type { ThinkingTrace, TraceEntry } from "./thread";
 
 // --- Session-scoped command errors ---------------------------------------
 
@@ -198,7 +198,10 @@ export type TurnPhase =
   // round's completed thinking block (duration + raw text), fired only when
   // the runtime exposes a thinking data source.
   | { RoundText: { text: string } }
-  | { ThinkingCompleted: { duration_ms: number; text: string } };
+  // Wraps the trace's own ThinkingTrace verbatim (the same reuse
+  // ToolCallCompleted makes of TraceEntry): the live state stores the block
+  // as-is and the round's fold renders it unchanged.
+  | { ThinkingCompleted: ThinkingTrace };
 
 // A `turn-progress` side-channel event addressed by sessionId (ADR-0059,
 // issue #76). Mirrors the Rust `TurnProgress`. The phase never enters the

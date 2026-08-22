@@ -9,13 +9,18 @@ import type { ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+// The hook class is the fold's selector / test anchor. A literal union of the
+// two folds that exist (the per-round thinking fold + the per-round steps
+// fold) so a typo'd class fails at the call site, not as a selector miss.
+export type FoldHookClass = "thinking-toggle" | "trace-toggle";
+
 export function FoldToggle({
   hookClass,
   expanded,
   onToggle,
   children,
 }: {
-  hookClass: string;
+  hookClass: FoldHookClass;
   expanded: boolean;
   onToggle: () => void;
   children: ReactNode;
