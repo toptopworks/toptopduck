@@ -81,14 +81,14 @@ const TRUNCATION_MARKER: &str = "\n[truncated]";
 /// The excerpt a row drained at turn end carries (issue #630): the turn
 /// ended before the agent reported a final status, and an empty excerpt
 /// under success=true would be indistinguishable from a real completion.
-const UNOBSERVED_EXCERPT: &str = "turn ended before a final status";
+pub(super) const UNOBSERVED_EXCERPT: &str = "turn ended before a final status";
 
 /// How a trace row ends: the wire-observed terminal statuses, or the
 /// turn-end fallback for a row whose agent never reported one (issue #630).
 /// Split from [`ToolCallStatus`] so the wire enum stays a pure wire shape
 /// while the row-finalization seam speaks in outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RowEnd {
+pub(super) enum RowEnd {
     /// The agent reported completion -- success row, empty excerpt.
     Completed,
     /// The agent reported failure -- the collected text is the anchor.

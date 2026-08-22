@@ -509,18 +509,25 @@ fn unresolved_call_drains_onto_its_opening_round() {
         Some("round one prose"),
         "the round keeps its prose slot"
     );
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "exactly the drained row: {:?}",
+        outcome.trace
+    );
     let entry = &outcome.trace[0].calls[0];
     assert_eq!(entry.name, "explore SELECT 1");
     // The honest unobserved marker (issue #630): a row still open at turn
     // end must not present as a bare success row (success=true with an
-    // empty excerpt is indistinguishable from a real completion).
+    // empty excerpt is indistinguishable from a real completion), and the
+    // marker text must stay distinct from the failure excerpt.
     assert!(
         !entry.success,
         "a drained row must not present as success: {entry:?}"
     );
-    assert!(
-        !entry.result_excerpt.is_empty(),
-        "a drained row carries the no-final-status marker: {entry:?}"
+    assert_eq!(
+        entry.result_excerpt, "turn ended before a final status",
+        "a drained row carries the unobserved marker: {entry:?}"
     );
     assert!(phases.iter().any(|p| matches!(
         p,

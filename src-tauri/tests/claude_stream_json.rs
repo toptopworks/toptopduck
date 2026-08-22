@@ -448,11 +448,16 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
         "user cancel -> Cancelled: {:?}",
         outcome.termination
     );
-    // Round 1 carries the drained call row (best-effort success -- the
+    // Round 1 carries the drained call row (honestly unobserved -- the
     // result frame never came); the call-less tail round keeps the prose
     // the cancel interrupted.
     assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
     assert_eq!(outcome.trace[0].calls.len(), 1, "{:?}", outcome.trace);
+    assert!(
+        !outcome.trace[0].calls[0].success,
+        "a drained row must not present as success: {:?}",
+        outcome.trace[0].calls[0]
+    );
     assert_eq!(
         outcome.trace[1].text.as_deref(),
         Some("partial answer"),

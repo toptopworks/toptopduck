@@ -368,9 +368,10 @@ pub enum ToolCallStatus {
     /// Failed with an error.
     Failed,
     /// An unrecognized status string. The v1 schema crate keeps a closed
-    /// four-variant status and downgrades an unparseable one to "absent"
-    /// (`DefaultOnError` on the optional status field -- never a whole-update
-    /// reject); this side degrades the same way: an unknown string maps to
+    /// four-variant status; its update path degrades an unparseable one to
+    /// "absent" (`DefaultOnError` on the optional status field), while its
+    /// initial `ToolCall.status` field would reject the whole notification.
+    /// This side degrades both paths: an unknown string maps to
     /// `Unknown`, which reads as "no terminal status yet" (issue #630). The
     /// raw string is not kept: the engine reads only the four terminal
     /// lifecycle points. `content` stays STRICT here (a bad item rejects the
@@ -823,9 +824,9 @@ mod tests {
 
     /// An unrecognized status string degrades to `ToolCallStatus::Unknown`
     /// instead of failing the whole update's parse (issue #630) -- the same
-    /// forward-compatibility stance the schema crate's own `Other(String)`
-    /// fallback takes, and the same one `ToolKind` already carries. The row
-    /// simply never reaches a terminal status through this value.
+    /// forward-compatibility stance `ToolKind` already carries on this
+    /// side (the crate keeps a closed status with no fallback variant).
+    /// The row simply never reaches a terminal status through this value.
     #[test]
     fn unknown_tool_call_status_degrades_to_unknown() {
         let raw = serde_json::json!({
