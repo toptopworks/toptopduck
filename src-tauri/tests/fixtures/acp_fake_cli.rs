@@ -219,6 +219,32 @@ fn main() {
                     );
                     continue;
                 }
+                // `session_new_raw` (issue #630): the session/new response as
+                // a raw schema-shaped line -- `sessionId` + `modes` + `_meta`
+                // alongside `configOptions`, the full NewSessionResponse field
+                // set the crate named by `wire::MODELED_SCHEMA` defines. The
+                // typed respond below serializes OUR NewSessionResult (self
+                // consistency only); this line pins the handshake against the
+                // real-agent shape (an unknown/extra field must parse).
+                if scenario == "session_new_raw" {
+                    write_line(
+                        &mut out,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "sessionId": "fake-session",
+                                "modes": {
+                                    "currentModeId": "default",
+                                    "availableModes": [{"id": "default", "name": "Default"}],
+                                },
+                                "configOptions": fake_config_options(),
+                                "_meta": {"source": "raw-schema-fixture"},
+                            },
+                        }),
+                    );
+                    continue;
+                }
                 // When the descriptor names a real bridge binary (the
                 // gateway_tool_call scenario), spawn it now so it connects
                 // back to the gateway before session/prompt fires MCP at it.
@@ -240,36 +266,10 @@ fn main() {
                         result: Some(NewSessionResult {
                             session_id: "fake-session".into(),
                             // ADR-0095 (AC: fake fixture returns
-                            // config_options): the real SessionConfigOption
-                            // wire shape (id / category / currentValue /
-                            // options[], camelCase -- schema crate 0.13.8)
-                            // with one model entry (two offered, one current)
-                            // + one thought_level entry (three offered, one
-                            // current) drives the engine's discovery path in
-                            // CI.
-                            config_options: Some(serde_json::json!([
-                                {
-                                    "id": "model",
-                                    "name": "Model",
-                                    "category": "model",
-                                    "currentValue": "fake-opus",
-                                    "options": [
-                                        { "value": "fake-opus", "name": "Opus" },
-                                        { "value": "fake-sonnet", "name": "Sonnet" },
-                                    ],
-                                },
-                                {
-                                    "id": "thought",
-                                    "name": "Thinking",
-                                    "category": "thought_level",
-                                    "currentValue": "medium",
-                                    "options": [
-                                        { "value": "low", "name": "Low" },
-                                        { "value": "medium", "name": "Medium" },
-                                        { "value": "high", "name": "High" },
-                                    ],
-                                },
-                            ])),
+                            // config_options): the shape comes from
+                            // `fake_config_options` (shared with the raw
+                            // schema-shaped scenario).
+                            config_options: Some(fake_config_options()),
                         }),
                         error: None,
                     },
@@ -373,13 +373,12 @@ fn play_scenario(
             respond_prompt(out, &id, StopReason::Success);
         }
         "tool_calls" => {
-            notify(
+            notify_tool_call_roundtrip(
                 out,
-                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
-            );
-            notify(
-                out,
-                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+                "tc_1",
+                "explore SELECT 1",
+                ToolKind::Search,
+                "rows: 3",
             );
             notify(out, agent_message("found 3 rows"));
             respond_prompt(out, &id, StopReason::Success);
@@ -400,41 +399,39 @@ fn play_scenario(
         "round_prose_thinking" => {
             notify(out, agent_thought("weighing schema options"));
             notify(out, agent_message("checking the data first"));
-            notify(
+            notify_tool_call_roundtrip(
                 out,
-                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
-            );
-            notify(
-                out,
-                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+                "tc_1",
+                "explore SELECT 1",
+                ToolKind::Search,
+                "rows: 3",
             );
             notify(out, agent_thought("narrowing the filter"));
             notify(out, agent_message("refining the query"));
-            notify(
+            notify_tool_call_roundtrip(
                 out,
-                tool_call_start("tc_2", "explore SELECT 2", ToolKind::Search),
-            );
-            notify(
-                out,
-                tool_call_finish("tc_2", "explore SELECT 2", ToolKind::Search, "rows: 1"),
+                "tc_2",
+                "explore SELECT 2",
+                ToolKind::Search,
+                "rows: 1",
             );
             notify(out, agent_message("both rounds folded"));
             respond_prompt(out, &id, StopReason::Success);
         }
-        // Issue #611: raw JSON lines in the schema crate 0.13.8 v1 wire shape
-        // (the `sessionUpdate` discriminator + ONE content block per chunk) --
+        // Issue #611: raw JSON lines in the schema-crate wire shape named by
+        // `wire::MODELED_SCHEMA` (the `sessionUpdate` discriminator + ONE
+        // content block per chunk) --
         // pins the parse path against the real-agent form, independent of the
         // typed helpers above (which serialize our own types).
         "real_wire_chunks" => {
             raw_session_update(out, "agent_thought_chunk", "real thought");
             raw_session_update(out, "agent_message_chunk", "real prose");
-            notify(
+            notify_tool_call_roundtrip(
                 out,
-                tool_call_start("rw_1", "explore SELECT 9", ToolKind::Search),
-            );
-            notify(
-                out,
-                tool_call_finish("rw_1", "explore SELECT 9", ToolKind::Search, "rows: 9"),
+                "rw_1",
+                "explore SELECT 9",
+                ToolKind::Search,
+                "rows: 9",
             );
             raw_session_update(out, "agent_message_chunk", "real terminal");
             respond_prompt(out, &id, StopReason::Success);
@@ -444,13 +441,12 @@ fn play_scenario(
         // prose (the fallback semantics this slice must preserve).
         "midturn_prose_no_terminal" => {
             notify(out, agent_message("checking alongside"));
-            notify(
+            notify_tool_call_roundtrip(
                 out,
-                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
-            );
-            notify(
-                out,
-                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+                "tc_1",
+                "explore SELECT 1",
+                ToolKind::Search,
+                "rows: 3",
             );
             respond_prompt(out, &id, StopReason::Success);
         }
@@ -663,6 +659,38 @@ fn play_scenario(
             notify(out, agent_message("done via gateway"));
             respond_prompt(out, &id, StopReason::Success);
         }
+        // Issue #630: one round, two calls in the same batch -- starts
+        // interleaved (start, start) before the finishes. Pins the saw_call
+        // prelude firing once for the round's FIRST call, not per call. The
+        // starts/finishes interleave on purpose: the adjacent-pair shape has
+        // its own `notify_tool_call_roundtrip`.
+        "single_round_two_calls" => {
+            notify(out, agent_message("batch prelude prose"));
+            notify(
+                out,
+                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
+            );
+            notify(
+                out,
+                tool_call_start("tc_2", "explore SELECT 2", ToolKind::Search),
+            );
+            notify(
+                out,
+                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+            );
+            notify(
+                out,
+                tool_call_finish("tc_2", "explore SELECT 2", ToolKind::Search, "rows: 1"),
+            );
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // `session_new_raw` (issue #630) differs only in the handshake's
+        // session/new line (raw schema shape); the prompt phase is the plain
+        // text reply.
+        "session_new_raw" => {
+            notify(out, agent_message("the answer is 42"));
+            respond_prompt(out, &id, StopReason::Success);
+        }
         other => {
             // Unknown scenario: respond success with a marker so a mis-spelled
             // scenario name fails loudly rather than hanging.
@@ -676,6 +704,37 @@ fn play_scenario(
 // Notification builders
 // ---------------------------------------------------------------------------
 
+/// The ADR-0095 discovery catalog: the real SessionConfigOption wire shape
+/// (id / category / currentValue / options[], camelCase) with one model entry
+/// (two offered, one current) + one thought_level entry (three offered, one
+/// current). Shared by the typed session/new respond and the raw
+/// schema-shaped `session_new_raw` line so both pin the same catalog.
+fn fake_config_options() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "currentValue": "fake-opus",
+            "options": [
+                { "value": "fake-opus", "name": "Opus" },
+                { "value": "fake-sonnet", "name": "Sonnet" },
+            ],
+        },
+        {
+            "id": "thought",
+            "name": "Thinking",
+            "category": "thought_level",
+            "currentValue": "medium",
+            "options": [
+                { "value": "low", "name": "Low" },
+                { "value": "medium", "name": "Medium" },
+                { "value": "high", "name": "High" },
+            ],
+        },
+    ])
+}
+
 fn notify(out: &mut std::io::Stdout, update: SessionUpdate) {
     let n = Notification::new(
         "session/update",
@@ -687,10 +746,11 @@ fn notify(out: &mut std::io::Stdout, update: SessionUpdate) {
     write_line(out, &n);
 }
 
-/// Emit one `session/update` as a hand-built JSON line in the schema crate
-/// 0.13.8 v1 wire shape (issue #611) -- `sessionUpdate` discriminator, one
-/// content block. Unlike [`notify`] this never serializes our own types, so
-/// the engine's parse path is pinned to the real-agent form.
+/// Emit one `session/update` as a hand-built JSON line in the schema-crate
+/// wire shape named by `wire::MODELED_SCHEMA` (issue #611) --
+/// `sessionUpdate` discriminator, one content block. Unlike [`notify`] this
+/// never serializes our own types, so the engine's parse path is pinned to
+/// the real-agent form.
 fn raw_session_update(out: &mut std::io::Stdout, kind: &str, text: &str) {
     let line = serde_json::json!({
         "jsonrpc": "2.0",
@@ -763,6 +823,22 @@ fn tool_call_finish(id: &str, title: &str, _kind: ToolKind, output: &str) -> Ses
             content: ContentBlock::text(output),
         }],
     }
+}
+
+/// A complete tool-call round trip on the wire: the start notification
+/// immediately followed by the completed finish, nothing interleaved -- the
+/// common fixture shape. Scenarios that interleave chunks between the two
+/// (`pending_across_round`) or drive the raw wire (`tool_kind_read`) keep
+/// the separate paths (issue #630).
+fn notify_tool_call_roundtrip(
+    out: &mut std::io::Stdout,
+    id: &str,
+    title: &str,
+    kind: ToolKind,
+    output: &str,
+) {
+    notify(out, tool_call_start(id, title, kind));
+    notify(out, tool_call_finish(id, title, kind, output));
 }
 
 fn tool_call_start_failed(id: &str, title: &str, kind: ToolKind, err: &str) -> SessionUpdate {

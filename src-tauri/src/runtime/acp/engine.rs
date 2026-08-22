@@ -78,6 +78,43 @@ const ACCUM_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// philosophy (never silently drop).
 const TRUNCATION_MARKER: &str = "\n[truncated]";
 
+/// The excerpt a row drained at turn end carries (issue #630): the turn
+/// ended before the agent reported a final status, and an empty excerpt
+/// under success=true would be indistinguishable from a real completion.
+const UNOBSERVED_EXCERPT: &str = "turn ended before a final status";
+
+/// How a trace row ends: the wire-observed terminal statuses, or the
+/// turn-end fallback for a row whose agent never reported one (issue #630).
+/// Split from [`ToolCallStatus`] so the wire enum stays a pure wire shape
+/// while the row-finalization seam speaks in outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowEnd {
+    /// The agent reported completion -- success row, empty excerpt.
+    Completed,
+    /// The agent reported failure -- the collected text is the anchor.
+    Failed,
+    /// The turn ended with the row still open -- not a success row; carries
+    /// [`UNOBSERVED_EXCERPT`].
+    Unobserved,
+}
+
+impl RowEnd {
+    /// Map the wire status onto the row ending. Only the two terminal
+    /// statuses reach here -- the call sites gate on them first -- so the
+    /// non-terminal arms are a defensive fold, not a reachable mapping.
+    /// Exhaustive (no wildcard): adding a wire variant re-asks this question
+    /// at compile time instead of silently landing rows in `Failed`.
+    fn from_wire_status(status: ToolCallStatus) -> Self {
+        match status {
+            ToolCallStatus::Completed => RowEnd::Completed,
+            ToolCallStatus::Failed
+            | ToolCallStatus::Pending
+            | ToolCallStatus::InProgress
+            | ToolCallStatus::Unknown => RowEnd::Failed,
+        }
+    }
+}
+
 /// One ACP turn input. The wiring seam assembles `prompt_blocks` from the
 /// same window the built-in loop reads; `mcp_servers` is the bridge
 /// descriptor.
@@ -302,8 +339,9 @@ impl AcpEngine {
             child.kill_and_wait();
             return outcome;
         }
-        // ADR-0059: signal the "thinking" wait once before the prompt (the ACP
-        // turn is one prompt round -- attempt = 1).
+        // ADR-0059: signal the "thinking" wait once before the prompt -- the
+        // round 1 marker (attempt = 1); later rounds bump it via `open_round`
+        // as calls interleave with thought/prose.
         on_phase(TurnPhase::Thinking { attempt: 1 });
 
         let prompt = Request::new(
@@ -341,19 +379,21 @@ impl AcpEngine {
             sink,
             &mut on_phase,
         );
-        // Finalize any tool rows still open at turn end (best-effort success),
-        // each landing on the round it opened in.
-        for row in pump.pending.drain(..) {
-            let entry = TraceEntry {
-                tool_use_id: row.tool_use_id,
-                name: row.name,
-                operation_kind: row.operation_kind,
-                summary: row.summary,
-                success: true,
-                result_excerpt: String::new(),
-            };
-            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-            pump.tracker.land_call(row.round, entry);
+        // Finalize any tool rows still open at turn end with the honest
+        // unobserved marker (issue #630), each landing on the round it
+        // opened in. The take ends `pending`'s borrow so the loop can call
+        // back into `finalize_row` -- the single TraceEntry construction.
+        for row in std::mem::take(&mut pump.pending) {
+            pump.finalize_row(
+                row.round,
+                &row.tool_use_id,
+                &row.name,
+                row.operation_kind,
+                &row.summary,
+                &row.content,
+                RowEnd::Unobserved,
+                &mut on_phase,
+            );
         }
         // Close the trailing round's thought stream: its ThinkingCompleted
         // fires (the fold renders live), but no RoundText -- whether the
@@ -425,11 +465,11 @@ pub(crate) struct HandshakeOutcome {
 
 /// One `session/set_config_option` request body (ADR-0095): sets the option
 /// with the given config id to `value` on the freshly minted session --
-/// field-for-field schema 0.13.8's `SetSessionConfigOptionRequest`
-/// (`session_id` / `config_id` / `value` as the select value id; its
-/// optional `_meta` is deliberately not sent). The protocol-standard
-/// injection channel for BOTH the model and the thought level
-/// (`NewSessionRequest` carries no model field, schema 0.13.8). Sent
+/// field-for-field `wire::MODELED_SCHEMA`'s
+/// `SetSessionConfigOptionRequest` (`session_id` / `config_id` / `value` as
+/// the select value id; its optional `_meta` is deliberately not sent). The
+/// protocol-standard injection channel for BOTH the model and the thought
+/// level (`NewSessionRequest` carries no model field there). Sent
 /// after the handshake when the user selected either; the response result is
 /// ignored (the next turn's handshake re-discovers the truth) but an RPC
 /// error fails the turn honestly.
@@ -846,10 +886,11 @@ impl RoundTracker {
     }
 
     /// The round a thought/prose chunk belongs to: the current one, or a
-    /// freshly opened one when the current round already observed a call
-    /// (the batch boundary). Opening fires the new round's `Thinking` wait --
-    /// the live channel's round pointer, mirroring the built-in loop's per
-    /// round-trip marker.
+    /// freshly opened one. The boundary is the FIRST thought/prose after any
+    /// call of the current round (`saw_call`) -- not a batch edge, so a batch
+    /// with thought/prose interleaved between its calls splits into rounds.
+    /// Opening fires the new round's `Thinking` wait -- the live channel's
+    /// round pointer, mirroring the built-in loop's per round-trip marker.
     fn open_round(&mut self, on_phase: &mut impl FnMut(TurnPhase)) -> &mut RoundAcc {
         if self.rounds.last().is_some_and(|r| r.saw_call) {
             self.rounds.push(RoundAcc::default());
@@ -882,14 +923,14 @@ impl RoundTracker {
         push_capped(&mut round.thinking_buf, text);
     }
 
-    /// The round a tool call belongs to (the current one) and its batch
+    /// The round a tool call belongs to (the current one) and its call
     /// seal: the round's FIRST call fires the thinking + prose prelude
     /// before its `ToolCallStarted` event.
     pub(super) fn call_round(&mut self, on_phase: &mut impl FnMut(TurnPhase)) -> usize {
         let idx = self.rounds.len() - 1;
         if !self.rounds[idx].saw_call {
             self.rounds[idx].saw_call = true;
-            self.fire_round_prelude(idx, on_phase);
+            self.fire_round_prelude(on_phase);
         }
         idx
     }
@@ -899,10 +940,13 @@ impl RoundTracker {
         self.rounds[round].calls.push(entry);
     }
 
-    /// Freeze the round's thought stream into its thinking block + emit the
-    /// completion event. Idempotent: a second call finds an empty buffer.
-    fn freeze_thinking(&mut self, idx: usize, on_phase: &mut impl FnMut(TurnPhase)) {
-        let Some(round) = self.rounds.get_mut(idx) else {
+    /// Freeze the trailing round's thought stream into its thinking block +
+    /// emit the completion event. Idempotent: a second call finds an empty
+    /// buffer. Always the trailing round -- both call sites target it (the
+    /// prelude's round IS the current one), so the index parameter collapsed
+    /// into `last_mut` (issue #630).
+    fn freeze_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        let Some(round) = self.rounds.last_mut() else {
             return;
         };
         if round.thinking_buf.is_empty() {
@@ -928,18 +972,18 @@ impl RoundTracker {
     /// never shows the trailing prose; whether the settle keeps it on the
     /// round depends on the termination (issues #611/#628).
     pub(super) fn freeze_trailing_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
-        let trailing = self.rounds.len() - 1;
-        self.freeze_thinking(trailing, on_phase);
+        self.freeze_thinking(on_phase);
     }
 
     /// The prelude the round's first tool call fires (issue #611): the
     /// frozen thinking block, then the round's prose -- both BEFORE the
     /// batch's `ToolCallStarted` events, the ADR-0103 live order the
     /// frontend's round grouping relies on. Skipped when the round offered
-    /// neither.
-    fn fire_round_prelude(&mut self, idx: usize, on_phase: &mut impl FnMut(TurnPhase)) {
-        self.freeze_thinking(idx, on_phase);
-        if let Some(round) = self.rounds.get(idx) {
+    /// neither. Fires on the current (trailing) round -- the same one
+    /// `call_round` returns.
+    fn fire_round_prelude(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        self.freeze_thinking(on_phase);
+        if let Some(round) = self.rounds.last() {
             if !round.text.is_empty() {
                 on_phase(TurnPhase::RoundText {
                     text: round.text.clone(),
@@ -951,7 +995,13 @@ impl RoundTracker {
     /// The terminal reply text: the trailing prose stretch (the call-less
     /// last round's chunks) when the model sent one, else the full
     /// accumulation -- the fallback semantics for models that put their
-    /// answer alongside the final batch.
+    /// answer alongside the final batch. The fallback covers the WHOLE-turn
+    /// concatenation: on a call-ending last round the per-round prose slots
+    /// stay populated AND their text is re-restated here -- a deliberate
+    /// data-layer restatement (single-round shape is pinned by tests): the
+    /// trace renders each round's prose once in its round, the turn's answer
+    /// renders this text once, and `settle_rounds` clears the call-less last
+    /// round's slot so that stretch never renders twice.
     pub(super) fn terminal_text(&self) -> String {
         match self.rounds.last() {
             Some(r) if !r.saw_call && !r.text.is_empty() => r.text.clone(),
@@ -1044,8 +1094,8 @@ impl Pump {
                 content,
             } => {
                 self.tool_call_count += 1;
-                // The batch boundary: the round's prelude fires once, before
-                // this call's Started event.
+                // The round's FIRST call fires the prelude once, before this
+                // call's Started event (saw_call latches it).
                 let idx = self.tracker.call_round(on_phase);
                 let (name, summary) = name_summary(title.as_deref(), tool_call_id);
                 let operation_kind = kind
@@ -1064,7 +1114,7 @@ impl Pump {
                         operation_kind,
                         &summary,
                         content,
-                        *status,
+                        RowEnd::from_wire_status(*status),
                         on_phase,
                     );
                 } else {
@@ -1112,7 +1162,7 @@ impl Pump {
                                 row.operation_kind,
                                 &row.summary,
                                 &row.content,
-                                final_status,
+                                RowEnd::from_wire_status(final_status),
                                 on_phase,
                             );
                             return;
@@ -1136,22 +1186,29 @@ impl Pump {
         operation_kind: OperationKind,
         summary: &str,
         content: &[ToolCallContent],
-        status: ToolCallStatus,
+        end: RowEnd,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
-        let success = matches!(status, ToolCallStatus::Completed);
-        let result_excerpt = if success {
-            String::new()
-        } else {
-            // Failure: keep the bounded text as the cross-turn failure anchor
-            // (ADR-0078). An empty failure excerpt would lose the anchor, so
-            // fall back to an honest "failed" marker.
-            let text = ToolCallContent::collect_text(content, TRACE_EXCERPT_MAX);
-            if text.is_empty() {
-                "failed".to_string()
-            } else {
-                text
+        let (success, result_excerpt) = match end {
+            RowEnd::Completed => (true, String::new()),
+            RowEnd::Failed => {
+                // Failure: keep the bounded text as the cross-turn failure
+                // anchor (ADR-0078). An empty failure excerpt would lose the
+                // anchor, so fall back to an honest "failed" marker.
+                let text = ToolCallContent::collect_text(content, TRACE_EXCERPT_MAX);
+                (
+                    false,
+                    if text.is_empty() {
+                        "failed".to_string()
+                    } else {
+                        text
+                    },
+                )
             }
+            // Unobserved: the turn ended before the agent reported a final
+            // status (issue #630). Not a success row -- the fixed marker
+            // keeps it distinguishable from a real completion in the trace.
+            RowEnd::Unobserved => (false, UNOBSERVED_EXCERPT.to_string()),
         };
         let entry = TraceEntry {
             tool_use_id: tool_use_id.to_string(),

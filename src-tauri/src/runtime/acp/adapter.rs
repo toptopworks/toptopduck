@@ -149,7 +149,8 @@ pub struct AdapterSpec {
     /// ONLY by the non-ACP paths (the engine appends `[flag, value]` after
     /// the argv prefix). `None` on ACP adapters -- the ACP path injects the
     /// model via a `session/set_config_option` request after the handshake
-    /// instead (schema 0.13.8's `NewSessionRequest` carries no model field).
+    /// instead (`NewSessionRequest` in `wire::MODELED_SCHEMA` carries no
+    /// model field).
     pub model_arg: Option<&'static str>,
     /// The ONE surface the reasoning-effort selection rides (ADR-0095 /
     /// ADR-0097 Decision 6): a `-c` config override key (codex) or an argv
@@ -473,7 +474,7 @@ impl DiscoveredRuntime {
 
 /// The semantic categories the discovery path keys on (ADR-0095 Decision 3):
 /// the ACP `SessionConfigOption.category` enum's model + thought_level
-/// variants, snake_case-tagged exactly this way in schema 0.13.8's
+/// variants, snake_case-tagged exactly this way in `wire::MODELED_SCHEMA`'s
 /// `SessionConfigOptionCategory`; any other tag -- including a renamed one
 /// -- lands in that enum's `Other(String)` fallback and contributes nothing
 /// (the zero-extraction warn in [`extract_discovered_runtime`] is what makes
@@ -484,8 +485,9 @@ pub(crate) const MODEL_CATEGORY: &str = "model";
 pub(crate) const THOUGHT_LEVEL_CATEGORY: &str = "thought_level";
 
 /// Extract the [`DiscoveredRuntime`] from a raw `config_options` value
-/// (ADR-0095). The ACP wire shape is schema 0.13.8's `SessionConfigOption`
-/// (camelCase: `id` / `name` / optional `description` / optional `category`,
+/// (ADR-0095). The ACP wire shape is `wire::MODELED_SCHEMA`'s
+/// `SessionConfigOption` (camelCase: `id` / `name` / optional
+/// `description` / optional `category`,
 /// plus a flattened Select kind carrying `currentValue` + `options`;
 /// `name` / `description` / `_meta` are display-side and never read here)
 /// -- one entry per option:
@@ -659,10 +661,10 @@ mod tests {
     // --- extract_discovered_runtime (ADR-0095) ------------------------------
 
     /// The full happy path against the real SessionConfigOption wire shape
-    /// (id / category / currentValue / options[], camelCase -- schema crate
-    /// 0.13.8): one model entry + one thought_level entry, each carrying a
-    /// current value and a flat offered-choices list. A non-categorized
-    /// entry (e.g. mode) is ignored.
+    /// (id / category / currentValue / options[], camelCase -- the crate
+    /// named by `wire::MODELED_SCHEMA`): one model entry + one thought_level
+    /// entry, each carrying a current value and a flat offered-choices list.
+    /// A non-categorized entry (e.g. mode) is ignored.
     #[test]
     fn extract_finds_model_and_thought_level_entries() {
         let catalog = json!([
