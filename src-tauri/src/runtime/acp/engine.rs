@@ -1166,12 +1166,11 @@ impl Pump {
     }
 }
 
-/// Derive a (name, summary) pair from a tool call's title + id. The title is
-/// the human-readable description; we use it for both (the bridge's real tool
-/// name arrives MCP-side in slice 9b).
 /// Append `text` to `buf` under the accumulation byte cap (issue #629): the
 /// first crossing latches the visible truncation marker; appends afterwards
-/// are dropped.
+/// are dropped. The whole chunk lands before the check, so a chunk straddling
+/// the cap overshoots it by the chunk's remainder -- bounded, since a chunk
+/// rides a capped line.
 fn push_capped(buf: &mut String, text: &str) {
     if buf.len() >= ACCUM_MAX_BYTES {
         return;
@@ -1190,10 +1189,15 @@ fn bounded_name_summary(title: &str) -> (String, String) {
     (bounded.clone(), bounded)
 }
 
+/// Derive a (name, summary) pair from a tool call's title + id. The title is
+/// the human-readable description; we use its bounded excerpt for both (the
+/// bridge's real tool name arrives MCP-side in slice 9b). Without a title the
+/// id stands in for both, bounded the same way (issue #629): the id rides the
+/// same IPC event + persisted recipe.
 fn name_summary(title: Option<&str>, id: &str) -> (String, String) {
     match title.filter(|t| !t.is_empty()) {
         Some(t) => bounded_name_summary(t),
-        None => (id.to_string(), id.to_string()),
+        None => bounded_name_summary(id),
     }
 }
 
@@ -1365,6 +1369,19 @@ mod tests {
         assert!(summary.ends_with('…'), "bounded summary ends with ellipsis");
         assert!(name.chars().count() <= TRACE_EXCERPT_MAX);
         assert!(name.ends_with('…'), "bounded name ends with ellipsis");
+        // The no-title fallback bounds the id the same way (issue #629): the
+        // id rides the same IPC event + persisted recipe.
+        let (name, summary) = name_summary(None, &long);
+        assert!(summary.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(
+            summary.ends_with('…'),
+            "bounded id fallback ends with ellipsis"
+        );
+        assert!(name.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(
+            name.ends_with('…'),
+            "bounded id fallback name ends with ellipsis"
+        );
     }
 
     /// Issue #629: a prose track hitting the byte cap latches the visible
@@ -1390,6 +1407,26 @@ mod tests {
             "the round track stops at the cap + marker"
         );
         assert!(round.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Issue #629 review: the append lands before the check, so a chunk that
+    /// straddles the cap overshoots it by the chunk's remainder -- the
+    /// overshoot is bounded (a chunk rides a capped line), exactly one
+    /// marker latches, and later chunks drop.
+    #[test]
+    fn a_straddling_chunk_overshoots_the_cap_with_one_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES - 10), &mut on_phase);
+        tracker.push_prose(&"文".repeat(8), &mut on_phase); // 24 bytes
+        tracker.push_prose("post-cap chunk", &mut on_phase);
+        // cap - 10 + 24 = cap + 14, then the marker; the third chunk drops.
+        assert_eq!(
+            tracker.text.len(),
+            ACCUM_MAX_BYTES + 14 + TRUNCATION_MARKER.len()
+        );
+        assert_eq!(tracker.text.matches("[truncated]").count(), 1);
+        assert!(tracker.text.ends_with(TRUNCATION_MARKER));
     }
 
     /// Issue #629: the thinking buffer hits the same byte cap, and the

@@ -631,7 +631,7 @@ mod tests {
                 content: ContentBlock::text("b".repeat(500)),
             },
             ToolCallContent::Content {
-                content: ContentBlock::text("tail".to_string()),
+                content: ContentBlock::text("tail"),
             },
         ];
         let got = ToolCallContent::collect_text(&items, 240);

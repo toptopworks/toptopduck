@@ -614,9 +614,19 @@ fn play_scenario(
         // while each line stays under the 4-MiB line cap (JSON envelope
         // included).
         "accum_cap" => {
+            let chunk = "x".repeat(3 * 1024 * 1024);
             for _ in 0..3 {
-                notify(out, agent_message(&"x".repeat(3 * 1024 * 1024)));
+                notify(out, agent_message(&chunk));
             }
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // Issue #629 review: a line past the ndjson line cap is dropped and
+        // the connection stays up -- the prose on the NEXT line still
+        // arrives. The first line is raw non-JSON garbage (it is dropped
+        // before any parse, so no envelope is needed).
+        "line_cap_overlong" => {
+            let _ = writeln!(out, "{}", "g".repeat(5 * 1024 * 1024));
+            notify(out, agent_message("still alive"));
             respond_prompt(out, &id, StopReason::Success);
         }
         "crash" => {

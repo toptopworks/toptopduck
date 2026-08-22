@@ -91,15 +91,17 @@ fn read_line_bounded(
     }
     // The budget was exhausted without a newline: the line is over-long.
     // (A short line without a newline is the final line before EOF -- a
-    // normal line.) Drain the remainder in bounded chunks, then drop.
+    // normal line. A final line of exactly `max` bytes, newline excluded,
+    // is indistinguishable from an over-long one here and drops with the
+    // same warn -- the safe side of the ambiguity.) Drain the remainder in
+    // bounded chunks, then drop.
     if n == max && !raw.ends_with(b"\n") {
         loop {
             raw.clear();
-            match Read::take(&mut *reader, max as u64).read_until(b'\n', raw) {
-                Ok(0) => return Ok(LineRead::Overlong), // EOF mid-line
-                Ok(_) if raw.ends_with(b"\n") => return Ok(LineRead::Overlong),
-                Ok(_) => continue,
-                Err(e) => return Err(e),
+            let n = Read::take(&mut *reader, max as u64).read_until(b'\n', raw)?;
+            // EOF mid-line, or the over-long line's own newline: done.
+            if n == 0 || raw.ends_with(b"\n") {
+                return Ok(LineRead::Overlong);
             }
         }
     }

@@ -750,6 +750,7 @@ fn cancel_stops_folding_content_updates() {
         std::thread::sleep(std::time::Duration::from_millis(200));
         cancel_for_thread.request();
     });
+    let start = std::time::Instant::now();
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     assert!(
         matches!(outcome.termination, Termination::Cancelled),
@@ -769,6 +770,9 @@ fn cancel_stops_folding_content_updates() {
         texts.iter().all(|t| !t.contains("after-cancel")),
         "the post-cancel prose is not folded: {texts:?}"
     );
+    // Same window pin as the peers: the cancel resolves in ~200ms, so a
+    // watchdog fallback (10s) turns into a loud failure.
+    assert_not_via_watchdog("cancel_stops_folding", start);
 }
 
 /// Issue #629: prose past the accumulation cap does not fail the turn -- it
@@ -791,6 +795,28 @@ fn accum_cap_keeps_the_turn_completing_with_a_marker() {
         text.ends_with("[truncated]"),
         "the answer carries the visible truncation marker (tail: {})",
         &text[text.len().saturating_sub(40)..]
+    );
+}
+
+/// Issue #629 review: a line past the ndjson line cap is dropped and the
+/// connection stays up -- the turn still completes with the prose that rode
+/// the line after the dropped one (the drop never kills the reader loop).
+#[test]
+fn overlong_line_is_dropped_and_reading_continues() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = engine(Arc::clone(&cancel), 24);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "line_cap_overlong");
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
+    let text = match &outcome.termination {
+        Termination::Text(t) => t,
+        other => panic!("the turn completes with text: {other:?}"),
+    };
+    assert!(
+        text.contains("still alive"),
+        "the line after the dropped one arrives: {text:?}"
     );
 }
 
