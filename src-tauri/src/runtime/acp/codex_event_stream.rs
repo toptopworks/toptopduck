@@ -437,7 +437,8 @@ pub(super) fn run_codex_event_stream(
             .text_or_transient("codex turn ended without a terminal event")
     });
 
-    outcome(term, pump.tracker.settle_rounds(), 1)
+    let rounds = pump.tracker.settle_rounds(&term);
+    outcome(term, rounds, 1)
 }
 
 /// Mutable state accumulated while pumping codex events. The round
@@ -772,7 +773,9 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert_eq!(pump.tracker.terminal_text(), "the answer is 42");
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("the answer is 42".into()));
         assert_eq!(rounds.len(), 1, "the trailing prose-only round drops");
         assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
         assert_eq!(rounds[0].calls.len(), 1);
@@ -805,7 +808,9 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].text.as_deref(), Some("checking the table"));
         let round_texts = phases
@@ -828,7 +833,9 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1);
         assert!(rounds[0].text.is_none());
         assert!(!phases
@@ -905,7 +912,9 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert_eq!(pump.tracker.terminal_text(), "done");
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
         assert_eq!(rounds.len(), 2);
         assert_eq!(rounds[0].text.as_deref(), Some("checking"));
         assert_eq!(rounds[1].text.as_deref(), Some("verifying"));
@@ -931,7 +940,10 @@ mod tests {
         );
         let end = pump.fold(CodexEvent::TurnCompleted, &mut |_| {});
         assert_eq!(end, Some(Termination::Text("part one part two".into())));
-        assert!(pump.tracker.settle_rounds().is_empty());
+        assert!(pump
+            .tracker
+            .settle_rounds(&Termination::Text("part one part two".into()))
+            .is_empty());
     }
 
     /// turn.completed with no prose yields the empty text -- the honest
@@ -974,6 +986,14 @@ mod tests {
             pump.tracker.text_or_transient("eof"),
             Termination::Text("final answer".into())
         );
+        // Settling under the promoted Text drops the tail (its prose rode
+        // the terminal text) -- the EOF fallback and the round settle stay
+        // consistent (issue #628).
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("final answer".into()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].text.as_deref(), Some("checking"));
         assert!(phases
             .iter()
             .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking")));
@@ -1006,7 +1026,9 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1, "the empty prose opens no extra round");
         assert!(rounds[0].text.is_none());
         assert!(
@@ -1042,7 +1064,9 @@ mod tests {
             pump.tracker.text_or_transient("eof"),
             Termination::Text("checking".into())
         );
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("checking".into()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].text.as_deref(), Some("checking"));
     }
@@ -1074,7 +1098,9 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1, "one batch round");
         assert_eq!(rounds[0].calls.len(), 2, "both calls share the round");
         assert_eq!(rounds[0].text.as_deref(), Some("let me query"));

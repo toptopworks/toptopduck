@@ -295,6 +295,9 @@ fn crash_with_text_treats_as_success() {
         Termination::Text(t) => assert_eq!(t, "about to crash"),
         other => panic!("expected Text (EOF fallback), got {other:?}"),
     }
+    // The promoted text rode the terminal -- no round double-carries it
+    // (issue #628's Text settle stays consistent with the fallback).
+    assert!(outcome.trace.is_empty(), "{:?}", outcome.trace);
 }
 
 /// Stdout closes with no frames and no text -> Transient.
@@ -398,6 +401,47 @@ fn user_cancel_aborts_the_whole_turn() {
     assert!(
         elapsed < std::time::Duration::from_secs(3),
         "took {elapsed:?} -- the cancel was not observed; the fixture sleeps 30s"
+    );
+}
+
+/// Issue #628: a user cancel mid-answer keeps the partial prose on the tail
+/// round -- the Cancelled termination carries no text for the prose to ride,
+/// so the trace is its only home.
+#[test]
+fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
+    let cancel = Arc::new(CancelToken::new());
+    // No wall-clock: the user-cancel path alone (the
+    // `user_cancel_aborts_the_whole_turn` peer's rationale).
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "cancel_with_prose");
+    // Same spawn-after-env pattern as the peer: begin_turn clears a stale
+    // `requested`, so the cancel must fire after the turn starts.
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    assert_eq!(outcome.trace.len(), 1, "the tail round survives");
+    assert_eq!(
+        outcome.trace[0].text.as_deref(),
+        Some("partial answer"),
+        "the streamed-so-far prose survives the cancel"
+    );
+    // Same window pin as the peer: catch a slow-but-correct resolution,
+    // not the outright miss (the Cancelled assert catches that).
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- a slow cancel resolution; the fixture sleeps 30s"
     );
 }
 

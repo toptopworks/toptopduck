@@ -138,6 +138,17 @@ fn main() {
             // Close stdout immediately — no events, no text. The pump sees
             // Disconnected with no text -> Transient.
         }
+        "cancel_with_prose" => {
+            // Stream agent text, then hold stdout open (no terminal event)
+            // so the pump's loop-top cancel check ends the turn mid-answer
+            // (issue #628's cancel-mid-prose shape).
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "agent_message", "message": "partial answer"}),
+            );
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
         other => {
             emit(
                 &mut out,

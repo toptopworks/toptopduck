@@ -492,8 +492,9 @@ pub(super) fn run_claude_stream_json(
 
     // Finalize any tool rows still open at turn end (best-effort success,
     // each landing on the round it opened in), then close the trailing
-    // round's thought stream -- its ThinkingCompleted renders live; the
-    // trailing prose rides the terminal text (issue #612).
+    // round's thought stream -- its ThinkingCompleted renders live; whether
+    // the settle keeps the trailing prose on the round depends on the
+    // termination (issues #612/#628).
     pump.finalize_pending(&mut on_phase);
     pump.tracker.freeze_trailing_thinking(&mut on_phase);
 
@@ -515,7 +516,8 @@ pub(super) fn run_claude_stream_json(
         d
     });
 
-    outcome(term, pump.tracker.settle_rounds(), 1, discovered)
+    let rounds = pump.tracker.settle_rounds(&term);
+    outcome(term, rounds, 1, discovered)
 }
 
 /// A `tool_use` awaiting its `tool_result` (live-phase bookkeeping). Carries
@@ -1075,12 +1077,17 @@ mod tests {
 
     /// The end-of-turn pump sequence the run loop performs: drain open
     /// rows, freeze the trailing round's thought stream (its
-    /// ThinkingCompleted renders live), settle the rounds.
-    fn settle(mut pump: ClaudePump, phases: &mut Vec<TurnPhase>) -> Vec<LoopRound> {
+    /// ThinkingCompleted renders live), settle the rounds under the turn's
+    /// termination.
+    fn settle(
+        mut pump: ClaudePump,
+        phases: &mut Vec<TurnPhase>,
+        termination: &Termination,
+    ) -> Vec<LoopRound> {
         pump.finalize_pending(&mut |p| phases.push(p));
         pump.tracker
             .freeze_trailing_thinking(&mut |p| phases.push(p));
-        pump.tracker.settle_rounds()
+        pump.tracker.settle_rounds(termination)
     }
 
     /// A full trajectory settles into per-round slots: the batch round
@@ -1126,7 +1133,11 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert_eq!(pump.tracker.terminal_text(), "the answer is 42");
-        let rounds = settle(pump, &mut phases);
+        let rounds = settle(
+            pump,
+            &mut phases,
+            &Termination::Text("the answer is 42".into()),
+        );
         assert_eq!(rounds.len(), 1, "the trailing prose-only round drops");
         assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
         let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
@@ -1272,7 +1283,7 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        let rounds = settle(pump, &mut phases);
+        let rounds = settle(pump, &mut phases, &Termination::Text("never mind".into()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(
             rounds[0].calls.len(),
@@ -1307,7 +1318,9 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert!(end.is_none());
-        let rounds = pump.tracker.settle_rounds();
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
         // No engine-side row (the gateway owns it). The call-less shell the
         // seal leaves behind drops at the wiring merge, like every runtime
         // path's empty round.
@@ -1342,7 +1355,7 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        let rounds = settle(pump, &mut phases);
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].calls.len(), 1);
         assert_eq!(rounds[0].calls[0].name, "Bash");
@@ -1446,7 +1459,7 @@ mod tests {
         );
         pump.finalize_pending(&mut |p| phases.push(p));
         assert!(pump.pending.is_empty());
-        let rounds = settle(pump, &mut phases);
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].calls.len(), 1);
         assert!(rounds[0].calls[0].success, "best-effort success");
