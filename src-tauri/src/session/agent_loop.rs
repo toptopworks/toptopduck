@@ -51,7 +51,8 @@ use crate::mcp::aggregator::{self, McpAggregator, RouteError};
 use crate::model::{Promotion, ThinkingTrace, TraceEntryView, TraceRound, TurnPhase};
 use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 use crate::provider::tool_calling::{
-    ToolResult, ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
+    ThinkingBlock, ToolResult, ToolTurnMessage, ToolTurnOutcome, ToolTurnReply, ToolTurnRequest,
+    ToolUse,
 };
 use crate::provider::{Provider, ProviderError};
 use crate::session::materializer::{Materializer, TurnDeps};
@@ -205,6 +206,7 @@ impl<'p> AgentLoop<'p> {
                 messages: messages.clone(),
                 tools: request.tools.clone(),
                 max_tokens: request.max_tokens,
+                thought_level: request.thought_level.clone(),
             };
             // Issue #321: guard the provider call against a panic. The adapter
             // (anthropic/openai HTTP + JSON parsing) is a trust boundary whose
@@ -212,7 +214,7 @@ impl<'p> AgentLoop<'p> {
             // generate_tool_turn panic cannot leave a ghost result_N (no tool
             // dispatched yet), so no rollback is needed -- the working set is
             // untouched.
-            let reply = match catch_unwind(AssertUnwindSafe(|| {
+            let turn_outcome = match catch_unwind(AssertUnwindSafe(|| {
                 self.provider.generate_tool_turn(&turn_req)
             })) {
                 Err(payload) => {
@@ -222,45 +224,67 @@ impl<'p> AgentLoop<'p> {
                         round_trips,
                     );
                 }
-                Ok(reply) => reply,
+                Ok(outcome) => outcome,
             };
-            match reply {
+            match turn_outcome {
                 // Terminal text: the model answered. A cancel that arrived
                 // during the (possibly slow) provider call wins over a textual
                 // reply (ADR-0021) -- the user asked to stop.
-                Ok(ToolTurnReply::Text(text)) => {
+                Ok(ToolTurnOutcome {
+                    thinking,
+                    reply: ToolTurnReply::Text(text),
+                }) => {
                     if cancel.is_requested() {
                         return outcome(Termination::Cancelled, outputs, round_trips);
                     }
+                    // ADR-0103 (issue #614): the terminal reply's thinking
+                    // completes live and opens a thinking-only trailing round
+                    // -- the answer itself rides the terminal text, mirroring
+                    // the ACP path's trailing-round semantics.
+                    if let Some(trace) = complete_round_thinking(&thinking, &mut on_phase) {
+                        outputs.rounds.push(LoopRound {
+                            thinking: Some(trace),
+                            text: None,
+                            calls: Vec::new(),
+                        });
+                    }
                     return outcome(Termination::Text(text), outputs, round_trips);
                 }
-                Ok(ToolTurnReply::ToolCalls { text, calls }) => {
+                Ok(ToolTurnOutcome {
+                    thinking,
+                    reply: ToolTurnReply::ToolCalls { text, calls },
+                }) => {
                     // Re-check after the (possibly slow) provider call.
                     if cancel.is_requested() {
                         return outcome(Termination::Cancelled, outputs, round_trips);
                     }
-                    // ADR-0103 (issue #608): one round per provider reply.
-                    // The connective prose (when present) rides the live
-                    // channel BEFORE the batch's call events -- the rail can
-                    // render the round's prose as it happens -- then opens the
-                    // trace round the batch's calls land on. Thinking fires
-                    // here too once the built-in thinking data source is
-                    // wired (posture follow-up slice).
+                    // ADR-0103 (issues #608/#614): one round per provider
+                    // reply. The round's thinking completes FIRST (only when
+                    // the round earned a trace -- readable thinking text
+                    // present; a redacted-only round stays silent), then the
+                    // connective prose (when present) rides the live channel
+                    // BEFORE the batch's call events -- the rail can render
+                    // the round's thinking fold + prose as they happen --
+                    // then the trace round the batch's calls land on opens.
+                    let trace = complete_round_thinking(&thinking, &mut on_phase);
                     if let Some(t) = text.as_ref() {
                         on_phase(TurnPhase::RoundText { text: t.clone() });
                     }
                     outputs.rounds.push(LoopRound {
-                        thinking: None,
+                        thinking: trace,
                         text: text.clone(),
                         calls: Vec::new(),
                     });
-                    // Append the assistant turn (prose + calls -- the wire
-                    // protocols accept text alongside tool_use in one
-                    // assistant turn), then dispatch each call serially
-                    // (ADR-0021 single-flight within a session).
+                    // Append the assistant turn (thinking + prose + calls --
+                    // the anthropic protocol carries the reasoning blocks and
+                    // text alongside tool_use in one assistant turn; the
+                    // openai protocol drops the thinking blocks, its honest
+                    // degrade), then dispatch each call serially (ADR-0021
+                    // single-flight within a session).
                     messages.push(ToolTurnMessage::Assistant {
                         text,
                         tool_calls: calls.clone(),
+                        thinking,
                     });
                     let mut aborted = false;
                     let gate = GateCtx {
@@ -398,6 +422,44 @@ fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termi
     Termination::Transient(detail)
 }
 
+/// Fold a round's thinking blocks into its trace entry (issue #614).
+/// Redacted blocks contribute no text (honest degrade); a round whose
+/// readable text is empty carries no trace entry, though on a tool batch
+/// its blocks still ride the assistant re-feed for tool-use continuity (a
+/// terminal reply's blocks are not re-fed -- the conversation ends there).
+/// `duration_ms` is pinned to 0: the built-in provider call is one
+/// non-streaming round-trip -- there is no observable thinking-only window,
+/// and no wall-clock approximation is fabricated for it (the #612
+/// precedent).
+fn thinking_trace(blocks: &[ThinkingBlock]) -> Option<ThinkingTrace> {
+    let text = blocks
+        .iter()
+        .filter_map(ThinkingBlock::readable_text)
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.is_empty()).then_some(ThinkingTrace {
+        duration_ms: 0,
+        text,
+    })
+}
+
+/// Derive a round's thinking trace and complete its live phase (issue
+/// #614): `ThinkingCompleted` fires exactly when the round earns a trace
+/// (readable text present). The trace then rides whichever `LoopRound`
+/// shape the caller records -- the thinking-only trailing round of a
+/// terminal reply or the prose round of a tool batch.
+fn complete_round_thinking(
+    thinking: &[ThinkingBlock],
+    on_phase: &mut impl FnMut(TurnPhase),
+) -> Option<ThinkingTrace> {
+    let trace = thinking_trace(thinking)?;
+    on_phase(TurnPhase::ThinkingCompleted {
+        duration_ms: trace.duration_ms,
+        text: trace.text.clone(),
+    });
+    Some(trace)
+}
+
 /// Roll back a ghost `result_N` left by a panic mid-dispatch (issue #321).
 /// `try_materialize` registers `result_N` partway through its body; a panic in
 /// any subsequent step (record_provenance, gc_stale_results, apply_display_label,
@@ -468,9 +530,9 @@ impl CallOutputs {
 /// `TraceRound` view + the persisted recipe round.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopRound {
-    /// The round's thinking block. `None` until a thinking data source is
-    /// wired for the built-in runtime (ADR-0095/0100 posture, follow-up
-    /// slice); the shape + live variant land here first.
+    /// The round's thinking block (ADR-0103, issue #614): the readable text
+    /// the built-in runtime's provider round produced, `None` when the turn
+    /// ran thinking-disabled (no posture level) or every block was redacted.
     pub thinking: Option<ThinkingTrace>,
     /// The round's connective prose (text the model emitted alongside its
     /// tool-call batch), `None` when the reply carried tool calls and no
@@ -1255,6 +1317,7 @@ mod tests {
             messages: vec![ToolTurnMessage::user(question)],
             tools: builtin_table(),
             max_tokens: 1024,
+            thought_level: None,
         }
     }
 
@@ -1598,11 +1661,11 @@ mod tests {
         // ADR-0103 (issue #608): a tool-call reply carrying connective prose
         // opens its round with that prose. The RoundText phase fires after
         // the round's Thinking wait and BEFORE the batch's call events; the
-        // recorded round carries the text (and no thinking -- no data source
-        // is wired for the built-in runtime yet); the prose also re-feeds on
-        // the assistant message, so the next round-trip's request carries it
-        // ("taken from the loop conversation" -- the wire protocols accept
-        // text alongside tool_use in one assistant turn).
+        // recorded round carries the text (and no thinking -- this script
+        // carries none); the prose also re-feeds on the assistant message,
+        // so the next round-trip's request carries it ("taken from the loop
+        // conversation" -- the wire protocols accept text alongside tool_use
+        // in one assistant turn).
         let engine = Engine::new();
         let mut ws = WorkingSet::default();
         let cancel = Arc::new(CancelToken::new());
@@ -1680,15 +1743,289 @@ mod tests {
         let captured = captured.lock().unwrap();
         let second = &captured[1];
         let carries_prose = second.messages.iter().any(|m| match m {
-            ToolTurnMessage::Assistant { text, tool_calls } => {
-                text.as_deref() == Some("先看一眼数据。") && !tool_calls.is_empty()
-            }
+            ToolTurnMessage::Assistant {
+                text, tool_calls, ..
+            } => text.as_deref() == Some("先看一眼数据。") && !tool_calls.is_empty(),
             _ => false,
         });
         assert!(
             carries_prose,
             "the prose re-feeds on the assistant message of the next request"
         );
+    }
+
+    #[test]
+    fn thinking_completes_between_thinking_wait_and_round_text() {
+        // ADR-0103 (issue #614): with the built-in thinking source wired, a
+        // round's phase order is Thinking{N} -> ThinkingCompleted{N} ->
+        // RoundText{N} -> the batch's call events (the first-touch round
+        // attribution premise: the opening round's thinking completes before
+        // anything else of that round arrives). The round's trace entry
+        // carries duration 0 (no thinking-only window in a non-streaming
+        // call) + the readable text; the assistant re-feed carries the FULL
+        // block sequence, redacted block included, verbatim.
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_thinking_tool_turn_seq(
+            "think",
+            vec![
+                Ok((
+                    vec![
+                        ThinkingBlock::Thinking {
+                            thinking: "先想清楚。".into(),
+                            signature: "sig-1".into(),
+                        },
+                        ThinkingBlock::Redacted {
+                            data: "opaque".into(),
+                        },
+                    ],
+                    ToolTurnReply::tool_calls_with(
+                        Some("先看一眼数据。".into()),
+                        vec![ToolUse {
+                            id: "tu_1".into(),
+                            name: "explore".into(),
+                            input: json!({"sql": "SELECT 1"}),
+                        }],
+                    ),
+                )),
+                Ok((
+                    vec![ThinkingBlock::Thinking {
+                        thinking: "收尾。".into(),
+                        signature: "sig-2".into(),
+                    }],
+                    ToolTurnReply::Text("done".into()),
+                )),
+            ],
+        );
+        let captured = provider.captured_tool_turns();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = deps(
+            &engine.conn,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let phases = std::sync::Mutex::new(Vec::new());
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("think"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &approval,
+            &sink,
+            |p| phases.lock().unwrap().push(p),
+        );
+        assert_eq!(outcome.termination, Termination::Text("done".into()));
+        // Round 1 carries its thinking + prose + call; the terminal reply
+        // opens a thinking-only trailing round (the answer rides the
+        // terminal text).
+        assert_eq!(outcome.trace.len(), 2);
+        assert_eq!(
+            outcome.trace[0].thinking,
+            Some(ThinkingTrace {
+                duration_ms: 0,
+                text: "先想清楚。".into(),
+            })
+        );
+        assert_eq!(
+            outcome.trace[1].thinking.as_ref().map(|t| t.text.as_str()),
+            Some("收尾。")
+        );
+        assert_eq!(outcome.trace[1].text, None);
+        assert_eq!(outcome.trace[1].calls, Vec::new());
+        // The phase stream: round 1 = Thinking, ThinkingCompleted, RoundText,
+        // call pair; round 2 = Thinking, ThinkingCompleted, then the terminal
+        // text (no RoundText -- the answer is not round prose).
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(phases[0], TurnPhase::Thinking { attempt: 1 });
+        assert_eq!(
+            phases[1],
+            TurnPhase::ThinkingCompleted {
+                duration_ms: 0,
+                text: "先想清楚。".into(),
+            },
+            "ThinkingCompleted fires right after the round's Thinking wait"
+        );
+        assert_eq!(
+            phases[2],
+            TurnPhase::RoundText {
+                text: "先看一眼数据。".into()
+            },
+            "RoundText fires after ThinkingCompleted and before the call events"
+        );
+        assert!(matches!(phases[3], TurnPhase::ToolCallStarted { .. }));
+        assert!(matches!(phases[4], TurnPhase::ToolCallCompleted { .. }));
+        assert_eq!(phases[5], TurnPhase::Thinking { attempt: 2 });
+        assert_eq!(
+            phases[6],
+            TurnPhase::ThinkingCompleted {
+                duration_ms: 0,
+                text: "收尾。".into(),
+            },
+            "the terminal reply's thinking completes live too"
+        );
+        // The re-fed assistant turn carries the FULL block sequence
+        // verbatim (redacted block included) for tool-use continuity.
+        let captured = captured.lock().unwrap();
+        let second = &captured[1];
+        let refeed = second.messages.iter().find_map(|m| match m {
+            ToolTurnMessage::Assistant { thinking, .. } if !thinking.is_empty() => Some(thinking),
+            _ => None,
+        });
+        let refeed = refeed.expect("the round's thinking re-feeds");
+        assert_eq!(
+            refeed.as_slice(),
+            [
+                ThinkingBlock::Thinking {
+                    thinking: "先想清楚。".into(),
+                    signature: "sig-1".into(),
+                },
+                ThinkingBlock::Redacted {
+                    data: "opaque".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn redacted_only_rounds_stay_silent_but_ride_the_refeed() {
+        // Issue #614: a redacted-only round (safety-redacted reasoning, no
+        // readable text) is silent both live and in the trace -- no
+        // ThinkingCompleted phase, no trace entry, and no thinking-only
+        // trailing round for a redacted-only terminal reply -- while its
+        // blocks still ride the next request's assistant turn (tool-use
+        // continuity). Pins the two-sided behavior at the loop level: the
+        // gate is readable text, not block presence.
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_thinking_tool_turn_seq(
+            "redacted",
+            vec![
+                Ok((
+                    vec![ThinkingBlock::Redacted {
+                        data: "opaque-1".into(),
+                    }],
+                    ToolTurnReply::tool_calls(vec![ToolUse {
+                        id: "tu_1".into(),
+                        name: "explore".into(),
+                        input: json!({"sql": "SELECT 1"}),
+                    }]),
+                )),
+                Ok((
+                    vec![ThinkingBlock::Redacted {
+                        data: "opaque-2".into(),
+                    }],
+                    ToolTurnReply::Text("done".into()),
+                )),
+            ],
+        );
+        let captured = provider.captured_tool_turns();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = deps(
+            &engine.conn,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let phases = std::sync::Mutex::new(Vec::new());
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("redacted"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &approval,
+            &sink,
+            |p| phases.lock().unwrap().push(p),
+        );
+        assert_eq!(outcome.termination, Termination::Text("done".into()));
+        // One trace round only -- the tool batch carries no thinking entry,
+        // and the redacted-only terminal reply opens no thinking-only
+        // trailing round.
+        assert_eq!(outcome.trace.len(), 1);
+        assert_eq!(outcome.trace[0].thinking, None);
+        // No ThinkingCompleted anywhere in the live stream.
+        let phases = phases.into_inner().unwrap();
+        assert!(
+            !phases
+                .iter()
+                .any(|p| matches!(p, TurnPhase::ThinkingCompleted { .. })),
+            "redacted-only rounds complete no live thinking phase"
+        );
+        // The first round's redacted block still rides the second request's
+        // assistant turn verbatim.
+        let captured = captured.lock().unwrap();
+        let second = &captured[1];
+        let refeed = second.messages.iter().find_map(|m| match m {
+            ToolTurnMessage::Assistant { thinking, .. } if !thinking.is_empty() => Some(thinking),
+            _ => None,
+        });
+        let refeed = refeed.expect("the redacted block still re-feeds");
+        assert_eq!(
+            refeed.as_slice(),
+            [ThinkingBlock::Redacted {
+                data: "opaque-1".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn thought_level_rides_every_round_trip_request() {
+        // The posture's thought-level flows from the turn's outer request
+        // onto EVERY per-round request the loop issues (the dispatch seam
+        // copies it from the session's runtime facts; the adapter layer is
+        // what maps it onto the wire).
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "leveled",
+            vec![
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
+                    id: "tu_1".into(),
+                    name: "explore".into(),
+                    input: json!({"sql": "SELECT 1"}),
+                }])),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = deps(
+            &engine.conn,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let mut outer = request("leveled");
+        outer.thought_level = Some("high".into());
+        AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &outer,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &approval,
+            &sink,
+            |_| {},
+        );
+        let captured = provider.captured_tool_turns();
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        for req in captured.iter() {
+            assert_eq!(req.thought_level.as_deref(), Some("high"));
+        }
     }
 
     #[test]
@@ -1895,7 +2232,9 @@ mod tests {
             "first turn is the asking question"
         );
         let tool_calls = match &second.messages[1] {
-            ToolTurnMessage::Assistant { text, tool_calls } => {
+            ToolTurnMessage::Assistant {
+                text, tool_calls, ..
+            } => {
                 assert!(text.is_none(), "no prose alongside the tool batch");
                 tool_calls
             }
@@ -2423,7 +2762,10 @@ mod tests {
         fn generate(&self, _: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
             unreachable!("the tool-calling loop never invokes generate")
         }
-        fn generate_tool_turn(&self, _: &ToolTurnRequest) -> Result<ToolTurnReply, ProviderError> {
+        fn generate_tool_turn(
+            &self,
+            _: &ToolTurnRequest,
+        ) -> Result<ToolTurnOutcome, ProviderError> {
             panic!("simulated provider panic in generate_tool_turn")
         }
         fn response_locale(&self) -> ResponseLocale {

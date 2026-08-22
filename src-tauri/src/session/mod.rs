@@ -1264,6 +1264,15 @@ impl Session {
                     locale,
                     inputs.skills,
                 );
+                // ADR-0103 (issue #614): the session posture's thought-level
+                // rides the built-in turn's provider request. Read from the
+                // same `runtime_facts` storage the ACP turn input injects
+                // from -- one source, no mirror (issue #530). The value is
+                // read once here, at dispatch: a posture change mid-turn
+                // cannot flip thinking on/off between the turn's rounds (an
+                // API-invalid interleaving). `None` leaves the request
+                // thinking-disabled, byte-identical to the status quo.
+                request.thought_level = self.runtime_facts.thought_level.clone();
                 // Disjoint field borrows: the loop borrows `&*self.provider`
                 // while TurnDeps borrows `&self.conn` / `&self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop takes
