@@ -81,6 +81,10 @@ pub fn assemble_tool_turn(
         messages: tool_turn_messages(&request),
         tools: crate::tools::builtin_table(),
         max_tokens: MAX_REPLY_TOKENS,
+        // The window knows nothing of the session posture; the dispatch seam
+        // stamps the session's thought-level onto the request after assembly
+        // (issue #614), so the default here is "thinking disabled".
+        thought_level: None,
     }
 }
 
@@ -154,6 +158,10 @@ fn tool_turn_messages(request: &ProviderRequest) -> Vec<ToolTurnMessage> {
             "assistant" => ToolTurnMessage::Assistant {
                 text: Some(content),
                 tool_calls: Vec::new(),
+                // Rendered history never re-feeds reasoning (ADR-0023): prior
+                // turns arrive as prose, and cross-turn thinking blocks are
+                // stripped by the API anyway.
+                thinking: Vec::new(),
             },
             // render_history_messages only emits user/assistant.
             _ => unreachable!("unknown role from render_history_messages: {role}"),

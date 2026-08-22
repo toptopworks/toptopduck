@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use toptopduck_lib::persistence::SaveError;
-use toptopduck_lib::provider::tool_calling::{ToolTurnReply, ToolTurnRequest, ToolUse};
+use toptopduck_lib::provider::tool_calling::{
+    ToolTurnOutcome, ToolTurnReply, ToolTurnRequest, ToolUse,
+};
 use toptopduck_lib::{
     is_resuming, ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome,
     PendingConflict, Provider, ProviderError, ProviderReply, ProviderRequest, ResumeError,
@@ -2868,7 +2870,7 @@ impl Provider for CountingProvider {
     fn generate_tool_turn(
         &self,
         _request: &ToolTurnRequest,
-    ) -> Result<ToolTurnReply, ProviderError> {
+    ) -> Result<ToolTurnOutcome, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(ProviderError::NotWired)
     }
@@ -3381,7 +3383,7 @@ impl Provider for WriteProbeProvider {
     fn generate_tool_turn(
         &self,
         _request: &ToolTurnRequest,
-    ) -> Result<ToolTurnReply, ProviderError> {
+    ) -> Result<ToolTurnOutcome, ProviderError> {
         // Mid-flight snapshot: persist_if_bound has NOT run yet (it runs in
         // record_turn, AFTER the loop returns), so this should equal the
         // pre-turn bytes.
@@ -3394,7 +3396,7 @@ impl Provider for WriteProbeProvider {
         }
         // Reply discarded -- the loop sees the cancel flag and lands
         // Cancelled.
-        Ok(ToolTurnReply::Text("never".into()))
+        Ok(ToolTurnReply::Text("never".into()).into())
     }
 }
 

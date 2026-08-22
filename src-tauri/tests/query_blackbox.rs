@@ -659,7 +659,9 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
     // assistant message is the verbatim summary note (ADR-0039), retargetable
     // by result name.
     match &payload.messages[1] {
-        ToolTurnMessage::Assistant { text, tool_calls } => {
+        ToolTurnMessage::Assistant {
+            text, tool_calls, ..
+        } => {
             let text = text.as_deref().unwrap_or_default();
             assert!(
                 text.contains("result_1"),

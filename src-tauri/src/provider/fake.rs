@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::cancel::CancelToken;
 
-use super::tool_calling::{ToolTurnReply, ToolTurnRequest};
+use super::tool_calling::{ThinkingBlock, ToolTurnOutcome, ToolTurnReply, ToolTurnRequest};
 use super::{Provider, ProviderError, ProviderReply, ProviderRequest};
 
 /// One question's scripted results, drawn in order then clamped to the last.
@@ -85,7 +85,7 @@ pub struct FakeProvider {
     /// loop (#295) drives `generate_tool_turn` once per round-trip; an
     /// unscripted question yields `NotWired`, mirroring the single-shot
     /// path's "never invent a reply" contract.
-    tool_scripts: HashMap<String, Script<ToolTurnReply>>,
+    tool_scripts: HashMap<String, Script<ToolTurnOutcome>>,
     /// Every `ToolTurnRequest` handed to `generate_tool_turn`, newest last (one
     /// entry per round-trip). Shared by `Arc` so an agent-loop unit test can
     /// assert the assembled conversation (messages + tools + system) after
@@ -180,6 +180,25 @@ impl FakeProvider {
         self.scripted_tool_turn_seq(question, vec![Ok(reply)])
     }
 
+    /// Register a queue of canned thinking-carrying tool-turn outcomes for a
+    /// question (issue #614): each entry pairs the round's reasoning blocks
+    /// with its reply, drawn front-first on successive calls exactly like
+    /// [`Self::scripted_tool_turn_seq`]. The plain builders wrap replies with
+    /// empty thinking, so every existing script reads as a thinking-disabled
+    /// turn.
+    pub fn scripted_thinking_tool_turn_seq(
+        mut self,
+        question: &str,
+        rounds: Vec<Result<(Vec<ThinkingBlock>, ToolTurnReply), ProviderError>>,
+    ) -> Self {
+        let outcomes = rounds
+            .into_iter()
+            .map(|round| round.map(|(thinking, reply)| ToolTurnOutcome { thinking, reply }))
+            .collect();
+        insert_script(&mut self.tool_scripts, question, outcomes);
+        self
+    }
+
     /// Register a queue of canned tool-turn replies for a question -- returned
     /// front-first on successive `generate_tool_turn` calls, clamping to the
     /// last once reached. Models a multi-step agent trajectory: `[ToolCalls
@@ -192,7 +211,13 @@ impl FakeProvider {
         question: &str,
         replies: Vec<Result<ToolTurnReply, ProviderError>>,
     ) -> Self {
-        insert_script(&mut self.tool_scripts, question, replies);
+        // Wrapping here (not at the draw site) keeps every reply-only script
+        // a thinking-disabled turn by construction.
+        let outcomes = replies
+            .into_iter()
+            .map(|r| r.map(ToolTurnOutcome::from))
+            .collect();
+        insert_script(&mut self.tool_scripts, question, outcomes);
         self
     }
 
@@ -298,7 +323,7 @@ impl Provider for FakeProvider {
     fn generate_tool_turn(
         &self,
         request: &ToolTurnRequest,
-    ) -> Result<ToolTurnReply, ProviderError> {
+    ) -> Result<ToolTurnOutcome, ProviderError> {
         // Record the assembled tool-turn payload before dispatching, mirroring
         // `generate`'s capture so an agent-loop unit test can assert what the
         // loop assembled (system / messages / tools). Poison tolerance matches
@@ -501,6 +526,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }],
             max_tokens: 1024,
+            thought_level: None,
         }
     }
 
@@ -511,7 +537,8 @@ mod tests {
         let got = provider
             .generate_tool_turn(&tool_request("count rows"))
             .expect("scripted");
-        assert_eq!(got, ToolTurnReply::Text("done".into()));
+        assert_eq!(got.reply, ToolTurnReply::Text("done".into()));
+        assert_eq!(got.thinking, Vec::new());
     }
 
     #[test]
@@ -532,16 +559,16 @@ mod tests {
         let first = provider
             .generate_tool_turn(&tool_request("two-step"))
             .expect("first");
-        assert!(matches!(first, ToolTurnReply::ToolCalls { .. }));
+        assert!(matches!(first.reply, ToolTurnReply::ToolCalls { .. }));
         let second = provider
             .generate_tool_turn(&tool_request("two-step"))
             .expect("second");
-        assert_eq!(second, ToolTurnReply::Text("done".into()));
+        assert_eq!(second.reply, ToolTurnReply::Text("done".into()));
         // Clamps to the last entry on every later call.
         let third = provider
             .generate_tool_turn(&tool_request("two-step"))
             .expect("third");
-        assert_eq!(third, ToolTurnReply::Text("done".into()));
+        assert_eq!(third.reply, ToolTurnReply::Text("done".into()));
     }
 
     #[test]

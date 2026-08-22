@@ -33,7 +33,9 @@ use serde_json::{json, Value};
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::prompt::{build_system_prompt, render_history_messages, Message};
 use crate::provider::reply::parse_reply;
-use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
+use crate::provider::tool_calling::{
+    ToolTurnMessage, ToolTurnOutcome, ToolTurnReply, ToolTurnRequest, ToolUse,
+};
 use crate::provider::{ProviderError, ProviderReply, ProviderRequest, MAX_REPLY_TOKENS};
 
 /// Wall-clock ceiling on one LLM HTTP call (mirrors the anthropic adapter).
@@ -204,7 +206,7 @@ impl OpenaiProvider {
     pub fn generate_tool_turn(
         config: &dyn ProviderConfigSource,
         request: &ToolTurnRequest,
-    ) -> Result<ToolTurnReply, ProviderError> {
+    ) -> Result<ToolTurnOutcome, ProviderError> {
         // ADR-0029 invariant 3: key fetched in the Rust core, per turn.
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
         let base_url = config.base_url();
@@ -232,7 +234,10 @@ impl OpenaiProvider {
         let raw: RawToolTurnResponse = response
             .into_json()
             .map_err(|e| ProviderError::Unavailable(format!("response read failed: {e}")))?;
-        parse_tool_turn_response(raw)
+        // ADR-0103 / issue #614 honest degrade: the thought-level posture is
+        // ignored (no `reasoning_effort` on the wire) and the outcome never
+        // carries thinking blocks -- the reply path is unchanged.
+        parse_tool_turn_response(raw).map(ToolTurnOutcome::from)
     }
 }
 
@@ -376,7 +381,13 @@ fn build_openai_messages(messages: &[ToolTurnMessage], system: &str) -> Vec<Valu
             ToolTurnMessage::User { content } => {
                 out.push(json!({ "role": "user", "content": content }));
             }
-            ToolTurnMessage::Assistant { text, tool_calls } => {
+            // Thinking blocks are dropped (ADR-0103, issue #614): the openai
+            // protocol honest-degrades -- no reasoning field is sent, none is
+            // parsed, and an in-turn assistant turn's reasoning never
+            // re-feeds (the wire shape has no pass-back channel for it).
+            ToolTurnMessage::Assistant {
+                text, tool_calls, ..
+            } => {
                 let mut entry = json!({ "role": "assistant" });
                 if let Some(t) = text {
                     entry["content"] = Value::String(t.clone());
@@ -1096,6 +1107,7 @@ mod tests {
                 }),
             }],
             max_tokens: 1024,
+            thought_level: None,
         }
     }
 
@@ -1150,7 +1162,7 @@ mod tests {
         let cfg = config_at(&server.url(), Some("sk-test"));
         let reply = OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("multi"))
             .expect("tool calls");
-        match reply {
+        match reply.reply {
             ToolTurnReply::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 2);
                 assert_eq!(calls[0].id, "call_1");
@@ -1184,7 +1196,7 @@ mod tests {
         let cfg = config_at(&server.url(), Some("sk-test"));
         let reply = OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("narrated"))
             .expect("tool calls");
-        match reply {
+        match reply.reply {
             ToolTurnReply::ToolCalls { text, calls } => {
                 assert_eq!(text.as_deref(), Some("先看一眼数据。"));
                 assert_eq!(calls.len(), 1);
@@ -1211,6 +1223,7 @@ mod tests {
                         name: "run_sql".into(),
                         input: serde_json::json!({"sql":"SELECT 1"}),
                     }],
+                    thinking: Vec::new(),
                 },
             ],
             tools: vec![ToolDefinition {
@@ -1219,6 +1232,7 @@ mod tests {
                 input_schema: serde_json::json!({"type":"object"}),
             }],
             max_tokens: 1024,
+            thought_level: None,
         };
         let mut server = mockito::Server::new();
         let _mock = server
@@ -1238,6 +1252,37 @@ mod tests {
     }
 
     #[test]
+    fn tool_turn_ignores_thought_level_entirely() {
+        // ADR-0103 / issue #614 honest degrade: a posture thought-level adds
+        // no reasoning field to the request body, the cap stays unsqueezed,
+        // and the outcome carries no thinking blocks -- the reply path is
+        // byte-identical to a thinking-disabled turn, with no error.
+        let mut request = tool_turn_request("count rows");
+        request.thought_level = Some("high".into());
+        let body = build_tool_turn_body("gpt-4o", &request);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 1024);
+
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": "done"}}]
+                })
+                .to_string(),
+            )
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let outcome =
+            OpenaiProvider::generate_tool_turn(&cfg, &request).expect("reply path unchanged");
+        assert_eq!(outcome.thinking, Vec::new());
+        assert_eq!(outcome.reply, ToolTurnReply::Text("done".into()));
+    }
+
+    #[test]
     fn tool_turn_round_trips_tool_result_as_tool_role_message() {
         // AC #291: a fed-back ToolResult is serialized as a role="tool"
         // message carrying tool_call_id + content; the assistant's prior
@@ -1253,6 +1298,7 @@ mod tests {
                         name: "run_sql".into(),
                         input: serde_json::json!({"sql":"SELECT 1"}),
                     }],
+                    thinking: Vec::new(),
                 },
                 ToolTurnMessage::tool_result(ToolResult {
                     tool_use_id: "call_1".into(),
@@ -1266,6 +1312,7 @@ mod tests {
                 input_schema: serde_json::json!({"type":"object"}),
             }],
             max_tokens: 1024,
+            thought_level: None,
         };
         let mut server = mockito::Server::new();
         let _mock = server
@@ -1278,7 +1325,10 @@ mod tests {
             ))
             .create();
         let cfg = config_at(&server.url(), Some("sk-test"));
-        match OpenaiProvider::generate_tool_turn(&cfg, &request).expect("text") {
+        match OpenaiProvider::generate_tool_turn(&cfg, &request)
+            .expect("text")
+            .reply
+        {
             ToolTurnReply::Text(t) => assert_eq!(t, "1 row"),
             other => panic!("expected Text, got {other:?}"),
         }
@@ -1309,6 +1359,7 @@ mod tests {
                             input: serde_json::json!({"sql":"SELECT 2"}),
                         },
                     ],
+                    thinking: Vec::new(),
                 },
                 ToolTurnMessage::tool_result(ToolResult {
                     tool_use_id: "call_1".into(),
@@ -1323,6 +1374,7 @@ mod tests {
             ],
             tools: Vec::new(),
             max_tokens: 1024,
+            thought_level: None,
         };
         let body = build_tool_turn_body("gpt-4o", &request);
         let messages = body.get("messages").unwrap().as_array().unwrap();
@@ -1347,7 +1399,10 @@ mod tests {
             ))
             .create();
         let cfg = config_at(&server.url(), Some("sk-test"));
-        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("final")).expect("text") {
+        match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("final"))
+            .expect("text")
+            .reply
+        {
             ToolTurnReply::Text(t) => assert_eq!(t, "the answer is 42"),
             other => panic!("expected Text, got {other:?}"),
         }
@@ -1472,6 +1527,7 @@ mod tests {
         let cfg = config_at(&server.url(), Some("sk-test"));
         match OpenaiProvider::generate_tool_turn(&cfg, &tool_turn_request("nullary"))
             .expect("calls")
+            .reply
         {
             ToolTurnReply::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 1);
@@ -1495,11 +1551,13 @@ mod tests {
                 ToolTurnMessage::Assistant {
                     text: None,
                     tool_calls: Vec::new(),
+                    thinking: Vec::new(),
                 },
                 ToolTurnMessage::user("follow up"),
             ],
             tools: Vec::new(),
             max_tokens: 1024,
+            thought_level: None,
         };
         let body = build_tool_turn_body("gpt-4o", &request);
         let messages = body.get("messages").unwrap().as_array().unwrap();

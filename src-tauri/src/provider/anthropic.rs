@@ -24,7 +24,9 @@ use serde_json::{json, Value};
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::prompt::{build_system_prompt, render_history_messages, Message};
 use crate::provider::reply::parse_reply;
-use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse};
+use crate::provider::tool_calling::{
+    ThinkingBlock, ToolTurnMessage, ToolTurnOutcome, ToolTurnReply, ToolTurnRequest, ToolUse,
+};
 use crate::provider::{ProviderError, ProviderReply, ProviderRequest, MAX_REPLY_TOKENS};
 
 /// Anthropic Messages API protocol version header value (ADR-0019: native
@@ -175,7 +177,7 @@ impl AnthropicProvider {
     pub fn generate_tool_turn(
         config: &dyn ProviderConfigSource,
         request: &ToolTurnRequest,
-    ) -> Result<ToolTurnReply, ProviderError> {
+    ) -> Result<ToolTurnOutcome, ProviderError> {
         // ADR-0029 invariant 3: key fetched in the Rust core, per turn. No
         // key -> NotWired (permanent, surfaces as a configure-key prompt).
         let key = config.api_key().ok_or(ProviderError::NotWired)?;
@@ -257,18 +259,59 @@ struct RawToolTurnBlock {
     /// The tool-call input (present on `tool_use` blocks); parsed verbatim.
     #[serde(default)]
     input: Option<Value>,
+    /// The reasoning text (present on `thinking` blocks; issue #614).
+    #[serde(default)]
+    thinking: Option<String>,
+    /// The reasoning pass-back signature (present on `thinking` blocks).
+    #[serde(default)]
+    signature: Option<String>,
+    /// The encrypted payload (present on `redacted_thinking` blocks).
+    #[serde(default)]
+    data: Option<String>,
+}
+
+/// The fixed posture thought-level -> thinking budget table (ADR-0103,
+/// issue #614). Messages API facts verified against the official
+/// extended-thinking guide: `budget_tokens` has a 1024 minimum and must be
+/// less than `max_tokens`; streaming is required once `max_tokens` exceeds
+/// 21333. The synthesis in [`build_tool_turn_body`] adds the budget ON TOP
+/// of the reply cap, so the cap keeps meaning "visible reply length"
+/// regardless of the level, and the top entry (4096 + 16384 = 20480) stays
+/// below the streaming threshold -- the non-streaming call shape holds at
+/// every level.
+fn thinking_budget(level: Option<&str>) -> Option<u32> {
+    match level? {
+        "low" => Some(1024),
+        "medium" => Some(4096),
+        "high" => Some(16384),
+        // Unknown ids (a dangling level from a runtime whose catalog uses a
+        // different vocabulary) honest-degrade: no thinking parameter, the
+        // reply path is byte-identical to the thinking-disabled turn.
+        _ => None,
+    }
 }
 
 /// Build the Anthropic Messages request body for one tool-calling turn. The
 /// `tools` field is omitted when the table is empty (the model then replies
 /// with text only); `messages` carries the translated conversation as
-/// anthropic content blocks (see [`build_anthropic_messages`]).
+/// anthropic content blocks (see [`build_anthropic_messages`]). A known
+/// thought-level (issue #614) adds the `thinking` enablement object and
+/// synthesizes `max_tokens` as reply cap + budget (the API counts thinking
+/// toward `max_tokens`, so the visible-reply cap would otherwise be squeezed
+/// by exactly the thinking budget).
 fn build_tool_turn_body(model: &str, request: &ToolTurnRequest) -> Value {
+    let budget = thinking_budget(request.thought_level.as_deref());
     let mut body = json!({
         "model": model,
-        "max_tokens": request.max_tokens,
+        "max_tokens": request.max_tokens + budget.unwrap_or(0),
         "system": request.system,
     });
+    if let Some(budget) = budget {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "budget_tokens": budget,
+        });
+    }
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
@@ -311,9 +354,38 @@ fn build_anthropic_messages(messages: &[ToolTurnMessage]) -> Vec<Value> {
                 flush(&mut out, &mut pending_tool_results);
                 out.push(json!({ "role": "user", "content": content }));
             }
-            ToolTurnMessage::Assistant { text, tool_calls } => {
+            ToolTurnMessage::Assistant {
+                text,
+                tool_calls,
+                thinking,
+            } => {
                 flush(&mut out, &mut pending_tool_results);
                 let mut blocks: Vec<Value> = Vec::new();
+                // Thinking blocks lead the assistant content (the API's own
+                // response order), echoed back verbatim for tool-use
+                // continuity (issue #614): the last assistant turn's
+                // complete unmodified thinking sequence must ride the next
+                // same-turn request.
+                for block in thinking {
+                    match block {
+                        ThinkingBlock::Thinking {
+                            thinking,
+                            signature,
+                        } => {
+                            blocks.push(json!({
+                                "type": "thinking",
+                                "thinking": thinking,
+                                "signature": signature,
+                            }));
+                        }
+                        ThinkingBlock::Redacted { data } => {
+                            blocks.push(json!({
+                                "type": "redacted_thinking",
+                                "data": data,
+                            }));
+                        }
+                    }
+                }
                 if let Some(t) = text {
                     blocks.push(json!({ "type": "text", "text": t }));
                 }
@@ -351,18 +423,24 @@ fn build_anthropic_messages(messages: &[ToolTurnMessage]) -> Vec<Value> {
     out
 }
 
-/// Parse the Anthropic tool-calling response into a [`ToolTurnReply`]. A
-/// `tool_use` block yields a [`ToolUse`]; a `text` block accumulates prose.
-/// If any `tool_use` blocks are present -> [`ToolTurnReply::ToolCalls`]
-/// (intermediate step; the agent loop executes them), with the joined prose
-/// riding alongside as the round's connective text (ADR-0103, issue #608;
-/// `None` when the reply carried no text block). Otherwise the joined text
-/// is the terminal [`ToolTurnReply::Text`]; empty text is a contract
+/// Parse the Anthropic tool-calling response into a [`ToolTurnOutcome`]. A
+/// `tool_use` block yields a [`ToolUse`]; a `text` block accumulates prose;
+/// `thinking` / `redacted_thinking` blocks (issue #614) collect onto the
+/// outcome's thinking list in received order (the re-feed must echo the
+/// sequence back verbatim). If any `tool_use` blocks are present ->
+/// [`ToolTurnReply::ToolCalls`] (intermediate step; the agent loop executes
+/// them), with the joined prose riding alongside as the round's connective
+/// text (ADR-0103, issue #608; `None` when the reply carried no text block).
+/// Otherwise the joined text is the terminal [`ToolTurnReply::Text`]; empty
+/// text is a contract
 /// violation -> retried [`ProviderError::Unavailable`]. Unknown block kinds
 /// are ignored (forward-compat with server-added block types).
-fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, ProviderError> {
+fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnOutcome, ProviderError> {
     let mut tool_calls = Vec::new();
     let mut text_parts: Vec<String> = Vec::new();
+    // Received order preserved: the wire's consecutive thinking sequence must
+    // survive the re-feed verbatim, so blocks are collected as they arrive.
+    let mut thinking: Vec<ThinkingBlock> = Vec::new();
     for block in raw.content {
         match block.kind.as_str() {
             "tool_use" => {
@@ -380,26 +458,41 @@ fn parse_tool_turn_response(raw: RawToolTurnResponse) -> Result<ToolTurnReply, P
                     text_parts.push(t);
                 }
             }
+            "thinking" => {
+                let text = block.thinking.ok_or_else(|| {
+                    ProviderError::Unavailable("thinking block missing thinking field".into())
+                })?;
+                let signature = block.signature.ok_or_else(|| {
+                    ProviderError::Unavailable("thinking block missing signature field".into())
+                })?;
+                thinking.push(ThinkingBlock::Thinking {
+                    thinking: text,
+                    signature,
+                });
+            }
+            "redacted_thinking" => {
+                let data = block.data.ok_or_else(|| {
+                    ProviderError::Unavailable("redacted_thinking block missing data field".into())
+                })?;
+                thinking.push(ThinkingBlock::Redacted { data });
+            }
             _ => {}
         }
     }
-    if !tool_calls.is_empty() {
+    let reply = if !tool_calls.is_empty() {
         // The empty-text -> None normalization lives in the constructor
         // (issue #617), shared with the openai adapter's parse point.
-        Ok(ToolTurnReply::tool_calls_with(
-            Some(text_parts.join("")),
-            tool_calls,
-        ))
+        ToolTurnReply::tool_calls_with(Some(text_parts.join("")), tool_calls)
     } else {
         let text = text_parts.join("");
         if text.is_empty() {
-            Err(ProviderError::Unavailable(
+            return Err(ProviderError::Unavailable(
                 "LLM response has no text content".into(),
-            ))
-        } else {
-            Ok(ToolTurnReply::Text(text))
+            ));
         }
-    }
+        ToolTurnReply::Text(text)
+    };
+    Ok(ToolTurnOutcome { thinking, reply })
 }
 
 /// Build the Anthropic messages array from the windowed payload: each prior
@@ -853,6 +946,7 @@ mod tests {
                 }),
             }],
             max_tokens: 1024,
+            thought_level: None,
         }
     }
 
@@ -902,7 +996,7 @@ mod tests {
         let cfg = config_at(&server.url(), Some("sk-test"));
         let reply = AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("multi"))
             .expect("tool calls");
-        match reply {
+        match reply.reply {
             ToolTurnReply::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 2);
                 assert_eq!(calls[0].id, "tu_1");
@@ -933,7 +1027,7 @@ mod tests {
         let cfg = config_at(&server.url(), Some("sk-test"));
         let reply = AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("narrated"))
             .expect("tool calls");
-        match reply {
+        match reply.reply {
             ToolTurnReply::ToolCalls { text, calls } => {
                 assert_eq!(text.as_deref(), Some("先看一眼数据。"));
                 assert_eq!(calls.len(), 1);
@@ -960,6 +1054,7 @@ mod tests {
                         name: "run_sql".into(),
                         input: serde_json::json!({"sql":"SELECT 1"}),
                     }],
+                    thinking: Vec::new(),
                 },
             ],
             tools: vec![ToolDefinition {
@@ -968,6 +1063,7 @@ mod tests {
                 input_schema: serde_json::json!({"type":"object"}),
             }],
             max_tokens: 1024,
+            thought_level: None,
         };
         let mut server = mockito::Server::new();
         let _mock = server
@@ -982,6 +1078,140 @@ mod tests {
         let cfg = config_at(&server.url(), Some("sk-test"));
         AnthropicProvider::generate_tool_turn(&cfg, &request).expect("request lands");
         _mock.assert();
+    }
+
+    #[test]
+    fn tool_turn_body_maps_thought_level_onto_thinking_budget() {
+        // Issue #614 / ADR-0103: a known thought-level adds the thinking
+        // enablement object with the fixed budget, and synthesizes
+        // max_tokens as reply cap + budget (the API counts thinking toward
+        // max_tokens, so the visible-reply cap must not be squeezed by the
+        // budget). max_tokens here is the helper's 1024.
+        for (level, budget) in [("low", 1024u32), ("medium", 4096), ("high", 16384)] {
+            let mut request = tool_turn_request("q");
+            request.thought_level = Some(level.into());
+            let body = build_tool_turn_body("m", &request);
+            assert_eq!(
+                body["thinking"],
+                serde_json::json!({"type": "enabled", "budget_tokens": budget}),
+                "level {level}"
+            );
+            assert_eq!(body["max_tokens"], 1024 + budget, "level {level}");
+        }
+    }
+
+    #[test]
+    fn tool_turn_body_omits_thinking_without_known_level() {
+        // Issue #614: a cleared level and an unknown id (a dangling level
+        // from a runtime with a different vocabulary) both leave the body
+        // byte-identical to the thinking-disabled turn -- honest degrade,
+        // no error, same semantics as the openai protocol.
+        for level in [None, Some("extreme")] {
+            let mut request = tool_turn_request("q");
+            request.thought_level = level.map(String::from);
+            let body = build_tool_turn_body("m", &request);
+            assert!(
+                body.get("thinking").is_none(),
+                "no thinking field for {level:?}"
+            );
+            assert_eq!(body["max_tokens"], 1024, "cap unsqueezed for {level:?}");
+        }
+    }
+
+    #[test]
+    fn tool_turn_parses_thinking_and_redacted_blocks_in_received_order() {
+        // Issue #614: thinking + redacted_thinking blocks collect onto the
+        // outcome's thinking list in wire order (the re-feed must echo the
+        // sequence back verbatim); the text/tool_use blocks parse as before.
+        let raw: RawToolTurnResponse = serde_json::from_str(&tool_response_body(
+            r#"[
+                {"type":"thinking","thinking":"plan A","signature":"sig-1"},
+                {"type":"redacted_thinking","data":"opaque"},
+                {"type":"text","text":"先看一眼数据。"},
+                {"type":"tool_use","id":"tu_1","name":"run_sql","input":{"sql":"SELECT 1"}}
+            ]"#,
+        ))
+        .expect("raw body");
+        let outcome = parse_tool_turn_response(raw).expect("outcome");
+        assert_eq!(
+            outcome.thinking,
+            vec![
+                ThinkingBlock::Thinking {
+                    thinking: "plan A".into(),
+                    signature: "sig-1".into(),
+                },
+                ThinkingBlock::Redacted {
+                    data: "opaque".into(),
+                },
+            ]
+        );
+        match outcome.reply {
+            ToolTurnReply::ToolCalls { text, calls } => {
+                assert_eq!(text.as_deref(), Some("先看一眼数据。"));
+                assert_eq!(calls.len(), 1);
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_enables_and_roundtrips_thinking_on_the_wire() {
+        // Issue #614 end to end: a posture thought-level lands the thinking
+        // enablement + synthesized max_tokens on the request body (mockito
+        // body-regex), the response's thinking block parses onto the
+        // outcome, and an in-turn assistant turn re-feeds its thinking
+        // blocks verbatim alongside tool_use (continuity requirement).
+        let mut request = tool_turn_request("count rows");
+        request.thought_level = Some("high".into());
+        request.messages.push(ToolTurnMessage::Assistant {
+            text: None,
+            tool_calls: vec![ToolUse {
+                id: "tu_prev".into(),
+                name: "run_sql".into(),
+                input: serde_json::json!({"sql": "SELECT 0"}),
+            }],
+            thinking: vec![
+                ThinkingBlock::Thinking {
+                    thinking: "prior reasoning".into(),
+                    signature: "sig-prev".into(),
+                },
+                ThinkingBlock::Redacted {
+                    data: "opaque-prev".into(),
+                },
+            ],
+        });
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::Regex(r#""budget_tokens":16384"#.into()))
+            .match_body(mockito::Matcher::Regex(r#""max_tokens":17408"#.into()))
+            .match_body(mockito::Matcher::Regex(r#""type":"thinking""#.into()))
+            .match_body(mockito::Matcher::Regex(
+                r#""thinking":"prior reasoning""#.into(),
+            ))
+            .match_body(mockito::Matcher::Regex(r#""signature":"sig-prev""#.into()))
+            .match_body(mockito::Matcher::Regex(
+                r#""type":"redacted_thinking""#.into(),
+            ))
+            .match_body(mockito::Matcher::Regex(r#""data":"opaque-prev""#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(
+                r#"[
+                    {"type":"thinking","thinking":"fresh reasoning","signature":"sig-1"},
+                    {"type":"tool_use","id":"tu_1","name":"run_sql","input":{"sql":"SELECT 1"}}
+                ]"#,
+            ))
+            .create();
+        let cfg = config_at(&server.url(), Some("sk-test"));
+        let outcome = AnthropicProvider::generate_tool_turn(&cfg, &request).expect("round trip");
+        _mock.assert();
+        assert_eq!(
+            outcome.thinking,
+            vec![ThinkingBlock::Thinking {
+                thinking: "fresh reasoning".into(),
+                signature: "sig-1".into(),
+            }]
+        );
     }
 
     #[test]
@@ -1001,6 +1231,7 @@ mod tests {
                         name: "run_sql".into(),
                         input: serde_json::json!({"sql":"SELECT 1"}),
                     }],
+                    thinking: Vec::new(),
                 },
                 ToolTurnMessage::tool_result(ToolResult {
                     tool_use_id: "tu_1".into(),
@@ -1014,6 +1245,7 @@ mod tests {
                 input_schema: serde_json::json!({"type":"object"}),
             }],
             max_tokens: 1024,
+            thought_level: None,
         };
         let mut server = mockito::Server::new();
         let _mock = server
@@ -1025,7 +1257,10 @@ mod tests {
             .with_body(tool_response_body(r#"[{"type":"text","text":"1 row"}]"#))
             .create();
         let cfg = config_at(&server.url(), Some("sk-test"));
-        match AnthropicProvider::generate_tool_turn(&cfg, &request).expect("text") {
+        match AnthropicProvider::generate_tool_turn(&cfg, &request)
+            .expect("text")
+            .reply
+        {
             ToolTurnReply::Text(t) => assert_eq!(t, "1 row"),
             other => panic!("expected Text, got {other:?}"),
         }
@@ -1057,6 +1292,7 @@ mod tests {
                             input: serde_json::json!({"sql":"SELECT 2"}),
                         },
                     ],
+                    thinking: Vec::new(),
                 },
                 ToolTurnMessage::tool_result(ToolResult {
                     tool_use_id: "tu_1".into(),
@@ -1071,6 +1307,7 @@ mod tests {
             ],
             tools: Vec::new(),
             max_tokens: 1024,
+            thought_level: None,
         };
         // Reuse the builder directly (no HTTP) to assert the message shape.
         let body = build_tool_turn_body("claude-sonnet-4-6", &request);
@@ -1100,6 +1337,7 @@ mod tests {
         let cfg = config_at(&server.url(), Some("sk-test"));
         match AnthropicProvider::generate_tool_turn(&cfg, &tool_turn_request("final"))
             .expect("text")
+            .reply
         {
             ToolTurnReply::Text(t) => assert_eq!(t, "the answer is 42"),
             other => panic!("expected Text, got {other:?}"),

@@ -270,12 +270,14 @@ pub trait Provider: Send {
     /// One native tool-calling round-trip (ADR-0081, issue #291):
     /// send the active tool table plus the in-progress conversation, get back
     /// either the model's tool invocations to execute or its terminal text
-    /// answer. The two adapters translate the protocol-neutral
-    /// [`tool_calling::ToolTurnRequest`] onto their native wire shapes
-    /// (anthropic `tools` / `tool_use` / `tool_result`; openai `tools` /
-    /// `tool_calls` / `tool` role). ADR-0029 invariant 3 holds: the request
-    /// never carries the key; the adapter reads it from the config source.
-    /// ADR-0044 classification is unchanged.
+    /// answer, alongside any reasoning blocks the runtime emitted (issue
+    /// #614 -- empty for every thinking-disabled turn and the openai
+    /// protocol's honest degrade). The two adapters translate the
+    /// protocol-neutral [`tool_calling::ToolTurnRequest`] onto their native
+    /// wire shapes (anthropic `tools` / `tool_use` / `tool_result`; openai
+    /// `tools` / `tool_calls` / `tool` role). ADR-0029 invariant 3 holds:
+    /// the request never carries the key; the adapter reads it from the
+    /// config source. ADR-0044 classification is unchanged.
     ///
     /// Coexists with [`Self::generate`] (zero behavior change to the
     /// single-shot path; ADR-0077 retires the single-SQL contract for
@@ -286,7 +288,7 @@ pub trait Provider: Send {
     fn generate_tool_turn(
         &self,
         _request: &tool_calling::ToolTurnRequest,
-    ) -> Result<tool_calling::ToolTurnReply, ProviderError> {
+    ) -> Result<tool_calling::ToolTurnOutcome, ProviderError> {
         Err(ProviderError::NotWired)
     }
 
@@ -355,7 +357,7 @@ impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
     fn generate_tool_turn(
         &self,
         request: &tool_calling::ToolTurnRequest,
-    ) -> Result<tool_calling::ToolTurnReply, ProviderError> {
+    ) -> Result<tool_calling::ToolTurnOutcome, ProviderError> {
         match self.config.protocol() {
             Protocol::Anthropic => {
                 anthropic::AnthropicProvider::generate_tool_turn(&self.config, request)

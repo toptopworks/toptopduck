@@ -84,9 +84,17 @@ pub enum ToolTurnMessage {
     /// A terminal assistant turn carries text and no tool calls; an
     /// intermediate turn carries tool calls (and optional reasoning prose the
     /// model emitted alongside).
+    ///
+    /// `thinking` carries the round's reasoning blocks for the in-turn
+    /// re-feed only (issue #614): tool-use continuity requires the last
+    /// assistant turn's complete unmodified thinking sequence on the next
+    /// same-turn request. Cross-turn history never populates it -- prior
+    /// turns re-render as prose (ADR-0023), and the API strips thinking
+    /// blocks from earlier turns anyway.
     Assistant {
         text: Option<String>,
         tool_calls: Vec<ToolUse>,
+        thinking: Vec<ThinkingBlock>,
     },
     /// One tool execution result routed back to the model. The agent loop
     /// emits one `ToolResult` per executed call; consecutive `ToolResult`s
@@ -139,6 +147,40 @@ pub struct ToolTurnRequest {
     pub tools: Vec<ToolDefinition>,
     /// Reply length cap; mirrors the single-shot adapters' `MAX_TOKENS`.
     pub max_tokens: u32,
+    /// The session posture's thought-level id riding this turn (ADR-0103,
+    /// issue #614), named after the same `AcpTurnInput` field it mirrors.
+    /// `None` = no thinking enablement (the status quo). The anthropic
+    /// adapter maps known ids onto an extended-thinking budget; unknown ids
+    /// and the openai protocol honest-degrade to no thinking at all.
+    pub thought_level: Option<String>,
+}
+
+/// One reasoning block the model emitted alongside its reply (ADR-0103,
+/// issue #614). Protocol-neutral carrier whose field names mirror the
+/// anthropic wire shape, so the adapter can echo each block back verbatim on
+/// the in-turn assistant re-feed: tool-use continuity requires the last
+/// assistant turn's complete unmodified thinking sequence (rearranging or
+/// editing blocks breaks the model's own reasoning flow).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThinkingBlock {
+    /// Readable reasoning text plus the opaque pass-back signature. The
+    /// signature exists solely for API verification and is never interpreted.
+    Thinking { thinking: String, signature: String },
+    /// Safety-redacted reasoning: encrypted, unreadable payload. Contributes
+    /// no display text but still rides the re-feed (dropping it would break
+    /// continuity for the turn it belongs to).
+    Redacted { data: String },
+}
+
+impl ThinkingBlock {
+    /// The readable reasoning text, `None` on a redacted block (which
+    /// renders nothing -- honest degrade, the API docs' display guidance).
+    pub fn readable_text(&self) -> Option<&str> {
+        match self {
+            Self::Thinking { thinking, .. } => Some(thinking),
+            Self::Redacted { .. } => None,
+        }
+    }
 }
 
 /// One tool-calling turn reply (ADR-0081, issue #291). Either the model
@@ -188,6 +230,32 @@ impl ToolTurnReply {
         Self::ToolCalls {
             text: text.filter(|t| !t.is_empty()),
             calls,
+        }
+    }
+}
+
+/// One provider round-trip's full outcome (issue #614, ADR-0103): the reply
+/// body plus the reasoning blocks the model emitted alongside it. Thinking
+/// rides beside the reply rather than inside it -- the loop consumes the
+/// blocks three ways (live `ThinkingCompleted` phase, trace round, in-turn
+/// assistant re-feed) regardless of which reply variant came back, so the
+/// blocks are round-level data, not part of either outcome shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolTurnOutcome {
+    /// The round's reasoning blocks in received order (the wire sequence must
+    /// survive the re-feed verbatim). Empty when the runtime produced none.
+    pub thinking: Vec<ThinkingBlock>,
+    /// The reply proper: a tool-call batch or the terminal text.
+    pub reply: ToolTurnReply,
+}
+
+impl From<ToolTurnReply> for ToolTurnOutcome {
+    /// Wrap a no-thinking reply -- the shape every non-anthropic source and
+    /// every thinking-disabled turn produces.
+    fn from(reply: ToolTurnReply) -> Self {
+        Self {
+            thinking: Vec::new(),
+            reply,
         }
     }
 }
@@ -261,6 +329,36 @@ mod tests {
                 calls: calls(),
             }
         );
+    }
+
+    /// A redacted block yields no readable text (it renders nothing); a
+    /// normal thinking block yields its text regardless of the signature.
+    #[test]
+    fn readable_text_is_none_on_redacted_blocks() {
+        assert_eq!(
+            ThinkingBlock::Thinking {
+                thinking: "plan".into(),
+                signature: "sig".into(),
+            }
+            .readable_text(),
+            Some("plan")
+        );
+        assert_eq!(
+            ThinkingBlock::Redacted {
+                data: "opaque".into(),
+            }
+            .readable_text(),
+            None
+        );
+    }
+
+    /// The reply-to-outcome conversion wraps with empty thinking -- the
+    /// default shape for every thinking-disabled or non-anthropic turn.
+    #[test]
+    fn reply_converts_to_outcome_with_empty_thinking() {
+        let outcome: ToolTurnOutcome = ToolTurnReply::Text("done".into()).into();
+        assert_eq!(outcome.thinking, Vec::new());
+        assert_eq!(outcome.reply, ToolTurnReply::Text("done".into()));
     }
 
     /// The protocol-neutral types are plain data: equality is field-wise, so
