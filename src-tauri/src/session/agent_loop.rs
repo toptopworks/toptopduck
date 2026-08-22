@@ -260,11 +260,12 @@ impl<'p> AgentLoop<'p> {
                     }
                     // ADR-0103 (issues #608/#614): one round per provider
                     // reply. The round's thinking completes FIRST (only when
-                    // the runtime produced blocks), then the connective prose
-                    // (when present) rides the live channel BEFORE the
-                    // batch's call events -- the rail can render the round's
-                    // thinking fold + prose as they happen -- then the trace
-                    // round the batch's calls land on opens.
+                    // the round earned a trace -- readable thinking text
+                    // present; a redacted-only round stays silent), then the
+                    // connective prose (when present) rides the live channel
+                    // BEFORE the batch's call events -- the rail can render
+                    // the round's thinking fold + prose as they happen --
+                    // then the trace round the batch's calls land on opens.
                     let trace = complete_round_thinking(&thinking, &mut on_phase);
                     if let Some(t) = text.as_ref() {
                         on_phase(TurnPhase::RoundText { text: t.clone() });
@@ -275,10 +276,11 @@ impl<'p> AgentLoop<'p> {
                         calls: Vec::new(),
                     });
                     // Append the assistant turn (thinking + prose + calls --
-                    // the wire protocols accept the reasoning blocks and text
-                    // alongside tool_use in one assistant turn), then dispatch
-                    // each call serially (ADR-0021 single-flight within a
-                    // session).
+                    // the anthropic protocol carries the reasoning blocks and
+                    // text alongside tool_use in one assistant turn; the
+                    // openai protocol drops the thinking blocks, its honest
+                    // degrade), then dispatch each call serially (ADR-0021
+                    // single-flight within a session).
                     messages.push(ToolTurnMessage::Assistant {
                         text,
                         tool_calls: calls.clone(),
@@ -422,11 +424,13 @@ fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termi
 
 /// Fold a round's thinking blocks into its trace entry (issue #614).
 /// Redacted blocks contribute no text (honest degrade); a round whose
-/// readable text is empty carries no trace entry, though its blocks still
-/// ride the assistant re-feed for tool-use continuity. `duration_ms` is
-/// pinned to 0: the built-in provider call is one non-streaming round-trip
-/// -- there is no observable thinking-only window, and no wall-clock
-/// approximation is fabricated for it (the #612 precedent).
+/// readable text is empty carries no trace entry, though on a tool batch
+/// its blocks still ride the assistant re-feed for tool-use continuity (a
+/// terminal reply's blocks are not re-fed -- the conversation ends there).
+/// `duration_ms` is pinned to 0: the built-in provider call is one
+/// non-streaming round-trip -- there is no observable thinking-only window,
+/// and no wall-clock approximation is fabricated for it (the #612
+/// precedent).
 fn thinking_trace(blocks: &[ThinkingBlock]) -> Option<ThinkingTrace> {
     let text = blocks
         .iter()
@@ -1657,11 +1661,11 @@ mod tests {
         // ADR-0103 (issue #608): a tool-call reply carrying connective prose
         // opens its round with that prose. The RoundText phase fires after
         // the round's Thinking wait and BEFORE the batch's call events; the
-        // recorded round carries the text (and no thinking -- no data source
-        // is wired for the built-in runtime yet); the prose also re-feeds on
-        // the assistant message, so the next round-trip's request carries it
-        // ("taken from the loop conversation" -- the wire protocols accept
-        // text alongside tool_use in one assistant turn).
+        // recorded round carries the text (and no thinking -- this script
+        // carries none); the prose also re-feeds on the assistant message,
+        // so the next round-trip's request carries it ("taken from the loop
+        // conversation" -- the wire protocols accept text alongside tool_use
+        // in one assistant turn).
         let engine = Engine::new();
         let mut ws = WorkingSet::default();
         let cancel = Arc::new(CancelToken::new());
@@ -1885,6 +1889,92 @@ mod tests {
                     data: "opaque".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn redacted_only_rounds_stay_silent_but_ride_the_refeed() {
+        // Issue #614: a redacted-only round (safety-redacted reasoning, no
+        // readable text) is silent both live and in the trace -- no
+        // ThinkingCompleted phase, no trace entry, and no thinking-only
+        // trailing round for a redacted-only terminal reply -- while its
+        // blocks still ride the next request's assistant turn (tool-use
+        // continuity). Pins the two-sided behavior at the loop level: the
+        // gate is readable text, not block presence.
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_thinking_tool_turn_seq(
+            "redacted",
+            vec![
+                Ok((
+                    vec![ThinkingBlock::Redacted {
+                        data: "opaque-1".into(),
+                    }],
+                    ToolTurnReply::tool_calls(vec![ToolUse {
+                        id: "tu_1".into(),
+                        name: "explore".into(),
+                        input: json!({"sql": "SELECT 1"}),
+                    }]),
+                )),
+                Ok((
+                    vec![ThinkingBlock::Redacted {
+                        data: "opaque-2".into(),
+                    }],
+                    ToolTurnReply::Text("done".into()),
+                )),
+            ],
+        );
+        let captured = provider.captured_tool_turns();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = deps(
+            &engine.conn,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let phases = std::sync::Mutex::new(Vec::new());
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("redacted"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &approval,
+            &sink,
+            |p| phases.lock().unwrap().push(p),
+        );
+        assert_eq!(outcome.termination, Termination::Text("done".into()));
+        // One trace round only -- the tool batch carries no thinking entry,
+        // and the redacted-only terminal reply opens no thinking-only
+        // trailing round.
+        assert_eq!(outcome.trace.len(), 1);
+        assert_eq!(outcome.trace[0].thinking, None);
+        // No ThinkingCompleted anywhere in the live stream.
+        let phases = phases.into_inner().unwrap();
+        assert!(
+            !phases
+                .iter()
+                .any(|p| matches!(p, TurnPhase::ThinkingCompleted { .. })),
+            "redacted-only rounds complete no live thinking phase"
+        );
+        // The first round's redacted block still rides the second request's
+        // assistant turn verbatim.
+        let captured = captured.lock().unwrap();
+        let second = &captured[1];
+        let refeed = second.messages.iter().find_map(|m| match m {
+            ToolTurnMessage::Assistant { thinking, .. } if !thinking.is_empty() => Some(thinking),
+            _ => None,
+        });
+        let refeed = refeed.expect("the redacted block still re-feeds");
+        assert_eq!(
+            refeed.as_slice(),
+            [ThinkingBlock::Redacted {
+                data: "opaque-1".into(),
+            }]
         );
     }
 

@@ -19,6 +19,7 @@ use serde_json::json;
 use toptopduck_lib::provider::tool_calling::{
     ToolTurnMessage, ToolTurnReply, ToolTurnRequest, ToolUse,
 };
+use toptopduck_lib::session::PosturePair;
 use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
     CancelToken, DatasetPrivacy, FakeProvider, KeychainStore, LoadOutcome, OperationKind,
@@ -509,6 +510,44 @@ fn a_transient_provider_fault_fails_the_turn_without_retry() {
         "no blind retry -- exactly one round-trip"
     );
     assert!(session.get("result_1").is_none());
+}
+
+#[test]
+fn posture_thought_level_stamps_every_built_in_round_trip_request() {
+    // Issue #614 review Important 1: the session dispatch seam -- the built-in
+    // arm copies the posture pair's thought-level from `runtime_facts` onto
+    // the assembled request at turn top (the pub `set_external_model_config`
+    // seam is the same entry the command layer drives). The agent-loop unit
+    // tests set the field directly on the outer request, bypassing the seam,
+    // so this pins the seam itself: a posture set to high rides EVERY
+    // round-trip request the loop issues (the adapter layer is what maps it
+    // onto the wire).
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "带级别",
+        productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
+    );
+    let captured = provider.captured_tool_turns();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.set_external_model_config(PosturePair {
+        model: Some("claude-opus-4-8".into()),
+        thought_level: Some("high".into()),
+    });
+
+    let (name, _, _) = materialized(session.ask("带级别"));
+    assert_eq!(name, "result_1");
+    let captured = captured.lock().expect("capture lock");
+    assert!(
+        captured.len() >= 2,
+        "the productive trajectory issues at least two round-trips"
+    );
+    for (i, req) in captured.iter().enumerate() {
+        assert_eq!(
+            req.thought_level.as_deref(),
+            Some("high"),
+            "round-trip {i} carries the posture level"
+        );
+    }
 }
 
 #[test]

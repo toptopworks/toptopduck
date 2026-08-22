@@ -237,9 +237,11 @@ impl ToolTurnReply {
 /// One provider round-trip's full outcome (issue #614, ADR-0103): the reply
 /// body plus the reasoning blocks the model emitted alongside it. Thinking
 /// rides beside the reply rather than inside it -- the loop consumes the
-/// blocks three ways (live `ThinkingCompleted` phase, trace round, in-turn
-/// assistant re-feed) regardless of which reply variant came back, so the
-/// blocks are round-level data, not part of either outcome shape.
+/// blocks up to three ways (live `ThinkingCompleted` phase + trace round on
+/// any reply whose readable text is non-empty; the in-turn assistant
+/// re-feed only on a tool-call batch, since a terminal reply ends the
+/// conversation), so the blocks are round-level data, not part of either
+/// outcome shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolTurnOutcome {
     /// The round's reasoning blocks in received order (the wire sequence must

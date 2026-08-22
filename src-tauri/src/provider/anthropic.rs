@@ -270,23 +270,103 @@ struct RawToolTurnBlock {
     data: Option<String>,
 }
 
-/// The fixed posture thought-level -> thinking budget table (ADR-0103,
-/// issue #614). Messages API facts verified against the official
-/// extended-thinking guide: `budget_tokens` has a 1024 minimum and must be
-/// less than `max_tokens`; streaming is required once `max_tokens` exceeds
-/// 21333. The synthesis in [`build_tool_turn_body`] adds the budget ON TOP
-/// of the reply cap, so the cap keeps meaning "visible reply length"
-/// regardless of the level, and the top entry (4096 + 16384 = 20480) stays
-/// below the streaming threshold -- the non-streaming call shape holds at
-/// every level.
-fn thinking_budget(level: Option<&str>) -> Option<u32> {
-    match level? {
+/// One model's extended-thinking capability class (issue #614). The Messages
+/// API thinking surface is model-conditional: `budget_tokens` was removed
+/// (400) on Claude Fable 5 / Sonnet 5 / Opus 5 / 4.8 / 4.7 and deprecated on
+/// the 4.6 pair, so the enablement shape must be graded per model, not sent
+/// uniformly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingRoute {
+    /// Adaptive thinking accepted. `display: "summarized"` rides the
+    /// enablement object on 4.7+ only -- the parameter is new on 4.7 (the
+    /// default there is `omitted`, empty thinking text); 4.6 does not know
+    /// it and already defaults to returning summarized text.
+    Adaptive { display: bool },
+    /// 5th-gen model where omitting `thinking` does NOT mean off (the server
+    /// runs adaptive anyway) and an explicit `{"type":"disabled"}` is the
+    /// verified off switch. Verified set: opus-5, sonnet-5.
+    FifthGenDisableable,
+    /// 5th-gen always-on family (fable-5, mythos-5): any explicit thinking
+    /// object -- including `disabled` -- returns a 400; thinking cannot be
+    /// turned off, only tuned via effort. A cleared level sends nothing and
+    /// the platform default (adaptive, omitted display) runs.
+    AlwaysOn,
+    /// Model predates the adaptive surface (4.5 and older) or the id does
+    /// not parse as a claude model: no thinking enablement at all.
+    Unsupported,
+}
+
+impl ThinkingRoute {
+    /// Whether a known thought-level can map onto the adaptive surface.
+    fn supports_adaptive(&self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+
+    /// The `thinking` enablement object for a known thought-level on this
+    /// route. Only called when [`Self::supports_adaptive`] holds.
+    fn adaptive_object(&self) -> Value {
+        match self {
+            Self::Adaptive { display: false } => json!({ "type": "adaptive" }),
+            _ => json!({ "type": "adaptive", "display": "summarized" }),
+        }
+    }
+}
+
+/// Classify a model id onto its thinking route. Parses `claude-{family}-
+/// {major}[-{minor}][-yyyymmdd]` (the legacy `claude-{major}-{minor}-{family}`
+/// shape parses too -- both are 3.x-era and land `Unsupported`); date
+/// suffixes and anything unparsable degrade. Future generations assume the
+/// adaptive surface (the direction the API is moving) but NOT the disable
+/// switch -- an unverified `disabled` is a 400 risk, while a missed one only
+/// means the server default runs, so only the verified set may send it.
+fn classify_thinking_model(model: &str) -> ThinkingRoute {
+    let mut segments = model.split('-');
+    if segments.next() != Some("claude") {
+        return ThinkingRoute::Unsupported;
+    }
+    // Collect the tail first: the family scan and the version scan must read
+    // the same segments (a single iterator would let one consume the other's
+    // input -- e.g. the legacy `claude-3-5-sonnet` shape puts numbers before
+    // the family name).
+    let tail: Vec<&str> = segments.collect();
+    let family = tail
+        .iter()
+        .copied()
+        .find(|s| matches!(*s, "fable" | "mythos" | "opus" | "sonnet" | "haiku"))
+        .unwrap_or("");
+    let mut numbers = tail.iter().copied().filter_map(|s| s.parse::<u32>().ok());
+    let major = numbers.next().unwrap_or(0);
+    // A second numeric segment of at most two digits is the minor version;
+    // longer segments are date suffixes and are ignored.
+    let minor = numbers.find(|&n| n <= 99);
+    match (major, minor, family) {
+        // The adaptive surface starts at 4.6; 4.5-and-older (including the
+        // legacy 3.x shape) never enable thinking.
+        (0..=3, _, _) | (4, None | Some(0..=5), _) => ThinkingRoute::Unsupported,
+        (4, Some(6), _) => ThinkingRoute::Adaptive { display: false },
+        (4, Some(7..), _) => ThinkingRoute::Adaptive { display: true },
+        (5.., _, "fable") | (5.., _, "mythos") => ThinkingRoute::AlwaysOn,
+        (5, _, "opus") | (5, _, "sonnet") => ThinkingRoute::FifthGenDisableable,
+        // Future generations and unlisted 5th-gen families: adaptive yes,
+        // disable switch no (unverified).
+        (_, _, _) => ThinkingRoute::Adaptive { display: true },
+    }
+}
+
+/// The posture thought-level -> reasoning headroom table (ADR-0103, issue
+/// #614). The values are NOT a wire budget: the adaptive surface has no
+/// `budget_tokens` to send -- they only size the `max_tokens` headroom so
+/// the model's self-paced thinking does not squeeze the visible reply cap
+/// (the API counts thinking toward `max_tokens`). Streaming becomes
+/// mandatory once `max_tokens` exceeds 21333; `MAX_REPLY_TOKENS` plus the
+/// high tier's headroom (4096 + 16384 = 20480) stays below it, pinned by
+/// test. Unknown ids (a dangling level from a runtime whose catalog uses a
+/// different vocabulary) yield None: no enablement, honest degrade.
+fn effort_headroom(level: &str) -> Option<u32> {
+    match level {
         "low" => Some(1024),
         "medium" => Some(4096),
         "high" => Some(16384),
-        // Unknown ids (a dangling level from a runtime whose catalog uses a
-        // different vocabulary) honest-degrade: no thinking parameter, the
-        // reply path is byte-identical to the thinking-disabled turn.
         _ => None,
     }
 }
@@ -294,23 +374,47 @@ fn thinking_budget(level: Option<&str>) -> Option<u32> {
 /// Build the Anthropic Messages request body for one tool-calling turn. The
 /// `tools` field is omitted when the table is empty (the model then replies
 /// with text only); `messages` carries the translated conversation as
-/// anthropic content blocks (see [`build_anthropic_messages`]). A known
-/// thought-level (issue #614) adds the `thinking` enablement object and
-/// synthesizes `max_tokens` as reply cap + budget (the API counts thinking
-/// toward `max_tokens`, so the visible-reply cap would otherwise be squeezed
-/// by exactly the thinking budget).
+/// anthropic content blocks (see [`build_anthropic_messages`]).
+///
+/// Thinking enablement (issue #614) is graded per model
+/// ([`classify_thinking_model`]). A known thought-level on an adaptive-capable
+/// model sends the `thinking` enablement object plus `output_config.effort`
+/// carrying the level id verbatim (the effort vocabulary low/medium/high
+/// aligns with the posture ids), and synthesizes `max_tokens` as reply cap +
+/// headroom. With `display: "summarized"` (4.7+), the block's thinking text
+/// is the model's own summary of its reasoning, not the raw chain of
+/// thought. On models where omitting `thinking` is not off (the verified
+/// 5th-gen set), a cleared or unknown level sends an explicit
+/// `{"type":"disabled"}` -- the only off switch. Every other combination
+/// omits the thinking parameter entirely, byte-identical to the
+/// thinking-disabled turn.
 fn build_tool_turn_body(model: &str, request: &ToolTurnRequest) -> Value {
-    let budget = thinking_budget(request.thought_level.as_deref());
+    let route = classify_thinking_model(model);
+    let headroom = request.thought_level.as_deref().and_then(effort_headroom);
+    let mut max_tokens = request.max_tokens;
+    let mut thinking = None;
+    let mut output_config = None;
+    if let Some(headroom) = headroom {
+        if route.supports_adaptive() {
+            thinking = Some(route.adaptive_object());
+            output_config = Some(json!({
+                "effort": request.thought_level,
+            }));
+            max_tokens = request.max_tokens + headroom;
+        }
+    } else if route == ThinkingRoute::FifthGenDisableable {
+        thinking = Some(json!({ "type": "disabled" }));
+    }
     let mut body = json!({
         "model": model,
-        "max_tokens": request.max_tokens + budget.unwrap_or(0),
+        "max_tokens": max_tokens,
         "system": request.system,
     });
-    if let Some(budget) = budget {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": budget,
-        });
+    if let Some(thinking) = thinking {
+        body["thinking"] = thinking;
+    }
+    if let Some(output_config) = output_config {
+        body["output_config"] = output_config;
     }
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
@@ -532,6 +636,18 @@ mod tests {
             base_url: url.to_string(),
             model: "claude-sonnet-4-6".to_string(),
             locale,
+            protocol: Protocol::Anthropic,
+        }
+    }
+
+    /// Build a config with an explicit model id (the thinking-enablement
+    /// grade is model-conditional -- issue #614 review Critical 1).
+    fn config_at_model(url: &str, key: Option<&str>, model: &str) -> StaticConfig {
+        StaticConfig {
+            key: key.map(str::to_string),
+            base_url: url.to_string(),
+            model: model.to_string(),
+            locale: ResponseLocale::EnUS,
             protocol: Protocol::Anthropic,
         }
     }
@@ -1081,40 +1197,179 @@ mod tests {
     }
 
     #[test]
-    fn tool_turn_body_maps_thought_level_onto_thinking_budget() {
-        // Issue #614 / ADR-0103: a known thought-level adds the thinking
-        // enablement object with the fixed budget, and synthesizes
-        // max_tokens as reply cap + budget (the API counts thinking toward
-        // max_tokens, so the visible-reply cap must not be squeezed by the
-        // budget). max_tokens here is the helper's 1024.
-        for (level, budget) in [("low", 1024u32), ("medium", 4096), ("high", 16384)] {
-            let mut request = tool_turn_request("q");
-            request.thought_level = Some(level.into());
-            let body = build_tool_turn_body("m", &request);
-            assert_eq!(
-                body["thinking"],
-                serde_json::json!({"type": "enabled", "budget_tokens": budget}),
-                "level {level}"
-            );
-            assert_eq!(body["max_tokens"], 1024 + budget, "level {level}");
+    fn classify_thinking_model_grades_the_id_surface() {
+        // Issue #614 review Critical 1: the thinking surface is
+        // model-conditional. `budget_tokens` 400s on Fable 5 / Sonnet 5 /
+        // Opus 5 / 4.8 / 4.7; `disabled` 400s on the always-on fable/mythos
+        // family; `display` is 4.7+ only. Date suffixes must not shift the
+        // version; unknown families, non-claude ids, and unparsable shapes
+        // degrade (the honest-degrade side, never a guessed wire shape).
+        for (model, expected) in [
+            // 5th gen: always-on family vs the verified disableable pair.
+            ("claude-fable-5", ThinkingRoute::AlwaysOn),
+            ("claude-mythos-5", ThinkingRoute::AlwaysOn),
+            ("claude-opus-5", ThinkingRoute::FifthGenDisableable),
+            ("claude-sonnet-5", ThinkingRoute::FifthGenDisableable),
+            // 4.7/4.8: adaptive + display; 4.6: bare adaptive (no display
+            // parameter yet, its default already returns summarized text).
+            ("claude-opus-4-8", ThinkingRoute::Adaptive { display: true }),
+            ("claude-opus-4-7", ThinkingRoute::Adaptive { display: true }),
+            (
+                "claude-opus-4-6",
+                ThinkingRoute::Adaptive { display: false },
+            ),
+            (
+                "claude-sonnet-4-6",
+                ThinkingRoute::Adaptive { display: false },
+            ),
+            // Date-suffixed variants classify like their base id.
+            (
+                "claude-opus-4-6-20260101",
+                ThinkingRoute::Adaptive { display: false },
+            ),
+            // 4.5 and older (incl. the legacy major-first id shape -- the
+            // 3.x minors must not read as 4th-gen versions): no thinking
+            // surface at all.
+            ("claude-haiku-4-5", ThinkingRoute::Unsupported),
+            ("claude-opus-4-5", ThinkingRoute::Unsupported),
+            ("claude-3-5-sonnet-20241022", ThinkingRoute::Unsupported),
+            ("claude-3-7-sonnet", ThinkingRoute::Unsupported),
+            // Future generations assume the adaptive surface but NOT the
+            // disable switch (unverified `disabled` is a 400 risk).
+            ("claude-opus-6", ThinkingRoute::Adaptive { display: true }),
+            ("claude-haiku-5", ThinkingRoute::Adaptive { display: true }),
+            // Unparsable / non-claude ids degrade.
+            ("gpt-4o", ThinkingRoute::Unsupported),
+            ("claude", ThinkingRoute::Unsupported),
+        ] {
+            assert_eq!(classify_thinking_model(model), expected, "model {model}");
         }
     }
 
     #[test]
-    fn tool_turn_body_omits_thinking_without_known_level() {
-        // Issue #614: a cleared level and an unknown id (a dangling level
-        // from a runtime with a different vocabulary) both leave the body
-        // byte-identical to the thinking-disabled turn -- honest degrade,
-        // no error, same semantics as the openai protocol.
+    fn tool_turn_body_grades_adaptive_enablement_by_model() {
+        // Issue #614 review Critical 1: a known thought-level maps onto the
+        // adaptive surface -- 4.7+ sends `display: "summarized"` (the default
+        // there is omitted, empty thinking text), 4.6 sends the bare object
+        // (its default already returns summarized text; it does not know the
+        // parameter). `output_config.effort` carries the level id verbatim
+        // and `max_tokens` is synthesized as reply cap + headroom (the API
+        // counts thinking toward `max_tokens`). max_tokens here is the
+        // helper's 1024.
+        for (model, thinking) in [
+            (
+                "claude-opus-4-8",
+                serde_json::json!({"type": "adaptive", "display": "summarized"}),
+            ),
+            // Always-on family still ENABLES on a known level (only the off
+            // switch is forbidden there).
+            (
+                "claude-fable-5",
+                serde_json::json!({"type": "adaptive", "display": "summarized"}),
+            ),
+            ("claude-opus-4-6", serde_json::json!({"type": "adaptive"})),
+        ] {
+            let mut request = tool_turn_request("q");
+            request.thought_level = Some("high".into());
+            let body = build_tool_turn_body(model, &request);
+            assert_eq!(body["thinking"], thinking, "model {model}");
+            assert_eq!(
+                body["output_config"],
+                serde_json::json!({"effort": "high"}),
+                "model {model}"
+            );
+            assert_eq!(body["max_tokens"], 1024 + 16384, "model {model}");
+        }
+    }
+
+    #[test]
+    fn tool_turn_body_sizes_headroom_per_effort_tier() {
+        // Issue #614: each known level adds its headroom tier on top of the
+        // reply cap, so the cap keeps meaning "visible reply length"
+        // regardless of the level.
+        for (level, headroom) in [("low", 1024u32), ("medium", 4096), ("high", 16384)] {
+            let mut request = tool_turn_request("q");
+            request.thought_level = Some(level.into());
+            let body = build_tool_turn_body("claude-opus-4-7", &request);
+            assert_eq!(body["max_tokens"], 1024 + headroom, "level {level}");
+            assert_eq!(
+                body["output_config"],
+                serde_json::json!({"effort": level}),
+                "level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn high_tier_headroom_stays_below_the_streaming_threshold() {
+        // The non-streaming call shape must hold at every level: streaming
+        // becomes mandatory once `max_tokens` exceeds 21333, so the reply
+        // cap (MAX_REPLY_TOKENS) plus the highest headroom tier must stay
+        // below it. Names the constants so raising either is caught here.
+        assert!(MAX_REPLY_TOKENS + effort_headroom("high").expect("high tier") <= 21333);
+    }
+
+    #[test]
+    fn tool_turn_body_disables_thinking_on_verified_fifth_gen_models() {
+        // Issue #614 review Critical 1: on opus-5 / sonnet-5 omitting
+        // `thinking` does NOT mean off (the server runs adaptive anyway), so
+        // a cleared or unknown level sends the explicit off switch. The cap
+        // stays unsqueezed and no effort rides the body.
         for level in [None, Some("extreme")] {
+            for model in ["claude-opus-5", "claude-sonnet-5"] {
+                let mut request = tool_turn_request("q");
+                request.thought_level = level.map(String::from);
+                let body = build_tool_turn_body(model, &request);
+                assert_eq!(
+                    body["thinking"],
+                    serde_json::json!({"type": "disabled"}),
+                    "level {level:?} on {model}"
+                );
+                assert_eq!(body["max_tokens"], 1024, "level {level:?} on {model}");
+                assert!(
+                    body.get("output_config").is_none(),
+                    "level {level:?} on {model}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tool_turn_body_omits_thinking_where_off_is_the_default() {
+        // Issue #614: three shapes leave the body byte-identical to the
+        // thinking-disabled turn on the SAME model -- honest degrade, no
+        // error: an unsupported model (4.5-and-older, unparsable, non-claude)
+        // with any level; a cleared or unknown level on models where omitting
+        // means off (the 4.x adaptive pairs); and a cleared or unknown level
+        // on the always-on fable/mythos family, where `disabled` is a 400
+        // (the platform default is the only legal off expression). A KNOWN
+        // level on fable/mythos still enables -- see
+        // tool_turn_body_grades_adaptive_enablement_by_model. Byte-identity
+        // (not just field absence) so a future echo of the level id anywhere
+        // in the body fails here.
+        for (model, level) in [
+            ("claude-haiku-4-5", Some("high")),
+            ("gpt-4o", Some("high")),
+            ("claude-opus-4-7", None),
+            ("claude-opus-4-7", Some("extreme")),
+            ("claude-opus-4-6", None),
+            ("claude-fable-5", None),
+            ("claude-fable-5", Some("extreme")),
+            ("claude-mythos-5", Some("extreme")),
+        ] {
+            let baseline = {
+                let mut request = tool_turn_request("q");
+                request.thought_level = None;
+                build_tool_turn_body(model, &request).to_string()
+            };
             let mut request = tool_turn_request("q");
             request.thought_level = level.map(String::from);
-            let body = build_tool_turn_body("m", &request);
-            assert!(
-                body.get("thinking").is_none(),
-                "no thinking field for {level:?}"
+            let body = build_tool_turn_body(model, &request);
+            assert_eq!(
+                body.to_string(),
+                baseline,
+                "model {model} with level {level:?}"
             );
-            assert_eq!(body["max_tokens"], 1024, "cap unsqueezed for {level:?}");
         }
     }
 
@@ -1156,11 +1411,13 @@ mod tests {
 
     #[test]
     fn tool_turn_enables_and_roundtrips_thinking_on_the_wire() {
-        // Issue #614 end to end: a posture thought-level lands the thinking
-        // enablement + synthesized max_tokens on the request body (mockito
-        // body-regex), the response's thinking block parses onto the
-        // outcome, and an in-turn assistant turn re-feeds its thinking
-        // blocks verbatim alongside tool_use (continuity requirement).
+        // Issue #614 end to end: a posture thought-level lands the graded
+        // thinking enablement (the config's sonnet-4-6 sends the bare
+        // adaptive object -- `display` is 4.7+ only) + effort + synthesized
+        // max_tokens on the request body (mockito body-regex), the response's
+        // thinking block parses onto the outcome, and an in-turn assistant
+        // turn re-feeds its thinking blocks verbatim alongside tool_use
+        // (continuity requirement).
         let mut request = tool_turn_request("count rows");
         request.thought_level = Some("high".into());
         request.messages.push(ToolTurnMessage::Assistant {
@@ -1183,7 +1440,10 @@ mod tests {
         let mut server = mockito::Server::new();
         let _mock = server
             .mock("POST", "/v1/messages")
-            .match_body(mockito::Matcher::Regex(r#""budget_tokens":16384"#.into()))
+            .match_body(mockito::Matcher::Regex(
+                r#""thinking":\{"type":"adaptive"\}"#.into(),
+            ))
+            .match_body(mockito::Matcher::Regex(r#""effort":"high""#.into()))
             .match_body(mockito::Matcher::Regex(r#""max_tokens":17408"#.into()))
             .match_body(mockito::Matcher::Regex(r#""type":"thinking""#.into()))
             .match_body(mockito::Matcher::Regex(
@@ -1212,6 +1472,29 @@ mod tests {
                 signature: "sig-1".into(),
             }]
         );
+    }
+
+    #[test]
+    fn tool_turn_sends_disabled_on_opus_5_without_a_level() {
+        // Issue #614 review Critical 1, wire level: on opus-5 omitting
+        // `thinking` does NOT mean off (the server runs adaptive anyway), so
+        // a cleared level must send the explicit off switch -- the regex
+        // pins the whole enablement object, and that neither `effort` nor an
+        // inflated `max_tokens` rides the body.
+        let request = tool_turn_request("count rows");
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::Regex(
+                r#""thinking":\{"type":"disabled"\}"#.into(),
+            ))
+            .match_body(mockito::Matcher::Regex(r#""max_tokens":1024"#.into()))
+            .with_status(200)
+            .with_body(tool_response_body(r#"[{"type":"text","text":"done"}]"#))
+            .create();
+        let cfg = config_at_model(&server.url(), Some("sk-test"), "claude-opus-5");
+        AnthropicProvider::generate_tool_turn(&cfg, &request).expect("request lands");
+        _mock.assert();
     }
 
     #[test]
