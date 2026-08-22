@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::engine::RoundTracker;
 use crate::approval::OperationKind;
 use crate::cancel::CancelToken;
 use crate::model::{TraceEntryView, TurnPhase};
@@ -376,12 +377,7 @@ pub(super) fn run_codex_event_stream(
     // turn = one thinking wait).
     on_phase(TurnPhase::Thinking { attempt: 1 });
 
-    let mut pump = JsonPump {
-        trace: Vec::new(),
-        text: String::new(),
-        tool_call_count: 0,
-        step_cap,
-    };
+    let mut pump = JsonPump::new(step_cap);
 
     let mut termination = None;
     let mut step_cap_tripped = false;
@@ -407,60 +403,21 @@ pub(super) fn run_codex_event_stream(
                     Ok(v) => v,
                     Err(_) => continue, // skip unparseable line
                 };
-                match parse_event(&value) {
-                    CodexEvent::TurnStarted => {
-                        // Already signaled Thinking above; a redundant signal
-                        // would confuse the UI. No-op.
-                    }
-                    CodexEvent::TurnCompleted => {
-                        termination = Some(if pump.text.is_empty() {
-                            Termination::Text(String::new())
-                        } else {
-                            Termination::Text(std::mem::take(&mut pump.text))
-                        });
-                        break;
-                    }
-                    CodexEvent::TurnFailed { error } => {
-                        termination = Some(Termination::Transient(error));
-                        break;
-                    }
-                    CodexEvent::AgentMessage { text } => {
-                        pump.text.push_str(&text);
-                    }
-                    CodexEvent::CommandExecution { call_id, command } => {
-                        pump.tool_call_count += 1;
-                        // codex command_execution events carry no success/failure
-                        // status (unlike ACP ToolCall); success defaults to true.
-                        let entry = TraceEntry {
-                            tool_use_id: call_id,
-                            name: command.clone(),
-                            operation_kind: OperationKind::Execute,
-                            summary: truncate_trace_excerpt(&command, TRACE_EXCERPT_MAX),
-                            success: true,
-                            result_excerpt: String::new(),
-                        };
-                        on_phase(TurnPhase::ToolCallStarted {
-                            name: entry.name.clone(),
-                            operation_kind: entry.operation_kind,
-                            summary: entry.summary.clone(),
-                        });
-                        on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-                        pump.trace.push(entry);
-                    }
-                    CodexEvent::Other => {}
+                if let Some(term) = pump.fold(parse_event(&value), &mut on_phase) {
+                    termination = Some(term);
+                    break;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // stdout closed before a terminal event. If we already have
-                // agent text, treat it as success (codex may close stdout
+                // stdout closed before a terminal event. If the tracker holds
+                // terminal text, treat it as success (codex may close stdout
                 // after the final message without an explicit turn.completed);
                 // otherwise it is a transient failure.
-                termination = Some(if !pump.text.is_empty() {
-                    Termination::Text(std::mem::take(&mut pump.text))
-                } else {
-                    Termination::Transient("codex closed stdout without a terminal event".into())
-                });
+                termination = Some(text_or_transient(
+                    &pump.tracker,
+                    "codex closed stdout without a terminal event",
+                ));
                 break;
             }
         }
@@ -475,38 +432,108 @@ pub(super) fn run_codex_event_stream(
 
     let term = termination.unwrap_or_else(|| {
         // No terminal event and no error — the pump exited without resolution.
-        // Treat accumulated text as the answer if any; otherwise transient.
-        if !pump.text.is_empty() {
-            Termination::Text(std::mem::take(&mut pump.text))
-        } else {
-            Termination::Transient("codex turn ended without a terminal event".into())
-        }
+        // Treat the terminal text as the answer if any; otherwise transient.
+        text_or_transient(&pump.tracker, "codex turn ended without a terminal event")
     });
 
-    outcome(term, pump.trace, 1)
+    outcome(term, pump.tracker.settle_rounds(), 1)
 }
 
-/// Mutable state accumulated while pumping codex events.
+/// Mutable state accumulated while pumping codex events. The round
+/// bookkeeping + terminal-text fallback are shared with the other stream
+/// paths (ADR-0103, issues #611/#612/#613); command events carry no result
+/// frame, so no pending-row drain exists here.
 struct JsonPump {
-    trace: Vec<TraceEntry>,
-    text: String,
+    tracker: RoundTracker,
     /// Count of command/tool executions observed (step-cap counter).
     tool_call_count: u32,
     step_cap: u32,
 }
 
+impl JsonPump {
+    fn new(step_cap: u32) -> Self {
+        Self {
+            tracker: RoundTracker::new(),
+            tool_call_count: 0,
+            step_cap,
+        }
+    }
+
+    /// Fold one parsed event: emit live phases, accumulate the round
+    /// bookkeeping, and return the turn's termination when the event is a
+    /// terminal one (issue #613 -- the claude path's pump fold seam).
+    fn fold(
+        &mut self,
+        event: CodexEvent,
+        on_phase: &mut impl FnMut(TurnPhase),
+    ) -> Option<Termination> {
+        match event {
+            // Already signaled Thinking before the pump; a redundant signal
+            // would confuse the UI. No-op.
+            CodexEvent::TurnStarted => None,
+            CodexEvent::TurnCompleted => Some(Termination::Text(self.tracker.terminal_text())),
+            CodexEvent::TurnFailed { error } => Some(Termination::Transient(error)),
+            CodexEvent::AgentMessage { text } => {
+                self.tracker.push_prose(&text, on_phase);
+                None
+            }
+            CodexEvent::CommandExecution { call_id, command } => {
+                self.tool_call_count += 1;
+                // codex command_execution events carry no success/failure
+                // status (unlike ACP ToolCall); success defaults to true.
+                let entry = TraceEntry {
+                    tool_use_id: call_id,
+                    name: command.clone(),
+                    operation_kind: OperationKind::Execute,
+                    summary: truncate_trace_excerpt(&command, TRACE_EXCERPT_MAX),
+                    success: true,
+                    result_excerpt: String::new(),
+                };
+                // The round's first call fires its prose prelude BEFORE the
+                // batch's ToolCallStarted (the ADR-0103 live order the
+                // frontend's round grouping relies on).
+                let round = self.tracker.call_round(on_phase);
+                on_phase(TurnPhase::ToolCallStarted {
+                    name: entry.name.clone(),
+                    operation_kind: entry.operation_kind,
+                    summary: entry.summary.clone(),
+                });
+                on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+                self.tracker.land_call(round, entry);
+                None
+            }
+            CodexEvent::Other => None,
+        }
+    }
+}
+
+/// The turn's closing shape when no terminal event settled it: the tracker's
+/// terminal text (the trailing prose stretch, else the full accumulation --
+/// models that answer alongside the final batch) becomes the answer (the
+/// honest degrade); without any, a transient failure carrying `message`.
+/// Shared by the stdout-EOF path and the post-pump fallback (the claude
+/// path's helper of the same name).
+fn text_or_transient(tracker: &RoundTracker, message: &str) -> Termination {
+    let text = tracker.terminal_text();
+    if !text.is_empty() {
+        Termination::Text(text)
+    } else {
+        Termination::Transient(message.to_string())
+    }
+}
+
 /// Build the [`LoopOutcome`] (same shape as the ACP engine's `outcome`).
-fn outcome(termination: Termination, trace: Vec<TraceEntry>, round_trips: u32) -> LoopOutcome {
+fn outcome(termination: Termination, rounds: Vec<LoopRound>, round_trips: u32) -> LoopOutcome {
     LoopOutcome {
         termination,
         // Promotions are gateway-side (ADR-0085: the bridge -> gateway ->
         // tools::dispatch path); the JSON event stream engine owns only the
         // event-driving half.
         promotions: Vec::new(),
-        // ADR-0103 (issue #608): the flat trajectory wraps as one round
-        // until the per-runtime grouping slice; an empty trajectory stays
-        // an empty round list (no ghost round).
-        trace: LoopRound::flat_wrap(trace),
+        // ADR-0103 (issue #613): the trajectory settles per round (each
+        // batch round carries its prose); an empty trajectory stays an
+        // empty round list (no ghost round).
+        trace: rounds,
         round_trips,
         // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
         discovered_runtime: None,
@@ -719,5 +746,317 @@ mod tests {
     #[test]
     fn config_overrides_empty_for_no_servers() {
         assert!(build_config_overrides(&[]).is_empty());
+    }
+
+    // --- pump fold: rounds (issue #613) --------------------------------------
+
+    /// A full trajectory settles into per-round slots: each batch round
+    /// carries its prose and its calls; the trailing call-less prose rides
+    /// the terminal text, not a round of its own.
+    #[test]
+    fn rounds_carry_prose_and_calls() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        // Round 1: prose + one command (its result implicit -- success
+        // defaults to true).
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "explore SELECT 1".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        // Trailing round: prose only -- the terminal answer.
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "the answer is 42".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "the answer is 42");
+        let rounds = pump.tracker.settle_rounds();
+        assert_eq!(rounds.len(), 1, "the trailing prose-only round drops");
+        assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore SELECT 1");
+        assert!(rounds[0].thinking.is_none(), "no thinking data source");
+    }
+
+    /// Same-round agent_message fragments merge into one round prose; the
+    /// live RoundText fires once, with the merged text, at the batch seal.
+    #[test]
+    fn same_round_fragments_merge_into_one_prose() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "checking ".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "the table".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = pump.tracker.settle_rounds();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].text.as_deref(), Some("checking the table"));
+        let round_texts = phases
+            .iter()
+            .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
+            .count();
+        assert_eq!(round_texts, 1, "one merged RoundText per round");
+    }
+
+    /// A batch round that offered no prose carries no text and fires no
+    /// RoundText.
+    #[test]
+    fn call_without_prose_keeps_round_text_empty() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = pump.tracker.settle_rounds();
+        assert_eq!(rounds.len(), 1);
+        assert!(rounds[0].text.is_none());
+        assert!(!phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::RoundText { .. })));
+    }
+
+    /// The live channel's ADR-0103 order for one round: RoundText, then the
+    /// batch's ToolCallStarted / Completed pair. The trailing prose opens
+    /// round 2 -- the round pointer fires -- but fires no RoundText: it rides
+    /// the terminal text.
+    #[test]
+    fn live_order_round_text_then_call_then_round_pointer() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "explore SELECT 1".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 3);
+        match &phases[0] {
+            TurnPhase::RoundText { text } => assert_eq!(text, "let me query"),
+            other => panic!("expected RoundText, got {other:?}"),
+        }
+        assert!(matches!(
+            &phases[1],
+            TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"
+        ));
+        assert!(matches!(phases[2], TurnPhase::ToolCallCompleted(_)));
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "the answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 4);
+        match &phases[3] {
+            TurnPhase::Thinking { attempt } => assert_eq!(*attempt, 2),
+            other => panic!("expected the round-2 Thinking wait, got {other:?}"),
+        }
+    }
+
+    /// Prose stays in the round it was emitted in: cross-round fragments do
+    /// not blend, and each round's seal fires its own prose prelude.
+    #[test]
+    fn cross_round_prose_stays_in_its_round() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        for (text, call) in [("checking", "call_1"), ("verifying", "call_2")] {
+            pump.fold(CodexEvent::AgentMessage { text: text.into() }, &mut |p| {
+                phases.push(p)
+            });
+            pump.fold(
+                CodexEvent::CommandExecution {
+                    call_id: call.into(),
+                    command: "ls".into(),
+                },
+                &mut |p| phases.push(p),
+            );
+        }
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "done".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "done");
+        let rounds = pump.tracker.settle_rounds();
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds[0].text.as_deref(), Some("checking"));
+        assert_eq!(rounds[1].text.as_deref(), Some("verifying"));
+    }
+
+    /// A call-less turn answers with all its prose (the single trailing
+    /// stretch) and settles to an empty round list -- a zero-call turn
+    /// records no round.
+    #[test]
+    fn call_less_turn_answers_with_all_prose() {
+        let mut pump = JsonPump::new(24);
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "part one ".into(),
+            },
+            &mut |_| {},
+        );
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "part two".into(),
+            },
+            &mut |_| {},
+        );
+        let end = pump.fold(CodexEvent::TurnCompleted, &mut |_| {});
+        assert_eq!(end, Some(Termination::Text("part one part two".into())));
+        assert!(pump.tracker.settle_rounds().is_empty());
+    }
+
+    /// turn.completed with no prose yields the empty text -- the honest
+    /// degrade shape the answer path already returns.
+    #[test]
+    fn turn_completed_without_prose_yields_empty_text() {
+        let mut pump = JsonPump::new(24);
+        let end = pump.fold(CodexEvent::TurnCompleted, &mut |_| {});
+        assert_eq!(end, Some(Termination::Text(String::new())));
+    }
+
+    /// stdout closing after a batch answers with the trailing stretch ONLY
+    /// -- the mid-batch prose stays in its round slot (the dual-track
+    /// semantics, the claude path's EOF precedent).
+    #[test]
+    fn eof_after_batch_answers_with_trailing_stretch_only() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "checking".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "final answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "final answer");
+        assert!(phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking")));
+    }
+
+    /// stdout closing right after a batch (no trailing stretch) falls back
+    /// to the full accumulation -- the shared terminal-text semantics for
+    /// models that put their answer alongside the final batch. The prose
+    /// still sits in its round slot.
+    #[test]
+    fn eof_after_batch_without_trailing_falls_back_to_full_text() {
+        let mut pump = JsonPump::new(24);
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "checking".into(),
+            },
+            &mut |_| {},
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.tracker.terminal_text(), "checking");
+        assert_eq!(
+            text_or_transient(&pump.tracker, "eof"),
+            Termination::Text("checking".into())
+        );
+        let rounds = pump.tracker.settle_rounds();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].text.as_deref(), Some("checking"));
+    }
+
+    /// Consecutive commands with no prose between them form ONE batch: both
+    /// calls land on the same round, one RoundText prelude fires, and no new
+    /// round pointer appears mid-batch.
+    #[test]
+    fn consecutive_commands_share_one_round() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "explore SELECT 1".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_2".into(),
+                command: "explore SELECT 2".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = pump.tracker.settle_rounds();
+        assert_eq!(rounds.len(), 1, "one batch round");
+        assert_eq!(rounds[0].calls.len(), 2, "both calls share the round");
+        assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
+                .count(),
+            1,
+            "one prose prelude for the batch"
+        );
+        assert!(
+            !phases
+                .iter()
+                .any(|p| matches!(p, TurnPhase::Thinking { attempt: 2 })),
+            "no round pointer mid-batch"
+        );
     }
 }
