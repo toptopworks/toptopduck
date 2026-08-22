@@ -362,17 +362,25 @@ pub enum ToolCallStatus {
 }
 
 /// Tool category (ACP `ToolKind`). Presentation-only -- maps to an
-/// [`crate::approval::OperationKind`] badge for the trace.
+/// [`crate::approval::OperationKind`] badge for the trace. The variant set
+/// mirrors the schema crate 0.13.8 v1 (its own `ToolKind` carries ten
+/// variants with `Read`/`Delete` included), and an unknown kind degrades to
+/// `Other` rather than failing the whole update's parse -- the schema's own
+/// forward-compatibility default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
+    Read,
     Edit,
+    Delete,
     Move,
     Search,
     Execute,
     Think,
     Fetch,
     SwitchMode,
+    /// Any kind a newer agent sends that this enum does not model yet.
+    #[serde(other)]
     Other,
 }
 
@@ -383,8 +391,8 @@ impl ToolKind {
     pub fn to_operation_kind(self) -> crate::approval::OperationKind {
         use crate::approval::OperationKind as Op;
         match self {
-            Self::Search | Self::Think | Self::SwitchMode | Self::Other => Op::Read,
-            Self::Edit | Self::Move => Op::Write,
+            Self::Read | Self::Search | Self::Think | Self::SwitchMode | Self::Other => Op::Read,
+            Self::Edit | Self::Move | Self::Delete => Op::Write,
             Self::Execute => Op::Execute,
             Self::Fetch => Op::Network,
         }
@@ -729,6 +737,48 @@ mod tests {
             }
             other => panic!("expected ToolCallUpdate, got {other:?}"),
         }
+    }
+
+    /// ToolKind mirrors the schema crate 0.13.8 v1 variant set: `read` and
+    /// `delete` parse (a schema-legal kind must never fail the whole
+    /// update's parse), an unknown kind degrades to `Other`, and the badge
+    /// mapping lands read-class and write-class respectively.
+    #[test]
+    fn tool_kind_read_delete_parse_and_degrade() {
+        let parse = |s: &str| serde_json::from_str::<ToolKind>(s).expect("kind must parse");
+        assert_eq!(parse("\"read\""), ToolKind::Read);
+        assert_eq!(parse("\"delete\""), ToolKind::Delete);
+        assert_eq!(
+            parse("\"quantum\""),
+            ToolKind::Other,
+            "an unknown kind degrades, it does not reject the update"
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolKind::Read).unwrap(),
+            "\"read\"",
+            "serialization keeps the snake_case wire form"
+        );
+        assert_eq!(
+            ToolKind::Read.to_operation_kind(),
+            crate::approval::OperationKind::Read
+        );
+        assert_eq!(
+            ToolKind::Delete.to_operation_kind(),
+            crate::approval::OperationKind::Write
+        );
+    }
+
+    /// A chunk whose content is an ARRAY of blocks (the shape this slice's
+    /// calibration ruled out) must fail to parse -- the negative case pins
+    /// the one-block ContentChunk contract alongside the positive fixtures.
+    #[test]
+    fn array_content_chunk_fails_to_parse() {
+        let raw = serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": [{"type": "text", "text": "Hello"}],
+        });
+        let res: Result<SessionUpdate, _> = serde_json::from_value(raw);
+        assert!(res.is_err(), "an array content chunk is not the wire shape");
     }
 
     /// collect_text concatenates text items + bounds the result.

@@ -682,10 +682,23 @@ impl AcpIo {
                         }
                         // Notification -- route session/update; ignore others.
                         if method == "session/update" {
-                            if let Ok(params) = serde_json::from_value::<SessionUpdateParams>(
+                            match serde_json::from_value::<SessionUpdateParams>(
                                 v.get("params").cloned().unwrap_or(Value::Null),
                             ) {
-                                pump.fold_update(&params.update, on_phase);
+                                Ok(params) => pump.fold_update(&params.update, on_phase),
+                                // Dropped, not fatal (protocol robustness) --
+                                // but never silent: a shape miss here renders
+                                // a whole turn empty while tests stay green,
+                                // so the drop stays answerable in logs (the
+                                // ndjson reader's issue #543 precedent).
+                                Err(e) => {
+                                    let payload = v.to_string();
+                                    let head: String = payload.chars().take(240).collect();
+                                    log::warn!(
+                                        target: "toptopduck::acp",
+                                        "session/update parse failed, line dropped: {e}; payload head: {head}"
+                                    );
+                                }
                             }
                         }
                     }
