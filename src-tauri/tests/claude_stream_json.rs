@@ -128,10 +128,19 @@ fn gateway_tool_call_emits_phases_without_engine_trace() {
         Termination::Text(t) => assert_eq!(t, "found 3 rows"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert!(
-        outcome.trace.is_empty(),
-        "gateway-routed calls own their trace rows: {:?}",
+    // The round keeps its prose (ADR-0103, issue #612) but no engine-side
+    // call rows -- the gateway owns those (ADR-0085; the merged trace would
+    // drop a duplicate, so the driver never emits one).
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "the prose round survives: {:?}",
         outcome.trace
+    );
+    assert_eq!(outcome.trace[0].text.as_deref(), Some("querying"));
+    assert!(
+        outcome.trace[0].calls.is_empty(),
+        "gateway-routed calls own their trace rows"
     );
     assert!(
         phases

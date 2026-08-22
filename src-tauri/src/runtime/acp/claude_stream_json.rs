@@ -56,6 +56,8 @@ use crate::session::agent_loop::{
     TRACE_EXCERPT_MAX,
 };
 
+use super::engine::RoundTracker;
+
 // ---------------------------------------------------------------------------
 // Frame parser (pure)
 // ---------------------------------------------------------------------------
@@ -71,6 +73,11 @@ pub(crate) enum ClaudeEvent {
     /// The turn's opening `system{init}` frame; carries the model the CLI
     /// actually runs (honest rendering, ADR-0097 Decision 5).
     SystemInit { model: Option<String> },
+    /// Assistant thinking-block content (issue #612): one merged event per
+    /// frame -- headless emits whole blocks, not deltas. Accumulates into
+    /// the current round's thinking stream, frozen at the batch boundary or
+    /// turn end.
+    ThinkingBlock { text: String },
     /// Assistant text content -- accumulated across the turn.
     AssistantText { text: String },
     /// A tool invocation opened (`assistant` `tool_use` block).
@@ -147,11 +154,12 @@ pub(crate) fn parse_events(value: &Value) -> Vec<ClaudeEvent> {
     }
 }
 
-/// Walk a `message.content` block array. On `assistant` frames, `text`
-/// blocks concatenate into one [`ClaudeEvent::AssistantText`] and each
-/// `tool_use` block is its own event; on `user` frames, each `tool_result`
-/// block is its own event. Other block types (thinking, tool-result content
-/// echoes, ...) contribute nothing.
+/// Walk a `message.content` block array. On `assistant` frames, `thinking`
+/// blocks concatenate into one [`ClaudeEvent::ThinkingBlock`] and `text`
+/// blocks into one [`ClaudeEvent::AssistantText`], both ahead of the
+/// per-`tool_use` events (issue #612); on `user` frames, each `tool_result`
+/// block is its own event. Other block types (tool-result content echoes,
+/// ...) contribute nothing.
 fn parse_message_blocks(value: &Value, assistant: bool) -> Vec<ClaudeEvent> {
     let Some(blocks) = value
         .get("message")
@@ -161,10 +169,16 @@ fn parse_message_blocks(value: &Value, assistant: bool) -> Vec<ClaudeEvent> {
         return Vec::new();
     };
     let mut events = Vec::new();
+    let mut thinking = String::new();
     let mut text = String::new();
     for block in blocks {
         let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match block_type {
+            "thinking" if assistant => {
+                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                    thinking.push_str(t);
+                }
+            }
             "text" if assistant => {
                 if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
                     text.push_str(t);
@@ -202,10 +216,15 @@ fn parse_message_blocks(value: &Value, assistant: bool) -> Vec<ClaudeEvent> {
             _ => {}
         }
     }
-    if !text.is_empty() {
-        events.insert(0, ClaudeEvent::AssistantText { text });
+    let mut prelude = Vec::new();
+    if !thinking.is_empty() {
+        prelude.push(ClaudeEvent::ThinkingBlock { text: thinking });
     }
-    events
+    if !text.is_empty() {
+        prelude.push(ClaudeEvent::AssistantText { text });
+    }
+    prelude.extend(events);
+    prelude
 }
 
 /// Extract a `stream_event` partial-message delta: only
@@ -405,8 +424,7 @@ pub(super) fn run_claude_stream_json(
     on_phase(TurnPhase::Thinking { attempt: 1 });
 
     let mut pump = ClaudePump {
-        trace: Vec::new(),
-        text: String::new(),
+        tracker: RoundTracker::new(),
         tool_call_count: 0,
         step_cap,
         current_model: None,
@@ -459,7 +477,7 @@ pub(super) fn run_claude_stream_json(
                 // text, treat it as the answer (honest degrade); without, a
                 // transient failure.
                 termination = Some(text_or_transient(
-                    &mut pump.text,
+                    &pump.tracker,
                     "claude closed stdout without a result frame",
                 ));
                 break;
@@ -473,13 +491,16 @@ pub(super) fn run_claude_stream_json(
     }
 
     // Finalize any tool rows still open at turn end (best-effort success,
-    // the ACP pump's precedent).
+    // each landing on the round it opened in), then close the trailing
+    // round's thought stream -- its ThinkingCompleted renders live; the
+    // trailing prose rides the terminal text (issue #612).
     pump.finalize_pending(&mut on_phase);
+    pump.tracker.freeze_trailing_thinking(&mut on_phase);
 
     super::process::kill_and_reap(&mut child);
 
     let term = termination.unwrap_or_else(|| {
-        text_or_transient(&mut pump.text, "claude turn ended without a result frame")
+        text_or_transient(&pump.tracker, "claude turn ended without a result frame")
     });
 
     // ADR-0097 Decision 5: `system{init}` reports the model this turn
@@ -493,11 +514,14 @@ pub(super) fn run_claude_stream_json(
         d
     });
 
-    outcome(term, pump.trace, 1, discovered)
+    outcome(term, pump.tracker.settle_rounds(), 1, discovered)
 }
 
-/// A `tool_use` awaiting its `tool_result` (live-phase bookkeeping).
+/// A `tool_use` awaiting its `tool_result` (live-phase bookkeeping). Carries
+/// the round it opened in -- a late completion (or the turn-end drain) lands
+/// the entry on that round, not whichever round is current.
 struct PendingClaudeCall {
+    round: usize,
     tool_use_id: String,
     /// The display name: the gateway prefix stripped when gateway-routed.
     name: String,
@@ -510,8 +534,9 @@ struct PendingClaudeCall {
 
 /// Mutable state accumulated while pumping claude frames.
 struct ClaudePump {
-    trace: Vec<TraceEntry>,
-    text: String,
+    /// The round bookkeeping: per-round thinking/prose/calls + the
+    /// terminal-text fallback (ADR-0103, issue #612).
+    tracker: RoundTracker,
     /// Count of tool invocations observed (step-cap counter) -- gateway-routed
     /// and native alike (the cap bounds the whole turn).
     tool_call_count: u32,
@@ -537,12 +562,22 @@ impl ClaudePump {
                 self.current_model = model;
                 None
             }
+            ClaudeEvent::ThinkingBlock { text } => {
+                self.tracker.push_thought(&text, on_phase);
+                None
+            }
+            // Complete prose and partial text deltas share the dual track
+            // (round slot + terminal fallback); the pinned argv never emits
+            // deltas, but the vocabulary maps them the same way (issue #561).
             ClaudeEvent::AssistantText { text } | ClaudeEvent::StreamDelta { text } => {
-                self.text.push_str(&text);
+                self.tracker.push_prose(&text, on_phase);
                 None
             }
             ClaudeEvent::ToolUse { id, name, input } => {
                 self.tool_call_count += 1;
+                // The batch boundary: the round's prelude (frozen thinking,
+                // prose) fires once, before this call's Started event.
+                let round = self.tracker.call_round(on_phase);
                 // One prefix scan settles both facts (strip_prefix(p)
                 // .is_some() <=> starts_with(p)): whether the call is
                 // gateway-routed, and the bare display name (the merged
@@ -566,6 +601,7 @@ impl ClaudePump {
                     summary: summary.clone(),
                 });
                 self.pending.push(PendingClaudeCall {
+                    round,
                     tool_use_id: id,
                     name: bare.to_string(),
                     gateway_routed,
@@ -590,11 +626,11 @@ impl ClaudePump {
             } => {
                 if !is_error {
                     // Prefer the terminal frame's own text; fall back to the
-                    // accumulated stream text.
+                    // terminal-text dual track (trailing prose, else the
+                    // accumulated stream text).
                     let final_text = if text.is_empty() {
-                        std::mem::take(&mut self.text)
+                        self.tracker.terminal_text()
                     } else {
-                        self.text.clear();
                         text
                     };
                     return Some(Termination::Text(final_text));
@@ -637,7 +673,7 @@ impl ClaudePump {
         };
         on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
         if !row.gateway_routed {
-            self.trace.push(entry);
+            self.tracker.land_call(row.round, entry);
         }
     }
 
@@ -650,13 +686,14 @@ impl ClaudePump {
     }
 }
 
-/// The turn's closing shape when no `result` frame settled it: accumulated
-/// stream text becomes the answer (the honest degrade); without any, a
-/// transient failure carrying `message`. Shared by the EOF path and the
-/// post-pump fallback.
-fn text_or_transient(text: &mut String, message: &str) -> Termination {
+/// The turn's closing shape when no `result` frame settled it: the pump's
+/// terminal text (trailing prose, else the accumulated stream text) becomes
+/// the answer (the honest degrade); without any, a transient failure
+/// carrying `message`. Shared by the EOF path and the post-pump fallback.
+fn text_or_transient(tracker: &RoundTracker, message: &str) -> Termination {
+    let text = tracker.terminal_text();
     if !text.is_empty() {
-        Termination::Text(std::mem::take(text))
+        Termination::Text(text)
     } else {
         Termination::Transient(message.to_string())
     }
@@ -665,7 +702,7 @@ fn text_or_transient(text: &mut String, message: &str) -> Termination {
 /// Build the [`LoopOutcome`] (same shape as the other engines).
 fn outcome(
     termination: Termination,
-    trace: Vec<TraceEntry>,
+    rounds: Vec<LoopRound>,
     round_trips: u32,
     discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
 ) -> LoopOutcome {
@@ -674,10 +711,11 @@ fn outcome(
         // Promotions are gateway-side (ADR-0085); the stream engine owns
         // only the frame-driving half.
         promotions: Vec::new(),
-        // ADR-0103 (issue #608): the flat trajectory wraps as one round
-        // until the per-runtime grouping slice; an empty trajectory stays
-        // an empty round list (no ghost round).
-        trace: LoopRound::flat_wrap(trace),
+        // ADR-0103 (issue #612): rounds grouped at the assistant-frame
+        // tool-call batch. A turn with no events settles to an empty list
+        // (no ghost round); a gateway-routed-only round keeps its call-less
+        // shell here and drops at the wiring merge's empty-round pass.
+        trace: rounds,
         round_trips,
         discovered_runtime: discovered,
     }
@@ -791,6 +829,81 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// An assistant frame's thinking block is captured as a
+    /// `ThinkingBlock` event (issue #612) -- the round's reasoning text,
+    /// emitted whole (headless sends complete blocks, not deltas).
+    #[test]
+    fn parse_assistant_thinking_block_captured() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "pondering the schema"}
+                ]
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::ThinkingBlock {
+                text: "pondering the schema".into()
+            }]
+        );
+    }
+
+    /// A full assistant frame keeps its block order on the event list:
+    /// thinking first, then text, then the tool_use batch -- the order the
+    /// round prelude relies on (thinking frozen, prose fired, then the
+    /// batch's Started events).
+    #[test]
+    fn parse_assistant_thinking_text_tool_use_order() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "reasoning"},
+                    {"type": "text", "text": "let me query"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "mcp__toptopduck-gateway__explore",
+                        "input": {"sql": "SELECT 1"}
+                    }
+                ]
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![
+                ClaudeEvent::ThinkingBlock {
+                    text: "reasoning".into()
+                },
+                ClaudeEvent::AssistantText {
+                    text: "let me query".into()
+                },
+                ClaudeEvent::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "mcp__toptopduck-gateway__explore".into(),
+                    input: json!({"sql": "SELECT 1"}),
+                },
+            ]
+        );
+    }
+
+    /// Thinking blocks only parse on assistant frames; a user frame
+    /// carrying one contributes nothing (defensive -- the wire never does).
+    #[test]
+    fn parse_user_frame_thinking_block_tolerated() {
+        let v = json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "not the model's"}
+                ]
+            }
+        });
+        assert_eq!(parse_events(&v), Vec::new());
     }
 
     /// A user frame's `tool_result` blocks map to settled tool invocations
@@ -960,14 +1073,223 @@ mod tests {
 
     fn pump_with_bridge() -> ClaudePump {
         ClaudePump {
-            trace: Vec::new(),
-            text: String::new(),
+            tracker: RoundTracker::new(),
             tool_call_count: 0,
             step_cap: 24,
             current_model: None,
             pending: Vec::new(),
             gateway_prefixes: vec!["mcp__toptopduck-gateway__".to_string()],
         }
+    }
+
+    // --- pump fold: rounds (issue #612) ---------------------------------------
+
+    /// The end-of-turn pump sequence the run loop performs: drain open
+    /// rows, freeze the trailing round's thought stream (its
+    /// ThinkingCompleted renders live), settle the rounds.
+    fn settle(mut pump: ClaudePump, phases: &mut Vec<TurnPhase>) -> Vec<LoopRound> {
+        pump.finalize_pending(&mut |p| phases.push(p));
+        pump.tracker
+            .freeze_trailing_thinking(&mut |p| phases.push(p));
+        pump.tracker.settle_rounds()
+    }
+
+    /// A full trajectory settles into per-round slots: the batch round
+    /// carries its frozen thinking, its prose, and its calls; the trailing
+    /// call-less prose rides the terminal text, not a round of its own.
+    #[test]
+    fn rounds_carry_prose_thinking_and_calls() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        // Round 1: thinking + prose + one native call, then its result.
+        pump.fold(
+            ClaudeEvent::ThinkingBlock {
+                text: "reasoning".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_1".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "toolu_1".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        // Trailing round: prose only -- the terminal answer.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "the answer is 42".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "the answer is 42");
+        let rounds = settle(pump, &mut phases);
+        assert_eq!(rounds.len(), 1, "the trailing prose-only round drops");
+        assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert_eq!(thinking.text, "reasoning");
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "Bash");
+    }
+
+    /// The live channel's ADR-0103 order for one round: ThinkingCompleted,
+    /// then RoundText, then the batch's ToolCallStarted -- and the trailing
+    /// call-less prose fires nothing live (it is the terminal text).
+    #[test]
+    fn live_order_thinking_round_text_then_call() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ThinkingBlock {
+                text: "first plan".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_1".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 3);
+        match &phases[0] {
+            TurnPhase::ThinkingCompleted { text, .. } => assert_eq!(text, "first plan"),
+            other => panic!("expected ThinkingCompleted, got {other:?}"),
+        }
+        match &phases[1] {
+            TurnPhase::RoundText { text } => assert_eq!(text, "let me query"),
+            other => panic!("expected RoundText, got {other:?}"),
+        }
+        assert!(matches!(phases[2], TurnPhase::ToolCallStarted { .. }));
+
+        // The trailing prose opens round 2 -- the live round pointer fires
+        // -- but the prose itself rides the terminal text: no RoundText.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "the answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 4);
+        match &phases[3] {
+            TurnPhase::Thinking { attempt } => assert_eq!(*attempt, 2),
+            other => panic!("expected the round-2 Thinking wait, got {other:?}"),
+        }
+    }
+
+    /// The trailing call-less prose stretch IS the terminal text -- the
+    /// honest-degrade answer when no result frame ever arrives.
+    #[test]
+    fn trailing_prose_is_the_terminal_text() {
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "partial answer".into(),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.tracker.terminal_text(), "partial answer");
+    }
+
+    /// Mid-batch prose + trailing prose without a result frame: the answer
+    /// is the trailing stretch ONLY -- the earlier prose stays in its round
+    /// slot (the dual-track semantics; the flat pump would have
+    /// concatenated both).
+    #[test]
+    fn eof_after_batch_answers_with_trailing_stretch_only() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        // Round 1: prose + a call, then its result.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "checking".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_1".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "toolu_1".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        // Trailing round: the answer, never followed by a result frame.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "final answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(
+            text_or_transient(&pump.tracker, "claude closed stdout"),
+            Termination::Text("final answer".into())
+        );
+        // The mid-batch prose fired live as its round's RoundText.
+        assert!(phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking")));
+    }
+
+    /// A call left open at turn end lands on the round it opened in, not
+    /// whichever round is current when the drain runs.
+    #[test]
+    fn pending_call_lands_on_its_opening_round() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        // Round 1: one call whose result frame never arrives.
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_open".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        // Round 2 opens (round 1 observed a call): trailing prose only.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "never mind".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = settle(pump, &mut phases);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(
+            rounds[0].calls.len(),
+            1,
+            "the open row drains into its round"
+        );
+        assert!(rounds[0].calls[0].success, "best-effort success");
     }
 
     /// A gateway-routed tool_use + tool_result emits phases but NO engine
@@ -995,7 +1317,12 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert!(end.is_none());
-        assert!(pump.trace.is_empty(), "the gateway owns the trace row");
+        let rounds = pump.tracker.settle_rounds();
+        // No engine-side row (the gateway owns it). The call-less shell the
+        // seal leaves behind drops at the wiring merge, like every runtime
+        // path's empty round.
+        assert_eq!(rounds.len(), 1);
+        assert!(rounds[0].calls.is_empty(), "the gateway owns the trace row");
         // The phases name the BARE tool (the merged gateway row's name).
         match &phases[0] {
             TurnPhase::ToolCallStarted { name, .. } => assert_eq!(name, "explore"),
@@ -1025,9 +1352,11 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        assert_eq!(pump.trace.len(), 1);
-        assert_eq!(pump.trace[0].name, "Bash");
-        assert!(!pump.trace[0].success);
+        let rounds = settle(pump, &mut phases);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "Bash");
+        assert!(!rounds[0].calls[0].success);
     }
 
     /// A success result frame ends the turn with the frame's own text.
@@ -1127,7 +1456,9 @@ mod tests {
         );
         pump.finalize_pending(&mut |p| phases.push(p));
         assert!(pump.pending.is_empty());
-        assert_eq!(pump.trace.len(), 1);
-        assert!(pump.trace[0].success, "best-effort success");
+        let rounds = settle(pump, &mut phases);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert!(rounds[0].calls[0].success, "best-effort success");
     }
 }
