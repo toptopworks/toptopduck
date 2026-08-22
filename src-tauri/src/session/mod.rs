@@ -1939,9 +1939,7 @@ fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome 
         round
             .calls
             .retain(|entry| builtin_metadata(&entry.name).is_none());
-        let emptied = round.calls.is_empty()
-            && round.thinking.is_none()
-            && round.text.is_none();
+        let emptied = round.calls.is_empty() && round.thinking.is_none() && round.text.is_none();
         if !emptied {
             rounds.push(round);
         }
