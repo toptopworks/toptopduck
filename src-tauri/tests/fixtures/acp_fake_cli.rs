@@ -392,6 +392,106 @@ fn play_scenario(
             notify(out, agent_message("the query failed"));
             respond_prompt(out, &id, StopReason::Success);
         }
+        // Issue #611: thought + prose chunks ahead of each tool-call batch,
+        // a terminal prose stretch after the last batch. Drives the per-round
+        // grouping (round boundary = the tool-call batch split), the
+        // ThinkingCompleted / RoundText live events, and the terminal-text
+        // rule (the trailing stretch, not the concatenation of every chunk).
+        "round_prose_thinking" => {
+            notify(out, agent_thought("weighing schema options"));
+            notify(out, agent_message("checking the data first"));
+            notify(
+                out,
+                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
+            );
+            notify(
+                out,
+                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+            );
+            notify(out, agent_thought("narrowing the filter"));
+            notify(out, agent_message("refining the query"));
+            notify(
+                out,
+                tool_call_start("tc_2", "explore SELECT 2", ToolKind::Search),
+            );
+            notify(
+                out,
+                tool_call_finish("tc_2", "explore SELECT 2", ToolKind::Search, "rows: 1"),
+            );
+            notify(out, agent_message("both rounds folded"));
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // Issue #611: raw JSON lines in the schema crate 0.13.8 v1 wire shape
+        // (the `sessionUpdate` discriminator + ONE content block per chunk) --
+        // pins the parse path against the real-agent form, independent of the
+        // typed helpers above (which serialize our own types).
+        "real_wire_chunks" => {
+            raw_session_update(out, "agent_thought_chunk", "real thought");
+            raw_session_update(out, "agent_message_chunk", "real prose");
+            notify(
+                out,
+                tool_call_start("rw_1", "explore SELECT 9", ToolKind::Search),
+            );
+            notify(
+                out,
+                tool_call_finish("rw_1", "explore SELECT 9", ToolKind::Search, "rows: 9"),
+            );
+            raw_session_update(out, "agent_message_chunk", "real terminal");
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // Issue #611: prose alongside the batch, then Success with no trailing
+        // message stretch -- the terminal text falls back to the accumulated
+        // prose (the fallback semantics this slice must preserve).
+        "midturn_prose_no_terminal" => {
+            notify(out, agent_message("checking alongside"));
+            notify(
+                out,
+                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
+            );
+            notify(
+                out,
+                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+            );
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // A schema-legal `kind: "read"` tool_call on the raw wire (the typed
+        // helpers never emit it) -- the line must parse and the call must
+        // land in the trace instead of being dropped whole.
+        "tool_kind_read" => {
+            raw_tool_call_start(out, "tc_r", "read the schema", "read");
+            notify(
+                out,
+                tool_call_finish("tc_r", "read the schema", ToolKind::Read, "42 lines"),
+            );
+            notify(out, agent_message("read it"));
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // A pending call whose completion arrives AFTER the next round
+        // opened -- the row must land on the round that opened it, not
+        // whichever round is current when the finish arrives.
+        "pending_across_round" => {
+            notify(
+                out,
+                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
+            );
+            notify(out, agent_thought("the finish is still in flight"));
+            notify(out, agent_message("round two prose"));
+            notify(
+                out,
+                tool_call_finish("tc_1", "explore SELECT 1", ToolKind::Search, "rows: 3"),
+            );
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // A call left unresolved when the turn ends -- the drain lands it on
+        // its opening round as a completed row.
+        "pending_turn_end_drain" => {
+            notify(out, agent_message("round one prose"));
+            notify(
+                out,
+                tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
+            );
+            respond_prompt(out, &id, StopReason::Success);
+        }
         "max_turns" => {
             respond_prompt(out, &id, StopReason::MaxTurns);
         }
@@ -550,10 +650,60 @@ fn notify(out: &mut std::io::Stdout, update: SessionUpdate) {
     write_line(out, &n);
 }
 
+/// Emit one `session/update` as a hand-built JSON line in the schema crate
+/// 0.13.8 v1 wire shape (issue #611) -- `sessionUpdate` discriminator, one
+/// content block. Unlike [`notify`] this never serializes our own types, so
+/// the engine's parse path is pinned to the real-agent form.
+fn raw_session_update(out: &mut std::io::Stdout, kind: &str, text: &str) {
+    let line = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "fake-session",
+            "update": {
+                "sessionUpdate": kind,
+                "messageId": "m1",
+                "content": {"type": "text", "text": text},
+            },
+        },
+    });
+    write_line(out, &line);
+}
+
+/// Emit a `tool_call` start as a hand-built JSON line with a RAW kind string
+/// (not our `ToolKind` enum) -- pins that a schema-legal kind the typed
+/// helpers never emit still parses instead of dropping the whole line.
+fn raw_tool_call_start(out: &mut std::io::Stdout, id: &str, title: &str, kind: &str) {
+    let line = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "fake-session",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": id,
+                "title": title,
+                "status": "in_progress",
+                "kind": kind,
+                "content": [],
+            },
+        },
+    });
+    write_line(out, &line);
+}
+
 fn agent_message(text: &str) -> SessionUpdate {
     SessionUpdate::AgentMessageChunk {
         message_id: Some("m1".into()),
-        content: vec![ContentBlock::text(text)],
+        content: ContentBlock::text(text),
+    }
+}
+
+/// An `agent_thought_chunk` carrying one text block (issue #611).
+fn agent_thought(text: &str) -> SessionUpdate {
+    SessionUpdate::AgentThoughtChunk {
+        message_id: Some("mt1".into()),
+        content: ContentBlock::text(text),
     }
 }
 

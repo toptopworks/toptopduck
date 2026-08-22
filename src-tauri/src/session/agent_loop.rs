@@ -481,12 +481,13 @@ pub struct LoopRound {
 }
 
 impl LoopRound {
-    /// A round carrying only calls -- the flat-trajectory wrap the ACP
-    /// paths and the wiring merge emit (ADR-0103, issue #608): no prose,
-    /// no thinking, ONE round for the whole call list. Per-runtime round
-    /// grouping is the adapter-specific follow-up slices; until they land,
-    /// every flat path funnels through here so the wrap shape (and its
-    /// rationale) lives once.
+    /// A round carrying only calls -- the flat-trajectory wrap the
+    /// stream-format adapters (claude / codex) and the wiring merge emit
+    /// (ADR-0103, issue #608): no prose, no thinking, ONE round for the
+    /// whole call list. The ACP-native engine groups its own rounds at the
+    /// tool-call batch boundary (issue #611); the remaining flat paths
+    /// funnel through here until their grouping slices land, so the wrap
+    /// shape (and its rationale) lives once.
     pub fn flat(calls: Vec<TraceEntry>) -> Self {
         Self {
             thinking: None,
