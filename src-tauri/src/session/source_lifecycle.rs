@@ -295,7 +295,7 @@ impl super::Session {
         // engine open this snapshot?) ahead of any destructive step, so a bad new
         // file never costs the user the old one.
         let swap_path = new_snap.file_path.to_string_lossy().into_owned();
-        if let Err(e) = self.conn.execute_batch(&format!(
+        if let Err(e) = self.admin_engine.conn().execute_batch(&format!(
             "ATTACH '{swap_path}' AS {} (READ_ONLY);",
             quote_ident(&swap_alias),
         )) {
@@ -317,7 +317,8 @@ impl super::Session {
         // queryable, so we abort before any damage (the swap file is best-effort
         // removed, though the held handle may keep it until session drop).
         if let Err(e) = self
-            .conn
+            .admin_engine
+            .conn()
             .execute_batch(&format!("DETACH {};", quote_ident(&swap_alias)))
         {
             log::warn!(
@@ -336,7 +337,8 @@ impl super::Session {
         // orphaned and removed, and the error is reported with the working set
         // untouched.
         if let Err(e) = self
-            .conn
+            .admin_engine
+            .conn()
             .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
         {
             log::warn!(
@@ -383,7 +385,7 @@ impl super::Session {
         // implementation-level cost of skipping a swap-then-cleanup round-trip
         // (not an ADR-level decision -- a second attach-pass would complicate
         // the replace path for a near-zero-probability OS-level failure).
-        if let Err(e) = self.conn.execute_batch(&format!(
+        if let Err(e) = self.admin_engine.conn().execute_batch(&format!(
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
             quote_ident(reference_name)
         )) {

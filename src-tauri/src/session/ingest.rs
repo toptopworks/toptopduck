@@ -83,7 +83,8 @@ impl super::Session {
     /// still reflects the removal; the session temp dir is wiped on drop.
     pub(super) fn release_snapshot(&mut self, reference_name: &str) {
         if let Err(e) = self
-            .conn
+            .admin_engine
+            .conn()
             .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
         {
             log::warn!(
@@ -134,7 +135,7 @@ impl super::Session {
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
             quote_ident(&reference_name),
         );
-        if let Err(e) = self.conn.execute_batch(&attach_sql) {
+        if let Err(e) = self.admin_engine.conn().execute_batch(&attach_sql) {
             if let Err(io_err) = std::fs::remove_file(&snap.file_path) {
                 log::warn!(
                     target: "toptopduck::session",
@@ -396,7 +397,7 @@ impl super::Session {
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
             quote_ident(reference_name)
         );
-        if let Err(e) = self.conn.execute_batch(&attach_sql) {
+        if let Err(e) = self.admin_engine.conn().execute_batch(&attach_sql) {
             if let Err(io_err) = fs::remove_file(&snap.file_path) {
                 log::warn!(
                     target: "toptopduck::session",
@@ -499,7 +500,8 @@ impl super::Session {
     fn rollback_excel(&mut self, attached: &[String]) {
         for reference_name in attached.iter().rev() {
             if let Err(e) = self
-                .conn
+                .admin_engine
+                .conn()
                 .execute_batch(&format!("DETACH {};", quote_ident(reference_name)))
             {
                 log::warn!(

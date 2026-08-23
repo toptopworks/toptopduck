@@ -768,7 +768,7 @@ impl super::Session {
             // K-1 results preserved, K rendered as Failed, AC6).
             let replay_break = {
                 let mut deps = TurnDeps {
-                    conn: &session.conn,
+                    conn: session.admin_engine.conn(),
                     source_files: &mut session.source_files,
                     working_set: &mut session.working_set,
                     result_row_cap: session.result_row_cap,
@@ -1076,7 +1076,7 @@ impl super::Session {
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
             quote_ident(reference_name)
         );
-        if let Err(e) = self.conn.execute_batch(&attach_sql) {
+        if let Err(e) = self.admin_engine.conn().execute_batch(&attach_sql) {
             if let Err(io_err) = fs::remove_file(&snap.file_path) {
                 log::warn!(
                     target: "toptopduck::session",

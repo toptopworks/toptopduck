@@ -4,6 +4,7 @@
 
 pub mod agent_loop;
 pub mod derived_source;
+mod engine;
 pub mod ingest;
 pub mod inline_materialize;
 pub mod materializer;
@@ -20,12 +21,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use duckdb::Connection;
 use tempfile::TempDir;
+
+use engine::AdminEngine;
 
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState};
 use crate::cancel::CancelToken;
-use crate::guardrail::{apply_resource_caps, DEFAULT_MAX_RESULT_ROWS};
+use crate::guardrail::DEFAULT_MAX_RESULT_ROWS;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
@@ -399,7 +401,10 @@ pub struct SessionRuntimeFacts {
 }
 
 pub struct Session {
-    conn: Connection,
+    /// The session-level admin engine (ADR-0104): an on-demand unit -- open +
+    /// resource caps in one step at first need, held until close. The single
+    /// acquisition point every engine consumer resolves through.
+    admin_engine: AdminEngine,
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
@@ -834,11 +839,11 @@ impl Session {
         // is a disk / OS issue surfaced honestly rather than silently skipped.
         fs::create_dir_all(temp_path.join(TOOL_OUTPUT_DIR_NAME))
             .map_err(|e| anyhow::anyhow!("failed to create tool_output dir: {e}"))?;
-        let conn = Connection::open_in_memory()?;
-        // Engine-level resource caps (ADR-0005 L3): bind memory + threads before
-        // any query runs so a runaway LLM SQL cannot OOM or monopolize the
-        // machine. Best-effort; apply_resource_caps logs+swallows a rejection.
-        apply_resource_caps(&conn);
+        // The admin engine is an on-demand unit (ADR-0104 Decision 1); slice
+        // #650 keeps construction eager, so materialize immediately --
+        // observable behavior identical to the eager open this replaces.
+        let admin_engine = AdminEngine::new();
+        admin_engine.materialize()?;
         // The provider + materializer live on the Session behind `Box<dyn>`
         // (dyn, not generic) so this struct does not parameterize the IPC
         // layer (ADR-0053). The agent loop borrows both per turn; the resume
@@ -847,7 +852,7 @@ impl Session {
         // source_files / working_set it borrows live on this Session and are
         // passed per turn via TurnDeps.
         Ok(Self {
-            conn,
+            admin_engine,
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
@@ -1274,7 +1279,8 @@ impl Session {
                 // thinking-disabled, byte-identical to the status quo.
                 request.thought_level = self.runtime_facts.thought_level.clone();
                 // Disjoint field borrows: the loop borrows `&*self.provider`
-                // while TurnDeps borrows `&self.conn` / `&self.source_files` /
+                // while TurnDeps borrows `self.admin_engine.conn()` /
+                // `&mut self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop takes
                 // `&mut *self.materializer` -- distinct Session fields, so they
                 // coexist without widening to `&mut self`. The block scope drops
@@ -1304,7 +1310,7 @@ impl Session {
                             &mcp.aggregated_tools(),
                         ));
                     let mut deps = TurnDeps {
-                        conn: &self.conn,
+                        conn: self.admin_engine.conn(),
                         source_files: &mut self.source_files,
                         working_set: &mut self.working_set,
                         result_row_cap: self.result_row_cap,
@@ -1518,7 +1524,7 @@ impl Session {
                 crate::mcp::aggregator::McpAggregator::with_tool_output(self.tool_output_path());
             self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
-                conn: &self.conn,
+                conn: self.admin_engine.conn(),
                 source_files: &mut self.source_files,
                 working_set: &mut self.working_set,
                 result_row_cap: self.result_row_cap,
@@ -1797,7 +1803,8 @@ impl Session {
             offset
         );
         let mut stmt = self
-            .conn
+            .admin_engine
+            .conn()
             .prepare(&sql)
             .map_err(|e| RowReadError::Execute(e.to_string()))?;
         let mut rows = stmt
@@ -1830,7 +1837,7 @@ impl Session {
     /// enforcement tests (AC5): writes against a source snapshot are rejected by
     /// the engine. Not part of the public ingest contract.
     pub fn execute_batch(&self, sql: &str) -> Result<(), duckdb::Error> {
-        self.conn.execute_batch(sql)
+        self.admin_engine.conn().execute_batch(sql)
     }
 
     /// Count rows in a snapshot's `data` table through its reference name
@@ -1839,7 +1846,7 @@ impl Session {
     /// part of the public ingest contract (the real query path arrives with the
     /// query loop, PRD #1).
     pub fn snapshot_row_count(&self, reference_name: &str) -> Result<i64, duckdb::Error> {
-        self.conn.query_row(
+        self.admin_engine.conn().query_row(
             &format!("SELECT COUNT(*) FROM {}.data", quote_ident(reference_name)),
             [],
             |r| r.get(0),
@@ -3052,7 +3059,8 @@ mod tests {
         // the session DB. (A broken rollback would leave it lingering -> the
         // retry's next CREATE clashes and the probe below is non-zero.)
         let remaining: i64 = session
-            .conn
+            .admin_engine
+            .conn()
             .query_row(
                 "SELECT count(*) FROM information_schema.tables WHERE table_name = 'result_1'",
                 [],
@@ -3072,7 +3080,8 @@ mod tests {
         // (PRAGMA-as-query is unsupported in this DuckDB for these keys).
         let session = Session::new().expect("session");
         let threads: String = session
-            .conn
+            .admin_engine
+            .conn()
             .query_row(
                 "SELECT value FROM duckdb_settings() WHERE name='threads'",
                 [],
@@ -3081,7 +3090,8 @@ mod tests {
             .expect("threads setting");
         assert_eq!(threads, crate::guardrail::MAX_THREADS.to_string());
         let mem: String = session
-            .conn
+            .admin_engine
+            .conn()
             .query_row(
                 "SELECT value FROM duckdb_settings() WHERE name='memory_limit'",
                 [],
