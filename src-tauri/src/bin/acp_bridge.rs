@@ -12,7 +12,9 @@
 //! framing on both sides, so it has nothing to parse. All semantics live in the
 //! gateway ([`toptopduck_lib::runtime::gateway::server::serve_connection`]):
 //! approval, dispatch, materialization. Keeping this binary protocol-blind is
-//! what lets the gateway stay the single enforcement point.
+//! what lets the gateway stay the single enforcement point. (The bounded-line
+//! handshake reader below is the one shared piece -- compiled in from the lib's
+//! source by `#[path]`, so the binary still links nothing.)
 //!
 //! Wire protocol (one turn, one bridge process):
 //! 1. `TcpStream::connect("127.0.0.1:{TOPTOPDUCK_GATEWAY_PORT}")`.
@@ -35,6 +37,16 @@ use std::net::{Shutdown, TcpStream};
 use std::process::ExitCode;
 use std::sync::mpsc;
 use std::thread;
+
+// The bounded-line handshake reader, source-shared rather than crate-linked:
+// this binary must not `use` the lib (ADR-0085 zero-dependency -- release LTO
+// dead-strips Tauri/DuckDB out of the per-turn-spawned binary), while issue
+// #643's single-implementation rule says no duplicate constant or function.
+// The lib's `bounded_line` module file is pure std precisely so it can be
+// compiled in here by path.
+#[path = "../bounded_line.rs"]
+mod bounded_line;
+use bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 
 /// The env var carrying the gateway's OS-assigned localhost port.
 const ENV_PORT: &str = "TOPTOPDUCK_GATEWAY_PORT";
@@ -85,10 +97,14 @@ enum HandshakeOutcome {
     IoError,
 }
 
-/// Write `BRIDGE_AUTH <token>\n` and expect `BRIDGE_OK\n` back. A clean EOF or
-/// any line that is not exactly `BRIDGE_OK` is a refuse -- the gateway drops
-/// the socket on a token mismatch without responding (ADR-0085 security model:
-/// a probing client learns nothing beyond "refused").
+/// Write `BRIDGE_AUTH <token>\n` and expect `BRIDGE_OK\n` back. A clean EOF,
+/// a read error, or any line that is not exactly `BRIDGE_OK` is a refuse --
+/// the gateway drops the socket on a token mismatch without responding
+/// (ADR-0085 security model: a probing client learns nothing beyond
+/// "refused"). The verdict line is read through the shared byte cap (issue
+/// #643): an over-long line is refused without the buffer growing with it,
+/// and since the process exits on refuse there is no remainder to drain --
+/// `Refused` is the safe side.
 fn handshake(
     read_half: &mut impl BufRead,
     write_half: &mut impl Write,
@@ -103,12 +119,14 @@ fn handshake(
     if write_half.flush().is_err() {
         return HandshakeOutcome::IoError;
     }
-    let mut line = String::new();
-    match read_half.read_line(&mut line) {
-        Ok(0) | Err(_) => return HandshakeOutcome::Refused,
-        Ok(_) => {}
-    }
-    if line.trim_end_matches(['\r', '\n']) == "BRIDGE_OK" {
+    let verdict = match read_line_bounded(read_half, LINE_MAX_BYTES) {
+        Ok(LineRead::Line(line)) => line,
+        // EOF, an over-long line, or a read error: all refused. The bridge
+        // has no logging surface (ADR-0085), so no warning -- the exit code
+        // is the only signal.
+        Ok(LineRead::Overlong) | Ok(LineRead::Eof) | Err(_) => return HandshakeOutcome::Refused,
+    };
+    if verdict.trim_end_matches(['\r', '\n']) == "BRIDGE_OK" {
         HandshakeOutcome::Ok
     } else {
         HandshakeOutcome::Refused
@@ -191,4 +209,59 @@ fn pump(mut tcp_to_stdout: impl Read + Send + 'static, mut stdin_to_tcp: TcpStre
     // other thread is still blocked in its read and gets reaped by the OS.
     let _ = rx.recv();
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// The one accepting input: exactly `BRIDGE_OK` on one line.
+    #[test]
+    fn handshake_accepts_the_exact_bridge_ok_line() {
+        let mut reader = Cursor::new(b"BRIDGE_OK\n".to_vec());
+        let mut written = Vec::new();
+        assert!(matches!(
+            handshake(&mut reader, &mut written, "tok"),
+            HandshakeOutcome::Ok
+        ));
+        assert_eq!(written, b"BRIDGE_AUTH tok\n");
+    }
+
+    /// Any other line is a refuse (ADR-0085: a probing client learns nothing
+    /// beyond "refused").
+    #[test]
+    fn handshake_refuses_a_wrong_line() {
+        let mut reader = Cursor::new(b"BRIDGE_NO\n".to_vec());
+        let mut written = Vec::new();
+        assert!(matches!(
+            handshake(&mut reader, &mut written, "tok"),
+            HandshakeOutcome::Refused
+        ));
+    }
+
+    /// A closed stream before the verdict line is a refuse, not a hang.
+    #[test]
+    fn handshake_refuses_clean_eof() {
+        let mut reader = Cursor::new(Vec::new());
+        let mut written = Vec::new();
+        assert!(matches!(
+            handshake(&mut reader, &mut written, "tok"),
+            HandshakeOutcome::Refused
+        ));
+    }
+
+    /// Issue #643: a handshake line past the byte cap is refused without the
+    /// read buffer growing with it -- the safe side (the process exits, no
+    /// drain needed); the outcome matches any other wrong line.
+    #[test]
+    fn handshake_refuses_an_overlong_line() {
+        let wire = format!("{}\n", "x".repeat(LINE_MAX_BYTES));
+        let mut reader = Cursor::new(wire.into_bytes());
+        let mut written = Vec::new();
+        assert!(matches!(
+            handshake(&mut reader, &mut written, "tok"),
+            HandshakeOutcome::Refused
+        ));
+    }
 }
