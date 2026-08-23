@@ -16,13 +16,15 @@
 //! anything non-std here breaks that constraint.
 //!
 //! An over-long line is drained and surfaced as [`LineRead::Overlong`]; the
-//! drop-and-warn policy lives with each caller (the log target is
-//! domain-specific, and the bridge has no logging surface at all).
+//! disposition is the caller's -- the ACP readers drop it with a warning, the
+//! gateway framing fails the connection (issue #646), and both bridge-auth
+//! handshakes refuse (the log target is domain-specific, and the bridge has
+//! no logging surface at all).
 use std::io::{BufRead, Read};
 
 /// The byte cap on a single incoming line (issue #629): an untrusted
 /// child cannot grow the reader's buffer past this; an over-long line is
-/// drained and surfaced as [`LineRead::Overlong`] (the drop / warn /
+/// drained and surfaced as [`LineRead::Overlong`] (the drop / fail /
 /// refuse policy is the caller's). A compile-time constant on purpose: it
 /// is a security invariant against untrusted output, not a user tunable --
 /// raising it is an evidence-driven default change, not a config knob.

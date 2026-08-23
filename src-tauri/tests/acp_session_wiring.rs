@@ -22,7 +22,7 @@ use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;
 use toptopduck_lib::{
     ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, KeychainStore, Session,
-    TurnInputs, TurnOutcome,
+    TurnFailure, TurnInputs, TurnOutcome,
 };
 
 /// The fake-CLI adapter: the fixture binary (named `acp-fake-cli`) driven with
@@ -119,6 +119,31 @@ fn external_gateway_tool_call_drives_dispatch() {
             );
         }
         other => panic!("gateway_tool_call must complete Textual, got {other:?}"),
+    }
+}
+
+/// Issue #646: an MCP request frame from the bridge that exceeds the
+/// gateway's per-line byte cap fails the serve (the connection tears down, no
+/// id-matched response ever exists). The turn lands on the serve-error path
+/// with the framing cause riding the failure detail -- never a `Cancelled`
+/// hang waiting on a response the gateway refused to write.
+#[test]
+fn external_overlong_gateway_request_fails_the_turn() {
+    let (mut session, old_path, _guard) = external_session("gateway_overlong_call");
+    let outcome = session.ask("run one over-long gateway tool call");
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+            assert!(
+                detail.contains("gateway serve failed"),
+                "the failure names its face: {detail}"
+            );
+            assert!(
+                detail.contains("frame line exceeded"),
+                "the framing cause rides the detail: {detail}"
+            );
+        }
+        other => panic!("gateway_overlong_call must land Failed(Execute), got {other:?}"),
     }
 }
 

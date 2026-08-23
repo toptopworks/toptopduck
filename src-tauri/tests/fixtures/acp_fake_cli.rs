@@ -675,6 +675,36 @@ fn play_scenario(
             notify(out, agent_message("done via gateway"));
             respond_prompt(out, &id, StopReason::Success);
         }
+        // Issue #646: same chain as gateway_tool_call, but the tools/call
+        // frame exceeds the gateway's per-line byte cap. The gateway fails the
+        // read and tears the connection down -- no id=2 response ever exists
+        // -- so the session's turn lands on the serve-error path (a failed
+        // outcome naming the framing cause), not a Cancelled hang.
+        "gateway_overlong_call" => {
+            bridge_write(&mcp_request(
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
+            ));
+            let _ = bridge_read();
+            // 5 MiB with margin over the 4 MiB cap: the cap is pub(crate),
+            // invisible to this integration fixture, so the margin keeps the
+            // scenario over-long even if the cap inches up.
+            let big = "x".repeat(5 * 1024 * 1024);
+            bridge_write(&mcp_request(
+                2,
+                "tools/call",
+                serde_json::json!({"name":"explore","arguments":{"sql":big}}),
+            ));
+            // The gateway tears the connection down once the over-long frame
+            // drained: EOF (or a reset) reads back as None -- never a
+            // response for id=2. The no-response half is pinned at the serve
+            // level (the serve_connection over-long e2e); this fixture only
+            // proceeds -- the prompt response is what lets the turn settle on
+            // the serve error, not a hang.
+            let _ = bridge_read();
+            respond_prompt(out, &id, StopReason::Success);
+        }
         // Issue #630: one round, two calls in the same batch -- starts
         // interleaved (start, start) before the finishes. Pins the saw_call
         // prelude firing once for the round's FIRST call, not per call. The

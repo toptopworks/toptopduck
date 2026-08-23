@@ -890,6 +890,7 @@ pub enum ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bounded_line::LINE_MAX_BYTES;
     use serde_json::json;
     use std::io::Cursor;
 
@@ -1000,6 +1001,38 @@ mod tests {
         assert!(
             matches!(err, ClientError::ServerClosed),
             "EOF -> ServerClosed, got {err:?}"
+        );
+    }
+
+    /// Issue #646: a pending request whose response frame exceeds the byte
+    /// cap surfaces as an explicit `Framing` error, not a hang until the
+    /// wall-clock watchdog -- the over-long frame never yields the matched id,
+    /// so the error return is the only observable outcome. The error display
+    /// names the face (server transport) and the framing cause (the cap).
+    #[test]
+    fn overlong_response_frame_fails_request_as_framing_error() {
+        // One over-long line: bigger than the cap, newline-terminated so the
+        // bounded reader settles on `Overlong` (not a final unterminated
+        // line).
+        let mut server = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
+        server.push(b'\n');
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools().expect_err("over-long response");
+        assert!(
+            matches!(
+                err,
+                ClientError::Framing(ref e) if e.kind() == std::io::ErrorKind::InvalidData
+            ),
+            "over-long response -> Framing(InvalidData), got {err:?}"
+        );
+        let display = err.to_string();
+        assert!(
+            display.contains("framing error"),
+            "the error names the transport face: {display}"
+        );
+        assert!(
+            display.contains(&LINE_MAX_BYTES.to_string()),
+            "the framing cause names the cap: {display}"
         );
     }
 
