@@ -23,12 +23,14 @@ use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 /// gap as a synthetic empty message, so a peer flooding blank lines cannot
 /// overflow the stack.
 ///
-/// Each line is read through the shared byte cap (issue #643): an over-long
-/// line is drained and dropped with a warning -- the connection stays up and
-/// the next frame still arrives -- so a peer (the MCP server subprocess on
-/// stdio, or the bridge pipe on the serve side) cannot grow the buffer
-/// without limit. The cap is the same [`LINE_MAX_BYTES`] the ACP readers
-/// enforce: one untrusted-input invariant across every face.
+/// Each line is read through the shared byte cap (issues #643/#646): an
+/// over-long line is drained and fails the read with `InvalidData` -- the
+/// connection drops. This is an id-correlated request/response stream, not an
+/// event stream: a silently dropped frame would leave its pending id
+/// unresolved (the reader parks until the wall-clock watchdog cancels the
+/// turn with the wrong attribution), so over-long input must fail fast and
+/// visibly. The cap is the same [`LINE_MAX_BYTES`] the ACP readers enforce:
+/// one untrusted-input invariant across every face.
 pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
     loop {
         match read_line_bounded(reader, LINE_MAX_BYTES)? {
@@ -36,8 +38,12 @@ pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
             LineRead::Overlong => {
                 log::warn!(
                     target: "toptopduck::gateway",
-                    "frame line exceeded {LINE_MAX_BYTES} bytes, dropped"
+                    "frame line exceeded {LINE_MAX_BYTES} bytes, failing the connection"
                 );
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("frame line exceeded {LINE_MAX_BYTES} bytes"),
+                ));
             }
             LineRead::Line(line) => {
                 let trimmed = line.trim_end_matches(['\r', '\n']);
@@ -109,25 +115,26 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    /// Issue #643: a frame whose single line exceeds the byte cap is drained
-    /// and dropped -- the connection stays up and the NEXT frame arrives. An
-    /// unbounded `read_line` would instead try to parse the over-long line as
-    /// JSON and kill the connection with `InvalidData`.
+    /// Issue #646: a frame whose single line exceeds the byte cap fails the
+    /// read with `InvalidData` (the same kind a malformed-JSON line yields)
+    /// and names the cap. This stream is id-correlated, so a silently dropped
+    /// frame would leave its pending id unresolved until the wall-clock
+    /// watchdog; an explicit failure is the observable contract on both
+    /// faces. Bytes after the over-long line are unreachable -- the caller
+    /// tears the connection down on the error, never reads past it.
     #[test]
-    fn read_drops_overlong_line_and_keeps_reading() {
-        // One over-long line (newline-terminated), then a normal frame: the
-        // drop must land on the over-long line only.
+    fn read_fails_overlong_line_as_invalid_data() {
+        // One over-long line (newline-terminated), then a normal frame that
+        // must never be reached.
         let mut wire = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
         wire.push(b'\n');
         wire.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":7}\n");
         let mut reader = std::io::Cursor::new(wire);
-        let msg = read_message(&mut reader)
-            .expect("read past the over-long line")
-            .expect("a message after the drop");
-        assert_eq!(msg["id"], 7);
+        let err = read_message(&mut reader).expect_err("over-long frame");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
-            read_message(&mut reader).expect("read at eof").is_none(),
-            "the over-long line's bytes are gone with the stream at EOF"
+            err.to_string().contains(&LINE_MAX_BYTES.to_string()),
+            "the error names the cap: {err}"
         );
     }
 

@@ -116,11 +116,16 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The accepted stream's read timeout. The serve loop checks cancel after each
-/// read returns, so a blocking `read_line` would not notice cancel mid-message;
-/// this bounds the cancel latency in the read loop to the same order as the
-/// accept poll. A `TimedOut` / `WouldBlock` from `read_line` is retried -- the
-/// partial line stays in the `BufReader`, so a slow multi-fragment frame still
-/// completes.
+/// read returns, so a blocking read would not notice cancel mid-message; this
+/// bounds the cancel latency in the read loop to the same order as the accept
+/// poll. A `TimedOut` / `WouldBlock` is retried. Since the bounded reader
+/// replaced `read_line` (issue #643) a timeout mid-line is not a resumable
+/// pause: bytes already pulled past the `BufReader` are lost, and the retry
+/// resumes at the stream's current position -- a frame split by a pause longer
+/// than this timeout is re-framed from that point. Both real senders (the
+/// bridge proxy, streaming fixtures) write frames continuously, so the window
+/// is theoretical; the byte cap itself still holds for any single unbroken
+/// read.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Accept one bridge connection, verify its token, and drive the MCP subset
@@ -201,7 +206,9 @@ pub fn serve_connection(
                 return Ok(outcome);
             } // bridge closed
             // Read timeout (READ_TIMEOUT): retry so the loop-top cancel check
-            // fires. BufReader preserves any partial line across the timeout.
+            // fires. A partial line already pulled past the BufReader is lost
+            // on this path (see READ_TIMEOUT's doc) -- the retried read
+            // resumes at the stream's current position, mid-line.
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
@@ -890,6 +897,54 @@ mod tests {
         assert!(
             outcome.promotions.is_empty(),
             "no materialize -> no promotion"
+        );
+    }
+
+    /// Issue #646: an over-long request frame from the bridge fails the serve
+    /// with the framing error instead of being dropped -- a dropped frame
+    /// would leave the bridge's request unreplied and the turn hung until the
+    /// wall-clock watchdog. The error surfaces through the serve's `Err` path,
+    /// which the turn assembler maps onto a failed (not cancelled) outcome;
+    /// the bridge observes the teardown as EOF, never a response.
+    #[test]
+    fn serve_connection_fails_on_overlong_request_frame() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let token = handle.token.clone();
+
+        let client = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut r = std::io::BufReader::new(s.try_clone().expect("clone"));
+            s.write_all(format!("BRIDGE_AUTH {token}\n").as_bytes())
+                .expect("auth write");
+            let mut line = String::new();
+            r.read_line(&mut line).expect("ok line");
+            assert_eq!(line, "BRIDGE_OK\n");
+            // One over-long request frame (newline-terminated so the bounded
+            // reader settles on Overlong, not a final unterminated line).
+            let mut frame = vec![b'x'; LINE_MAX_BYTES + 1];
+            frame.push(b'\n');
+            s.write_all(&frame).expect("send over-long frame");
+            // The gateway tears the connection down: the read side sees EOF
+            // (or, on a reset teardown, an error) -- either way no response
+            // bytes ever arrive for the over-long request.
+            let mut tail = String::new();
+            let n = r.read_line(&mut tail).unwrap_or(0);
+            assert_eq!(n, 0, "connection closed without a response, got {tail:?}");
+        });
+
+        // `GatewayOutcome` carries no Debug (nothing asserts on it whole), so
+        // the error is extracted by hand rather than via `expect_err`.
+        let err = match serve_connection(handle, ctx, &AtomicBool::new(false)) {
+            Ok(_) => panic!("an over-long request frame must fail the serve"),
+            Err(e) => e,
+        };
+        client.join().expect("client thread panicked");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains(&LINE_MAX_BYTES.to_string()),
+            "the error names the cap: {err}"
         );
     }
 
