@@ -366,13 +366,19 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), "blocked-line");
         let (delivered, warned) = writer.join().unwrap();
         assert!(delivered, "after the drain the blocked send completes");
-        assert!(warned, "the queue-full episode warned (once, debounced)");
+        assert!(
+            warned,
+            "the queue-full episode entered the Full arm (the debounce flag set)"
+        );
     }
 
     /// Issue #640: a gone receiver exits the reader on both paths -- the
     /// fast path's `try_send` Disconnected, and (the drain-after-cancel
     /// shape) a Full queue whose blocking `send` then finds the receiver
-    /// dropped: Err, never a hang or panic.
+    /// dropped: Err, never a hang or panic. std's `try_send` reports
+    /// Disconnected ahead of Full, so the second half must put the writer
+    /// inside the blocking `send` before the receiver drops -- a
+    /// pre-arranged drop would silently take the fast path again.
     #[test]
     fn enqueue_exits_when_the_pump_is_gone() {
         let (tx, rx) = mpsc::sync_channel::<String>(READER_CHANNEL_CAPACITY);
@@ -382,13 +388,41 @@ mod tests {
             !enqueue_bounded(&tx, "gone".to_string(), &mut warned),
             "try_send on a disconnected receiver -> reader exit"
         );
-        // The queue holds a line, the pump then drops its end mid-backpressure.
+        // The queue holds a line; the writer enters the Full arm and blocks
+        // in `send`, and the pump then drops its end mid-backpressure.
         let (tx, rx) = mpsc::sync_channel::<String>(1);
         assert!(enqueue_bounded(&tx, "queued".to_string(), &mut warned));
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let mut warned = false;
+            let _ = started_tx.send(());
+            let delivered = enqueue_bounded(&tx, "next".to_string(), &mut warned);
+            (delivered, warned)
+        });
+        // The signal only says the writer is about to enqueue; the grace
+        // sleep lets the try_send -> Full -> warn -> blocking-send sequence
+        // run before the receiver goes away.
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
         drop(rx);
+        let (delivered, warned) = writer.join().unwrap();
         assert!(
-            !enqueue_bounded(&tx, "next".to_string(), &mut warned),
-            "Full then blocking send on a gone receiver -> reader exit"
+            !delivered,
+            "blocking send on a gone receiver -> reader exit"
+        );
+        assert!(warned, "the Full arm fired before the disconnect");
+    }
+
+    /// Issue #640: the documented worst-case queue residency is a
+    /// cross-constant invariant -- capacity x [`LINE_MAX_BYTES`] = 32 MiB.
+    /// The pin trips CI when either constant drifts without the memory
+    /// budget being revisited.
+    #[test]
+    fn reader_channel_residency_matches_the_documented_budget() {
+        assert_eq!(
+            READER_CHANNEL_CAPACITY * LINE_MAX_BYTES,
+            32 * 1024 * 1024,
+            "worst-case reader queue residency must match the documented budget"
         );
     }
 }
