@@ -13,6 +13,8 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::Value;
 
+use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
+
 /// Read one newline-delimited JSON-RPC message. Returns `None` at clean EOF
 /// (peer closed); returns `Err` on an invalid line.
 ///
@@ -20,20 +22,33 @@ use serde_json::Value;
 /// the reader loops internally to the next real frame rather than treating the
 /// gap as a synthetic empty message, so a peer flooding blank lines cannot
 /// overflow the stack.
+///
+/// Each line is read through the shared byte cap (issue #643): an over-long
+/// line is drained and dropped with a warning -- the connection stays up and
+/// the next frame still arrives -- so a peer (the MCP server subprocess on
+/// stdio, or the bridge pipe on the serve side) cannot grow the buffer
+/// without limit. The cap is the same [`LINE_MAX_BYTES`] the ACP readers
+/// enforce: one untrusted-input invariant across every face.
 pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            return Ok(None);
+        match read_line_bounded(reader, LINE_MAX_BYTES)? {
+            LineRead::Eof => return Ok(None),
+            LineRead::Overlong => {
+                log::warn!(
+                    target: "toptopduck::gateway",
+                    "frame line exceeded {LINE_MAX_BYTES} bytes, dropped"
+                );
+            }
+            LineRead::Line(line) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    continue;
+                }
+                return serde_json::from_str(trimmed)
+                    .map(Some)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+            }
         }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            continue;
-        }
-        return serde_json::from_str(trimmed)
-            .map(Some)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
     }
 }
 
@@ -92,5 +107,39 @@ mod tests {
         let mut reader = std::io::Cursor::new(wire.to_vec());
         let err = read_message(&mut reader).expect_err("invalid json");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Issue #643: a frame whose single line exceeds the byte cap is drained
+    /// and dropped -- the connection stays up and the NEXT frame arrives. An
+    /// unbounded `read_line` would instead try to parse the over-long line as
+    /// JSON and kill the connection with `InvalidData`.
+    #[test]
+    fn read_drops_overlong_line_and_keeps_reading() {
+        // One over-long line (newline-terminated), then a normal frame: the
+        // drop must land on the over-long line only.
+        let mut wire = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
+        wire.push(b'\n');
+        wire.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":7}\n");
+        let mut reader = std::io::Cursor::new(wire);
+        let msg = read_message(&mut reader)
+            .expect("read past the over-long line")
+            .expect("a message after the drop");
+        assert_eq!(msg["id"], 7);
+        assert!(
+            read_message(&mut reader).expect("read at eof").is_none(),
+            "the over-long line's bytes are gone with the stream at EOF"
+        );
+    }
+
+    /// A final frame without a trailing newline still parses -- the tail line
+    /// before EOF is a normal frame, not an error (pins the read_line-shaped
+    /// semantics the bounded reader must preserve).
+    #[test]
+    fn read_parses_a_final_unterminated_frame() {
+        let mut reader = std::io::Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":9}".to_vec());
+        let msg = read_message(&mut reader)
+            .expect("read the tail line")
+            .expect("a message");
+        assert_eq!(msg["id"], 9);
     }
 }

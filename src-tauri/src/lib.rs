@@ -16,6 +16,7 @@
 
 pub mod app_config;
 pub mod approval;
+pub(crate) mod bounded_line;
 pub mod cancel;
 pub mod commands;
 pub mod fs_acl;

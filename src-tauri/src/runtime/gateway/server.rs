@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::approval::{ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome};
+use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 use crate::cancel::CancelToken;
 use crate::mcp::aggregator::{self, McpAggregator};
 use crate::model::Promotion;
@@ -259,13 +260,23 @@ fn accept_bridge(
 /// Verify the bridge's auth line (`BRIDGE_AUTH <token>`). A mismatch is the
 /// only error path -- the stream is dropped without a response so a probing
 /// client learns nothing beyond "refused" (ADR-0085 security model).
+///
+/// The auth line is read through the shared byte cap (issue #643): this read
+/// happens BEFORE the token check, so the peer is an unauthenticated prober
+/// that grabbed the connection -- the pre-auth surface. An over-long line,
+/// like a clean EOF, falls into the mismatch arm (empty vs expected), so it
+/// fails with the same `PermissionDenied` and no observable difference.
 fn verify_bridge(
     reader: &mut impl BufRead,
     writer: &mut impl Write,
     expected: &str,
 ) -> io::Result<()> {
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
+    let line = match read_line_bounded(reader, LINE_MAX_BYTES)? {
+        LineRead::Line(line) => line,
+        // An over-long or EOF-terminated empty "line" can never match the
+        // expected auth line -- refuse it exactly like a token mismatch.
+        LineRead::Overlong | LineRead::Eof => String::new(),
+    };
     let got = line.trim_end_matches(['\r', '\n']);
     if got == format!("BRIDGE_AUTH {expected}") {
         writer.write_all(b"BRIDGE_OK\n")?;
@@ -599,13 +610,27 @@ mod tests {
     #[test]
     fn verify_bridge_treats_clean_eof_as_refused() {
         // A probing client that connects + closes without sending a token line
-        // must not crash the gateway -- read_line returns Ok(0) and the empty
-        // line falls through to the mismatch arm (PermissionDenied).
+        // must not crash the gateway -- the bounded read reports EOF and the
+        // empty line falls through to the mismatch arm (PermissionDenied).
         let input = Cursor::new(Vec::new());
         let mut reader = std::io::BufReader::new(input);
         let mut writer = Vec::new();
         let err = verify_bridge(&mut reader, &mut writer, "x").expect_err("eof refused");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// Issue #643: the pre-auth surface. An over-long auth line is refused
+    /// with the same `PermissionDenied` as a token mismatch (no observable
+    /// difference for a prober) instead of growing the buffer with the line.
+    #[test]
+    fn verify_bridge_refuses_an_overlong_auth_line() {
+        let wire = format!("{}\n", "x".repeat(LINE_MAX_BYTES));
+        let input = Cursor::new(wire.into_bytes());
+        let mut reader = std::io::BufReader::new(input);
+        let mut writer = Vec::new();
+        let err = verify_bridge(&mut reader, &mut writer, "tok").expect_err("over-long refused");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(writer.is_empty(), "no response on a refused handshake");
     }
 
     #[test]
