@@ -1,7 +1,7 @@
 //! The bounded single-line reader every untrusted-input surface shares
 //! (issues #629/#639/#643).
 //!
-//! Three faces read untrusted peer output through this one implementation:
+//! Four faces read untrusted peer output through this one implementation:
 //! the ACP adapter stdout readers (`spawn_line_reader` in the ACP process
 //! module), the gateway's NDJSON frame reader (`read_message` in the
 //! gateway framing module), the gateway's bridge-auth check, and the
@@ -16,8 +16,8 @@
 //! anything non-std here breaks that constraint.
 //!
 //! An over-long line is drained and surfaced as [`LineRead::Overlong`]; the
-/// drop-and-warn policy lives with each caller (the log target is
-/// domain-specific, and the bridge has no logging surface at all).
+//! drop-and-warn policy lives with each caller (the log target is
+//! domain-specific, and the bridge has no logging surface at all).
 use std::io::{BufRead, Read};
 
 /// The byte cap on a single incoming line (issue #629): an untrusted
@@ -40,9 +40,11 @@ pub(crate) enum LineRead {
 }
 
 /// Read one line, buffering at most `max` bytes of it (issue #629). The
-/// scratch buffer is function-local: the over-long drain pass reuses it
-/// within one call, and the accepted line is moved out of it for the
-/// UTF-8 conversion.
+/// `max` parameter exists for the unit tests (small caps keep fixtures
+/// tiny); every production caller passes [`LINE_MAX_BYTES`]. The scratch
+/// buffer is function-local: the over-long drain pass reuses it within
+/// one call, and the accepted line is moved out of it for the UTF-8
+/// conversion.
 pub(crate) fn read_line_bounded(
     reader: &mut impl BufRead,
     max: usize,
@@ -153,6 +155,24 @@ mod tests {
         ));
     }
 
+    /// The mirror half of the boundary above: a mid-stream line whose
+    /// payload is exactly `max` bytes drops as over-long -- its newline
+    /// lands one byte past the budget (the documented conservative side)
+    /// -- and the reader keeps going with the next line.
+    #[test]
+    fn exact_max_payload_drops_as_overlong() {
+        let exact = "x".repeat(64); // 64 x's: the newline is byte 65
+        let mut cur = Cursor::new(format!("{exact}\nok\n").into_bytes());
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64),
+            Ok(LineRead::Overlong)
+        ));
+        assert!(matches!(
+            read_line_bounded(&mut cur, 64),
+            Ok(LineRead::Line(l)) if l == "ok\n"
+        ));
+    }
+
     /// Invalid UTF-8 keeps the old `read_line` failure shape: an io error,
     /// so a caller's break-on-error path is unchanged.
     #[test]
@@ -160,5 +180,26 @@ mod tests {
         let mut cur = Cursor::new(vec![0xff, 0xfe, b'\n']);
         let err = read_line_bounded(&mut cur, 64).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// A failing reader propagates as an io error (a real read failure,
+    /// unlike the constructed UTF-8 one above) -- every caller's Err arm
+    /// rides on this shape.
+    #[test]
+    fn read_error_propagates() {
+        struct FailRead;
+        impl Read for FailRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read failed"))
+            }
+        }
+        impl BufRead for FailRead {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                Err(std::io::Error::other("fill failed"))
+            }
+            fn consume(&mut self, _: usize) {}
+        }
+        let err = read_line_bounded(&mut FailRead, 64).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 }
