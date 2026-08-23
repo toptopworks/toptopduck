@@ -30,12 +30,6 @@ pub(crate) struct AdminEngine {
     conn: OnceLock<Connection>,
 }
 
-impl Default for AdminEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl AdminEngine {
     /// An unmaterialized engine: no DuckDB instance exists yet (ADR-0104
     /// Decision 1 targets zero instances at session creation).
