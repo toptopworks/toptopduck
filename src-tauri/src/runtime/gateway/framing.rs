@@ -29,8 +29,12 @@ use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 /// event stream: a silently dropped frame would leave its pending id
 /// unresolved (the reader parks until the wall-clock watchdog cancels the
 /// turn with the wrong attribution), so over-long input must fail fast and
-/// visibly. The cap is the same [`LINE_MAX_BYTES`] the ACP readers enforce:
-/// one untrusted-input invariant across every face.
+/// visibly. (The ACP readers keep drop-and-warn on a different safety net:
+/// their event streams carry no pending id, and a dropped terminator frame
+/// still settles at EOF through the fallback outcome -- a degraded but
+/// visible turn end, not a parked read.) The cap is the same
+/// [`LINE_MAX_BYTES`] the ACP readers enforce: one untrusted-input invariant
+/// across every face.
 pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
     loop {
         match read_line_bounded(reader, LINE_MAX_BYTES)? {

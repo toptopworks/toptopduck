@@ -1011,13 +1011,11 @@ mod tests {
     /// names the face (server transport) and the framing cause (the cap).
     #[test]
     fn overlong_response_frame_fails_request_as_framing_error() {
-        let mut server: Vec<u8> = Vec::new();
         // One over-long line: bigger than the cap, newline-terminated so the
         // bounded reader settles on `Overlong` (not a final unterminated
         // line).
-        let mut line = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
-        line.push(b'\n');
-        server.extend_from_slice(&line);
+        let mut server = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
+        server.push(b'\n');
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let err = client.list_tools().expect_err("over-long response");
         assert!(

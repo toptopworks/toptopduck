@@ -97,6 +97,7 @@ pub struct GatewayCtx<'a> {
 /// The trace + promotions a serve collected from the bridge's tool calls
 /// (ADR-0078 cross-runtime trace contract). The turn assembler (slice 9c)
 /// merges this with the built-in loop's output shape verbatim.
+#[derive(Debug)]
 pub struct GatewayOutcome {
     pub trace: Vec<TraceEntry>,
     pub promotions: Vec<Promotion>,
@@ -928,18 +929,25 @@ mod tests {
             s.write_all(&frame).expect("send over-long frame");
             // The gateway tears the connection down: the read side sees EOF
             // (or, on a reset teardown, an error) -- either way no response
-            // bytes ever arrive for the over-long request.
+            // bytes ever arrive for the over-long request. The 5s bound is a
+            // regression guard: if the over-long arm ever reverts to
+            // drop-and-warn, no teardown ever comes and this read parks
+            // forever -- the timeout turns that into a diagnostic failure.
+            s.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set tail read timeout");
             let mut tail = String::new();
-            let n = r.read_line(&mut tail).unwrap_or(0);
-            assert_eq!(n, 0, "connection closed without a response, got {tail:?}");
+            match r.read_line(&mut tail) {
+                // Clean EOF: the teardown arrived with zero response bytes.
+                Ok(0) => {}
+                Ok(n) => panic!("connection closed without a response, got {n} bytes: {tail:?}"),
+                // A reset teardown surfaces as an error -- still no response.
+                Err(e) if e.kind() != io::ErrorKind::TimedOut => {}
+                Err(e) => panic!("no teardown in 5s -- dropped, not failed: {e}"),
+            }
         });
 
-        // `GatewayOutcome` carries no Debug (nothing asserts on it whole), so
-        // the error is extracted by hand rather than via `expect_err`.
-        let err = match serve_connection(handle, ctx, &AtomicBool::new(false)) {
-            Ok(_) => panic!("an over-long request frame must fail the serve"),
-            Err(e) => e,
-        };
+        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+            .expect_err("an over-long request frame must fail the serve");
         client.join().expect("client thread panicked");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
