@@ -547,6 +547,31 @@ fn play_scenario(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
+        // Issue #640: a runaway agent -- a flood of update lines the pump
+        // cannot fold to completion before the engine's cancel arrives. The
+        // bounded reader channel (capacity 8) backpressures the flood at the
+        // source; the turn must still resolve through the cancel (cooperative
+        // Cancelled) with the pre-cancel lines folded. The flood loop never
+        // reads stdin, so an early session/cancel simply waits in the pipe
+        // until the drain below finds it -- no write-side deadlock either way.
+        "runaway" => {
+            const RUNAWAY_LINES: u32 = 50_000;
+            for i in 0..RUNAWAY_LINES {
+                notify(out, agent_message(&format!("runaway line {i}")));
+            }
+            // This loop never produces a Success on its own: like the stuck
+            // scenario, only the engine's cancel ends it.
+            loop {
+                if *cancel_seen {
+                    respond_prompt(out, &id, StopReason::Cancelled);
+                    return;
+                }
+                if drain_once(reader, cancel_seen) {
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         "prompt_error" => {
             // The agent returns a JSON-RPC error for session/prompt (no result).
             // The engine maps it to a Transient carrying this message, NOT
