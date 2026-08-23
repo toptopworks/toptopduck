@@ -605,6 +605,72 @@ fn wall_clock_watchdog_fires_cancel_on_a_stuck_agent() {
     );
 }
 
+/// Issue #640: a runaway agent flooding update lines far faster than the pump
+/// folds them resolves through the bounded reader channel exactly as before
+/// it -- the cancel fires, the cooperative fixture answers Cancelled, and the
+/// lines consumed before the cancel are folded (backpressure throttles the
+/// flood at the source; it never changes the turn's termination or the folded
+/// trace). The cancel rides the shared token (the same token the wall-clock
+/// watchdog fires -- `wall_clock_watchdog_fires_cancel_on_a_stuck_agent` pins
+/// that firing; the pump treats both identically), gated on the pre-prompt
+/// Thinking phase instead of a blind sleep: the phase fires only once the
+/// handshake is done and the prompt is about to go out, so a slow spawn
+/// cannot make the cancel land before the flood's first lines (the watchdog
+/// itself arms at begin_turn and would race exactly that).
+#[test]
+fn runaway_output_cancel_keeps_termination_and_partial_prose() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = engine(Arc::clone(&cancel), 24);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "runaway");
+    // The flood gets a fixed 200ms fold window after the prompt goes out
+    // (the first lines land within milliseconds of it), then the token fires.
+    let (prompt_out, prompt_seen) = std::sync::mpsc::channel::<()>();
+    let mut prompt_out = Some(prompt_out);
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        let _ = prompt_seen.recv();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |p| {
+        if matches!(p, TurnPhase::Thinking { attempt: 1 }) {
+            if let Some(tx) = prompt_out.take() {
+                let _ = tx.send(());
+            }
+        }
+    });
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "cancel on a runaway agent -> Cancelled: {:?}",
+        outcome.termination
+    );
+    let texts: Vec<&str> = outcome
+        .trace
+        .iter()
+        .filter_map(|r| r.text.as_deref())
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("runaway line")),
+        "the pre-cancel flood lines are folded: {} rounds, first text len {:?}",
+        outcome.trace.len(),
+        texts.first().map(|t| t.len())
+    );
+    // Not the shared 2s bound: this turn also drains the flood's remainder
+    // after the cancel (parse-only, no fold), which a cold fixture spawn can
+    // push past 2s. The 5s bound still separates it loudly from the 10s
+    // watchdog fallback (a dead cancel thread resolves there, never here).
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "runaway_output_cancel: took {elapsed:?} -- resolved via the wall-clock \
+         watchdog, not the phase-gated cancel"
+    );
+}
+
 /// A prompt-response RPC error surfaces as a Transient carrying the agent's
 /// message, NOT "closed stdout" (the diagnostic-misdirection regression fixed
 /// alongside this fixture).
