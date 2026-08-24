@@ -44,19 +44,19 @@ struct AggregatedServer {
     tools: Vec<Value>,
 }
 
-/// One configured server's per-turn connect outcome (issue #301 slice D). The
-/// command layer snapshots the [`McpAggregator::connect_all`] results into the
-/// `SessionHandle` so `list_mcp_server_status` reads the last turn's outcome
-/// without taking the session lock (which an in-flight turn holds) -- the
-/// status IPC is lock-light on the handle. `connected: false` covers every
-/// skip path (transport connect fault, spawn fault, tools/list fault) with the
-/// reason in `error`; `connected: true` carries the live tool count the
-/// gateway advertised that turn.
+/// One configured server's per-turn connect outcome (issue #301 slice D).
+/// [`McpAggregator::connect_all`] returns one per server; the turn paths
+/// discard the slice (the per-session status IPC is retired, ADR-0106), so
+/// the outcomes pin the aggregator's integration tests + any future
+/// diagnostics. `connected: false` covers every skip path (transport connect
+/// fault, spawn fault, tools/list fault) with the reason in `error`;
+/// `connected: true` carries the live tool count the gateway advertised that
+/// turn.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConnectResult {
-    /// The server's stable id (matches [`McpServerConfig::id`] + the
-    /// SessionHandle enablement set's key). The status IPC joins this id back
-    /// to app-config for the display label, so the label is not carried here.
+    /// The server's stable id (matches [`McpServerConfig::id`]). The id is
+    /// the join key back to app-config, so the display label is not carried
+    /// here.
     pub id: McpServerId,
     /// Whether the server connected + its tools were listed. `false` for every
     /// skip path (the aggregator logs the detail; this is the boolean the UI
@@ -65,8 +65,7 @@ pub struct ConnectResult {
     /// The number of tools the server advertised (0 when not connected).
     pub tool_count: usize,
     /// The tool list the server advertised at connect (empty when not
-    /// connected). The settings page renders this in the expandable per-row
-    /// detail (issue #387).
+    /// connected), projected to [`McpToolInfo`].
     pub tools: Vec<McpToolInfo>,
     /// The skip reason when `connected: false` (`None` on success).
     pub error: Option<String>,
@@ -75,7 +74,7 @@ pub struct ConnectResult {
 /// One tool entry a connected server advertised, projected to just the fields
 /// the UI needs (issue #387). The full `{name, description, inputSchema}` entry
 /// stays in [`AggregatedServer::tools`] for gateway routing; this is the lean
-/// view for `list_mcp_server_status` + `probe_mcp_server`.
+/// view for `probe_mcp_server` + the aggregator's connect outcomes.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct McpToolInfo {
     /// The server-native tool name (no `mcp__<slug>__` prefix -- the raw name
@@ -140,11 +139,10 @@ impl McpAggregator {
 
     /// Connect + initialize one server (any transport), list its tools, and
     /// add it under a unique slug derived from its display name (issue #301
-    /// slice D + issue #389 SSE/HTTP). Returns a [`ConnectResult`] so the
-    /// caller can snapshot the per-turn outcome. A failure (connect fault,
-    /// tools/list fault) logs + skips the server -- the turn is not failed by
-    /// a misconfigured server -- and the `ConnectResult` carries `connected:
-    /// false` + the reason so the status IPC surfaces it without re-spawning.
+    /// slice D + issue #389 SSE/HTTP). A failure (connect fault, tools/list
+    /// fault) logs + skips the server -- the turn is not failed by a
+    /// misconfigured server -- and the returned [`ConnectResult`] carries
+    /// `connected: false` + the reason.
     pub fn connect_one(
         &mut self,
         config: &McpServerConfig,
@@ -215,7 +213,12 @@ impl McpAggregator {
     /// [`env`](McpServerConfig::env). A server that fails to connect is logged
     /// and skipped via [`Self::connect_one`] -- a misconfigured server does
     /// not brick the turn -- and surfaces as `connected: false` in the
-    /// returned slice.
+    /// returned slice. ADR-0106 defense-in-depth: entries with
+    /// `enabled: false` are skipped here outright -- the semantic axis is
+    /// [`LiveProviderConfig::enabled_mcp_servers`](crate::provider::LiveProviderConfig::enabled_mcp_servers),
+    /// but this guard holds the dormancy line (no connect, no spawn, no
+    /// keychain read) for any caller that hands over an unfiltered registry
+    /// snapshot.
     pub fn connect_all(
         &mut self,
         servers: &[McpServerConfig],
@@ -223,6 +226,18 @@ impl McpAggregator {
     ) -> Vec<ConnectResult> {
         servers
             .iter()
+            .filter(|server| {
+                if server.enabled {
+                    true
+                } else {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} disabled at the config level (ADR-0106); skipping",
+                        server.id
+                    );
+                    false
+                }
+            })
             .map(|server| {
                 let secrets = collect_secrets(keychain, server);
                 self.connect_one(server, &secrets)

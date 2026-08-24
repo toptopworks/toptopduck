@@ -2,10 +2,18 @@ import { useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
-import type { McpProbeResult, McpServerConfig, McpTransport } from "../../types/mcp";
+import {
+  MCP_ENABLED_PLACEHOLDER,
+  type McpProbeResult,
+  type McpServerConfig,
+  type McpTransport,
+} from "../../types/mcp";
 import { probeMcpServer, setMcpServerSecret, upsertMcpServer } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
-import { configToWebJson, normalizeJsonToConfig } from "../../lib/mcp-json-parse";
+import {
+  configToWebJson,
+  normalizeJsonToConfig,
+} from "../../lib/mcp-json-parse";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -61,12 +69,14 @@ type FormMode = "form" | "json";
  *  from `env`, secret entries (value empty — keychain is one-way) from
  *  `keychain_env_keys`. */
 function initEnvEntries(server: McpServerConfig): EnvEntry[] {
-  const entries: EnvEntry[] = Object.entries(server.env).map(([key, value]) => ({
-    id: envEntrySeq++,
-    key,
-    value,
-    isSecret: false,
-  }));
+  const entries: EnvEntry[] = Object.entries(server.env).map(
+    ([key, value]) => ({
+      id: envEntrySeq++,
+      key,
+      value,
+      isSecret: false,
+    }),
+  );
   for (const key of server.keychain_env_keys) {
     entries.push({ id: envEntrySeq++, key, value: "", isSecret: true });
   }
@@ -97,7 +107,9 @@ export function McpServerForm({
     initialServer.transport.type,
   );
   const [command, setCommand] = useState(
-    initialServer.transport.type === "stdio" ? initialServer.transport.command : "",
+    initialServer.transport.type === "stdio"
+      ? initialServer.transport.command
+      : "",
   );
   const [argsText, setArgsText] = useState(
     initialServer.transport.type === "stdio"
@@ -138,10 +150,9 @@ export function McpServerForm({
         return false;
       }
     }
-    return displayName.trim() !== "" && (
-      transportType === "stdio"
-        ? command.trim() !== ""
-        : url.trim() !== ""
+    return (
+      displayName.trim() !== "" &&
+      (transportType === "stdio" ? command.trim() !== "" : url.trim() !== "")
     );
   }, [mode, jsonText, displayName, transportType, command, url, serverId]);
 
@@ -180,6 +191,9 @@ export function McpServerForm({
         timeoutMs.trim() && !Number.isNaN(Number(timeoutMs))
           ? Number(timeoutMs)
           : null,
+      // Placeholder; handleSave owns the real value (see the ADR-0106 note
+      // there). Keeps this builder total over the McpServerConfig shape.
+      enabled: MCP_ENABLED_PLACEHOLDER,
     };
   }
 
@@ -290,6 +304,13 @@ export function McpServerForm({
     } else {
       config = buildConfigFromForm();
     }
+
+    // ADR-0106: `enabled` is owned by the settings row toggle, not this form
+    // (neither Form nor JSON mode edits it). Preserve the existing value on
+    // edit -- a disabled server stays disabled through an edit -- and save
+    // enabled for a new server (the blank add-mode initialServer carries
+    // `enabled: true`, Decision 4's explicit-intent default).
+    config = { ...config, enabled: initialServer.enabled };
 
     // In JSON mode the normalizer detects secret key names but drops their
     // values (secrets must go to the OS keychain, not config). Block save
@@ -470,27 +491,26 @@ export function McpServerForm({
           </p>
         )}
 
-        {error && <p className="settings-error text-destructive px-4 py-1.5 text-sm">{error}</p>}
+        {error && (
+          <p className="settings-error text-destructive px-4 py-1.5 text-sm">
+            {error}
+          </p>
+        )}
 
         {/* Save / Cancel */}
         <div className="flex items-center gap-2 px-4 py-3">
-          <Button type="button" disabled={!isFormValid || saving} onClick={() => void handleSave()}>
+          <Button
+            type="button"
+            disabled={!isFormValid || saving}
+            onClick={() => void handleSave()}
+          >
             {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
             {saving ? (
-              <FormattedMessage
-                id="common.saving"
-                defaultMessage="Saving…"
-              />
+              <FormattedMessage id="common.saving" defaultMessage="Saving…" />
             ) : isEdit ? (
-              <FormattedMessage
-                id="common.save"
-                defaultMessage="Save"
-              />
+              <FormattedMessage id="common.save" defaultMessage="Save" />
             ) : (
-              <FormattedMessage
-                id="common.add"
-                defaultMessage="Add"
-              />
+              <FormattedMessage id="common.add" defaultMessage="Add" />
             )}
           </Button>
           <Button
@@ -692,7 +712,10 @@ function FormView({
           className="py-2.5"
           title={(
             <Label htmlFor="mcp-url" className="text-muted-foreground">
-              <FormattedMessage id="settings.mcp.form.url" defaultMessage="URL" />
+              <FormattedMessage
+                id="settings.mcp.form.url"
+                defaultMessage="URL"
+              />
             </Label>
           )}
         >
@@ -748,20 +771,81 @@ function EnvEditor({
   // intl.formatMessage call has a literal id so the formatjs extractor finds it.
   const L = isHeaders
     ? {
-        section: intl.formatMessage({ id: "settings.mcp.form.headers", defaultMessage: "Request headers (optional)" }),
-        add: intl.formatMessage({ id: "settings.mcp.form.headersAdd", defaultMessage: "Add header" }),
-        empty: intl.formatMessage({ id: "settings.mcp.form.headersEmpty", defaultMessage: "No request headers. Click Add header to create one." }),
-        keyLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.headersKeyLabel", defaultMessage: "Header name (row {row})" }, { row }),
-        valueLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.headersValueLabel", defaultMessage: "Header value (row {row})" }, { row }),
-        removeLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.headersRemoveLabel", defaultMessage: "Remove header (row {row})" }, { row }),
+        section: intl.formatMessage({
+          id: "settings.mcp.form.headers",
+          defaultMessage: "Request headers (optional)",
+        }),
+        add: intl.formatMessage({
+          id: "settings.mcp.form.headersAdd",
+          defaultMessage: "Add header",
+        }),
+        empty: intl.formatMessage({
+          id: "settings.mcp.form.headersEmpty",
+          defaultMessage: "No request headers. Click Add header to create one.",
+        }),
+        keyLabel: (row: number) =>
+          intl.formatMessage(
+            {
+              id: "settings.mcp.form.headersKeyLabel",
+              defaultMessage: "Header name (row {row})",
+            },
+            { row },
+          ),
+        valueLabel: (row: number) =>
+          intl.formatMessage(
+            {
+              id: "settings.mcp.form.headersValueLabel",
+              defaultMessage: "Header value (row {row})",
+            },
+            { row },
+          ),
+        removeLabel: (row: number) =>
+          intl.formatMessage(
+            {
+              id: "settings.mcp.form.headersRemoveLabel",
+              defaultMessage: "Remove header (row {row})",
+            },
+            { row },
+          ),
       }
     : {
-        section: intl.formatMessage({ id: "settings.mcp.form.envVars", defaultMessage: "Environment variables (optional)" }),
-        add: intl.formatMessage({ id: "settings.mcp.form.envAdd", defaultMessage: "Add variable" }),
-        empty: intl.formatMessage({ id: "settings.mcp.form.envEmpty", defaultMessage: "No environment variables. Click Add variable to create one." }),
-        keyLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.envKeyLabel", defaultMessage: "Variable name (row {row})" }, { row }),
-        valueLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.envValueLabel", defaultMessage: "Variable value (row {row})" }, { row }),
-        removeLabel: (row: number) => intl.formatMessage({ id: "settings.mcp.form.envRemoveLabel", defaultMessage: "Remove variable (row {row})" }, { row }),
+        section: intl.formatMessage({
+          id: "settings.mcp.form.envVars",
+          defaultMessage: "Environment variables (optional)",
+        }),
+        add: intl.formatMessage({
+          id: "settings.mcp.form.envAdd",
+          defaultMessage: "Add variable",
+        }),
+        empty: intl.formatMessage({
+          id: "settings.mcp.form.envEmpty",
+          defaultMessage:
+            "No environment variables. Click Add variable to create one.",
+        }),
+        keyLabel: (row: number) =>
+          intl.formatMessage(
+            {
+              id: "settings.mcp.form.envKeyLabel",
+              defaultMessage: "Variable name (row {row})",
+            },
+            { row },
+          ),
+        valueLabel: (row: number) =>
+          intl.formatMessage(
+            {
+              id: "settings.mcp.form.envValueLabel",
+              defaultMessage: "Variable value (row {row})",
+            },
+            { row },
+          ),
+        removeLabel: (row: number) =>
+          intl.formatMessage(
+            {
+              id: "settings.mcp.form.envRemoveLabel",
+              defaultMessage: "Remove variable (row {row})",
+            },
+            { row },
+          ),
       };
 
   return (
@@ -773,7 +857,10 @@ function EnvEditor({
           onClick={handleExpand}
           className="flex w-full items-center gap-1.5 text-left"
         >
-          <ChevronRight className="text-muted-foreground size-4 shrink-0" aria-hidden />
+          <ChevronRight
+            className="text-muted-foreground size-4 shrink-0"
+            aria-hidden
+          />
           <span className="text-muted-foreground text-sm font-medium">
             {L.section}
           </span>
@@ -801,9 +888,7 @@ function EnvEditor({
           </div>
 
           {entries.length === 0 ? (
-            <p className="text-muted-foreground text-xs">
-              {L.empty}
-            </p>
+            <p className="text-muted-foreground text-xs">{L.empty}</p>
           ) : (
             <div className="space-y-1.5">
               {entries.map((entry, i) => (
@@ -819,7 +904,9 @@ function EnvEditor({
                     className="flex-1 font-mono text-xs"
                     value={entry.value}
                     onChange={(e) => onUpdate(i, { value: e.target.value })}
-                    placeholder={entry.isSecret ? "Stored in keychain" : "value"}
+                    placeholder={
+                      entry.isSecret ? "Stored in keychain" : "value"
+                    }
                     type={entry.isSecret ? "password" : "text"}
                     aria-label={L.valueLabel(i + 1)}
                   />
@@ -827,10 +914,14 @@ function EnvEditor({
                     <input
                       type="checkbox"
                       checked={entry.isSecret}
-                      onChange={(e) => onUpdate(i, { isSecret: e.target.checked })}
+                      onChange={(e) =>
+                        onUpdate(i, { isSecret: e.target.checked })}
                       className="size-3.5 cursor-pointer accent-primary"
                       aria-label={intl.formatMessage(
-                        { id: "settings.mcp.form.envSecretLabel", defaultMessage: "Secret (row {row})" },
+                        {
+                          id: "settings.mcp.form.envSecretLabel",
+                          defaultMessage: "Secret (row {row})",
+                        },
                         { row: i + 1 },
                       )}
                     />
@@ -883,7 +974,7 @@ function JsonView({
         onChange={(e) => onJsonText(e.target.value)}
         className="min-h-80 font-mono text-xs"
         spellCheck={false}
-        placeholder="{ &quot;my-mcp-server&quot;: { &quot;command&quot;: &quot;npx&quot;, &quot;args&quot;: [...] } }"
+        placeholder='{ "my-mcp-server": { "command": "npx", "args": [...] } }'
       />
       {jsonError && (
         <p className="text-destructive mt-2 text-xs">

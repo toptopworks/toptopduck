@@ -5,7 +5,12 @@ import { Plus } from "lucide-react";
 
 import { Input } from "../ui/input";
 import { TruncatingTooltip } from "./TruncatingTooltip";
-import { listMountedSkills, listSkills, mountSkill, unmountSkill } from "../../api";
+import {
+  listMountedSkills,
+  listSkills,
+  mountSkill,
+  unmountSkill,
+} from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
@@ -80,7 +85,11 @@ export function ComposerSkillsSection({
     });
   }
 
-  const { data: listing, isLoading, error: listingQueryError } = useQuery({
+  const {
+    data: listing,
+    isLoading,
+    error: listingQueryError,
+  } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,
   });
@@ -95,10 +104,7 @@ export function ComposerSkillsSection({
   });
 
   const mountedSet = useMemo(
-    () =>
-      new Set(
-        sessionId === null ? (pendingSkills ?? []) : (mounted ?? []),
-      ),
+    () => new Set(sessionId === null ? (pendingSkills ?? []) : (mounted ?? [])),
     [sessionId, pendingSkills, mounted],
   );
 
@@ -117,25 +123,20 @@ export function ComposerSkillsSection({
     });
   }
 
-  function invalidateAfterSkillMutation(name: string) {
-    clearPending(name);
-    void queryClient.invalidateQueries({
-      queryKey: sessionKeys.mcpStatus(sessionId as string),
-    });
-  }
-
   const mountMutation = useMutation({
     mutationFn: (name: string) => mountSkill(sessionId as string, name),
     onMutate: (name) => markPending(name),
     onSuccess: (_data, name) =>
-      applyMountDelta((prev) => (prev?.includes(name) ? prev : [...(prev ?? []), name])),
+      applyMountDelta((prev) =>
+        prev?.includes(name) ? prev : [...(prev ?? []), name],
+      ),
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({
         queryKey: sessionKeys.mountedSkills(sessionId as string),
       });
     },
-    onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
+    onSettled: (_d, _e, name) => clearPending(name),
   });
 
   const unmountMutation = useMutation({
@@ -149,7 +150,7 @@ export function ComposerSkillsSection({
         queryKey: sessionKeys.mountedSkills(sessionId as string),
       });
     },
-    onSettled: (_d, _e, name) => invalidateAfterSkillMutation(name),
+    onSettled: (_d, _e, name) => clearPending(name),
   });
 
   function toggle(skill: SkillEntry) {
@@ -184,7 +185,9 @@ export function ComposerSkillsSection({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const matched =
-      q === "" ? registry : registry.filter((s) => s.name.toLowerCase().includes(q));
+      q === ""
+        ? registry
+        : registry.filter((s) => s.name.toLowerCase().includes(q));
     // Pin mounted (selected) skills to the top; Array.prototype.sort is
     // stable, so the registry order is preserved within each group.
     return [...matched].sort(
@@ -194,9 +197,10 @@ export function ComposerSkillsSection({
 
   const empty = !isLoading && registry.length === 0;
   const noMatches = !empty && filtered.length === 0;
-  const displayError = error
-    ?? (listingQueryError ? fmtError(listingQueryError, intl) : null)
-    ?? (mountedQueryError ? fmtError(mountedQueryError, intl) : null);
+  const displayError =
+    error ??
+    (listingQueryError ? fmtError(listingQueryError, intl) : null) ??
+    (mountedQueryError ? fmtError(mountedQueryError, intl) : null);
 
   return (
     <div className="composer-skill-section grid gap-1.5">

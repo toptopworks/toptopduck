@@ -44,8 +44,9 @@ pub struct SkillPromptFragment {
     pub content_hash: String,
     /// The MCP server ids declared under `metadata.toptopduck_mcp_servers`
     /// (issue #369). Empty when absent or when the frontmatter YAML is
-    /// unparseable. The command layer intersects these with the globally
-    /// configured servers to derive the effective MCP enablement set.
+    /// unparseable. Declarative metadata only (ADR-0106): a declaration never
+    /// contributes to the effective MCP set -- the command layer checks the
+    /// ids against the global registry solely to warn on unknown ids.
     pub mcp_servers: Vec<String>,
 }
 

@@ -47,7 +47,23 @@ export interface McpServerConfig {
   // same shape as AppConfig.last_dir), so this field is `number | null`, NOT
   // optional. The gateway enforces the value at connect / call time.
   timeout_ms: number | null;
+  // Machine-level persistent enablement (ADR-0106). Enabled = the server
+  // enters every session's effective tool surface; disabled = dormant (no
+  // connect, no spawn, no keychain secret read, no catalog entry). Mirrors
+  // Rust `bool` + serde(default = true) -- Rust always serializes the field,
+  // so it is `boolean`, NOT optional. The settings row toggle writes it via
+  // upsertMcpServer; the edit form preserves the existing value, new/import
+  // entries default true.
+  enabled: boolean;
 }
+
+// Placeholder `enabled` for parsed / drafted configs (ADR-0106): neither JSON
+// mode nor the form edits enablement -- the settings row toggle owns the
+// field -- so parsers and the form's draft builder carry this constant and
+// the form's save overwrites it with the server's current value (an edit
+// never re-arms a disabled server). New / imported entries land enabled as
+// explicit intent (Decision 4), not via this placeholder.
+export const MCP_ENABLED_PLACEHOLDER = true;
 
 // The user-configured MCP server registry carried by AppConfig.mcp_servers
 // (issue #301). Mirrors the Rust McpServerRegistry: insertion-ordered server
@@ -55,15 +71,6 @@ export interface McpServerConfig {
 export interface McpServerRegistry {
   servers: McpServerConfig[];
 }
-
-// The enablement source for a server in this session (issue #369). Mirrors
-// the Rust McpEnabledSource adjacently-tagged enum (snake_case variants).
-// Distinguishes user-toggled from skill-declared so the "+" panel renders
-// three states: off (null) / on-user (can toggle off) / on-skill (read-only,
-// labeled "via skill <name>").
-export type McpEnabledSource =
-  | { kind: "user" }
-  | { kind: "skill"; name: string };
 
 // One tool entry a connected server advertised, projected to just the fields
 // the UI needs (issue #387). Mirrors the Rust McpToolInfo -- the server-native
@@ -73,38 +80,6 @@ export interface McpToolInfo {
   name: string;
   // The human-readable description the server reported ("" when omitted).
   description: string;
-}
-
-// One row of the per-session MCP server status (issue #301 slice D, AC#3 +
-// #369 skill sources). Mirrors the Rust McpServerStatusEntry joined at the
-// command boundary from the app-config registry + the session's effective
-// enablement set (user ∪ skill-declared ∩ configured) + the last turn's
-// connect cache. list_mcp_server_status returns one entry per CONFIGURED
-// server, enabled or not.
-export interface McpServerStatusEntry {
-  // The server's stable id (matches McpServerConfig.id).
-  id: string;
-  // The renamable display label.
-  display_name: string;
-  // Whether THIS session has the server in the EFFECTIVE enabled set -- user
-  // OR skill (issue #369). false when neither source enabled it.
-  enabled: boolean;
-  // The enablement source (issue #369): null when disabled, { kind: "user" }
-  // when user-toggled, { kind: "skill", name } when skill-declared. When both
-  // sources enable the same server, skill takes priority (v1 read-only).
-  source: McpEnabledSource | null;
-  // Whether the last turn's connect succeeded for this server (false when
-  // enabled-but-failed or not connected yet this session).
-  connected: boolean;
-  // The tool count the server advertised at the last connect (0 when not
-  // connected).
-  tool_count: number;
-  // The tool list the server advertised at the last connect (empty when not
-  // connected). The settings page renders this in the expandable per-row
-  // detail (issue #387).
-  tools: McpToolInfo[];
-  // The last connect's error message (null on success or when not attempted).
-  error: string | null;
 }
 
 // The result of a manual connection probe (issue #387). Mirrors the Rust
@@ -125,7 +100,8 @@ export type ImportSource = "claude_desktop" | "codex";
 
 // One server discovered in an external config (issue #390). Mirrors the Rust
 // DiscoveredServer. A subset of McpServerConfig without `id` (empty -- Rust
-// mints a uuid on upsert) or `timeout_ms` (defaults to null). The import
+// mints a uuid on upsert), `timeout_ms` (defaults to null), or `enabled`
+// (the import lands enabled, ADR-0106 Decision 4). The import
 // checklist renders these; the user selects entries to batch-upsert.
 export interface DiscoveredServer {
   display_name: string;

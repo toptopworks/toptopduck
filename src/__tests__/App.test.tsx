@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 import { StrictMode } from "react";
@@ -42,10 +49,6 @@ vi.mock("../api", async (importOriginal) => {
     // ADR-0059: the turn-progress listener mounts with every SessionPane.
     // Stub it (no-op unlisten) so jsdom doesn't hit the real Tauri listen.
     onTurnProgress: vi.fn(async () => () => {}),
-    // The composer "+" panel queries the per-session MCP status on mount
-    // (issue #351); no App.test flow exercises MCP, so an empty read keeps
-    // jsdom off the real invoke.
-    listMcpServerStatus: vi.fn(async () => []),
     // The composer auth-mode chip queries the session's authorization posture
     // on mount (issue #352); no App.test flow exercises the toggle, so a
     // per_call default read + no-op write keep jsdom off the real invoke.
@@ -105,15 +108,24 @@ const HEADER_MGMT_PROPS = {
 // them. The shell-level cold-start + multi-session behavior lives in
 // Shell.test.tsx. Each render gets a fresh QueryClient (ADR-0051: test renders
 // never share cache). zh-CN so the i18n'd chrome matches the assertions.
-function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test session"): void {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderPane(
+  locale: EffectiveLocale = "zh-CN",
+  sessionName = "Test session",
+): void {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   // TooltipProvider mirrors the App ancestor: the rail's turn cards carry the
   // TruncatingTooltip question recovery (ADR-0050), which crashes without the
   // provider context once a turn renders (an optimistic append or a thread
   // mock).
   const wrap = (children: ReactNode) => (
     <QueryClientProvider client={queryClient}>
-      <IntlProvider locale={locale} messages={catalogFor(locale)} defaultLocale="en-US">
+      <IntlProvider
+        locale={locale}
+        messages={catalogFor(locale)}
+        defaultLocale="en-US"
+      >
         <TooltipProvider>{children}</TooltipProvider>
       </IntlProvider>
     </QueryClientProvider>
@@ -139,7 +151,9 @@ function renderPane(locale: EffectiveLocale = "zh-CN", sessionName = "Test sessi
         pendingQuestion={null}
         onQuestionConsumed={() => {}}
         onSeedDraft={() => {}}
-        onComposerFields={(_sid, fields) => { capturedComposerFields = fields; }}
+        onComposerFields={(_sid, fields) => {
+          capturedComposerFields = fields;
+        }}
         onComposerFieldsUnmount={() => {}}
         sessionName={sessionName}
         onFirstTurnSettled={() => {}}
@@ -169,19 +183,27 @@ async function submitQuestion(question: string): Promise<void> {
 // coded string, and the same helper serves the en-US locale test.
 function verbKey(kind: SessionFlowKind): CatalogKey {
   switch (kind) {
-    case "load": return "error.verb.load";
-    case "rename": return "error.verb.rename";
-    case "replace": return "error.verb.replace";
-    case "delete": return "error.verb.delete";
-    case "privacy": return "error.verb.privacy";
-    case "ask": return "error.verb.ask";
+    case "load":
+      return "error.verb.load";
+    case "rename":
+      return "error.verb.rename";
+    case "replace":
+      return "error.verb.replace";
+    case "delete":
+      return "error.verb.delete";
+    case "privacy":
+      return "error.verb.privacy";
+    case "ask":
+      return "error.verb.ask";
     default: {
       // Exhaustiveness guard: mirrors errorVerb in lib/error-presentation/
       // app-error so a new SessionFlowKind member forces a test update here
       // too. The `default: never` throw enforces this regardless of tsconfig
       // flags.
       const unhandled: never = kind;
-      throw new Error(`unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`);
+      throw new Error(
+        `unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`,
+      );
     }
   }
 }
@@ -260,7 +282,9 @@ describe("App guided-load flow", () => {
     expect(screen.getByText(/引导加载：m/)).toBeInTheDocument();
 
     // Choose the real header (row 2) and submit -> guided ingest (AC3/AC7 seam).
-    fireEvent.change(screen.getByLabelText(/表头所在行/), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText(/表头所在行/), {
+      target: { value: "2" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /按选择加载/ }));
 
     await waitFor(() =>
@@ -268,7 +292,9 @@ describe("App guided-load flow", () => {
         { name: "people", rectify: { header_row: 2, skip_rows: [] } },
       ]),
     );
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
   });
 });
 
@@ -291,7 +317,9 @@ describe("App rename flow", () => {
 
     // Mount refresh settles, then select the dataset to show its detail.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /^people/ }));
     // The dataset's column type is shown (now in both the schema table and the
@@ -309,12 +337,16 @@ describe("App rename flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
 
     // The rename carries the stable reference name + the new display label.
-    await waitFor(() => expect(renameDataset).toHaveBeenCalledWith("sess-1", "people", "员工表"));
+    await waitFor(() =>
+      expect(renameDataset).toHaveBeenCalledWith("sess-1", "people", "员工表"),
+    );
 
     // Selection survived (keyed by reference_name): the list now shows the new
     // label, yet the same dataset's columns are still in the detail pane.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^员工表/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^员工表/ }),
+      ).toBeInTheDocument(),
     );
     expect(screen.getAllByText("BIGINT").length).toBeGreaterThan(0);
   });
@@ -327,7 +359,9 @@ describe("App rename flow", () => {
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
 
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
@@ -338,7 +372,9 @@ describe("App rename flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
 
     await waitFor(() =>
-      expect(screen.getByText(/显示名「员工表」已被其他数据集使用/)).toBeInTheDocument(),
+      expect(
+        screen.getByText(/显示名「员工表」已被其他数据集使用/),
+      ).toBeInTheDocument(),
     );
     // The rename rejection must not inherit the ingest flow's load prefix.
     expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
@@ -360,16 +396,22 @@ describe("App privacy flow", () => {
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
     // Select the dataset to reveal PrivacyControls in the detail pane.
     fireEvent.click(screen.getByRole("button", { name: /^people/ }));
 
-    vi.mocked(setDatasetPrivacy).mockRejectedValueOnce("权限不足，无法修改隐私设置");
+    vi.mocked(setDatasetPrivacy).mockRejectedValueOnce(
+      "权限不足，无法修改隐私设置",
+    );
     fireEvent.click(screen.getByLabelText(/向云端 LLM 发送样本值/));
 
     await waitFor(() =>
-      expect(screen.getByText(/权限不足，无法修改隐私设置/)).toBeInTheDocument(),
+      expect(
+        screen.getByText(/权限不足，无法修改隐私设置/),
+      ).toBeInTheDocument(),
     );
     // Positive pin on the privacy verb so a verb-swap regression (privacy/ask
     // exchanged, etc.) is caught, not just the cross-operation mismatch below.
@@ -400,7 +442,9 @@ describe("App error-prefix locale consistency (issue #139)", () => {
     renderPane("en-US");
     fireEvent.click(await screen.findByRole("tab", { name: "Working set" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
 
     vi.spyOn(window, "prompt").mockReturnValue("员工表");
@@ -413,7 +457,9 @@ describe("App error-prefix locale consistency (issue #139)", () => {
     // Both the prefix and the underlying refusal (en-US catalog
     // error.dataset.displayTaken) render in English -- locale consistent.
     await waitFor(() =>
-      expect(screen.getByText(/Rename failed: Display label/)).toBeInTheDocument(),
+      expect(
+        screen.getByText(/Rename failed: Display label/),
+      ).toBeInTheDocument(),
     );
   });
 
@@ -432,7 +478,9 @@ describe("App error-prefix locale consistency (issue #139)", () => {
     renderPane("en-US");
     fireEvent.click(await screen.findByRole("tab", { name: "Working set" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
 
     vi.spyOn(window, "prompt").mockReturnValue("renamed");
@@ -472,7 +520,14 @@ describe("App ask flow", () => {
       kind: "Materialized",
       data: {
         promotions: [
-          { dataset: { ...guidedDataset, reference_name: "result_1", row_count: 1 }, sql: "SELECT 1" },
+          {
+            dataset: {
+              ...guidedDataset,
+              reference_name: "result_1",
+              row_count: 1,
+            },
+            sql: "SELECT 1",
+          },
         ],
         viz: null,
         assumption: null,
@@ -480,12 +535,16 @@ describe("App ask flow", () => {
     });
     renderPane();
     await submitQuestion("总共几行");
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行"));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行"),
+    );
     // the materialized result pane appears (ResultView heading). The thread
     // rail also shows a result link with the same text, so target the heading
     // role to assert the workspace ResultView specifically.
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("heading", { name: /结果：result_1/ }),
+      ).toBeInTheDocument(),
     );
   });
 
@@ -511,14 +570,20 @@ describe("App ask flow", () => {
     // go UNCONSUMED here and leak into the next test's mount query.
     vi.mocked(askQuestion).mockResolvedValueOnce({
       kind: "Textual",
-      data: { text_kind: "Clarify", body: "按产品名还是客户名汇总？", assumption: null },
+      data: {
+        text_kind: "Clarify",
+        body: "按产品名还是客户名汇总？",
+        assumption: null,
+      },
     });
     await submitQuestion("哪个名字");
 
     // The clarify body is visible in the thread AND now also in the workspace
     // textual card, so assert at least one match rather than a unique one.
     await waitFor(() =>
-      expect(screen.getAllByText("按产品名还是客户名汇总？").length).toBeGreaterThan(0),
+      expect(
+        screen.getAllByText("按产品名还是客户名汇总？").length,
+      ).toBeGreaterThan(0),
     );
     // ...and no result pane opens for a non-result outcome.
     expect(screen.queryByText(/结果：result/)).not.toBeInTheDocument();
@@ -530,7 +595,9 @@ describe("App ask flow", () => {
     // alongside it (the two read as contradictory).
     renderPane();
     // The empty hint is up before any ask (the thread query settles empty).
-    await waitFor(() => expect(screen.getByText(/尚无对话/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/尚无对话/)).toBeInTheDocument(),
+    );
     vi.mocked(askQuestion).mockImplementationOnce(
       () => new Promise<TurnOutcome>(() => {}), // stays in flight
     );
@@ -541,7 +608,9 @@ describe("App ask flow", () => {
     });
     // The live card renders the asking question; the empty hint is gone.
     await waitFor(() =>
-      expect(within(document.querySelector(".session-rail")!).getByText("第一问")).toBeInTheDocument(),
+      expect(
+        within(document.querySelector(".session-rail")!).getByText("第一问"),
+      ).toBeInTheDocument(),
     );
     expect(screen.queryByText(/尚无对话/)).not.toBeInTheDocument();
   });
@@ -559,19 +628,27 @@ describe("App delete-source flow (issue #38)", () => {
     // stable reference name, then refreshes so the list no longer shows it.
     vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(removeSource).mockImplementation(async (_sid, ref) => {
-      state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
+      state.workingSet = state.workingSet.filter(
+        (d) => d.reference_name !== ref,
+      );
     });
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
 
-    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("sess-1", "people"));
+    await waitFor(() =>
+      expect(removeSource).toHaveBeenCalledWith("sess-1", "people"),
+    );
     // The refresh after the delete drops the removed source from the list.
     await waitFor(() =>
-      expect(screen.queryByRole("button", { name: /^people/ })).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("button", { name: /^people/ }),
+      ).not.toBeInTheDocument(),
     );
   });
 
@@ -586,11 +663,15 @@ describe("App delete-source flow (issue #38)", () => {
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
     await waitFor(() =>
-      expect(screen.getByText(/删源失败：找不到引用名为「people」的数据集/)).toBeInTheDocument(),
+      expect(
+        screen.getByText(/删源失败：找不到引用名为「people」的数据集/),
+      ).toBeInTheDocument(),
     );
     // No other operation's prefix is used.
     expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
@@ -598,7 +679,9 @@ describe("App delete-source flow (issue #38)", () => {
     expect(screen.queryByText(failedPrefix("replace"))).not.toBeInTheDocument();
     // A RemoveSource reject is a command reject, not a turn outcome, so the
     // ask-turn Failed card (.textual-card.failed, issue #125) must not render.
-    expect(document.querySelector(".textual-card.failed")).not.toBeInTheDocument();
+    expect(
+      document.querySelector(".textual-card.failed"),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -626,13 +709,17 @@ describe("App delete-active-source flow (issue #39)", () => {
     // silently fall back. The frontend opens a dialog (no IPC yet) collecting an
     // explicit continuation, then removeActiveSource carries both names (AC2).
     vi.mocked(removeActiveSource).mockImplementation(async (_sid, ref) => {
-      state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
+      state.workingSet = state.workingSet.filter(
+        (d) => d.reference_name !== ref,
+      );
       vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // focus moved to people
     });
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^orders/ }),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
 
@@ -649,7 +736,11 @@ describe("App delete-active-source flow (issue #39)", () => {
     // Confirm with the default-selected continuation (people).
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() =>
-      expect(removeActiveSource).toHaveBeenCalledWith("sess-1", "orders", "people"),
+      expect(removeActiveSource).toHaveBeenCalledWith(
+        "sess-1",
+        "orders",
+        "people",
+      ),
     );
     // AC2: dialog closed after the commit.
     await waitFor(() =>
@@ -663,10 +754,14 @@ describe("App delete-active-source flow (issue #39)", () => {
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^orders/ }),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
-    await waitFor(() => expect(screen.getByText(/删除焦点源/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/删除焦点源/)).toBeInTheDocument(),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "中止" }));
     await waitFor(() =>
@@ -684,18 +779,24 @@ describe("App delete-active-source flow (issue #39)", () => {
     state.workingSet = [guidedDataset];
     vi.mocked(activeDataset).mockResolvedValue(guidedDataset); // people active, last source
     vi.mocked(removeSource).mockImplementation(async (_sid, ref) => {
-      state.workingSet = state.workingSet.filter((d) => d.reference_name !== ref);
+      state.workingSet = state.workingSet.filter(
+        (d) => d.reference_name !== ref,
+      );
       vi.mocked(activeDataset).mockResolvedValue(null); // empty working set
     });
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
 
     // No continuation dialog (only one source); straight to removeSource.
-    await waitFor(() => expect(removeSource).toHaveBeenCalledWith("sess-1", "people"));
+    await waitFor(() =>
+      expect(removeSource).toHaveBeenCalledWith("sess-1", "people"),
+    );
     expect(removeActiveSource).not.toHaveBeenCalled();
     expect(screen.queryByText(/删除焦点源/)).not.toBeInTheDocument();
     // Empty working set -> the upload prompt renders.
@@ -716,18 +817,28 @@ describe("App delete-active-source flow (issue #39)", () => {
     renderPane();
     fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^orders/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /^orders/ }),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
-    await waitFor(() => expect(screen.getByText(/删除焦点源/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/删除焦点源/)).toBeInTheDocument(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() =>
-      expect(removeActiveSource).toHaveBeenCalledWith("sess-1", "orders", "people"),
+      expect(removeActiveSource).toHaveBeenCalledWith(
+        "sess-1",
+        "orders",
+        "people",
+      ),
     );
     // The typed refusal renders under the delete prefix with the locale message;
     // the dialog stays open for retry (closed inside fn, after the await).
     await waitFor(() =>
-      expect(screen.getByText(/删源失败：「ghost」不是剩余可用源之一/)).toBeInTheDocument(),
+      expect(
+        screen.getByText(/删源失败：「ghost」不是剩余可用源之一/),
+      ).toBeInTheDocument(),
     );
     expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
     expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
@@ -782,7 +893,9 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     onSeedDraft: ReturnType<typeof vi.fn>;
     rerender: (payload: PendingPayload) => void;
   } {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
     const onIngestConsumed = vi.fn();
     const onQuestionConsumed = vi.fn();
     const onSeedDraft = vi.fn();
@@ -810,12 +923,18 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     );
     const tree = (
       <QueryClientProvider client={queryClient}>
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")} defaultLocale="en-US">
+        <IntlProvider
+          locale="zh-CN"
+          messages={catalogFor("zh-CN")}
+          defaultLocale="en-US"
+        >
           <TooltipProvider>{pane}</TooltipProvider>
         </IntlProvider>
       </QueryClientProvider>
     );
-    const view = render(payload.strictMode ? <StrictMode>{tree}</StrictMode> : tree);
+    const view = render(
+      payload.strictMode ? <StrictMode>{tree}</StrictMode> : tree,
+    );
     const rerender = (next: PendingPayload) => {
       const nextPane = (
         <SessionPane
@@ -835,12 +954,18 @@ describe("SessionPane pending-payload consumption (#500)", () => {
       );
       const nextTree = (
         <QueryClientProvider client={queryClient}>
-          <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")} defaultLocale="en-US">
+          <IntlProvider
+            locale="zh-CN"
+            messages={catalogFor("zh-CN")}
+            defaultLocale="en-US"
+          >
             <TooltipProvider>{nextPane}</TooltipProvider>
           </IntlProvider>
         </QueryClientProvider>
       );
-      view.rerender(next.strictMode ? <StrictMode>{nextTree}</StrictMode> : nextTree);
+      view.rerender(
+        next.strictMode ? <StrictMode>{nextTree}</StrictMode> : nextTree,
+      );
     };
     return { onIngestConsumed, onQuestionConsumed, onSeedDraft, rerender };
   }
@@ -857,13 +982,18 @@ describe("SessionPane pending-payload consumption (#500)", () => {
   });
 
   it("ingests the pending file list BEFORE firing the pending question", async () => {
-    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    vi.mocked(ingestFile).mockResolvedValue({
+      kind: "Loaded",
+      data: loadedDataset,
+    });
     const { onIngestConsumed, onQuestionConsumed } = renderPaneWithPending({
       pendingIngestPaths: ["/x/a.csv", "/x/b.csv"],
       pendingQuestion: "how many rows?",
     });
 
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?"));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?"),
+    );
     expect(ingestFile).toHaveBeenCalledTimes(2);
     expect(ingestFile).toHaveBeenNthCalledWith(1, "sess-1", "/x/a.csv");
     expect(ingestFile).toHaveBeenNthCalledWith(2, "sess-1", "/x/b.csv");
@@ -878,14 +1008,23 @@ describe("SessionPane pending-payload consumption (#500)", () => {
 
   it("fires the pending question alone when no files are pending", async () => {
     renderPaneWithPending({ pendingQuestion: "bare question" });
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "bare question"));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "bare question"),
+    );
     expect(ingestFile).not.toHaveBeenCalled();
   });
 
   it("ingests a drop-to-create file without a question", async () => {
-    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
-    const { onIngestConsumed } = renderPaneWithPending({ pendingIngestPaths: ["/x/drop.csv"] });
-    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/drop.csv"));
+    vi.mocked(ingestFile).mockResolvedValue({
+      kind: "Loaded",
+      data: loadedDataset,
+    });
+    const { onIngestConsumed } = renderPaneWithPending({
+      pendingIngestPaths: ["/x/drop.csv"],
+    });
+    await waitFor(() =>
+      expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/drop.csv"),
+    );
     expect(onIngestConsumed).toHaveBeenCalledTimes(1);
     expect(askQuestion).not.toHaveBeenCalled();
   });
@@ -909,7 +1048,9 @@ describe("SessionPane pending-payload consumption (#500)", () => {
       pendingQuestion: "how many rows?",
     });
 
-    await waitFor(() => expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"));
+    await waitFor(() =>
+      expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"),
+    );
     expect(askQuestion).not.toHaveBeenCalled();
     // The guidance dialog owns the user's attention.
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -925,14 +1066,19 @@ describe("SessionPane pending-payload consumption (#500)", () => {
       pendingQuestion: "how many rows?",
     });
 
-    await waitFor(() => expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"));
+    await waitFor(() =>
+      expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"),
+    );
     expect(askQuestion).not.toHaveBeenCalled();
   });
 
   it("consumes each payload exactly once under React.StrictMode (dev remount)", async () => {
     // StrictMode dev double-invokes effects on mount; the payload-key dedup
     // must hold so the files ingest + the question fires exactly once.
-    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    vi.mocked(ingestFile).mockResolvedValue({
+      kind: "Loaded",
+      data: loadedDataset,
+    });
     renderPaneWithPending({
       pendingIngestPaths: ["/x/a.csv"],
       pendingQuestion: "once only",
@@ -948,13 +1094,18 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     // paths+question pair). A DIFFERENT payload on the same mounted pane must
     // produce a different key and consume again — a second drop onto an active
     // session must not be silently dropped by stale dedup.
-    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+    vi.mocked(ingestFile).mockResolvedValue({
+      kind: "Loaded",
+      data: loadedDataset,
+    });
     const { rerender, onIngestConsumed } = renderPaneWithPending({
       pendingIngestPaths: ["/x/a.csv"],
     });
 
     // First payload consumed.
-    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"));
+    await waitFor(() =>
+      expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"),
+    );
     expect(onIngestConsumed).toHaveBeenCalledTimes(1);
 
     // Simulate the shell clearing the prop then a new drop landing.
@@ -962,7 +1113,9 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     rerender({ pendingIngestPaths: ["/x/b.csv"] });
 
     // Second distinct payload consumed again — not blocked by stale dedup.
-    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/b.csv"));
+    await waitFor(() =>
+      expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/b.csv"),
+    );
     expect(onIngestConsumed).toHaveBeenCalledTimes(2);
     expect(ingestFile).toHaveBeenCalledTimes(2);
   });

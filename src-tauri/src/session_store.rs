@@ -40,15 +40,12 @@
 //!   `InFlight` / `Engine` instead of merging them into one `Err(String)`.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::approval::SharedApprovalState;
 use crate::cancel::CancelToken;
-use crate::mcp::aggregator::ConnectResult;
-use crate::mcp::config::McpServerId;
 use crate::provider::Provider;
 use crate::runtime::acp::adapter::AdapterSpec;
 use crate::session::{PosturePair, Session};
@@ -288,21 +285,6 @@ pub struct SessionHandle {
     /// session lock. Allocated once at [`SessionStore::create`]; reset on
     /// resume via [`Self::reset_approval`].
     approval: SharedApprovalState,
-    /// Issue #301 slice D: the per-session enabled-server set (server
-    /// granularity, AC#3). A whitelist -- only servers whose id is in this set
-    /// are connected at turn top. Default-empty (ADR-0080 lineage: a freshly
-    /// created session enables nothing until the user explicitly toggles a
-    /// server on, mirroring how trust starts empty + the user explicitly
-    /// grants "always allow"); reset on resume via
-    /// [`Self::reset_mcp_enablement`].
-    enabled_mcp: Mutex<HashSet<McpServerId>>,
-    /// Issue #301 slice D: the cached per-server connect outcomes from the
-    /// last turn's `connect_all`. Snapshotted from the Session after each turn
-    /// (`Session::last_mcp_connect`) so `list_mcp_server_status` reads the
-    /// last turn's outcome without taking the session lock an in-flight turn
-    /// holds. Empty until the first turn + reset on resume alongside the
-    /// enablement set (the Session is fresh, no connect has run yet).
-    last_mcp_connect: Mutex<Vec<ConnectResult>>,
     /// The next segment's runtime choice + model posture pair, ONE mutex
     /// slot (issue #600) -- the runtime selector (issue #353,
     /// ADR-0076/0081/0083: `None` drives the built-in BYOK agent loop, the
@@ -321,7 +303,7 @@ pub struct SessionHandle {
     /// restore call; the runtime choice is restored from the recipe-header
     /// `last_runtime` (ADR-0102 Decision 1, issue #589 -- segment
     /// continuation; the runtime is execution-plane session state, so unlike
-    /// the approval / MCP posture it survives a resume as the session's own
+    /// the approval posture it survives a resume as the session's own
     /// last runtime).
     runtime_posture: Mutex<RuntimePosture>,
     /// ADR-0095: the cached discovered model / thought-level catalog from the
@@ -329,14 +311,6 @@ pub struct SessionHandle {
     /// session open / resume cold-start (before any turn re-discovers). None
     /// until the first ACP turn; persisted alongside the two selections.
     cached_discovered: Mutex<Option<crate::runtime::acp::adapter::DiscoveredRuntime>>,
-    /// Issue #369: a snapshot of the session's mounted-skill names, mirrored
-    /// from `Session::mounted_skills()` on mount/unmount (and inside `ask`).
-    /// Lets `list_mcp_server_status` resolve skill-declared MCP servers without
-    /// taking the session lock an in-flight turn holds -- the same lock-light
-    /// pattern as `enabled_mcp` + `last_mcp_connect`. Reset to empty on resume
-    /// alongside the MCP enablement set; the first post-resume `ask` repopulates
-    /// it from the replayed recipe.
-    mounted_skills_snapshot: Mutex<Vec<String>>,
 }
 
 impl SessionHandle {
@@ -461,111 +435,6 @@ impl SessionHandle {
     /// (they are not in the recipe / app-config).
     pub fn reset_approval(&self) {
         self.approval.reset();
-    }
-
-    // --- MCP server-granularity enablement (issue #301 slice D, AC#3) -------
-    //
-    // A per-session WHITELIST of connected external MCP servers. Default-empty
-    // (a fresh session enables nothing until the user explicitly toggles a
-    // server on -- the same ADR-0080 lineage as the tool-level trust set, scaled
-    // to server granularity: an explicit user action widens the surface, never
-    // a silent default). The status IPC joins app-config (the full server
-    // registry) with this set + the last turn's connect cache so the UI shows
-    // every configured server, its on/off state, and its last connect outcome
-    // + tool count.
-
-    /// The enabled-server ids for this session (issue #301 slice D, AC#3).
-    /// `ask` reads this per turn to filter the configured server list down to
-    /// the servers the user actually enabled this session.
-    pub fn enabled_mcp_servers(&self) -> Vec<McpServerId> {
-        self.enabled_mcp
-            .lock()
-            .expect("enabled_mcp lock poisoned")
-            .iter()
-            .cloned()
-            .collect()
-    }
-
-    /// Toggle one server's enabled state for this session (issue #301 slice D,
-    /// AC#3). `enabled = true` inserts (idempotent); `enabled = false` removes
-    /// (idempotent). The next turn's `connect_all` reflects the change --
-    /// per-turn spawn (ADR-0076 Q2) means no live connection to tear down.
-    pub fn set_mcp_enabled(&self, id: McpServerId, enabled: bool) {
-        let mut guard = self.enabled_mcp.lock().expect("enabled_mcp lock poisoned");
-        if enabled {
-            guard.insert(id);
-        } else {
-            guard.remove(&id);
-        }
-    }
-
-    /// Reset the enabled set + connect cache to the default (issue #301 slice
-    /// D, AC#3). Called by `open_duck` after a successful resume alongside
-    /// [`Self::reset_approval`] -- the enablement is session-level and must
-    /// not survive a resume (it is not in the recipe / app-config, same
-    /// reasoning as the approval posture). Issue #369: also clears the
-    /// mounted-skills snapshot so `list_mcp_server_status` does not surface
-    /// stale skill-declared servers before the first post-resume turn
-    /// repopulates it.
-    pub fn reset_mcp_enablement(&self) {
-        self.enabled_mcp
-            .lock()
-            .expect("enabled_mcp lock poisoned")
-            .clear();
-        self.last_mcp_connect
-            .lock()
-            .expect("last_mcp_connect lock poisoned")
-            .clear();
-        self.mounted_skills_snapshot
-            .lock()
-            .expect("mounted_skills_snapshot lock poisoned")
-            .clear();
-    }
-
-    /// A snapshot of the last turn's per-server connect outcomes (issue #301
-    /// slice D). `ask` mirrors the Session's post-turn cache here so
-    /// `list_mcp_server_status` is lock-light (it never takes the session
-    /// lock, which an in-flight turn holds). Empty until the first turn + after
-    /// a resume.
-    pub fn last_mcp_connect(&self) -> Vec<ConnectResult> {
-        self.last_mcp_connect
-            .lock()
-            .expect("last_mcp_connect lock poisoned")
-            .clone()
-    }
-
-    /// Mirror the Session's last-turn connect outcomes into the handle (issue
-    /// #301 slice D). Called by `ask` after a turn finishes -- the Session is
-    /// still locked at that point, but this write only touches the handle's
-    /// own Mutex (no session-lock re-entry).
-    pub fn set_last_mcp_connect(&self, results: Vec<ConnectResult>) {
-        *self
-            .last_mcp_connect
-            .lock()
-            .expect("last_mcp_connect lock poisoned") = results;
-    }
-
-    /// A snapshot of the session's mounted-skill names (issue #369). Mirrored
-    /// from `Session::mounted_skills()` on mount/unmount and inside `ask`, so
-    /// `list_mcp_server_status` can resolve skill-declared MCP servers without
-    /// taking the session lock an in-flight turn holds. Empty until the first
-    /// mount and after a resume (the first post-resume `ask` repopulates).
-    pub fn mounted_skills_snapshot(&self) -> Vec<String> {
-        self.mounted_skills_snapshot
-            .lock()
-            .expect("mounted_skills_snapshot lock poisoned")
-            .clone()
-    }
-
-    /// Mirror the session's mounted-skill set into the handle (issue #369).
-    /// Called by `mount_skill`/`unmount_skill` (session lock held) and `ask`
-    /// (session lock held) so the snapshot stays current. Lock-light: touches
-    /// only the handle's own Mutex, no session-lock re-entry.
-    pub fn set_mounted_skills_snapshot(&self, names: Vec<String>) {
-        *self
-            .mounted_skills_snapshot
-            .lock()
-            .expect("mounted_skills_snapshot lock poisoned") = names;
     }
 
     // --- Runtime + posture slot (issue #353, ADR-0076/0081/0083) ------------
@@ -712,8 +581,8 @@ impl SessionHandle {
     }
 
     /// Restore the persisted ADR-0095 trio from the resumed recipe
-    /// (open_duck). Unlike the reset-to-default lineage (`reset_approval` /
-    /// `reset_mcp_enablement`), the model + thought-level pair + the
+    /// (open_duck). Unlike the reset-to-default lineage (`reset_approval`),
+    /// the model + thought-level pair + the
     /// discovery cache SURVIVE a resume -- ADR-0095 Decision 6: losing the
     /// model selection is an unexpected degradation of the resume promise
     /// (the runtime choice survives the same way since ADR-0102 Decision 2,
@@ -789,14 +658,11 @@ impl SessionStore {
             // PerCall mode + an empty trust set. Reset on resume
             // (SessionHandle::reset_approval via open_duck).
             approval: Arc::new(crate::approval::ApprovalState::new()),
-            enabled_mcp: Mutex::new(HashSet::new()),
-            last_mcp_connect: Mutex::new(Vec::new()),
             // Issue #353: the built-in runtime is the honest default (ADR-0081);
             // an external CLI is an explicit per-session pick, restored on
             // resume from the recipe header (ADR-0102).
             runtime_posture: Mutex::new(RuntimePosture::default()),
             cached_discovered: Mutex::new(None),
-            mounted_skills_snapshot: Mutex::new(Vec::new()),
         });
         // Generate the id only after the resource exists; insert under the
         // write lock; return the id only after the insert lands.
@@ -1087,75 +953,6 @@ mod tests {
         // A second mark is a harmless no-op (already closing).
         handle.mark_closing();
         assert!(handle.is_closing());
-    }
-
-    /// `SessionHandle::set_mcp_enabled` toggles server-granularity enablement
-    /// (issue #301 slice D, AC#3): a fresh session enables nothing, toggle-on
-    /// inserts, toggle-off removes (both idempotent), and reset_mcp_enablement
-    /// returns the set to empty + clears the connect cache. The whole
-    /// lifecycle is lock-light on the handle -- no session lock taken.
-    #[test]
-    fn mcp_enablement_toggles_idempotently_and_resets() {
-        let store = SessionStore::new();
-        let id = store
-            .create(
-                Arc::new(CancelToken::new()),
-                Box::new(crate::UnwiredProvider),
-            )
-            .expect("create session");
-        let handle = store.get(&id).expect("handle");
-        let srv_a = McpServerId("srv-a".into());
-        let srv_b = McpServerId("srv-b".into());
-
-        // Fresh session: empty whitelist (ADR-0080 lineage, default-strict -- a
-        // configured server does not connect until the user toggles it on).
-        assert!(
-            handle.enabled_mcp_servers().is_empty(),
-            "fresh session enables no MCP server"
-        );
-
-        // Toggle on is idempotent + observable.
-        handle.set_mcp_enabled(srv_a.clone(), true);
-        handle.set_mcp_enabled(srv_a.clone(), true);
-        let enabled = handle.enabled_mcp_servers();
-        assert_eq!(enabled.len(), 1, "duplicate toggle-on is idempotent");
-        assert!(enabled.contains(&srv_a), "srv_a is enabled");
-
-        // A second server toggles on independently.
-        handle.set_mcp_enabled(srv_b.clone(), true);
-        assert_eq!(
-            handle.enabled_mcp_servers().len(),
-            2,
-            "two distinct servers coexist"
-        );
-
-        // Toggle off is idempotent + removes only the target.
-        handle.set_mcp_enabled(srv_a.clone(), false);
-        handle.set_mcp_enabled(srv_a.clone(), false);
-        let enabled = handle.enabled_mcp_servers();
-        assert_eq!(enabled.len(), 1, "duplicate toggle-off is idempotent");
-        assert!(
-            enabled.contains(&srv_b),
-            "srv_b stays enabled when srv_a is toggled off"
-        );
-
-        // Reset clears the set + the connect cache (resume resets it, AC#3).
-        handle.set_last_mcp_connect(vec![ConnectResult {
-            id: srv_b.clone(),
-            connected: true,
-            tool_count: 3,
-            tools: Vec::new(),
-            error: None,
-        }]);
-        handle.reset_mcp_enablement();
-        assert!(
-            handle.enabled_mcp_servers().is_empty(),
-            "reset clears the enablement set"
-        );
-        assert!(
-            handle.last_mcp_connect().is_empty(),
-            "reset clears the connect cache alongside the enablement set"
-        );
     }
 
     /// `fire_cancel` wakes a gate blocked on the approval condvar (not just

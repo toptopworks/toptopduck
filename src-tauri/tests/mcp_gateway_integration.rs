@@ -35,6 +35,7 @@ fn fake_config(id: &str, display: &str) -> McpServerConfig {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     }
 }
 
@@ -142,6 +143,7 @@ fn connect_all_skips_a_server_that_fails_to_spawn_without_bricking_others() {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     };
     agg.connect_all(&[bad, good], &keychain);
     let names = tool_names(&agg);
@@ -192,6 +194,7 @@ fn connect_one_injects_secrets_into_the_child_env() {
         env: BTreeMap::new(),
         keychain_env_keys: vec!["TOPTOPDUCK_TEST_MCP_SECRET".into()],
         timeout_ms: None,
+        enabled: true,
     };
     let mut agg = McpAggregator::empty();
     agg.connect_one(&config, &secrets);
@@ -236,12 +239,11 @@ fn connect_one_injects_secrets_into_the_child_env() {
 
 #[test]
 fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
-    // The per-server ConnectResult (issue #301 slice D) is the source of truth
-    // for list_mcp_server_status: a return-shape regression would silently
-    // break the status IPC. This pins the shape for the three reachable return
-    // paths in connect_one -- success, stdio spawn failure, and HTTP transport
-    // failure (issue #389: SSE/HTTP now attempt to connect instead of being
-    // rejected upfront as "unsupported transport").
+    // The per-server ConnectResult (issue #301 slice D) pins the shape for
+    // the three reachable return paths in connect_one -- success, stdio spawn
+    // failure, and HTTP transport failure (issue #389: SSE/HTTP now attempt
+    // to connect instead of being rejected upfront as "unsupported
+    // transport").
     // (The fourth path, tools/list failure, needs a fixture that corrupts
     // tools/list; its construction site is byte-identical to the other two
     // skip paths and is shape-covered by them.)
@@ -254,6 +256,7 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     };
     let http_fail = McpServerConfig {
         id: McpServerId("http-fail".into()),
@@ -264,6 +267,7 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     };
     let good = fake_config("good", "Good");
 
@@ -710,6 +714,7 @@ fn http_transport_aggregator_connect_and_route() {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     };
     let keychain = KeychainStore::new();
     let mut agg = McpAggregator::empty();
@@ -817,6 +822,7 @@ fn sse_transport_aggregator_connect_and_route() {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     };
     let keychain = KeychainStore::new();
     let mut agg = McpAggregator::empty();

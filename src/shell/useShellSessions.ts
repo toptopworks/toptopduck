@@ -24,7 +24,10 @@
 // ingests per single drop.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { IntlShape } from "react-intl";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import {
+  open as openDialog,
+  save as saveDialog,
+} from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
 import type { CreateSessionReply, SetPosturePersistOutcome } from "../api";
@@ -44,7 +47,6 @@ import {
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
-  toggleMcpServer,
 } from "../api";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
@@ -60,8 +62,9 @@ import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
  *  existed (ADR-0092 Decision 6, issue #500). The shell applies it to a
  *  freshly minted session BEFORE registering it open, so the SessionPane's
  *  pendingQuestion / pendingIngestPaths consumption on mount runs under the
- *  chosen runtime + authorization mode with the picked skills mounted + MCP
- *  servers enabled. authMode defaults to the backend default and a field
+ *  chosen runtime + authorization mode with the picked skills mounted (MCP
+ *  servers are config-level enablement since ADR-0106 -- nothing to apply
+ *  per session). authMode defaults to the backend default and a field
  *  still at that default skips its IPC (nothing to apply); runtime's unset
  *  marker is null for the same skip (issue #572: the backend's own
  *  create_session resolution already started the session on the resolved
@@ -70,8 +73,8 @@ import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
  *  same null-sentinel shape (ADR-0099/0100, issue #574): null = untouched
  *  (the backend's create_session startup backfill applies); a non-null pair
  *  is EXPLICIT -- null fields are real clears -- and lands via the two model
- *  set IPCs. The two lists are empty by default; each entry lands one mount /
- *  enable IPC. */
+ *  set IPCs. The skills list is empty by default; each entry lands one mount
+ *  IPC. */
 export interface PendingComposerPosture {
   runtime: SessionRuntimeChoice | null;
   authMode: AuthMode;
@@ -82,11 +85,6 @@ export interface PendingComposerPosture {
   /** Skill spec names picked on the cold-start Skills trigger (draft mode,
    *  #500): mounted onto the minted session one by one, in pick order. */
   skills: string[];
-  /** MCP server ids picked on the cold-start MCP trigger (draft mode, #500):
-   *  enabled onto the minted session one by one. Applied AFTER the skills so
-   *  a server both a picked skill declares and the user picked lands in the
-   *  session's enabled set either way. */
-  mcpServers: string[];
 }
 
 /** Resume / open-busy status (ADR-0034). A structured discriminated union, not
@@ -145,8 +143,8 @@ export function useShellSessions({
   /** ADR-0092 (#500): create a session from a cold-start bar submit, carrying
    *  the question as pendingQuestion + the picked files as pendingIngestPaths
    *  for the new SessionPane to consume on mount (files ingest BEFORE the
-   *  question fires). The posture (runtime + auth mode + skills + MCP servers
-   *  picked on the centered bar's draft-mode controls) is applied before the
+   *  question fires). The posture (runtime + auth mode + skills picked on the
+   *  centered bar's draft-mode controls) is applied before the
    *  pane mounts so the FIRST turn runs under it. `pendingFiles` may be empty
    *  (a bare question submit). Resolves true when the session was created (the
    *  shell resets its pending state); false when createSession rejected (the
@@ -168,7 +166,11 @@ export function useShellSessions({
   clearPendingQuestion: (sid: string) => void;
   closeOpen: (sid: string) => Promise<void>;
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
-  renameEntry: (sid: string | null, path: string, newName: string) => Promise<void>;
+  renameEntry: (
+    sid: string | null,
+    path: string,
+    newName: string,
+  ) => Promise<void>;
   handleOpenDuck: () => Promise<void>;
   /** Export a copy of the session directory to a user-chosen location
    *  (ADR-0089 Decision 5, issue #449). Opens a save dialog, then calls the
@@ -221,9 +223,9 @@ export function useShellSessions({
         // a stale sid falls back to the first remaining entry (then null).
         const activeId =
           next.activeId !== null
-            ? (next.sessions.some((s) => s.sid === next.activeId)
-                ? next.activeId
-                : (next.sessions[0]?.sid ?? null))
+            ? next.sessions.some((s) => s.sid === next.activeId)
+              ? next.activeId
+              : (next.sessions[0]?.sid ?? null)
             : null;
         return { sessions: next.sessions, activeId };
       });
@@ -241,7 +243,10 @@ export function useShellSessions({
   // activate paths that can actually invalidate activeId.
   const mapSessions = useCallback(
     (fn: (prev: OpenSession[]) => OpenSession[]): void => {
-      setState((prev) => ({ sessions: fn(prev.sessions), activeId: prev.activeId }));
+      setState((prev) => ({
+        sessions: fn(prev.sessions),
+        activeId: prev.activeId,
+      }));
     },
     [],
   );
@@ -307,9 +312,9 @@ export function useShellSessions({
   // registerOpen so the pane mounts (and consumes pendingIngestPaths /
   // pendingQuestion) only after the session carries the user's picks — the
   // first turn runs on the chosen runtime + auth mode with the picked skills
-  // mounted + MCP servers enabled. Skills mount BEFORE the MCP enables so a
-  // server both a picked skill declares and the user picked is enabled either
-  // way. A rejected posture write is logged and skipped (the session opens on
+  // mounted (MCP servers are config-level enablement since ADR-0106 -- no
+  // per-session enable step). A rejected posture write is logged and skipped
+  // (the session opens on
   // the backend default for that facet; the picker's keep-server-posture
   // semantics) instead of failing the whole creation. A rejected write also
   // surfaces via setShellError so the user is informed their picker selection
@@ -427,13 +432,10 @@ export function useShellSessions({
             );
           }
           for (const name of posture.skills) {
-            await applyPostureWrite(() => mountSkill(sid, name), "skill mount", name);
-          }
-          for (const serverId of posture.mcpServers) {
             await applyPostureWrite(
-              () => toggleMcpServer(sid, serverId, true),
-              "MCP enable",
-              serverId,
+              () => mountSkill(sid, name),
+              "skill mount",
+              name,
             );
           }
         }
@@ -518,7 +520,10 @@ export function useShellSessions({
         // routes to that session's ingest wherever it lands (AC: the
         // per-session drop path is unchanged).
         if (position !== undefined && isPointOverComposerBar(position)) {
-          log.debug("useShellSessions", "drop swallowed: landed on composer bar");
+          log.debug(
+            "useShellSessions",
+            "drop swallowed: landed on composer bar",
+          );
           return;
         }
         void dropFile(path);
@@ -577,7 +582,9 @@ export function useShellSessions({
   const clearPendingQuestion = useCallback(
     (sid: string) => {
       mapSessions((sessions) =>
-        sessions.map((o) => (o.sid === sid ? { ...o, pendingQuestion: null } : o)),
+        sessions.map((o) =>
+          o.sid === sid ? { ...o, pendingQuestion: null } : o,
+        ),
       );
     },
     [mapSessions],
@@ -589,10 +596,7 @@ export function useShellSessions({
   // id + returns the duck path to resume from, and this helper handles the
   // resume-progress listener, openDuck call, registerOpen, and error cleanup.
   const resumeIntoNewSession = useCallback(
-    async (
-      prepare: () => Promise<CreateSessionReply>,
-      name: string,
-    ) => {
+    async (prepare: () => Promise<CreateSessionReply>, name: string) => {
       setResumeStatus({ kind: "opening" });
       // ADR-0056 / issue #76: resume-progress is a global Tauri broadcast keyed
       // by session_id. The listener registers BEFORE the prepare step mints the
@@ -638,7 +642,13 @@ export function useShellSessions({
         targetSid = sid;
         await openDuck(sid, duck_path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
-        registerOpen({ sid, name, path: duck_path, pendingIngestPaths: [], pendingQuestion: null });
+        registerOpen({
+          sid,
+          name,
+          path: duck_path,
+          pendingIngestPaths: [],
+          pendingQuestion: null,
+        });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
         // C2: if the prepare step succeeded but openDuck failed, the just-minted
@@ -675,13 +685,10 @@ export function useShellSessions({
       // sessions/{new_uuid}/session.duck. The resume target is the EXISTING
       // file at `path` (a prior session's duck), not the freshly-created empty
       // one — so override duck_path with the existing path.
-      await resumeIntoNewSession(
-        async () => {
-          const { session_id } = await createSession();
-          return { session_id, duck_path: path };
-        },
-        name,
-      );
+      await resumeIntoNewSession(async () => {
+        const { session_id } = await createSession();
+        return { session_id, duck_path: path };
+      }, name);
     },
     [openSessions, apply, resumeIntoNewSession],
   );
@@ -773,7 +780,11 @@ export function useShellSessions({
             "kind" in e &&
             e.kind === "NotFound"
           ) {
-            log.debug("closeSession", "background close: session already gone", sid);
+            log.debug(
+              "closeSession",
+              "background close: session already gone",
+              sid,
+            );
             return;
           }
           const kind =
@@ -878,7 +889,10 @@ export function useShellSessions({
       const path = typeof selected === "string" ? selected : null;
       if (!path) return;
       const stem =
-        path.split(/[\\/]/).pop()?.replace(/\.duck$/i, "") ?? "session";
+        path
+          .split(/[\\/]/)
+          .pop()
+          ?.replace(/\.duck$/i, "") ?? "session";
       await importAndOpen(path, stem);
       refreshSessions();
     } catch (e) {
@@ -925,7 +939,11 @@ export function useShellSessions({
       } catch (e) {
         // Best-effort: a failure here means the sidebar/header keep the old
         // name until the next refresh. The session itself is unaffected.
-        log.warn("syncSessionName", "failed to sync auto-named session", fmtError(e, intl));
+        log.warn(
+          "syncSessionName",
+          "failed to sync auto-named session",
+          fmtError(e, intl),
+        );
       }
       refreshSessions();
     },

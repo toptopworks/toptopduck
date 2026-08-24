@@ -283,11 +283,26 @@ impl LiveProviderConfig {
         crate::mcp::secrets::clear_mcp_secret(&self.keychain, id, env_key)
     }
 
-    /// Read-only snapshot of the configured MCP servers (issue #301 slice
-    /// C-gw). The gateway reads this per external turn to connect each
-    /// configured server; the clone is cheap (a Vec of small config structs).
+    /// Read-only snapshot of the configured registry (issue #301 slice
+    /// C-gw): every server, enabled or not (the settings list renders the
+    /// disabled rows too). The turn's effective set is the filtered
+    /// [`Self::enabled_mcp_servers`]; the clone is cheap (a Vec of small
+    /// config structs).
     pub fn mcp_servers(&self) -> Vec<McpServerConfig> {
         self.load().mcp_servers.servers.clone()
+    }
+
+    /// ADR-0106: the effective MCP set -- the configured servers whose
+    /// config-level `enabled` flag is on. Single-axis by decision: no
+    /// per-session or skill-declared contribution exists, and disabled means
+    /// dormant (no connect, no child spawn, no keychain secret read, no
+    /// catalog entry). `ask` feeds exactly this slice to the turn's
+    /// aggregator, so a disabled server never reaches `connect_all`.
+    pub fn enabled_mcp_servers(&self) -> Vec<McpServerConfig> {
+        self.mcp_servers()
+            .into_iter()
+            .filter(|srv| srv.enabled)
+            .collect()
     }
 
     /// Borrow the OS keychain (ADR-0029). The gateway reads each server's
@@ -1160,6 +1175,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
 
         live.upsert_mcp_server(server)
@@ -1269,6 +1285,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = live.upsert_mcp_server(incoming).expect("upsert");
         assert_ne!(stored.id.as_str(), "");
@@ -1276,6 +1293,126 @@ mod tests {
         let reloaded = live.load();
         assert_eq!(reloaded.mcp_servers.servers.len(), 1);
         assert_eq!(reloaded.mcp_servers.servers[0].id, stored.id);
+    }
+
+    #[test]
+    fn enabled_mcp_servers_is_the_config_level_axis_alone() {
+        // ADR-0106: the effective set is the config-level `enabled` flag --
+        // no per-session or skill-declared contribution exists. A disabled
+        // server is absent from the slice `ask` feeds the aggregator, so it
+        // never connects (no spawn, no keychain read); the registry itself
+        // still lists it (the settings row renders it, toggled off).
+        let (_dir, live) = live();
+        let make = |id: &str, enabled: bool| McpServerConfig {
+            id: McpServerId(id.into()),
+            display_name: id.into(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms: None,
+            enabled,
+        };
+        live.upsert_mcp_server(make("on-a", true))
+            .expect("upsert on-a");
+        live.upsert_mcp_server(make("off-b", false))
+            .expect("upsert off-b");
+        live.upsert_mcp_server(make("on-c", true))
+            .expect("upsert on-c");
+
+        let registry = live.mcp_servers();
+        assert_eq!(
+            registry.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["on-a", "off-b", "on-c"],
+            "the registry lists every configured server, enabled or not"
+        );
+
+        let effective = live.enabled_mcp_servers();
+        assert_eq!(
+            effective.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["on-a", "on-c"],
+            "only config-enabled servers reach the turn's aggregator"
+        );
+    }
+
+    #[test]
+    fn disabled_server_never_attempted_at_turn_assembly() {
+        // #656 AC3: a disabled server is dormant at turn assembly -- no child
+        // spawn, no keychain secret read. Composed over the real ask chain
+        // (`enabled_mcp_servers` -> `connect_all`): both servers carry a
+        // command that does not exist, so ANY connect attempt surfaces as a
+        // `connected: false` ConnectResult row. The enabled one supplies the
+        // contrast (attempted -> row, failed); the disabled one's ABSENCE
+        // from the results proves the attempt -- and the keychain read that
+        // precedes spawn injection -- never happened.
+        let (_dir, live) = live();
+        let make = |id: &str, enabled: bool| McpServerConfig {
+            id: McpServerId(id.into()),
+            display_name: id.into(),
+            transport: McpTransport::stdio("/bin/toptopduck-definitely-not-a-command", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: if enabled {
+                Vec::new()
+            } else {
+                vec!["API_KEY".into()]
+            },
+            timeout_ms: None,
+            enabled,
+        };
+        live.upsert_mcp_server(make("on-a", true))
+            .expect("upsert on-a");
+        live.upsert_mcp_server(make("off-b", false))
+            .expect("upsert off-b");
+
+        let mut agg = crate::mcp::aggregator::McpAggregator::empty();
+        let results = agg.connect_all(&live.enabled_mcp_servers(), live.keychain());
+        assert_eq!(
+            results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["on-a"],
+            "only the enabled server was attempted (off-b never spawned)"
+        );
+        assert!(!results[0].connected, "the bogus command fails when tried");
+    }
+
+    #[test]
+    fn connect_all_skips_disabled_entries_even_when_passed_unfiltered() {
+        // ADR-0106: the dormancy line holds at the chokepoint too. The
+        // semantic axis is `enabled_mcp_servers` (see the tests above), but
+        // `connect_all` itself guards: a caller handing over an unfiltered
+        // registry snapshot -- the shape a future consumer like #657's
+        // meta-tool surface could produce -- still gets disabled servers
+        // skipped (no spawn, no keychain read). Same bogus-command contrast:
+        // the enabled server surfaces as a failed row; the disabled one is
+        // absent.
+        let (_dir, live) = live();
+        let make = |id: &str, enabled: bool| McpServerConfig {
+            id: McpServerId(id.into()),
+            display_name: id.into(),
+            transport: McpTransport::stdio("/bin/toptopduck-definitely-not-a-command", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: if enabled {
+                Vec::new()
+            } else {
+                vec!["API_KEY".into()]
+            },
+            timeout_ms: None,
+            enabled,
+        };
+        live.upsert_mcp_server(make("on-a", true))
+            .expect("upsert on-a");
+        live.upsert_mcp_server(make("off-b", false))
+            .expect("upsert off-b");
+
+        let mut agg = crate::mcp::aggregator::McpAggregator::empty();
+        // Deliberately UNFILTERED: the full registry snapshot, not
+        // `enabled_mcp_servers()` -- the guard is what stands between it and
+        // the spawn/keychain effects.
+        let results = agg.connect_all(&live.mcp_servers(), live.keychain());
+        assert_eq!(
+            results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["on-a"],
+            "the guard skips the disabled entry even in an unfiltered slice"
+        );
+        assert!(!results[0].connected, "the bogus command fails when tried");
     }
 
     #[test]
@@ -1289,6 +1426,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         live.upsert_mcp_server(first).expect("first upsert");
         let updated = McpServerConfig {
@@ -1298,6 +1436,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         live.upsert_mcp_server(updated).expect("second upsert");
         let reloaded = live.load();
@@ -1318,6 +1457,7 @@ mod tests {
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
                 timeout_ms: None,
+                enabled: true,
             })
             .expect("upsert");
         live.remove_mcp_server(&stored.id).expect("remove");
@@ -1350,6 +1490,7 @@ mod tests {
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
                     timeout_ms: None,
+                    enabled: true,
                 };
                 thread::spawn(move || live.upsert_mcp_server(server).expect("upsert").id)
             })

@@ -78,7 +78,7 @@ _Avoid_: 运行时会话(runtime session)——运行时无状态，无会话可
 _Avoid_: 默认模型(default model)——那是未选择态下 CLI 自身的默认行为；推荐模型(recommended)；预设(preset)
 
 **网关 (Gateway)**:
-运行时访问工具面的唯一聚合接入点：装配工具表（内置 DuckDB 工具 + 用户配置的外部 MCP 服务器 + 技能声明的工具），并在此强制分级审批（ADR-0080）、审计、物化命名（ADR-0077）。内置运行时在 app 进程内直接经网关路由；外部运行时经**桥接**回连网关。网关是强制边界——运行时绕过网关直连工具，则审批/审计/物化皆不可强制。
+运行时访问工具面的唯一聚合接入点：装配工具面——内置 DuckDB 工具直列，启用服务器的外部 MCP 工具经固定发现面按需可见（agent 搜索目录、按句柄调用；见 ADR-0105/0106），并在此强制分级审批（ADR-0080）、审计、物化命名（ADR-0077）。内置运行时在 app 进程内直接经网关路由；外部运行时经**桥接**回连网关。网关是强制边界——运行时绕过网关直连工具，则审批/审计/物化皆不可强制。
 _Avoid_: 代理(proxy)、中间件(middleware)、路由器(router)
 
 **桥接 (Bridge)**:
@@ -90,9 +90,13 @@ _Avoid_: 代理(proxy)——那是网关的别名；适配器(adapter)——那�
 _Avoid_: 命令(command)、扩展(extension)、接口(interface)
 
 **技能 (Skill)**:
-可挂载到会话的命名能力包 = 提示片段（Markdown 正文）+ 可选的 MCP server 引用，遵循 [Agent Skills 规范](https://agentskills.io/specification)：一技能 = 一目录 + `SKILL.md`（YAML frontmatter + Markdown 正文），`name`（kebab-case、≤64、等于目录名）即其稳定身份。技能住全局技能库（单一注册表），每会话可多挂载、中途增减；由 app 在轮次装配阶段统一注入（提示片段进系统提示、MCP 引用进有效工具集），与运行时无涉——改变 agent 的「答法」，不动工作集与 recipe 结构。
+可挂载到会话的命名能力包 = 提示片段（Markdown 正文）+ 可选的 MCP server 引用，遵循 [Agent Skills 规范](https://agentskills.io/specification)：一技能 = 一目录 + `SKILL.md`（YAML frontmatter + Markdown 正文），`name`（kebab-case、≤64、等于目录名）即其稳定身份。技能住全局技能库（单一注册表），每会话可多挂载、中途增减；由 app 在轮次装配阶段统一注入（提示片段进系统提示、MCP 引用为声明性元数据——所指服务器须在配置中启用方可用，引用不改变启用状态），与运行时无涉——改变 agent 的「答法」，不动工作集与 recipe 结构。
 _Avoid_: 插件(plugin)、模板(template)、宏(macro)
 
 **技能生命周期事件 (Skill Lifecycle Event)**:
 对会话活跃技能集的一次用户驱动突变——挂载（Mount）/ 卸载（Unmount），仅两态（技能内容变化不是生命周期事件，由各轮 provenance 的 content_hash 捕获）。与源生命周期事件同构：在 thread 中恒可见、占时序位置，但**非轮次**、不占计步序、不以轮次身份进远窗——而进窗口装配器的当前状态视图（轮次装配用彼时活跃的技能集）。活跃技能集记入轮次装配上下文（审计依据）。
 _Avoid_: 操作(operation)、配置变更(config change)——太泛
+
+**MCP 服务器**:
+用户配置的外部工具服务器（stdio / SSE / HTTP 传输），其工具经网关发现面对 agent 可用。**启用**是机器级持久状态：启用即进所有会话的有效工具面；禁用即休眠且为**绝对权威**——不连接、不进目录，技能引用不可越权复活（ADR-0106）。非秘密配置与启用状态住 app-config（ADR-0038），秘密值住 OS keychain（ADR-0029）。
+_Avoid_: 后端、服务——太泛；插件——那是另一机制，未在本域定义

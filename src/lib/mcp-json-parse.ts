@@ -11,7 +11,11 @@
 // - "url" present     → type from optional "type" field (default "http")
 // - "transport" present → assumed to be our internal McpTransport shape
 
-import type { McpServerConfig, McpTransport } from "../types/mcp";
+import {
+  MCP_ENABLED_PLACEHOLDER,
+  type McpServerConfig,
+  type McpTransport,
+} from "../types/mcp";
 
 // --- Secret detection (mirrors Rust) -----------------------------------------
 // Mirrors SECRET_KEY_NAMES in src-tauri/src/app_config/io.rs.
@@ -30,7 +34,13 @@ const SECRET_NAME_SUBSTRINGS = [
 // Mirrors IMPORT_SECRET_SUBSTRINGS in src-tauri/src/mcp/import.rs, plus
 // "authorization" for HTTP request headers (not in the Rust set because the
 // Rust import path only handles stdio env vars).
-const IMPORT_SECRET_SUBSTRINGS = ["token", "bearer", "jwt", "privatekey", "authorization"];
+const IMPORT_SECRET_SUBSTRINGS = [
+  "token",
+  "bearer",
+  "jwt",
+  "privatekey",
+  "authorization",
+];
 
 function collapseName(name: string): string {
   return name
@@ -98,7 +108,8 @@ export function normalizeJsonToConfig(
   if (isInternalConfig(raw)) {
     return {
       id: typeof raw.id === "string" ? raw.id : fallbackId,
-      display_name: typeof raw.display_name === "string" ? raw.display_name : "",
+      display_name:
+        typeof raw.display_name === "string" ? raw.display_name : "",
       transport: raw.transport,
       env: isRecord(raw.env) ? stringifyRecord(raw.env) : {},
       keychain_env_keys: Array.isArray(raw.keychain_env_keys)
@@ -106,17 +117,17 @@ export function normalizeJsonToConfig(
             (x): x is string => typeof x === "string",
           )
         : [],
-      timeout_ms:
-        typeof raw.timeout_ms === "number" ? raw.timeout_ms : null,
+      timeout_ms: typeof raw.timeout_ms === "number" ? raw.timeout_ms : null,
+      // A JSON `enabled` field is intentionally ignored (neither form mode
+      // edits enablement); the form's save overwrites the placeholder.
+      enabled: MCP_ENABLED_PLACEHOLDER,
     };
   }
 
   // Unwrap {"mcpServers": {...}} (Claude Desktop format); otherwise treat the
   // root as a bare {name: config} map.
   const serverMap =
-    "mcpServers" in raw && isRecord(raw.mcpServers)
-      ? raw.mcpServers
-      : raw;
+    "mcpServers" in raw && isRecord(raw.mcpServers) ? raw.mcpServers : raw;
 
   const entries = Object.entries(serverMap).filter(([, v]) => isRecord(v));
   if (entries.length === 0) {
@@ -141,15 +152,14 @@ function buildConfigFromFlat(
   // stdio → "env"; http/sse → "headers" (with "env" fallback for non-standard
   // formats that put headers under "env").
   const envSource =
-    transport.type === "stdio"
-      ? config.env
-      : (config.headers ?? config.env);
+    transport.type === "stdio" ? config.env : (config.headers ?? config.env);
   const rawEnv = isRecord(envSource) ? envSource : {};
   const env: Record<string, string> = {};
   const keychain_env_keys: string[] = [];
 
   for (const [key, rawValue] of Object.entries(rawEnv)) {
-    const value = typeof rawValue === "string" ? rawValue : String(rawValue ?? "");
+    const value =
+      typeof rawValue === "string" ? rawValue : String(rawValue ?? "");
     if (isSecretEnvKey(key)) {
       // Route to keychain; value is dropped (same as the Rust import path).
       // The user re-enters the value via the form's Secret checkbox.
@@ -165,12 +175,17 @@ function buildConfigFromFlat(
     transport,
     env,
     keychain_env_keys,
-    timeout_ms: typeof config.timeout_ms === "number" ? config.timeout_ms : null,
+    timeout_ms:
+      typeof config.timeout_ms === "number" ? config.timeout_ms : null,
+    enabled: MCP_ENABLED_PLACEHOLDER,
   };
 }
 
 /** Determine the McpTransport from raw config fields. */
-function parseTransport(name: string, config: Record<string, unknown>): McpTransport {
+function parseTransport(
+  name: string,
+  config: Record<string, unknown>,
+): McpTransport {
   if (typeof config.command === "string") {
     return {
       type: "stdio",
