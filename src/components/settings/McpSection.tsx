@@ -622,20 +622,26 @@ function McpServerRow({
            * Sits BEFORE the action buttons so it reads as the row's primary
            * control, not an action. */}
           <Tooltip>
+            {/* The span isolates the trigger: TooltipTrigger asChild stamps
+             * its own data-state ("closed"/"open") onto the child, and on the
+             * Switch root that would clobber the switch's data-state
+             * ("checked"/"unchecked") — the track's data-variant backgrounds
+             * would never match, leaving a bare floating thumb. */}
             <TooltipTrigger asChild>
-              <Switch
-                checked={server.enabled}
-                disabled={toggling}
-                onCheckedChange={onToggleEnabled}
-                aria-label={intl.formatMessage(
-                  {
-                    id: "settings.mcp.enableToggleLabel",
-                    defaultMessage: "Toggle server {name}",
-                  },
-                  { name: server.display_name },
-                )}
-                className="mr-1.5"
-              />
+              <span className="mr-1.5 inline-flex">
+                <Switch
+                  checked={server.enabled}
+                  disabled={toggling}
+                  onCheckedChange={onToggleEnabled}
+                  aria-label={intl.formatMessage(
+                    {
+                      id: "settings.mcp.enableToggleLabel",
+                      defaultMessage: "Toggle server {name}",
+                    },
+                    { name: server.display_name },
+                  )}
+                />
+              </span>
             </TooltipTrigger>
             <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
               {server.enabled ? (
