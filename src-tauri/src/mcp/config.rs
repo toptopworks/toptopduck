@@ -247,14 +247,6 @@ impl McpServerRegistry {
         }
         server
     }
-
-    /// Remove the server with the given id (idempotent: a missing id is a
-    /// no-op). Does NOT clear the server's keychain secrets -- the caller
-    /// orchestrates clear-then-remove so the secret env_keys (UI-side knowledge
-    /// until the gateway injection contract lands) stay explicit (issue #301).
-    pub fn remove(&mut self, id: &McpServerId) {
-        self.servers.retain(|s| &s.id != id);
-    }
 }
 
 #[cfg(test)]
@@ -659,52 +651,6 @@ mod tests {
         assert_eq!(reg.servers.len(), 2);
         assert_eq!(reg.servers[1].id, McpServerId("beta".into()));
         assert_eq!(stored.id, McpServerId("beta".into()));
-    }
-
-    #[test]
-    fn registry_remove_drops_by_id() {
-        let mut reg = McpServerRegistry {
-            servers: vec![
-                McpServerConfig {
-                    id: McpServerId("alpha".into()),
-                    display_name: "Alpha".into(),
-                    transport: McpTransport::stdio("/bin/a", Vec::new()),
-                    env: BTreeMap::new(),
-                    keychain_env_keys: Vec::new(),
-                    timeout_ms: None,
-                    enabled: true,
-                },
-                McpServerConfig {
-                    id: McpServerId("beta".into()),
-                    display_name: "Beta".into(),
-                    transport: McpTransport::stdio("/bin/b", Vec::new()),
-                    env: BTreeMap::new(),
-                    keychain_env_keys: Vec::new(),
-                    timeout_ms: None,
-                    enabled: true,
-                },
-            ],
-        };
-        reg.remove(&McpServerId("alpha".into()));
-        assert_eq!(reg.servers.len(), 1);
-        assert_eq!(reg.servers[0].id, McpServerId("beta".into()));
-    }
-
-    #[test]
-    fn registry_remove_missing_id_is_noop() {
-        let mut reg = McpServerRegistry {
-            servers: vec![McpServerConfig {
-                id: McpServerId("solo".into()),
-                display_name: "Solo".into(),
-                transport: McpTransport::stdio("/bin/s", Vec::new()),
-                env: BTreeMap::new(),
-                keychain_env_keys: Vec::new(),
-                timeout_ms: None,
-                enabled: true,
-            }],
-        };
-        reg.remove(&McpServerId("missing".into()));
-        assert_eq!(reg.servers.len(), 1, "missing id -> no-op");
     }
 
     // --- timeout_ms (T1) ----------------------------------------------------

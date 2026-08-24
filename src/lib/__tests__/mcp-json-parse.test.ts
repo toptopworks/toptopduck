@@ -90,18 +90,26 @@ describe("normalizeJsonToConfig", () => {
       env: { FOO: "bar" },
       keychain_env_keys: ["SECRET_KEY"],
       timeout_ms: 5000,
-      enabled: true,
     };
 
     const config = normalizeJsonToConfig(json, "");
-    expect(config).toEqual(json);
+    // The draft carries every field EXCEPT `enabled` (the form's save owns
+    // that field; #659).
+    expect(config).toEqual({
+      id: "srv-1",
+      display_name: "existing",
+      transport: { type: "http", url: "https://example.com/mcp" },
+      env: { FOO: "bar" },
+      keychain_env_keys: ["SECRET_KEY"],
+      timeout_ms: 5000,
+    });
   });
 
-  it("ignores an `enabled` field in internal-format JSON (ADR-0106)", () => {
+  it("drops an `enabled` field in internal-format JSON (ADR-0106, #659)", () => {
     // Enablement is machine-level state owned by the settings row toggle,
     // never imported: a JSON `enabled: false` must not survive
-    // normalization (the placeholder governs until the form assembles the
-    // real value).
+    // normalization. The Draft shape carries no `enabled` at all, so no
+    // consumer of a parsed draft can read a stale value.
     const json = {
       id: "srv-1",
       display_name: "existing",
@@ -110,7 +118,7 @@ describe("normalizeJsonToConfig", () => {
     };
 
     const config = normalizeJsonToConfig(json, "");
-    expect(config.enabled).toBe(true);
+    expect(config).not.toHaveProperty("enabled");
   });
 
   it("rejects internal format with malformed transport (missing command)", () => {
@@ -254,7 +262,6 @@ describe("configToWebJson", () => {
       env: { LOG_LEVEL: "debug" },
       keychain_env_keys: [],
       timeout_ms: null,
-      enabled: true,
     });
 
     const parsed = JSON.parse(json);
@@ -275,7 +282,6 @@ describe("configToWebJson", () => {
       env: {},
       keychain_env_keys: [],
       timeout_ms: null,
-      enabled: true,
     });
 
     const parsed = JSON.parse(json);
@@ -294,7 +300,6 @@ describe("configToWebJson", () => {
       env: { "X-Custom": "val" },
       keychain_env_keys: ["Authorization"],
       timeout_ms: null,
-      enabled: true,
     });
 
     const parsed = JSON.parse(json);
@@ -311,7 +316,6 @@ describe("configToWebJson", () => {
       env: { LOG_LEVEL: "info" },
       keychain_env_keys: ["API_KEY"],
       timeout_ms: null,
-      enabled: true,
     });
 
     const parsed = JSON.parse(json);
@@ -326,7 +330,6 @@ describe("configToWebJson", () => {
       env: {},
       keychain_env_keys: [],
       timeout_ms: 60000,
-      enabled: true,
     });
 
     const parsed = JSON.parse(json);
@@ -341,7 +344,6 @@ describe("configToWebJson", () => {
       env: {},
       keychain_env_keys: [],
       timeout_ms: null,
-      enabled: true,
     });
 
     const parsed = JSON.parse(json);

@@ -49,6 +49,7 @@ import {
 } from "./settings-chrome";
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
+import { upsertMirror, withMcpServers } from "./mcp-mirror";
 
 // MCP servers settings pane (issue #387 + #388). Two sub-views managed by local
 // state: "list" shows every configured server with a connection status dot,
@@ -76,14 +77,6 @@ type FormTarget = {
   server: McpServerConfig;
   isEdit: boolean;
 };
-
-/** Commit shape shared by every write path in this section: rebuild the MCP
- *  server list inside an AppConfig immutably. Callers pass the already
- *  rebuilt slice (map-replace preserves row order for the toggle; save /
- *  import / delete rebuild via filter). */
-function withMcpServers(cfg: AppConfig, servers: McpServerConfig[]): AppConfig {
-  return { ...cfg, mcp_servers: { ...cfg.mcp_servers, servers } };
-}
 
 export function McpSection({
   appConfig,
@@ -127,6 +120,25 @@ export function McpSection({
       )
     : servers;
 
+  /** Shared error half of every write here (#659): run one async write unit
+   *  and surface a resolve-to-error or rejection through setError — the catch
+   *  contract lives in one place, mirroring useShellSessions's
+   *  applyPostureWrite. Returns the error string, or null on success;
+   *  handleConfirmDelete gates its cleanup on the non-null value. */
+  async function runCommit(
+    write: () => Promise<string | null>,
+  ): Promise<string | null> {
+    try {
+      const err = await write();
+      if (err) setError(err);
+      return err;
+    } catch (e) {
+      const msg = fmtError(e, intl);
+      setError(msg);
+      return msg;
+    }
+  }
+
   function handleAdd() {
     setFormTarget({
       server: {
@@ -160,22 +172,15 @@ export function McpSection({
   ) {
     setTogglingId(server.id);
     setError(null);
-    try {
+    await runCommit(async () => {
       const finalized = await upsertMcpServer({ ...server, enabled });
-      const err = await onCommit((cfg) =>
-        withMcpServers(
-          cfg,
-          cfg.mcp_servers.servers.map((s) =>
-            s.id === finalized.id ? finalized : s,
-          ),
-        ),
+      return onCommit((cfg) =>
+        withMcpServers(cfg, upsertMirror(cfg.mcp_servers.servers, finalized)),
       );
-      if (err) setError(err);
-    } catch (e) {
-      setError(fmtError(e, intl));
-    } finally {
-      setTogglingId(null);
-    }
+    });
+    // runCommit never rejects (failures surface as error strings), so the
+    // busy flag always clears.
+    setTogglingId(null);
   }
 
   /** Called by the form after upsert + secrets + probe complete. Syncs the
@@ -195,18 +200,13 @@ export function McpSection({
     }
     // Sync the finalized config into React state so the list shows the
     // new/updated entry immediately. Both rejection and resolve-to-error
-    // are surfaced so the user knows the commit failed (C3).
-    try {
-      const err = await onCommit((cfg) => {
-        const others = cfg.mcp_servers.servers.filter(
-          (s) => s.id !== finalized.id,
-        );
-        return withMcpServers(cfg, [...others, finalized]);
-      });
-      if (err) setError(err);
-    } catch (e) {
-      setError(fmtError(e, intl));
-    }
+    // are surfaced so the user knows the commit failed (C3). The mirror
+    // upserts in place — an edited row keeps its position (#659).
+    await runCommit(() =>
+      onCommit((cfg) =>
+        withMcpServers(cfg, upsertMirror(cfg.mcp_servers.servers, finalized)),
+      ),
+    );
     setFormTarget(null);
   }
 
@@ -233,21 +233,20 @@ export function McpSection({
       return next;
     });
     // Sync all imported configs into React state (one commit for the batch).
-    try {
-      const err = await onCommit((cfg) => {
-        const existingIds = new Set(results.map((r) => r.config.id));
-        const others = cfg.mcp_servers.servers.filter(
-          (s) => !existingIds.has(s.id),
-        );
-        return withMcpServers(cfg, [
-          ...others,
-          ...results.map((r) => r.config),
-        ]);
-      });
-      if (err) setError(err);
-    } catch (e) {
-      setError(fmtError(e, intl));
-    }
+    // Upsert semantics per entry: new ids append, existing ids replace in
+    // place — an imported id that matches a configured row keeps its
+    // position (#659).
+    await runCommit(() =>
+      onCommit((cfg) =>
+        withMcpServers(
+          cfg,
+          results.reduce(
+            (acc, r) => upsertMirror(acc, r.config),
+            cfg.mcp_servers.servers,
+          ),
+        ),
+      ),
+    );
   }
 
   function toggleRow(id: string) {
@@ -290,50 +289,47 @@ export function McpSection({
     if (!deleteTarget) return;
     setDeleting(true);
     setError(null);
-    try {
-      // Remove the config entry first (the primary action). If this fails,
-      // the server is still intact — secrets are preserved (reversed from
-      // the original clear-then-remove order to avoid a partial-failure
-      // window where secrets are wiped but the config persists).
-      const err = await onCommit((cfg) =>
+    // Remove the config entry first (the primary action). If this fails,
+    // the server is still intact — secrets are preserved (reversed from
+    // the original clear-then-remove order to avoid a partial-failure
+    // window where secrets are wiped but the config persists).
+    const err = await runCommit(() =>
+      onCommit((cfg) =>
         withMcpServers(
           cfg,
           cfg.mcp_servers.servers.filter((s) => s.id !== deleteTarget.id),
         ),
-      );
-      if (err) {
-        setError(err);
-      } else {
-        // Config removed — clean up local state for the removed server.
-        const removedId = deleteTarget.id;
-        const removedKeys = deleteTarget.keychainEnvKeys;
-        setProbeStates((prev) => {
-          const next = { ...prev };
-          delete next[removedId];
-          return next;
-        });
-        setExpandedRows((prev) => {
-          const next = new Set(prev);
-          next.delete(removedId);
-          return next;
-        });
-        setDeleteTarget(null);
-        // Clear keychain secrets after successful config removal (best
-        // effort). An orphaned keychain entry is inert — keyed by the
-        // removed server's uuid id, nothing reads it.
-        for (const envKey of removedKeys) {
-          try {
-            await clearMcpServerSecret(removedId, envKey);
-          } catch (e) {
-            console.warn("keychain clear failed for", removedId, envKey, e);
-          }
+      ),
+    );
+    if (err === null) {
+      // Config removed — clean up local state for the removed server.
+      const removedId = deleteTarget.id;
+      const removedKeys = deleteTarget.keychainEnvKeys;
+      setProbeStates((prev) => {
+        const next = { ...prev };
+        delete next[removedId];
+        return next;
+      });
+      setExpandedRows((prev) => {
+        const next = new Set(prev);
+        next.delete(removedId);
+        return next;
+      });
+      setDeleteTarget(null);
+      // Clear keychain secrets after successful config removal (best
+      // effort). An orphaned keychain entry is inert — keyed by the
+      // removed server's uuid id, nothing reads it.
+      for (const envKey of removedKeys) {
+        try {
+          await clearMcpServerSecret(removedId, envKey);
+        } catch (e) {
+          console.warn("keychain clear failed for", removedId, envKey, e);
         }
       }
-    } catch (e) {
-      setError(fmtError(e, intl));
-    } finally {
-      setDeleting(false);
     }
+    // runCommit never rejects, so the busy flag always clears (no finally
+    // needed).
+    setDeleting(false);
   }
 
   // --- Form view ----------------------------------------------------------

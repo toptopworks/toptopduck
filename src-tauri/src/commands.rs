@@ -946,18 +946,6 @@ pub fn upsert_mcp_server(
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 
-/// Remove the MCP server with the given id from app-config (issue #301).
-/// Idempotent: a missing id is success. Does NOT clear the server's keychain
-/// secrets (the frontend orchestrates clear-then-remove).
-#[tauri::command]
-pub fn remove_mcp_server(
-    live: State<'_, LiveProviderConfig>,
-    id: McpServerId,
-) -> Result<(), StoreCommandError> {
-    live.remove_mcp_server(&id)
-        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
-}
-
 /// Store one MCP server secret in the OS keychain under `mcp-<id>-<env_key>`
 /// (issue #301, ADR-0029 one-shot frontend -> Rust transfer). The value never
 /// crosses IPC back out.

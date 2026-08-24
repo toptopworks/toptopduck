@@ -12,8 +12,7 @@
 // - "transport" present → assumed to be our internal McpTransport shape
 
 import {
-  MCP_ENABLED_PLACEHOLDER,
-  type McpServerConfig,
+  type McpServerDraft,
   type McpTransport,
 } from "../types/mcp";
 
@@ -92,13 +91,14 @@ function isInternalConfig(
   return isRecord(v) && isMcpTransport(v.transport);
 }
 
-/** Normalize a parsed JSON value into a McpServerConfig. Throws on invalid
- *  input or a server entry missing command/url. For map formats, the FIRST
- *  entry is used (the form is single-server). */
+/** Normalize a parsed JSON value into a McpServerDraft (no `enabled` — the
+ *  form's save owns that field; ADR-0106 / #659). Throws on invalid input
+ *  or a server entry missing command/url. For map formats, the FIRST entry
+ *  is used (the form is single-server). */
 export function normalizeJsonToConfig(
   raw: unknown,
   fallbackId: string,
-): McpServerConfig {
+): McpServerDraft {
   if (!isRecord(raw)) {
     throw new Error("Expected a JSON object");
   }
@@ -117,10 +117,9 @@ export function normalizeJsonToConfig(
             (x): x is string => typeof x === "string",
           )
         : [],
-      timeout_ms: typeof raw.timeout_ms === "number" ? raw.timeout_ms : null,
       // A JSON `enabled` field is intentionally ignored (neither form mode
-      // edits enablement); the form's save overwrites the placeholder.
-      enabled: MCP_ENABLED_PLACEHOLDER,
+      // edits enablement); the draft carries no `enabled` at all.
+      timeout_ms: typeof raw.timeout_ms === "number" ? raw.timeout_ms : null,
     };
   }
 
@@ -146,7 +145,7 @@ function buildConfigFromFlat(
   name: string,
   config: Record<string, unknown>,
   fallbackId: string,
-): McpServerConfig {
+): McpServerDraft {
   const transport = parseTransport(name, config);
 
   // stdio → "env"; http/sse → "headers" (with "env" fallback for non-standard
@@ -177,7 +176,6 @@ function buildConfigFromFlat(
     keychain_env_keys,
     timeout_ms:
       typeof config.timeout_ms === "number" ? config.timeout_ms : null,
-    enabled: MCP_ENABLED_PLACEHOLDER,
   };
 }
 
@@ -211,13 +209,14 @@ function stringifyRecord(raw: Record<string, unknown>): Record<string, string> {
 
 // --- Serializer (inverse of normalizeJsonToConfig for single server) ---------
 
-/** Serialize a McpServerConfig into the common web-format JSON (bare server
- *  map). The inverse of normalizeJsonToConfig for the single-server case.
+/** Serialize a config (draft or full) into the common web-format JSON (bare
+ *  server map). The inverse of normalizeJsonToConfig for the single-server
+ *  case.
  *
  *  Secret env/header keys are included with empty values — the actual values
  *  live in the OS keychain, never in JSON. On parse-back, normalizeJsonToConfig
  *  routes them to keychain_env_keys automatically. */
-export function configToWebJson(config: McpServerConfig): string {
+export function configToWebJson(config: McpServerDraft): string {
   const entry: Record<string, unknown> = {};
 
   const isStdio = config.transport.type === "stdio";

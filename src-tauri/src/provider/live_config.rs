@@ -246,24 +246,6 @@ impl LiveProviderConfig {
         Ok(stored)
     }
 
-    /// Remove the MCP server with the given id from app-config (idempotent: a
-    /// missing id is a no-op). Does NOT clear the server's keychain secrets --
-    /// the frontend orchestrates clear-then-remove; orphaned entries keyed by
-    /// the removed server's (uuid) id are inert.
-    pub fn remove_mcp_server(&self, id: &McpServerId) -> Result<(), app_config::WriteError> {
-        // Hold write_lock across the full load -> mutate -> store (same contract
-        // as upsert_mcp_server); store_inner, not store --
-        // std::sync::Mutex is non-reentrant.
-        let _guard = self
-            .write_lock
-            .lock()
-            .expect("app-config write_lock poisoned");
-        let mut cfg = self.load_for_write()?;
-        cfg.mcp_servers.remove(id);
-        self.store_inner(cfg)?;
-        Ok(())
-    }
-
     /// Store one MCP server secret in the OS keychain under
     /// `mcp-<id>-<env_key>` (issue #301, ADR-0029 one-shot frontend -> Rust
     /// transfer). The value never crosses IPC back out.
@@ -1186,13 +1168,6 @@ mod tests {
             "no defaults-plus-one-write rewrite"
         );
 
-        live.remove_mcp_server(&McpServerId("any".into()))
-            .expect_err("remove refuses a corrupt read");
-        assert_eq!(
-            std::fs::read(live.path()).expect("file still there"),
-            corrupt
-        );
-
         live.set_sessions_dir(Some("/elsewhere".into()))
             .expect_err("set_sessions_dir refuses a corrupt read");
         assert_eq!(
@@ -1442,29 +1417,6 @@ mod tests {
         let reloaded = live.load();
         assert_eq!(reloaded.mcp_servers.servers.len(), 1, "replace not append");
         assert_eq!(reloaded.mcp_servers.servers[0].display_name, "New");
-    }
-
-    #[test]
-    fn remove_mcp_server_drops_from_persisted_config() {
-        // remove -> store -> reload sees the server gone. Idempotent on a
-        // missing id (no error, no change).
-        let (_dir, live) = live();
-        let stored = live
-            .upsert_mcp_server(McpServerConfig {
-                id: McpServerId(String::new()),
-                display_name: "GH".into(),
-                transport: McpTransport::stdio("/bin/srv", Vec::new()),
-                env: BTreeMap::new(),
-                keychain_env_keys: Vec::new(),
-                timeout_ms: None,
-                enabled: true,
-            })
-            .expect("upsert");
-        live.remove_mcp_server(&stored.id).expect("remove");
-        let reloaded = live.load();
-        assert!(reloaded.mcp_servers.servers.is_empty());
-        // Idempotent: removing the same id again is a no-op success.
-        live.remove_mcp_server(&stored.id).expect("remove again");
     }
 
     #[test]

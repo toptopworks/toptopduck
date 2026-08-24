@@ -7,6 +7,7 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 
 import { McpSection } from "../McpSection";
+import { upsertMirror } from "../mcp-mirror";
 import { clearMcpServerSecret, discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
@@ -66,6 +67,50 @@ function renderWithProviders(ui: ReactElement) {
     </QueryClientProvider>,
   );
 }
+
+describe("upsertMirror (#659)", () => {
+  it("replaces an existing id in place", () => {
+    const a = makeServer({ id: "srv-a" });
+    const b = makeServer({ id: "srv-b" });
+    const c = makeServer({ id: "srv-c" });
+    const edited = makeServer({ id: "srv-b", display_name: "B edited" });
+
+    expect(upsertMirror([a, b, c], edited).map((s) => s.id)).toEqual([
+      "srv-a",
+      "srv-b",
+      "srv-c",
+    ]);
+    expect(upsertMirror([a, b, c], edited)[1].display_name).toBe("B edited");
+  });
+
+  it("appends a new id at the end", () => {
+    const a = makeServer({ id: "srv-a" });
+    const fresh = makeServer({ id: "srv-new" });
+
+    expect(upsertMirror([a], fresh).map((s) => s.id)).toEqual([
+      "srv-a",
+      "srv-new",
+    ]);
+  });
+
+  it("batch upsert keeps existing ids in place and appends new ids", () => {
+    // The import path folds a batch through upsertMirror: an imported id
+    // matching a configured row replaces it in place, unseen ids append —
+    // mirroring the backend registry's per-entry upsert semantics.
+    const a = makeServer({ id: "srv-a" });
+    const b = makeServer({ id: "srv-b" });
+    const c = makeServer({ id: "srv-c" });
+    const bEdited = makeServer({ id: "srv-b", display_name: "B imported" });
+    const fresh = makeServer({ id: "srv-new" });
+
+    const batch = [bEdited, fresh].reduce(
+      (acc, next) => upsertMirror(acc, next),
+      [a, b, c],
+    );
+    expect(batch.map((s) => s.id)).toEqual(["srv-a", "srv-b", "srv-c", "srv-new"]);
+    expect(batch[1].display_name).toBe("B imported");
+  });
+});
 
 describe("McpSection (issue #387)", () => {
   beforeEach(() => {
@@ -462,6 +507,40 @@ describe("McpSection (issue #387)", () => {
     // Form is closed — error shows on the list view (C3: setFormTarget(null)
     // runs at the end regardless of onCommit outcome).
     expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
+  });
+
+  it("keeps row order when editing an existing server (#659)", async () => {
+    // The registry's upsert replaces in place (order preserved on disk), so
+    // the React mirror must not shuffle the edited row to the end -- a
+    // restart would otherwise snap the row back to its disk position.
+    const a = makeServer({ id: "srv-a", display_name: "A" });
+    const b = makeServer({ id: "srv-b", display_name: "B" });
+    const c = makeServer({ id: "srv-c", display_name: "C" });
+    const finalized = makeServer({ id: "srv-b", display_name: "B edited" });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    const onCommit = vi.fn().mockResolvedValue(null);
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([a, b, c])} onCommit={onCommit} />,
+    );
+
+    // Edit B, rename it, save.
+    fireEvent.click(screen.getByRole("button", { name: "Edit server B" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "B edited" },
+    });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutateFn = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    const mutated = mutateFn(makeAppConfig([a, b, c]));
+    expect(mutated.mcp_servers.servers.map((s) => s.id)).toEqual([
+      "srv-a",
+      "srv-b",
+      "srv-c",
+    ]);
+    expect(mutated.mcp_servers.servers[1].display_name).toBe("B edited");
   });
 
   // --- Import button (issue #390) -----------------------------------------

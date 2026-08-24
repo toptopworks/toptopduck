@@ -3,9 +3,9 @@ import { ArrowLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import {
-  MCP_ENABLED_PLACEHOLDER,
   type McpProbeResult,
   type McpServerConfig,
+  type McpServerDraft,
   type McpTransport,
 } from "../../types/mcp";
 import { probeMcpServer, setMcpServerSecret, upsertMcpServer } from "../../api";
@@ -65,10 +65,10 @@ export type McpServerFormProps = {
 
 type FormMode = "form" | "json";
 
-/** Build the initial env-entry list from an existing config: non-secret entries
- *  from `env`, secret entries (value empty — keychain is one-way) from
- *  `keychain_env_keys`. */
-function initEnvEntries(server: McpServerConfig): EnvEntry[] {
+/** Build the initial env-entry list from an existing config (draft or full —
+ *  enablement is not read): non-secret entries from `env`, secret entries
+ *  (value empty — keychain is one-way) from `keychain_env_keys`. */
+function initEnvEntries(server: McpServerDraft): EnvEntry[] {
   const entries: EnvEntry[] = Object.entries(server.env).map(
     ([key, value]) => ({
       id: envEntrySeq++,
@@ -156,8 +156,9 @@ export function McpServerForm({
     );
   }, [mode, jsonText, displayName, transportType, command, url, serverId]);
 
-  // Build a McpServerConfig from the current form fields.
-  function buildConfigFromForm(): McpServerConfig {
+  // Build a McpServerDraft from the current form fields (no `enabled` — the
+  // save below is the single assembly point that stamps it; #659).
+  function buildConfigFromForm(): McpServerDraft {
     const transport: McpTransport =
       transportType === "stdio"
         ? {
@@ -191,9 +192,6 @@ export function McpServerForm({
         timeoutMs.trim() && !Number.isNaN(Number(timeoutMs))
           ? Number(timeoutMs)
           : null,
-      // Placeholder; handleSave owns the real value (see the ADR-0106 note
-      // there). Keeps this builder total over the McpServerConfig shape.
-      enabled: MCP_ENABLED_PLACEHOLDER,
     };
   }
 
@@ -203,7 +201,7 @@ export function McpServerForm({
    *  is used). Shared by mode-switch and save (M7). */
   function tryParseConfig(
     text: string,
-  ): { ok: true; config: McpServerConfig } | { ok: false; error: string } {
+  ): { ok: true; config: McpServerDraft } | { ok: false; error: string } {
     try {
       const raw = JSON.parse(text);
       return { ok: true, config: normalizeJsonToConfig(raw, serverId) };
@@ -213,7 +211,7 @@ export function McpServerForm({
   }
 
   /** Sync FROM JSON text → flat form state (called when switching JSON → Form). */
-  function syncFromJson(parsed: McpServerConfig): void {
+  function syncFromJson(parsed: McpServerDraft): void {
     setDisplayName(parsed.display_name);
     setTransportType(parsed.transport.type);
     if (parsed.transport.type === "stdio") {
@@ -292,25 +290,30 @@ export function McpServerForm({
   }
 
   async function handleSave() {
-    // Build the config from the active mode.
-    let config: McpServerConfig;
+    // Build the draft from the active mode (no `enabled` — neither mode
+    // edits it; the assembly below stamps the real value).
+    let draft: McpServerDraft;
     if (mode === "json") {
       const result = tryParseConfig(jsonText);
       if (!result.ok) {
         setJsonError(result.error);
         return;
       }
-      config = result.config;
+      draft = result.config;
     } else {
-      config = buildConfigFromForm();
+      draft = buildConfigFromForm();
     }
 
-    // ADR-0106: `enabled` is owned by the settings row toggle, not this form
-    // (neither Form nor JSON mode edits it). Preserve the existing value on
-    // edit -- a disabled server stays disabled through an edit -- and save
-    // enabled for a new server (the blank add-mode initialServer carries
-    // `enabled: true`, Decision 4's explicit-intent default).
-    config = { ...config, enabled: initialServer.enabled };
+    // ADR-0106 + #659: `enabled` is owned by the settings row toggle, not
+    // this form (neither Form nor JSON mode edits it). This is the SINGLE
+    // assembly point — preserve the existing value on edit (a disabled
+    // server stays disabled through an edit) and save enabled for a new
+    // server (the blank add-mode initialServer carries `enabled: true`,
+    // Decision 4's explicit-intent default).
+    const config: McpServerConfig = {
+      ...draft,
+      enabled: initialServer.enabled,
+    };
 
     // In JSON mode the normalizer detects secret key names but drops their
     // values (secrets must go to the OS keychain, not config). Block save
