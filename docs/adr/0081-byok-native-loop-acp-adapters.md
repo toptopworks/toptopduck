@@ -1,5 +1,7 @@
 # 运行时实现:BYOK Rust 原生循环 + ACP 优先 CLI 适配器
 
+> 本 ADR「内置运行时 = Rust 原生 agent 循环」的实现形态决策**被 ADR-0107 取代**为 yoagent 进程内 agent 循环 crate；本 ADR「外部运行时 = 数据定义适配器引擎」、执行级兜底帽值（24 步 / 120s / 整轮取消）与对「借壳第三方 agent 进程」的否决**保留**——该否决的理由（key 过界、二进制依赖、他进程自觉）对第三方进程仍然成立，yoagent 是进程内 crate、非第三方进程。见 ADR-0107。
+
 ## Decision
 
 **内置运行时 = Rust 原生 agent 循环**，驱动现有 Provider 层（ADR-0064 anthropic/openai 协议，用各协议**原生 tool-calling**）；key 永不出进程（ADR-0029 不变量完整）。**外部运行时 = 数据定义适配器引擎**：每 CLI 一个纯数据定义（bin / argv builder / 流格式 / MCP 注入方式），通用引擎统一做检测 / 启动 / 解析；传输**优先 ACP**（stdio JSON-RPC；MCP server 描述符经 `session/new` 注入；`session/update` 的 tool_call 系列天然映射执行轨迹）；**每轮恒 `session/new` + 喂全量窗口化上下文**，不持 upstream session handle（运行时无状态，ADR-0076）。v1 验证 ACP 三件套 claude-code / gemini-cli / codex；qwen-code 列二批。**执行级兜底**：步数上限（默认 24）+ 墙钟 watchdog（默认 120s，对齐 ADR-0021 `REQUEST_TIMEOUT`），触顶该轮 failed/cancelled；cancel = 整轮中止（内置：interrupt token 扩至循环；外部：ACP `session/cancel` + SIGTERM fallback）。

@@ -34,3 +34,4 @@ ADR-0028 定义了 C 失败轮的**单预算重试回路**与四类 outcome，�
 - provider 实现须把 HTTP 401/403 映射为 `NotWired`（`anthropic.rs` 已如此）；其他 5xx / 网络 / 解析失败归 `Unavailable`。
 - `NotWired` 的 `Display` 文案统一提示"配置有效 key"，对三种来源（无 key / 被拒 / 未 wired）一视同仁——不泄露是哪一种，避免给攻击者端点探针信号。
 - 本 ADR 不改变 ADR-0028 的四类 outcome 划分，只补全"provider 错误如何映射到 C 失败轮的进/不进回路"。
+- **被 ADR-0107 校准**：重试执行点移交 yoagent 内置退避重试（限流 / 网络错误，退避 + 抖动）；两档分类（permanent / transient）与用户可见失败词汇保留——yoagent 终态错误映射进既有分类再上达。见 ADR-0107。

@@ -40,3 +40,4 @@ ADR-0007 锁单一 Claude + 薄抽象（`Provider` trait），ADR-0019 把 v1 �
 - **被 ADR-0070 校准**：profile 配置流程新增 preflight 环节；model 字段选择方式从手填升级为 list models 探测下拉（失败回退手填），profile schema 形状不变（model 仍是字段）。见 ADR-0070。
 - **被 ADR-0071 校准**：model 仍是 profile 字段（不独立化）；对话区切 model 写回 `profile.model`，`live_config` 读法不变；`ProfileSwitcher`（issue #154）退役，日常切换入口移至对话区。见 ADR-0071。
 - **被 ADR-0098 校准**：`ProviderConfig` 不变量变更——`profiles` 可为空、`active_profile` 为 `Option`；`normalize()` 的非空重种 + 悬空回退首项不变量废除（空列表保持空、悬空指针归 `None`）；IPC view 的 effective 回退链随之调整。见 ADR-0098。
+- **被 ADR-0107 校准**：anthropic/openai 协议适配器实现移交 yoagent crate（进程内链接）；Profile 概念、协议轴、活跃档案语义与 preflight 环节不变；协议轴扩面（yoagent 原生支持的其他线协议）拆独立 issue。见 ADR-0107。
