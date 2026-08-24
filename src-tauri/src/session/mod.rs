@@ -1467,7 +1467,7 @@ impl Session {
             prompt_blocks,
         };
         // 5. Drive the gateway serve + the ACP engine on two scoped threads.
-        //    The gateway borrows the session's live resources (conn / working
+        //    The gateway borrows the session's live resources (engine / working
         //    set / materializer / approval / sink / cancel) for `tools/call`
         //    dispatch; the engine drives the ACP protocol with no session
         //    borrows. Scoped threads let the non-`'static` borrows cross the

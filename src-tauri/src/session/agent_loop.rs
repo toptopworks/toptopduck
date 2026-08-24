@@ -1419,7 +1419,7 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -1508,7 +1508,7 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -1587,27 +1587,6 @@ mod tests {
         let _ = RecipeTraceEntry::from_live_trace(&entry);
     }
 
-    /// Throwaway TurnDeps over a real in-memory admin engine. Mirrors the
-    /// `tools::test_support` cap defaults so the loop drives the same engine
-    /// shape the dispatch tests do.
-    fn deps<'a>(
-        engine: &'a AdminEngine,
-        ws: &'a mut WorkingSet,
-        sources: &'a mut HashMap<String, std::path::PathBuf>,
-        temp: &'a Path,
-        tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps {
-            engine,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: temp,
-            tool_output_refs,
-        }
-    }
-
     /// Drive a loop with a scripted provider + the real materializer + a fresh
     /// approval state. No watchdog (wall_clock=None) so the step-cap /
     /// cancellation tests are deterministic.
@@ -1622,7 +1601,7 @@ mod tests {
     ) -> LoopOutcome {
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(engine, ws, &mut sources, temp, &mut refs);
+        let mut d = TurnDeps::test_deps(engine, ws, &mut sources, temp, &mut refs);
         let approval = ApprovalState::new();
         let sink = RecordingSink::default();
         AgentLoop::new(provider, cancel)
@@ -1694,7 +1673,7 @@ mod tests {
         let captured = provider.captured_tool_turns();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -1801,7 +1780,7 @@ mod tests {
         let captured = provider.captured_tool_turns();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -1928,7 +1907,7 @@ mod tests {
         let captured = provider.captured_tool_turns();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2000,7 +1979,7 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2467,7 +2446,7 @@ mod tests {
             .scripted_tool_turn_blocking("stuck", ToolTurnReply::Text("never".into()));
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2826,7 +2805,7 @@ mod tests {
         let provider = PanickingProvider;
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2880,7 +2859,7 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
+        let mut d = TurnDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,

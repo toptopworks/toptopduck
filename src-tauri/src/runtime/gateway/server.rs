@@ -557,15 +557,7 @@ mod tests {
         let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
         let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
         let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
-        let deps = TurnDeps {
-            engine: &engine.admin_engine,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: engine.temp.path(),
-            tool_output_refs: refs,
-        };
+        let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
         GatewayCtx {
             deps,
             materializer: fake,

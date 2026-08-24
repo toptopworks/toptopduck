@@ -194,15 +194,7 @@ pub(crate) mod test_support {
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
     ) -> TurnDeps<'a> {
-        TurnDeps {
-            engine,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: Path::new("."),
-            tool_output_refs,
-        }
+        TurnDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
     }
 
     /// Same inert cap defaults as [`inert_deps`] but with a caller-owned
@@ -217,15 +209,7 @@ pub(crate) mod test_support {
         temp_path: &'a Path,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
     ) -> TurnDeps<'a> {
-        TurnDeps {
-            engine,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path,
-            tool_output_refs,
-        }
+        TurnDeps::test_deps(engine, ws, sources, temp_path, tool_output_refs)
     }
 }
 

@@ -14,7 +14,7 @@
 //! The trait is object-safe (no generics, no `Self` return) so the `Session`
 //! holds `Box<dyn Materializer>` -- dyn, not generic, so it does not
 //! parameterize `commands.rs` / `lib.rs` (ADR-0053 Decision 4). Live state
-//! (admin connection, source paths, working set, caps) is aggregated in the
+//! (admin engine, source paths, working set, caps) is aggregated in the
 //! Session root and borrowed per turn via [`TurnDeps`]; the materializer owns
 //! none of it (ADR-0053 Decision 4 -- stateless, owned by none).
 
@@ -79,7 +79,7 @@ impl CachedDerivedRef {
 /// borrowed per turn -- the materializer is stateless and owns none of this.
 ///
 /// Disjoint borrows via a struct let one call site hand a materializer
-/// `&mut working_set` alongside `&conn` / `&mut source_files` / `&temp_path`
+/// `&mut working_set` alongside `&engine` / `&mut source_files` / `&temp_path`
 /// without widening to `&mut Session`. The `&mut source_files` lets a
 /// materialize step register derived sources mid-turn (issue #433,
 /// ADR-0087 D4).
@@ -111,8 +111,10 @@ pub(crate) struct TurnDeps<'a> {
 #[cfg(test)]
 impl<'a> TurnDeps<'a> {
     /// Build `TurnDeps` with default caps (1 000 rows / 100 results) over a
-    /// materialized in-memory engine + real temp dir. Shared by derived-source
-    /// and materializer tests so the field list stays in one place.
+    /// materialized in-memory engine + real temp dir. The one TurnDeps
+    /// constructor carrying the cap literals; every other fixture (the tools
+    /// `test_support` wrappers, resume, gateway) delegates here so the field
+    /// list stays in one place.
     pub(crate) fn test_deps(
         engine: &'a AdminEngine,
         ws: &'a mut WorkingSet,
