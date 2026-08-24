@@ -113,7 +113,7 @@ fn read_page(
     let conn = deps
         .engine
         .acquire()
-        .map_err(|e| format!("sample failed: {e}"))?;
+        .map_err(|e| format!("engine materialization failed: {e}"))?;
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("sample failed: {e}"))?;
