@@ -613,12 +613,13 @@ fn execute_call(
     // Meta-tool trio dispatch (ADR-0105): list / search run locally against
     // the aggregator's catalog (read-only, short of the gate -- the built-in
     // read tools' trust shape); mcp_invoke resolves its handle BEFORE the
-    // enforcement points and recurses into the regular external path under
-    // the backend identity, so the gate / trace never see "mcp_invoke". A
-    // resolution failure is the call's own error result with no phase events
-    // and no trace entry -- the same semantics as a call that never reached
-    // a tool.
-    match call.name.as_str() {
+    // enforcement points and falls through to the rest of this function
+    // under the backend identity, so the gate / trace never see
+    // "mcp_invoke". A resolution failure is the call's own error result with
+    // no phase events and no trace entry -- the same semantics as a call
+    // that never reached a tool.
+    let resolved;
+    let call = match call.name.as_str() {
         crate::mcp::meta_tools::META_LIST_SERVERS => {
             let payload = mcp.server_listing();
             return Ok(local_meta_call(
@@ -642,41 +643,36 @@ fn execute_call(
                 )),
             };
         }
-        crate::mcp::meta_tools::META_INVOKE => {
-            return match mcp.resolve_invoke(&call.input) {
-                Err(message) => Ok(meta_failure(call, &message)),
-                Ok((handle, arguments)) => execute_call(
-                    &ToolUse {
-                        id: call.id.clone(),
-                        name: handle,
-                        input: arguments,
-                    },
-                    deps,
-                    materializer,
-                    mcp,
-                    gate,
-                    outputs,
-                    on_phase,
+        crate::mcp::meta_tools::META_INVOKE => match mcp.resolve_invoke(&call.input) {
+            Err(message) => return Ok(meta_failure(call, &message)),
+            Ok((handle, arguments)) => {
+                resolved = ToolUse {
+                    id: call.id.clone(),
+                    name: handle,
+                    input: arguments,
+                };
+                &resolved
+            }
+        },
+        // A handle emitted directly as a tool name is not a valid call form
+        // on the discovery surface (ADR-0105 Consequences): mcp_invoke is
+        // the one addressing path. Fail as the call's own error BEFORE the
+        // gate, so a hallucinated direct call never surfaces an approval
+        // card for a name the surface never advertised. The guard matches
+        // EMITTED names only -- the resolved fall-through above is the one
+        // path that may carry a namespaced name past this arm.
+        _ if aggregator::parse_namespaced(&call.name).is_some() => {
+            return Ok(meta_failure(
+                call,
+                &format!(
+                    "tool `{}` is a namespaced external handle; address it via mcp_invoke, \
+                     not as a direct tool call",
+                    call.name
                 ),
-            };
+            ));
         }
-        _ => {}
-    }
-    // A handle emitted directly as a tool name is not a valid call form on
-    // the discovery surface (ADR-0105 Consequences): mcp_invoke is the one
-    // addressing path. Fail as the call's own error BEFORE the gate, so a
-    // hallucinated direct call never surfaces an approval card for a name
-    // the surface never advertised.
-    if aggregator::parse_namespaced(&call.name).is_some() {
-        return Ok(meta_failure(
-            call,
-            &format!(
-                "tool `{}` is a namespaced external handle; address it via mcp_invoke, \
-                 not as a direct tool call",
-                call.name
-            ),
-        ));
-    }
+        _ => call,
+    };
     let (key, operation_kind, summary) = classify_call(call);
     let gate_req = ApprovalRequest {
         key,
@@ -728,9 +724,10 @@ fn execute_call(
     // namespaced `mcp__<slug>__<tool>` name goes to the matching external
     // MCP server via the aggregator (the prefix is stripped server-side); a
     // bare name goes to the built-in DuckDB executor. Under the discovery
-    // surface the namespaced arm is reached only from the `mcp_invoke`
-    // recursion above (a directly-emitted handle was already refused
-    // pre-gate), so this dispatch stays the single external execution point.
+    // surface the namespaced arm is reached only via the `mcp_invoke`
+    // fall-through above (a directly-emitted handle was already refused in
+    // the trio match), so this dispatch stays the single external execution
+    // point.
     // Both surface the outcome as the typed channel (issue #336): the
     // model-facing `result` (JSON payload on success or an error string on
     // failure -- both feed back to the model; the agent self-corrects on an
@@ -2813,6 +2810,74 @@ mod tests {
         assert!(
             outcome.trace.is_empty(),
             "resolution failure leaves no trace entry (and no empty round)"
+        );
+    }
+
+    /// The `mcp_invoke` success composition (ADR-0105 Decision 4): a handle
+    /// that resolves against the catalog flows the regular external path
+    /// under the backend identity -- the gate consumes the handle (seeded
+    /// trust), the trace row names the handle (never "mcp_invoke"), and the
+    /// routing failure (the test server's transport is a dead port) rides
+    /// back as the call's own error for self-correction. Pins the exact
+    /// composition whose regression the PR #660 review caught: when the
+    /// resolved handle was re-refused by the direct-emission guard, the call
+    /// returned the refusal error with NO trace row, failing the row
+    /// assertions below.
+    #[test]
+    fn meta_invoke_resolved_handle_dispatches_under_the_backend_identity() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "invoke-ok",
+            vec![
+                Ok(call(
+                    "mcp_invoke",
+                    json!({"tool": "mcp__fake__echo", "arguments": {"message": "hi"}}),
+                )),
+                Ok(ToolTurnReply::Text("routed".into())),
+            ],
+        );
+        let mut mcp = McpAggregator::catalog_server_for_test(
+            "Fake",
+            vec![json!({
+                "name": "echo",
+                "description": "echo the message",
+                "inputSchema": {"type": "object"},
+            })],
+        );
+        let approval = ApprovalState::new();
+        approval.seed_trust(&ToolKey::external("fake", "mcp__fake__echo"));
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let sink = RecordingSink::default();
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("invoke-ok"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut mcp,
+            &approval,
+            &sink,
+            |_| {},
+        );
+        assert_eq!(outcome.termination, Termination::Text("routed".into()));
+        assert_eq!(outcome.trace.len(), 1, "one round");
+        let calls = &outcome.trace[0].calls;
+        assert_eq!(calls.len(), 1, "one dispatched call");
+        assert_eq!(
+            calls[0].name, "mcp__fake__echo",
+            "the trace row carries the backend handle, not an mcp_invoke shell"
+        );
+        assert!(
+            !calls[0].success,
+            "the dead transport surfaces as the call's own error"
         );
     }
 

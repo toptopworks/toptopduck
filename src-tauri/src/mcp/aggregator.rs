@@ -321,10 +321,15 @@ impl McpAggregator {
         let mut total_matched = 0usize;
         for server in &self.servers {
             for entry in &server.tools {
-                let native = entry
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                // A malformed entry (no non-empty string `name`) has no
+                // addressable handle: its would-be card would read
+                // `mcp__<slug>__`, which `parse_namespaced` rejects, so the
+                // card could never be invoked. Skip it (as `extract_tool_info`
+                // does) so every card the surface emits is callable.
+                let native = match entry.get("name").and_then(Value::as_str) {
+                    Some(n) if !n.is_empty() => n,
+                    _ => continue,
+                };
                 let description = entry
                     .get("description")
                     .and_then(Value::as_str)
@@ -394,6 +399,35 @@ impl McpAggregator {
                 }
             }
         }
+    }
+
+    /// Test-only: an aggregator whose catalog holds one connected server
+    /// with the given tool entries and no live transport (the client points
+    /// at a port the OS just reclaimed, so routing fails with a connection
+    /// error -- the failure shape the dispatch-composition pins exercise).
+    /// The catalog / resolve paths never touch the client. Records no
+    /// connect attempt, so `meta_tool_definitions` stays empty (mounting is
+    /// pinned through the real `connect_all` paths instead).
+    #[cfg(test)]
+    pub(crate) fn catalog_server_for_test(display_name: &str, tools: Vec<Value>) -> Self {
+        let id = McpServerId("test-catalog-srv".into());
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            listener.local_addr().expect("local addr").port()
+            // The listener drops here: nothing answers on the port, and the
+            // OS is extremely unlikely to rehand it out mid-test.
+        };
+        let client = crate::mcp::client::HttpClient::unreachable_for_test(&format!(
+            "http://127.0.0.1:{port}"
+        ));
+        let mut agg = Self::empty();
+        agg.servers.push(AggregatedServer {
+            slug: slugify(display_name, &id),
+            display_name: display_name.to_string(),
+            client: TransportClient::Http(client),
+            tools,
+        });
+        agg
     }
 
     /// Route a `tools/call` whose name is `mcp__<slug>__<tool>` to the matching
@@ -738,6 +772,50 @@ mod tests {
         let agg = McpAggregator::default();
         assert!(agg.servers.is_empty());
         assert!(agg.meta_tool_definitions().is_empty());
+    }
+
+    /// ADR-0105 Decision 3: the catalog serves at most `SEARCH_TOP_K` cards
+    /// while `total_matched` carries the pre-truncation count -- a 12-tool
+    /// catalog serves 10 cards and reports 12 matched, so the caller can
+    /// tell matches were dropped and narrow the query.
+    #[test]
+    fn search_catalog_caps_cards_at_search_top_k() {
+        let tools: Vec<Value> = (0..12)
+            .map(|i| {
+                json!({
+                    "name": format!("tool_{i}"),
+                    "description": "a tool",
+                    "inputSchema": {"type": "object"},
+                })
+            })
+            .collect();
+        let agg = McpAggregator::catalog_server_for_test("TopK", tools);
+        let out = agg.search_catalog("");
+        assert_eq!(
+            out["tools"].as_array().unwrap().len(),
+            meta_tools::SEARCH_TOP_K,
+            "served cards cap at SEARCH_TOP_K"
+        );
+        assert_eq!(out["total_matched"], 12, "total counts pre-truncation");
+    }
+
+    /// A malformed entry (no non-empty string `name`) cannot be addressed --
+    /// its would-be handle `mcp__<slug>__` never parses -- so it never
+    /// becomes a card and never counts toward `total_matched`. Every card
+    /// the surface emits must be callable through `mcp_invoke`.
+    #[test]
+    fn search_catalog_skips_entries_without_a_usable_name() {
+        let tools = vec![
+            json!({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}}),
+            json!({"description": "no name at all"}),
+            json!({"name": ""}),
+        ];
+        let agg = McpAggregator::catalog_server_for_test("SkipMalformed", tools);
+        let out = agg.search_catalog("");
+        assert_eq!(out["total_matched"], 1, "only the well-formed entry counts");
+        let cards = out["tools"].as_array().unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["tool"], "mcp__skipmalformed__echo");
     }
 
     // --- route error branches (no spawn; empty aggregator) ------------------

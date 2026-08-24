@@ -840,6 +840,54 @@ mod tests {
         }
     }
 
+    /// ADR-0105 Decision 1: the trio mounts on the ATTEMPTED set, so a turn
+    /// whose only enabled server FAILED to connect still advertises the trio
+    /// on `tools/list` -- `mcp_list_servers` can then surface the failure
+    /// reason. Pins the bridge surface's mount point (the `tools/list`
+    /// extend): the trio appends after the built-ins, and no flattened
+    /// external name ever appears.
+    #[test]
+    fn tools_list_appends_the_trio_when_a_connect_was_attempted() {
+        let mut ctx = fresh_ctx();
+        let config = crate::mcp::config::McpServerConfig {
+            id: crate::mcp::config::McpServerId("srv-broken".into()),
+            display_name: "BrokenMCP".into(),
+            transport: crate::mcp::config::McpTransport::stdio(
+                "/no/such/toptopduck-binary",
+                Vec::new(),
+            ),
+            env: std::collections::BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        ctx.mcp
+            .connect_all(&[config], &crate::provider::keychain::KeychainStore::new());
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
+        match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                let names: Vec<&str> = v["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .map(|t| t["name"].as_str().expect("tool name"))
+                    .collect();
+                let builtins = builtin_table().len();
+                assert_eq!(names.len(), builtins + 3, "built-ins + the trio");
+                assert_eq!(
+                    names[builtins..],
+                    ["mcp_list_servers", "mcp_search_tools", "mcp_invoke"],
+                    "the trio extends the table in definition order"
+                );
+            }
+            _ => panic!("tools/list must return Result"),
+        }
+    }
+
     #[test]
     fn handle_method_unknown_returns_method_not_found() {
         let mut ctx = fresh_ctx();
