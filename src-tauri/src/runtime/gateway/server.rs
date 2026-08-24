@@ -102,7 +102,7 @@ pub struct GatewayCtx<'a> {
 /// The trace + promotions a serve collected from the bridge's tool calls
 /// (ADR-0078 cross-runtime trace contract). The turn assembler (slice 9c)
 /// merges this with the built-in loop's output shape verbatim.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct GatewayOutcome {
     pub trace: Vec<TraceEntry>,
     pub promotions: Vec<Promotion>,
@@ -170,12 +170,7 @@ pub fn serve_connection(
         // Cancel fired before any bridge connected: return the empty outcome so
         // the turn assembler's termination (single-source ACP) decides the
         // TurnOutcome (Cancelled), not a gateway serve error.
-        None => {
-            return Ok(GatewayOutcome {
-                trace: Vec::new(),
-                promotions: Vec::new(),
-            });
-        }
+        None => return Ok(GatewayOutcome::default()),
         Some(pair) => pair,
     };
     // The listener accepted exactly one bridge (ADR-0085 per-bridge lifecycle);
@@ -188,10 +183,7 @@ pub fn serve_connection(
 
     verify_bridge(&mut reader, &mut writer, &token)?;
 
-    let mut outcome = GatewayOutcome {
-        trace: Vec::new(),
-        promotions: Vec::new(),
-    };
+    let mut outcome = GatewayOutcome::default();
     loop {
         if ctx.cancel.is_requested() {
             return Ok(outcome);
@@ -407,50 +399,23 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         name,
         input: arguments,
     };
+    // The shared dispatch classification (issue #663 review): the trio match,
+    // the parse-first invoke resolution, and the direct-handle refusal all
+    // live in `meta_tools::resolve_meta_call` -- this site maps each variant
+    // onto the gateway envelope. `Resolved` is an owned replacement call that
+    // outlives the match through `resolved`; `Fallthrough` borrows the
+    // original; both take the shared classify -> gate -> dispatch path below.
     let resolved;
-    let call = match call.name.as_str() {
-        meta_tools::META_LIST_SERVERS => {
-            let payload = ctx.mcp.server_listing();
-            return local_meta_result(&call, meta_tools::LIST_SUMMARY, payload, outcome);
+    let call: &ToolUse = match meta_tools::resolve_meta_call(&ctx.mcp, &call) {
+        meta_tools::MetaDispatch::Local { summary, payload } => {
+            return local_meta_result(&call, &summary, payload, outcome);
         }
-        meta_tools::META_SEARCH_TOOLS => {
-            return match meta_tools::parse_search_input(&call.input) {
-                Ok(query) => {
-                    let summary = meta_tools::query_summary(query);
-                    let payload = ctx.mcp.search_catalog(query);
-                    local_meta_result(&call, &summary, payload, outcome)
-                }
-                Err(message) => resolution_failure(message),
-            };
+        meta_tools::MetaDispatch::Refused(message) => return resolution_failure(message),
+        meta_tools::MetaDispatch::Resolved(replacement) => {
+            resolved = replacement;
+            &resolved
         }
-        // Parse-first (ADR-0105 Decision 4): the handle resolves against the
-        // turn's catalog BEFORE any gate / trace. On success the call falls
-        // through to the shared classify -> gate -> dispatch path below under
-        // the backend identity -- the same resolve-and-fall-through shape the
-        // built-in loop uses, so the gate / trace never see "mcp_invoke".
-        meta_tools::META_INVOKE => match ctx.mcp.resolve_invoke(&call.input) {
-            Err(message) => return resolution_failure(message),
-            Ok((handle, arguments)) => {
-                resolved = ToolUse {
-                    id: call.id.clone(),
-                    name: handle,
-                    input: arguments,
-                };
-                &resolved
-            }
-        },
-        // A handle emitted directly as a tool name is not a valid call form on
-        // the discovery surface: `mcp_invoke` is the one addressing path
-        // (ADR-0105 Consequences -- the bridge/LLM addresses external tools via
-        // the invoke, not by emitting the namespaced name). Fail as a tool-level
-        // error BEFORE the gate, so a hallucinated direct call never surfaces an
-        // approval card for a name the surface never advertised. The guard
-        // matches EMITTED names only -- the resolved fall-through above is the
-        // one path that may carry a namespaced name past this arm.
-        _ if aggregator::parse_namespaced(&call.name).is_some() => {
-            return resolution_failure(meta_tools::direct_handle_failure(&call.name));
-        }
-        _ => &call,
+        meta_tools::MetaDispatch::Fallthrough(call) => call,
     };
     // The gate consumes the RESOLVED identity (ADR-0105 Decision 4), so an
     // approval card names the backend server + handle, never "mcp_invoke".
@@ -490,9 +455,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             // handle between the two sites, so the guard above judges the
             // EMITTED name while this judges the final identity (a hoisted
             // bool would be stale for exactly the invoke path).
-            let (response, is_error, excerpt) = if aggregator::parse_namespaced(&call.name)
-                .is_some()
-            {
+            let (response, is_error, excerpt) = if aggregator::is_namespaced(&call.name) {
                 let route_result = ctx.mcp.route(&call.name, &call.input);
                 let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
                 (Response::Result(envelope), is_error, excerpt)
@@ -502,7 +465,11 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                     outcome.promotions.push(promotion);
                 }
                 let is_error = dispatched.result.is_error;
-                let excerpt = dispatched.result.content.clone();
+                // Truncate via borrow BEFORE the move into the envelope -- a
+                // full-content clone would double peak memory per built-in
+                // call (issue #663 review); the trace-side re-truncation in
+                // the push below is idempotent on the truncated string.
+                let excerpt = truncate_trace_excerpt(&dispatched.result.content, TRACE_EXCERPT_MAX);
                 (
                     Response::Result(json!({
                         "content": [{"type": "text", "text": dispatched.result.content}],
@@ -736,19 +703,28 @@ mod tests {
     /// A notification (no id) gets a bare 202, the same contract the
     /// integration fake uses.
     fn serve_one_rpc(mut stream: TcpStream) {
+        // Every early return below eprintln!s its failure (issue #663
+        // review): the fixture answers transport faults with an empty 202,
+        // which would otherwise surface later as an unrelated rmcp timeout
+        // -- the exact "confusing failure" mode `live_ctx` avoids at connect.
         let read_half = match stream.try_clone() {
             Ok(s) => s,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("serve_one_rpc: stream clone failed: {e}");
+                return;
+            }
         };
         let mut reader = BufReader::new(read_half);
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+            eprintln!("serve_one_rpc: connection closed before a request line");
             return;
         }
         let mut content_length = 0usize;
         loop {
             let mut header = String::new();
             if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                eprintln!("serve_one_rpc: connection closed mid-headers");
                 return;
             }
             if header.trim().is_empty() {
@@ -760,11 +736,15 @@ mod tests {
         }
         let mut body = vec![0u8; content_length];
         if content_length > 0 && reader.read_exact(&mut body).is_err() {
+            eprintln!("serve_one_rpc: short body read ({content_length} declared)");
             return;
         }
         let resp = match serde_json::from_slice::<Value>(&body) {
             Ok(req) => rpc_answer(&req),
-            Err(_) => Value::Null,
+            Err(e) => {
+                eprintln!("serve_one_rpc: body parse failed: {e}");
+                Value::Null
+            }
         };
         if resp.is_null() {
             let _ = stream.write_all(
@@ -960,10 +940,7 @@ mod tests {
     #[test]
     fn handle_method_initialize_advertises_gateway_server_info() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
         match handle_method("initialize", &msg, &mut ctx, &mut outcome) {
             Response::Result(v) => {
@@ -977,10 +954,7 @@ mod tests {
     #[test]
     fn handle_method_tools_list_advertises_builtin_table() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
         match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
             Response::Result(v) => {
@@ -1015,10 +989,7 @@ mod tests {
         };
         ctx.mcp
             .connect_all(&[config], &crate::provider::keychain::KeychainStore::new());
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
         match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
             Response::Result(v) => {
@@ -1043,10 +1014,7 @@ mod tests {
     #[test]
     fn handle_method_unknown_returns_method_not_found() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 3, "method": "frobnicate"});
         match handle_method("frobnicate", &msg, &mut ctx, &mut outcome) {
             Response::Error(code, m) => {
@@ -1060,10 +1028,7 @@ mod tests {
     #[test]
     fn handle_method_notification_returns_none_no_envelope() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         // No id -> a notification; the match arm returns Response::None, which
         // the caller's id-check drops without writing a response.
         let msg = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
@@ -1337,10 +1302,7 @@ mod tests {
     #[test]
     fn handle_tools_call_allow_path_runs_builtin_through_dispatch() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1376,10 +1338,7 @@ mod tests {
     #[test]
     fn handle_tools_call_missing_name_returns_params_error() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 5,
@@ -1404,10 +1363,7 @@ mod tests {
     #[test]
     fn handle_tools_call_list_servers_serves_locally_with_one_trace_row() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -1426,6 +1382,10 @@ mod tests {
         }
         assert_eq!(outcome.trace.len(), 1, "one meta call -> one trace row");
         assert_eq!(outcome.trace[0].name, "mcp_list_servers");
+        // The trace summary is the shared constant, not a re-inlined literal
+        // (issue #663 review: LIST_SUMMARY had no end-to-end pin at either
+        // dispatch site).
+        assert_eq!(outcome.trace[0].summary, meta_tools::LIST_SUMMARY);
         assert!(outcome.trace[0].success);
         assert_eq!(outcome.trace[0].operation_kind, OperationKind::Read);
     }
@@ -1436,10 +1396,7 @@ mod tests {
     #[test]
     fn handle_tools_call_search_tools_carries_query_in_summary() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 8,
@@ -1466,10 +1423,7 @@ mod tests {
     #[test]
     fn handle_tools_call_direct_handle_emission_is_refused_pregate() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 11,
@@ -1510,10 +1464,7 @@ mod tests {
             (json!({}), "parameter `tool`"),
         ] {
             let mut ctx = fresh_ctx();
-            let mut outcome = GatewayOutcome {
-                trace: Vec::new(),
-                promotions: Vec::new(),
-            };
+            let mut outcome = GatewayOutcome::default();
             let msg = json!({
                 "jsonrpc": "2.0",
                 "id": 9,
@@ -1544,10 +1495,7 @@ mod tests {
     #[test]
     fn handle_tools_call_string_id_not_double_quoted() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": "req-abc",
@@ -1650,10 +1598,7 @@ mod tests {
     fn handle_tools_call_search_tools_without_a_query_fails_with_the_shared_message() {
         for args in [json!({}), json!({"query": 7})] {
             let mut ctx = fresh_ctx();
-            let mut outcome = GatewayOutcome {
-                trace: Vec::new(),
-                promotions: Vec::new(),
-            };
+            let mut outcome = GatewayOutcome::default();
             let msg = json!({
                 "jsonrpc": "2.0", "id": 21, "method": "tools/call",
                 "params": {"name": "mcp_search_tools", "arguments": args}
@@ -1689,10 +1634,7 @@ mod tests {
         let mut ctx = live_ctx(&server);
         ctx.approval
             .seed_trust(&ToolKey::external("livemcp", "mcp__livemcp__add"));
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0", "id": 42, "method": "tools/call",
             "params": {"name": "mcp_invoke",
@@ -1731,10 +1673,7 @@ mod tests {
         let mut ctx = live_ctx(&server);
         ctx.approval
             .seed_trust(&ToolKey::external("livemcp", "mcp__livemcp__add"));
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         // 1) search: the card carries the handle + the server's schema.
         let search = json!({
             "jsonrpc": "2.0", "id": 50, "method": "tools/call",
@@ -1788,10 +1727,7 @@ mod tests {
         let mut ctx = live_ctx(&server);
         ctx.approval
             .seed_trust(&ToolKey::external("livemcp", "mcp__livemcp__fail"));
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0", "id": 60, "method": "tools/call",
             "params": {"name": "mcp_invoke", "arguments": {"tool": "mcp__livemcp__fail"}}

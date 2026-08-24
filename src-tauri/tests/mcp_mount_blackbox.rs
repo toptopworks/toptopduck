@@ -69,6 +69,7 @@ fn a_configured_mcp_server_mounts_the_trio_on_the_provider_tool_surface() {
     );
 
     let guard = captured.lock().expect("capture lock");
+    assert!(!guard.is_empty(), "provider saw no tool turns");
     let names: Vec<&str> = guard[0].tools.iter().map(|t| t.name.as_str()).collect();
     for meta in ["mcp_list_servers", "mcp_search_tools", "mcp_invoke"] {
         assert!(
@@ -106,6 +107,7 @@ fn an_empty_effective_set_mounts_no_meta_tools() {
     );
 
     let guard = captured.lock().expect("capture lock");
+    assert!(!guard.is_empty(), "provider saw no tool turns");
     let names: Vec<&str> = guard[0].tools.iter().map(|t| t.name.as_str()).collect();
     assert!(
         !names.iter().any(|n| n.starts_with("mcp_")),

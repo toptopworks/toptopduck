@@ -58,11 +58,15 @@ struct AggregatedServer {
 /// (ADR-0105 Decision 1): the manifest shows enabled servers that FAILED to
 /// connect too (with the reason), while the search catalog carries only the
 /// connected ones. Built by the single [`McpAggregator::record_outcome`]
-/// helper next to the [`ConnectResult`] it mirrors, so the two surfaces
-/// cannot drift.
+/// helper from the finished [`ConnectResult`]: the flat fields DERIVE from
+/// it, so the two surfaces cannot drift, and the tool list moves out with
+/// the result instead of riding a dead copy in the turn's records (the only
+/// reader, `server_listing`, reads `tool_count`).
 struct ConnectRecord {
     display_name: String,
-    outcome: ConnectOutcome,
+    connected: bool,
+    tool_count: usize,
+    error: Option<String>,
 }
 
 /// The two legal shapes of one connect attempt (issue #661): the flat
@@ -101,7 +105,9 @@ pub struct ConnectResult {
     /// skip path (the aggregator logs the detail; this is the boolean the UI
     /// badges).
     pub connected: bool,
-    /// The number of tools the server advertised (0 when not connected).
+    /// The number of usable tools the server advertised -- entries without a
+    /// name are malformed, never reach the catalog, and are not counted
+    /// (0 when not connected).
     pub tool_count: usize,
     /// The tool list the server advertised at connect (empty when not
     /// connected), projected to [`McpToolInfo`].
@@ -232,8 +238,13 @@ impl McpAggregator {
                 );
             }
         };
-        let tool_count = tools.len();
         let tool_infos = extract_tool_info(&tools);
+        // Count the USABLE tools: malformed entries (no name) never reach
+        // the catalog, so a raw advertised count would disagree with what
+        // `mcp_search_tools` can ever return (issue #663 review) -- a server
+        // whose entries are all malformed lists as connected with 0 tools,
+        // not N phantom ones.
+        let tool_count = tool_infos.len();
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
         self.servers.push(AggregatedServer {
@@ -257,21 +268,21 @@ impl McpAggregator {
     /// [`ConnectResult`] -- from the single typed outcome (issue #661).
     /// The `connect_one` branches previously pushed a record AND returned a
     /// result built in parallel, two construction sites that could drift;
-    /// this is now the one place either shape is built.
+    /// this is now the one place either shape is built. The tool list MOVES
+    /// into the returned result (the record's only reader wants the count),
+    /// and the record's flat fields derive from the finished result.
     fn record_outcome(
         &mut self,
         display_name: &str,
         id: &McpServerId,
         outcome: ConnectOutcome,
     ) -> ConnectResult {
-        let result = match &outcome {
-            ConnectOutcome::Connected {
-                tool_count, tools, ..
-            } => ConnectResult {
+        let result = match outcome {
+            ConnectOutcome::Connected { tool_count, tools } => ConnectResult {
                 id: id.clone(),
                 connected: true,
-                tool_count: *tool_count,
-                tools: tools.clone(),
+                tool_count,
+                tools,
                 error: None,
             },
             ConnectOutcome::Failed { error } => ConnectResult {
@@ -279,12 +290,14 @@ impl McpAggregator {
                 connected: false,
                 tool_count: 0,
                 tools: Vec::new(),
-                error: Some(error.clone()),
+                error: Some(error),
             },
         };
         self.connect_records.push(ConnectRecord {
             display_name: display_name.to_string(),
-            outcome,
+            connected: result.connected,
+            tool_count: result.tool_count,
+            error: result.error.clone(),
         });
         result
     }
@@ -415,15 +428,11 @@ impl McpAggregator {
             .connect_records
             .iter()
             .map(|r| {
-                let (connected, tool_count, error) = match &r.outcome {
-                    ConnectOutcome::Connected { tool_count, .. } => (true, *tool_count, None),
-                    ConnectOutcome::Failed { error } => (false, 0, Some(error.as_str())),
-                };
                 serde_json::json!({
                     "server": r.display_name,
-                    "connected": connected,
-                    "tool_count": tool_count,
-                    "error": error,
+                    "connected": r.connected,
+                    "tool_count": r.tool_count,
+                    "error": r.error,
                 })
             })
             .collect();
@@ -603,19 +612,30 @@ pub fn namespaced_name(slug: &str, tool: &str) -> String {
     format!("{NAMESPACED_PREFIX}{slug}{NAMESPACED_SEP}{tool}")
 }
 
+/// Split a namespaced name into its non-empty `(slug, tool)` parts WITHOUT
+/// allocating -- `None` for any name that is not a well-formed handle. Both
+/// [`parse_namespaced`] and [`is_namespaced`] route through here so the shape
+/// rule lives once.
+fn namespaced_parts(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix(NAMESPACED_PREFIX)?;
+    let (slug, tool) = rest.split_once(NAMESPACED_SEP)?;
+    (!slug.is_empty() && !tool.is_empty()).then_some((slug, tool))
+}
+
 /// Parse a gateway-advertised name back into `(server_slug, server-native
 /// tool)`. Returns `None` if the name is not a namespaced MCP tool (the
 /// built-in tools, or a stray name) -- the gateway treats those as built-in
 /// dispatch candidates.
 pub fn parse_namespaced(name: &str) -> Option<(String, String)> {
-    let rest = name.strip_prefix(NAMESPACED_PREFIX)?;
-    let mut parts = rest.splitn(2, NAMESPACED_SEP);
-    let slug = parts.next()?.to_string();
-    let tool = parts.next()?.to_string();
-    if slug.is_empty() || tool.is_empty() {
-        return None;
-    }
-    Some((slug, tool))
+    namespaced_parts(name).map(|(slug, tool)| (slug.to_string(), tool.to_string()))
+}
+
+/// Non-allocating shape test for a namespaced MCP handle -- the guard /
+/// routing discriminator at the dispatch sites. [`parse_namespaced`]
+/// allocates the split pair; a site that only needs the shape (the pre-gate
+/// refusal guard, the route-by-name discriminator) pays no allocation for it.
+pub fn is_namespaced(name: &str) -> bool {
+    namespaced_parts(name).is_some()
 }
 
 /// Extract the first text block from a standard MCP `tools/call` envelope
@@ -870,12 +890,12 @@ mod tests {
         assert_eq!(cards[0]["tool"], "mcp__skipmalformed__echo");
     }
 
-    /// Issue #661: an empty catalog (no server connected) is distinguishable
-    /// from a no-match search over a live catalog -- the empty shape carries
-    /// the note pointing at `mcp_list_servers`, while a no-match search (and
-    /// a live-but-zero-tools catalog) stay note-free.
+    /// Issue #661: the catalog note rides ONLY the empty turn -- an empty
+    /// catalog (no server connected) carries the note pointing at
+    /// `mcp_list_servers`, while a no-match search over a live catalog and a
+    /// live-but-zero-tools catalog both stay note-free.
     #[test]
-    fn search_catalog_empty_vs_no_match_are_distinguishable() {
+    fn search_catalog_note_rides_only_the_empty_catalog() {
         // Empty catalog: nothing connected -> the note rides the result.
         let empty = McpAggregator::empty();
         let out = empty.search_catalog("");

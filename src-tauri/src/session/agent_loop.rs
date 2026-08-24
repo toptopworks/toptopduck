@@ -611,61 +611,27 @@ fn execute_call(
     outputs: &mut CallOutputs,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<ToolResult, GateCancelled> {
-    // Meta-tool trio dispatch (ADR-0105): list / search run locally against
-    // the aggregator's catalog (read-only, short of the gate -- the built-in
-    // read tools' trust shape); mcp_invoke resolves its handle BEFORE the
-    // enforcement points and falls through to the rest of this function
-    // under the backend identity, so the gate / trace never see
-    // "mcp_invoke". A resolution failure is the call's own error result with
-    // no phase events and no trace entry -- the same semantics as a call
-    // that never reached a tool.
+    // Meta-tool trio dispatch (ADR-0105): the classification -- list / search
+    // run locally against the aggregator's catalog (read-only, short of the
+    // gate -- the built-in read tools' trust shape); mcp_invoke resolves its
+    // handle BEFORE the enforcement points and falls through under the
+    // backend identity, so the gate / trace never see "mcp_invoke"; a
+    // resolution / parse / direct-handle failure is the call's own error
+    // result with no phase events and no trace entry -- the same semantics as
+    // a call that never reached a tool. All of that lives in the shared
+    // `meta_tools::resolve_meta_call` (issue #663 review); this site maps
+    // each variant onto the loop's `ToolResult` shape.
     let resolved;
-    let call = match call.name.as_str() {
-        meta_tools::META_LIST_SERVERS => {
-            let payload = mcp.server_listing();
-            return Ok(local_meta_call(
-                call,
-                meta_tools::LIST_SUMMARY,
-                payload,
-                outputs,
-                on_phase,
-            ));
+    let call: &ToolUse = match meta_tools::resolve_meta_call(mcp, call) {
+        meta_tools::MetaDispatch::Local { summary, payload } => {
+            return Ok(local_meta_call(call, &summary, payload, outputs, on_phase));
         }
-        meta_tools::META_SEARCH_TOOLS => {
-            return match meta_tools::parse_search_input(&call.input) {
-                Ok(query) => {
-                    let summary = meta_tools::query_summary(query);
-                    let payload = mcp.search_catalog(query);
-                    Ok(local_meta_call(call, &summary, payload, outputs, on_phase))
-                }
-                Err(message) => Ok(meta_failure(call, &message)),
-            };
+        meta_tools::MetaDispatch::Refused(message) => return Ok(meta_failure(call, &message)),
+        meta_tools::MetaDispatch::Resolved(replacement) => {
+            resolved = replacement;
+            &resolved
         }
-        meta_tools::META_INVOKE => match mcp.resolve_invoke(&call.input) {
-            Err(message) => return Ok(meta_failure(call, &message)),
-            Ok((handle, arguments)) => {
-                resolved = ToolUse {
-                    id: call.id.clone(),
-                    name: handle,
-                    input: arguments,
-                };
-                &resolved
-            }
-        },
-        // A handle emitted directly as a tool name is not a valid call form
-        // on the discovery surface (ADR-0105 Consequences): mcp_invoke is
-        // the one addressing path. Fail as the call's own error BEFORE the
-        // gate, so a hallucinated direct call never surfaces an approval
-        // card for a name the surface never advertised. The guard matches
-        // EMITTED names only -- the resolved fall-through above is the one
-        // path that may carry a namespaced name past this arm.
-        _ if aggregator::parse_namespaced(&call.name).is_some() => {
-            return Ok(meta_failure(
-                call,
-                &meta_tools::direct_handle_failure(&call.name),
-            ));
-        }
-        _ => call,
+        meta_tools::MetaDispatch::Fallthrough(call) => call,
     };
     let (key, operation_kind, summary) = classify_call(call);
     let gate_req = ApprovalRequest {
@@ -728,7 +694,7 @@ fn execute_call(
     // error) plus the side effect the executor reported. The external path
     // never promotes (external tools do not materialize a working-set
     // result), so `promotion` is always `None` there.
-    let outcome = if aggregator::parse_namespaced(&call.name).is_some() {
+    let outcome = if aggregator::is_namespaced(&call.name) {
         let tool_output_dir = deps.temp_path.join(super::TOOL_OUTPUT_DIR_NAME);
         route_external_call(call, mcp, &tool_output_dir)
     } else {
@@ -829,6 +795,15 @@ fn meta_failure(call: &ToolUse, message: &str) -> ToolResult {
 /// no tool-name literal `match` here, so adding a built-in tool is one entry in
 /// `builtin_tools`, not a parallel edit to this function. An unknown name falls
 /// through to the external arm (the gateway surfaces the approval card for it).
+/// Hard cap on the external-call argument preview inside the approval
+/// summary (issue #661; cap added by the #663 review): sized so the preview
+/// plus its ``external tool `name` with `` frame stays inside the card-body
+/// budget ([`crate::approval::SUMMARY_MAX_CHARS`]) -- deliberately larger
+/// than the 120-char trace cap so a realistic payload previews its head on
+/// the card instead of degrading to a bare JSON fragment the approver cannot
+/// read.
+const ARGS_PREVIEW_MAX_CHARS: usize = 448;
+
 pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
     match definitions::builtin_metadata(&call.name) {
         Some(spec) => (
@@ -868,11 +843,12 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             // approval card's `summary` field is designed for a parameter
             // digest, and a handle-only card makes the user blind-sign
             // whatever the external server is about to receive. The input is
-            // compact-JSON'd under the trace summary cap; the emit-side
-            // `truncate_summary` cap backstops the IPC broadcast.
+            // compact-JSON'd under the argument-preview cap (issue #663
+            // review); the emit-side `truncate_summary` cap backstops the IPC
+            // broadcast.
             let summary = format!(
                 "external tool `{other}` with {}",
-                truncate_trace_summary(&call.input.to_string())
+                crate::approval::truncate_summary(&call.input.to_string(), ARGS_PREVIEW_MAX_CHARS)
             );
             (key, OperationKind::Network, summary)
         }
@@ -1684,6 +1660,84 @@ mod tests {
                 .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. })),
             "a gate-denied call must never emit ToolCallStarted"
         );
+    }
+
+    /// A denied `mcp_invoke` (ADR-0105 Decision 4 + ADR-0078): the gate
+    /// consumed the RESOLVED handle, so the deny completion names the backend
+    /// handle -- never "mcp_invoke" (issue #663 review: this identity was
+    /// pinned on the allow path only; the deny row's naming had no pin).
+    #[test]
+    fn denied_invoke_completion_names_the_resolved_handle() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "deny-invoke",
+            vec![
+                Ok(call("mcp_invoke", json!({"tool": "mcp__live__echo"}))),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        // A live catalog entry (dead-port transport: the denial lands at the
+        // gate, before any dispatch, so the server is never contacted).
+        // Display "Live" slugifies to "live".
+        let mut mcp = McpAggregator::catalog_server_for_test(
+            "Live",
+            vec![json!({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}})],
+        );
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let responder = std::thread::spawn(move || {
+            let request_id = poll_request_id(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted an approval request");
+            approval_c
+                .respond(request_id, ApprovalResponse::Deny)
+                .expect("deny ok");
+        });
+
+        AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("deny-invoke"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut mcp,
+            &approval,
+            &*sink,
+            {
+                let phases = Arc::clone(&phases);
+                move |p| phases.lock().unwrap().push(p)
+            },
+        );
+        responder.join().expect("responder thread");
+
+        let phases = phases.lock().unwrap().clone();
+        let completed: Vec<&TurnPhase> = phases
+            .iter()
+            .filter(|p| matches!(p, TurnPhase::ToolCallCompleted { .. }))
+            .collect();
+        assert_eq!(completed.len(), 1, "one completion for the denied invoke");
+        match completed[0] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert_eq!(
+                    view.name, "mcp__live__echo",
+                    "the deny row names the resolved handle, never mcp_invoke"
+                );
+                assert!(!view.success);
+            }
+            other => panic!("expected ToolCallCompleted, got {other:?}"),
+        }
     }
 
     /// The failure-message guard (issue #316): the persisted excerpt is the
@@ -2760,6 +2814,7 @@ mod tests {
                 Ok(ToolTurnReply::Text("recovered".into())),
             ],
         );
+        let handle = provider.captured_tool_turns();
         let outcome = run_loop(
             &provider,
             cancel,
@@ -2774,6 +2829,30 @@ mod tests {
             outcome.trace.is_empty(),
             "a malformed search never reached a tool -> no trace entry"
         );
+
+        // The model-facing failure is the SHARED parse message (issue #661):
+        // the second round-trip's request carries the call's error result,
+        // and its content must equal `missing_query_failure()` -- the same
+        // single source the gateway site pins -- so a re-inlined drifting
+        // literal at this dispatch site fails here.
+        let captured = handle.lock().expect("capture not poisoned");
+        assert_eq!(captured.len(), 2, "one capture per round-trip");
+        match &captured[1].messages[2] {
+            ToolTurnMessage::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(
+                    content,
+                    &meta_tools::missing_query_failure(),
+                    "the loop serves the shared missing-query message"
+                );
+                assert!(
+                    is_error,
+                    "the shared message rides back as the call's own error"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 
     /// A namespaced handle emitted DIRECTLY as a tool name is refused before
@@ -2970,7 +3049,7 @@ mod tests {
         let unknown = classify_call(&ToolUse {
             id: "5".into(),
             name: "acme_fetch".into(),
-            input: json!({}),
+            input: json!({"q": "rust", "depth": 2}),
         });
         assert!(!unknown.0.is_builtin());
         assert_eq!(unknown.0.tool, "acme_fetch");
@@ -2982,9 +3061,11 @@ mod tests {
         );
         // Issue #661: the external summary carries the call's arguments (the
         // approval card's parameter digest) -- a handle-only summary makes
-        // the user blind-sign what the external server receives.
+        // the user blind-sign what the external server receives. The
+        // assertion pins actual argument CONTENT (compact JSON), so a
+        // summary that hardcodes `{}` and drops the arguments fails here.
         assert!(
-            unknown.2.contains("with {"),
+            unknown.2.contains(r#""q":"rust""#) && unknown.2.contains(r#""depth":2"#),
             "external summary carries the argument JSON: {}",
             unknown.2
         );

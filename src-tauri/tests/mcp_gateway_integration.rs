@@ -70,11 +70,11 @@ fn broken_config(id: &str, display: &str) -> McpServerConfig {
     }
 }
 
-/// The catalog's handle cards under an empty query, in advertised order (the
-/// shared extraction the mount / collision / skip / transport tests assert
-/// on). Takes the aggregator so the borrowed `&str`s outlive the call.
-fn catalog_handles(agg: &McpAggregator) -> Vec<String> {
-    let catalog = agg.search_catalog("");
+/// The handle cards of a FETCHED catalog, in advertised order (the shared
+/// extraction the mount / collision / skip / transport tests assert on).
+/// Taking the catalog (not the aggregator) lets a caller that already holds
+/// it reuse it instead of re-running the search.
+fn catalog_handles(catalog: &Value) -> Vec<String> {
     catalog["tools"]
         .as_array()
         .expect("cards")
@@ -100,7 +100,7 @@ fn connect_all_mounts_the_trio_and_discovers_by_handle() {
     // An empty query returns the whole catalog; each card's `tool` field is
     // the handle. display "FakeMCP" slugifies to "fakemcp".
     let catalog = agg.search_catalog("");
-    let handles = catalog_handles(&agg);
+    let handles = catalog_handles(&catalog);
     assert_eq!(
         handles,
         vec![
@@ -114,16 +114,16 @@ fn connect_all_mounts_the_trio_and_discovers_by_handle() {
     let card = &catalog["tools"][1];
     assert_eq!(card["server"], "FakeMCP", "card names the display name");
     // The card carries the server's OWN schema verbatim (issue #661: the
-    // fake's `add` schema is non-trivial, so a degraded empty object -- or a
-    // re-wrapped one -- cannot pass this).
+    // fake's `add` schema is non-trivial). Full-schema equality (issue #663
+    // review: the previous two-field probe let a re-wrap that adds a field
+    // while preserving the probe pair pass).
     assert_eq!(
-        card["inputSchema"]["properties"]["a"]["type"], "integer",
-        "card carries the server's schema verbatim"
-    );
-    assert_eq!(
-        card["inputSchema"]["required"],
-        json!(["a", "b"]),
-        "schema fields survive untouched"
+        card["inputSchema"],
+        json!({"type": "object",
+               "properties": {"a": {"type": "integer"},
+                              "b": {"type": "integer"}},
+               "required": ["a", "b"]}),
+        "card carries the server's schema verbatim, field for field"
     );
 
     // The manifest names the connected server with its outcome, mirroring
@@ -190,7 +190,7 @@ fn connect_all_assigns_unique_slug_suffix_on_display_name_collision() {
     );
     // Collision de-duplication surfaces in the catalog's handles (ADR-0105:
     // the card's `tool` field is the composed handle).
-    let handles = catalog_handles(&agg);
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
         handles.iter().any(|h| h == "mcp__fakemcp__echo"),
         "first server keeps bare slug, got {handles:?}"
@@ -250,7 +250,7 @@ fn connect_all_skips_a_server_that_fails_to_spawn_without_bricking_others() {
     // The catalog holds only the connected server (ADR-0105 Decision 3: a
     // failed connect leaves no placeholder); the manifest still names the
     // failed attempt with its reason (Decision 1).
-    let handles = catalog_handles(&agg);
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
         handles.iter().any(|h| h == "mcp__good__echo"),
         "good server aggregated despite bad sibling, got {handles:?}"
@@ -837,7 +837,7 @@ fn http_transport_aggregator_connect_and_route() {
     assert!(results[0].connected, "http server connected via aggregator");
 
     // The catalog carries the server's tools as handle cards (ADR-0105).
-    let handles = catalog_handles(&agg);
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
         handles.iter().any(|h| h == "mcp__httpmcp__add"),
         "handle cards, got {handles:?}"
@@ -942,7 +942,7 @@ fn sse_transport_aggregator_connect_and_route() {
     assert!(results[0].connected, "sse server connected via aggregator");
 
     // The catalog carries the server's tools as handle cards (ADR-0105).
-    let handles = catalog_handles(&agg);
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
         handles.iter().any(|h| h == "mcp__ssemcp__add"),
         "handle cards, got {handles:?}"

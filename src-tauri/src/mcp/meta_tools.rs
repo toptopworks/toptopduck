@@ -18,14 +18,16 @@
 //! [`McpAggregator`](super::aggregator::McpAggregator) owns the catalog data
 //! (connected servers + their advertised tools); this module owns the pure
 //! pieces -- the trio's names + definitions, the search match semantics, and
-//! the `mcp_invoke` input parse. The dispatch sites (the gateway server for
-//! the bridge path, `execute_call` for the built-in loop) resolve an invoke
-//! BEFORE the enforcement points so approval / audit / trace keep consuming
-//! the backend tool identity (ADR-0105 Decision 4).
+//! the `mcp_invoke` input parse -- plus the dispatch classification
+//! ([`resolve_meta_call`]) both dispatch sites consume: the gateway server
+//! for the bridge path and `execute_call` for the built-in loop resolve an
+//! invoke BEFORE the enforcement points so approval / audit / trace keep
+//! consuming the backend tool identity (ADR-0105 Decision 4).
 
 use serde_json::{json, Value};
 
-use crate::provider::tool_calling::ToolDefinition;
+use super::aggregator::McpAggregator;
+use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 
 /// The `mcp_list_servers` tool name: the connected-server manifest for this
 /// turn (display name, connect outcome, tool count).
@@ -232,6 +234,78 @@ pub(crate) fn parse_invoke_input(input: &Value) -> Result<(String, Value), Strin
     Ok((handle, arguments))
 }
 
+/// One dispatch-site-agnostic classification of a tool call against the meta
+/// surface: the arm order, the parse-first invoke resolution, and the
+/// direct-handle refusal previously lived as mirrored ~45-line skeletons at
+/// BOTH dispatch sites (the gateway's `handle_tools_call` and the loop's
+/// `execute_call`); they are single-sourced in [`resolve_meta_call`] so a
+/// protocol change (a fourth meta tool, a moved guard) edits one match. The
+/// two sites keep only the variant-to-envelope mapping, whose shapes
+/// genuinely differ (`Response` vs `ToolResult`).
+#[derive(Debug)]
+pub(crate) enum MetaDispatch<'a> {
+    /// A locally-served meta answer (the `mcp_list_servers` manifest, a parsed
+    /// `mcp_search_tools` catalog query): the summary + payload both sites
+    /// wrap identically. Never touches a backend server, so there is no gate
+    /// suspension (catalog reads carry the built-in read tools' trust shape).
+    Local { summary: String, payload: Value },
+    /// A malformed call refused BEFORE the gate (a bad search input, an
+    /// unresolvable `mcp_invoke`, a directly-emitted handle): the message
+    /// rides back as the call's own error with no gate suspension and no
+    /// trace entry -- the same semantics as a call that never reached a tool.
+    Refused(String),
+    /// An `mcp_invoke` whose handle resolved against the turn's catalog
+    /// (ADR-0105 Decision 4: parse-first, so the enforcement points consume
+    /// the backend identity): an owned replacement call that falls through
+    /// to the shared classify -> gate -> dispatch path.
+    Resolved(ToolUse),
+    /// Not a meta call: the untouched call, borrowed for the same
+    /// fall-through.
+    Fallthrough(&'a ToolUse),
+}
+
+/// Classify one tool call against the meta surface. Pure dispatch protocol --
+/// no gate, no trace, no envelope shaping; the caller maps each variant onto
+/// its own return type.
+pub(crate) fn resolve_meta_call<'a>(mcp: &McpAggregator, call: &'a ToolUse) -> MetaDispatch<'a> {
+    match call.name.as_str() {
+        META_LIST_SERVERS => MetaDispatch::Local {
+            summary: LIST_SUMMARY.to_string(),
+            payload: mcp.server_listing(),
+        },
+        META_SEARCH_TOOLS => match parse_search_input(&call.input) {
+            Ok(query) => MetaDispatch::Local {
+                summary: query_summary(query),
+                payload: mcp.search_catalog(query),
+            },
+            Err(message) => MetaDispatch::Refused(message),
+        },
+        // Parse-first (ADR-0105 Decision 4): the handle resolves against the
+        // turn's catalog BEFORE any gate / trace. On success the call falls
+        // through under the backend identity -- the gate / trace never see
+        // "mcp_invoke".
+        META_INVOKE => match mcp.resolve_invoke(&call.input) {
+            Ok((handle, arguments)) => MetaDispatch::Resolved(ToolUse {
+                id: call.id.clone(),
+                name: handle,
+                input: arguments,
+            }),
+            Err(message) => MetaDispatch::Refused(message),
+        },
+        // A handle emitted directly as a tool name is not a valid call form
+        // on the discovery surface (ADR-0105 Consequences): `mcp_invoke` is
+        // the one addressing path. Refused BEFORE the gate, so a
+        // hallucinated direct call never surfaces an approval card for a
+        // name the surface never advertised. The guard matches EMITTED names
+        // only -- the resolved fall-through above is the one path that may
+        // carry a namespaced name past this arm.
+        _ if super::aggregator::is_namespaced(&call.name) => {
+            MetaDispatch::Refused(direct_handle_failure(&call.name))
+        }
+        _ => MetaDispatch::Fallthrough(call),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +421,75 @@ mod tests {
             Err(missing_query_failure()),
             "a non-string query fails like a missing one"
         );
+    }
+
+    /// The dispatch classification each site consumes (issue #663 review):
+    /// one match, four outcomes. Pinned with an empty aggregator (no servers
+    /// connected) so the classification itself -- not the catalog contents --
+    /// is what's under test.
+    #[test]
+    fn resolve_meta_call_classifies_the_four_dispatch_outcomes() {
+        let mcp = McpAggregator::empty();
+        let list = ToolUse {
+            id: "1".into(),
+            name: META_LIST_SERVERS.into(),
+            input: json!({}),
+        };
+        match resolve_meta_call(&mcp, &list) {
+            MetaDispatch::Local { summary, .. } => {
+                assert_eq!(summary, LIST_SUMMARY);
+            }
+            other => panic!("list classifies Local, got {other:?}"),
+        }
+
+        let bad_search = ToolUse {
+            id: "2".into(),
+            name: META_SEARCH_TOOLS.into(),
+            input: json!({}),
+        };
+        match resolve_meta_call(&mcp, &bad_search) {
+            MetaDispatch::Refused(message) => assert_eq!(message, missing_query_failure()),
+            other => panic!("bad search classifies Refused, got {other:?}"),
+        }
+
+        // An unresolvable invoke (no server connected) refuses through the
+        // shared resolution failure; a resolving one is exercised end-to-end
+        // at both dispatch sites with a live catalog.
+        let bad_invoke = ToolUse {
+            id: "3".into(),
+            name: META_INVOKE.into(),
+            input: json!({"tool": "mcp__ghost__echo"}),
+        };
+        match resolve_meta_call(&mcp, &bad_invoke) {
+            MetaDispatch::Refused(message) => {
+                assert!(
+                    message.contains("ghost"),
+                    "resolution failure names the slug: {message}"
+                );
+            }
+            other => panic!("unresolvable invoke classifies Refused, got {other:?}"),
+        }
+
+        let direct = ToolUse {
+            id: "4".into(),
+            name: "mcp__github__search".into(),
+            input: json!({"q": "x"}),
+        };
+        match resolve_meta_call(&mcp, &direct) {
+            MetaDispatch::Refused(message) => {
+                assert_eq!(message, direct_handle_failure("mcp__github__search"));
+            }
+            other => panic!("direct handle classifies Refused, got {other:?}"),
+        }
+
+        let builtin = ToolUse {
+            id: "5".into(),
+            name: "explore".into(),
+            input: json!({"sql": "SELECT 1"}),
+        };
+        match resolve_meta_call(&mcp, &builtin) {
+            MetaDispatch::Fallthrough(c) => assert_eq!(c.name, "explore"),
+            other => panic!("a non-meta call falls through, got {other:?}"),
+        }
     }
 }
