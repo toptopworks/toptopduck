@@ -9,8 +9,10 @@
 //! bridge descriptor before the bridge connects) while [`serve_connection`]
 //! blocks for the bridge connection's lifetime.
 //!
-//! `tools/list` advertises the built-in DuckDB tool table; external MCP /
-//! skill tools join the table in later slices (ADR-0085 Consequences).
+//! `tools/list` advertises the built-in DuckDB tool table plus, when external
+//! servers connected this turn, the fixed meta-tool discovery trio
+//! (`mcp_list_servers` / `mcp_search_tools` / `mcp_invoke`, ADR-0105) --
+//! external tools surface by handle through discovery, not one-by-one.
 //! `tools/call` routes through the approval gate + [`crate::tools::dispatch`],
 //! mirroring the built-in agent loop's `execute_call` -- built-in tools
 //! classify `Allow` (zero approval, ADR-0080 Decision 1), unknown names fall
@@ -23,10 +25,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::approval::{ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome};
+use crate::approval::{
+    ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome, OperationKind,
+};
 use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 use crate::cancel::CancelToken;
 use crate::mcp::aggregator::{self, McpAggregator};
+use crate::mcp::meta_tools;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 use crate::session::agent_loop::{
@@ -338,10 +343,18 @@ fn handle_method(
             }
         })),
         "tools/list" => {
-            // Built-in DuckDB tools + namespaced external MCP tools (slice
-            // C-gw): the bridge / LLM sees one merged table.
+            // Built-in DuckDB tools stay direct-listed; the external surface
+            // is the fixed meta-tool trio (ADR-0105), attached only when a
+            // server connected this turn. The bridge / LLM never sees a
+            // per-tool flattened advertisement.
             let mut tools: Vec<Value> = builtin_table().iter().map(tool_to_mcp).collect();
-            tools.extend(ctx.mcp.aggregated_tools());
+            tools.extend(
+                ctx.mcp
+                    .meta_tool_definitions()
+                    .iter()
+                    .map(tool_to_mcp)
+                    .collect::<Vec<_>>(),
+            );
             Response::Result(json!({ "tools": tools }))
         }
         "tools/call" => handle_tools_call(msg, ctx, outcome),
@@ -367,6 +380,16 @@ fn tool_to_mcp(def: &ToolDefinition) -> Value {
 /// built-in loop's `execute_call`. A gate denial is a tool-level error the
 /// agent self-corrects from (ADR-0077); a gate cancel ends the serve loop
 /// (surfaced as a JSON-RPC error so the bridge does not hang on a reply).
+///
+/// The meta-tool trio dispatches FIRST (ADR-0105): `mcp_list_servers` /
+/// `mcp_search_tools` run locally against the aggregator's catalog (read-only,
+/// short of the gate -- the same trust shape as the built-in read tools);
+/// `mcp_invoke` resolves its handle BEFORE the enforcement points so the
+/// gate / trace keep consuming the backend tool identity, and a resolution
+/// failure is the call's own failure (no gate suspension, no trace entry --
+/// the same semantics as a call that never reached a tool). A namespaced
+/// handle emitted directly as a tool name is refused the same way: the trio
+/// is the one addressing surface.
 fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOutcome) -> Response {
     let params = msg.get("params").unwrap_or(&Value::Null);
     let name = match params.get("name").and_then(|v| v.as_str()) {
@@ -390,6 +413,53 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         name,
         input: arguments,
     };
+    match call.name.as_str() {
+        meta_tools::META_LIST_SERVERS => {
+            let payload = ctx.mcp.server_listing();
+            return local_meta_result(&call, "list connected servers", payload, outcome);
+        }
+        meta_tools::META_SEARCH_TOOLS => {
+            return match call.input.get("query").and_then(Value::as_str) {
+                Some(query) => {
+                    let summary = meta_tools::query_summary(query);
+                    let payload = ctx.mcp.search_catalog(query);
+                    local_meta_result(&call, &summary, payload, outcome)
+                }
+                None => resolution_failure(meta_tools::missing_query_failure()),
+            };
+        }
+        meta_tools::META_INVOKE => {
+            // Parse-first (ADR-0105 Decision 4): the handle resolves against
+            // the turn's catalog BEFORE any gate / trace. On success the call
+            // flows the regular external path under the backend identity.
+            return match ctx.mcp.resolve_invoke(&call.input) {
+                Err(message) => resolution_failure(message),
+                Ok((handle, arguments)) => gated_external_call(
+                    &ToolUse {
+                        id: call.id.clone(),
+                        name: handle,
+                        input: arguments,
+                    },
+                    ctx,
+                    outcome,
+                ),
+            };
+        }
+        _ => {}
+    }
+    // A handle emitted directly as a tool name is not a valid call form on
+    // the discovery surface: `mcp_invoke` is the one addressing path
+    // (ADR-0105 Consequences -- the bridge/LLM addresses external tools via
+    // the invoke, not by emitting the namespaced name). Fail as a tool-level
+    // error BEFORE the gate, so a hallucinated direct call never surfaces an
+    // approval card for a name the surface never advertised.
+    if aggregator::parse_namespaced(&call.name).is_some() {
+        return resolution_failure(format!(
+            "tool `{}` is a namespaced external handle; address it via mcp_invoke, \
+             not as a direct tool call",
+            call.name
+        ));
+    }
     let (key, operation_kind, summary) = classify_call(&call);
     let gate_req = ApprovalRequest {
         key,
@@ -413,26 +483,6 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             }))
         }
         Ok(GateOutcome::Allow) => {
-            // Route by name shape (slice C-gw): a namespaced
-            // `mcp__<slug>__<tool>` name goes to the matching external server
-            // (envelope relayed verbatim via [`external_call_outcome`]); a bare
-            // name goes to the built-in executor (flat text wrapped into one
-            // text block). The two paths build DIFFERENT response envelopes --
-            // see [`external_call_outcome`] for why the external envelope is
-            // relayed verbatim rather than re-wrapped.
-            if aggregator::parse_namespaced(&call.name).is_some() {
-                let route_result = ctx.mcp.route(&call.name, &call.input);
-                let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
-                outcome.trace.push(TraceEntry {
-                    tool_use_id: call.id.clone(),
-                    name: call.name.clone(),
-                    operation_kind,
-                    summary,
-                    success: !is_error,
-                    result_excerpt: truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
-                });
-                return Response::Result(envelope);
-            }
             let dispatched = dispatch(&call, &mut ctx.deps, ctx.cancel, ctx.materializer);
             if let Some(promotion) = dispatched.promotion {
                 outcome.promotions.push(promotion);
@@ -455,6 +505,93 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             }))
         }
     }
+}
+
+/// Drive one backend-identity external call through classify -> gate -> route
+/// (ADR-0076 gateway routing; reached from `mcp_invoke` resolution and from
+/// direct handle emission). The gate consumes the RESOLVED identity
+/// (ADR-0105 Decision 4), so an approval card names the backend server +
+/// handle, never "mcp_invoke". The server's envelope is relayed verbatim via
+/// [`external_call_outcome`] and the trace entry names the handle.
+fn gated_external_call(
+    call: &ToolUse,
+    ctx: &mut GatewayCtx,
+    outcome: &mut GatewayOutcome,
+) -> Response {
+    let (key, operation_kind, summary) = classify_call(call);
+    let gate_req = ApprovalRequest {
+        key,
+        operation_kind,
+        summary: summary.clone(),
+    };
+    match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
+        Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
+        Ok(GateOutcome::Denied) => {
+            outcome.trace.push(TraceEntry {
+                tool_use_id: call.id.clone(),
+                name: call.name.clone(),
+                operation_kind,
+                summary,
+                success: false,
+                result_excerpt: "denied by approval gateway".to_string(),
+            });
+            Response::Result(json!({
+                "content": [{"type": "text", "text": "tool call denied by the approval gateway"}],
+                "isError": true,
+            }))
+        }
+        Ok(GateOutcome::Allow) => {
+            let route_result = ctx.mcp.route(&call.name, &call.input);
+            let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
+            outcome.trace.push(TraceEntry {
+                tool_use_id: call.id.clone(),
+                name: call.name.clone(),
+                operation_kind,
+                summary,
+                success: !is_error,
+                result_excerpt: truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
+            });
+            Response::Result(envelope)
+        }
+    }
+}
+
+/// Serve one locally-executed meta-tool (`mcp_list_servers` /
+/// `mcp_search_tools`): wrap the catalog payload as a success tool result +
+/// record a trace entry. These never touch a backend server, so there is no
+/// gate suspension (catalog reads carry the built-in read tools' trust
+/// shape) and no envelope relay -- the payload is the gateway's own JSON.
+fn local_meta_result(
+    call: &ToolUse,
+    summary: &str,
+    payload: Value,
+    outcome: &mut GatewayOutcome,
+) -> Response {
+    let excerpt = payload.to_string();
+    outcome.trace.push(TraceEntry {
+        tool_use_id: call.id.clone(),
+        name: call.name.clone(),
+        operation_kind: OperationKind::Read,
+        summary: summary.to_string(),
+        success: true,
+        result_excerpt: truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
+    });
+    Response::Result(json!({
+        "content": [{"type": "text", "text": excerpt}],
+        "isError": false,
+    }))
+}
+
+/// An addressing failure on the discovery surface (a malformed meta-tool
+/// input, an unresolvable `mcp_invoke` handle, or a handle emitted directly
+/// as a tool name): the call's own error result, surfaced as a tool-level
+/// failure the agent self-corrects from (ADR-0077/0105). No gate suspension
+/// and NO trace entry -- the call never reached a tool.
+fn resolution_failure(message: String) -> Response {
+    Response::Result(json!({
+        "content": [{"type": "text", "text": message}],
+        "isError": true,
+    }))
 }
 
 /// Resolve a routed external MCP call into the response envelope + the trace
@@ -698,6 +835,54 @@ mod tests {
                 let tools = v["tools"].as_array().expect("tools array");
                 assert!(!tools.is_empty(), "built-in table is non-empty");
                 assert!(tools.iter().all(|t| t["name"].is_string()));
+            }
+            _ => panic!("tools/list must return Result"),
+        }
+    }
+
+    /// ADR-0105 Decision 1: the trio mounts on the ATTEMPTED set, so a turn
+    /// whose only enabled server FAILED to connect still advertises the trio
+    /// on `tools/list` -- `mcp_list_servers` can then surface the failure
+    /// reason. Pins the bridge surface's mount point (the `tools/list`
+    /// extend): the trio appends after the built-ins, and no flattened
+    /// external name ever appears.
+    #[test]
+    fn tools_list_appends_the_trio_when_a_connect_was_attempted() {
+        let mut ctx = fresh_ctx();
+        let config = crate::mcp::config::McpServerConfig {
+            id: crate::mcp::config::McpServerId("srv-broken".into()),
+            display_name: "BrokenMCP".into(),
+            transport: crate::mcp::config::McpTransport::stdio(
+                "/no/such/toptopduck-binary",
+                Vec::new(),
+            ),
+            env: std::collections::BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        ctx.mcp
+            .connect_all(&[config], &crate::provider::keychain::KeychainStore::new());
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
+        match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                let names: Vec<&str> = v["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .map(|t| t["name"].as_str().expect("tool name"))
+                    .collect();
+                let builtins = builtin_table().len();
+                assert_eq!(names.len(), builtins + 3, "built-ins + the trio");
+                assert_eq!(
+                    names[builtins..],
+                    ["mcp_list_servers", "mcp_search_tools", "mcp_invoke"],
+                    "the trio extends the table in definition order"
+                );
             }
             _ => panic!("tools/list must return Result"),
         }
@@ -1057,6 +1242,148 @@ mod tests {
             _ => panic!("missing name must return Error"),
         }
         assert!(outcome.trace.is_empty(), "no dispatch -> no trace");
+    }
+
+    /// `mcp_list_servers` serves locally against the aggregator's manifest
+    /// (ADR-0105): a success tool result + exactly one trace entry naming the
+    /// meta-tool itself, with no gate suspension (the built-in read tools'
+    /// trust shape). Works on an empty catalog too -- the manifest is the
+    /// honest empty list.
+    #[test]
+    fn handle_tools_call_list_servers_serves_locally_with_one_trace_row() {
+        let mut ctx = fresh_ctx();
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "mcp_list_servers", "arguments": {}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false);
+                assert!(v["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("\"servers\""));
+            }
+            _ => panic!("list_servers must return Result"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one meta call -> one trace row");
+        assert_eq!(outcome.trace[0].name, "mcp_list_servers");
+        assert!(outcome.trace[0].success);
+        assert_eq!(outcome.trace[0].operation_kind, OperationKind::Read);
+    }
+
+    /// `mcp_search_tools` carries the query into the trace summary and serves
+    /// the catalog payload locally (empty catalog on this fixture -- the
+    /// aggregator-level integration tests pin the match semantics).
+    #[test]
+    fn handle_tools_call_search_tools_carries_query_in_summary() {
+        let mut ctx = fresh_ctx();
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {"name": "mcp_search_tools", "arguments": {"query": "github issues"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false);
+                let text = v["content"][0]["text"].as_str().unwrap();
+                assert!(text.contains("\"total_matched\""));
+            }
+            _ => panic!("search_tools must return Result"),
+        }
+        assert_eq!(outcome.trace.len(), 1);
+        assert_eq!(outcome.trace[0].name, "mcp_search_tools");
+        assert_eq!(outcome.trace[0].summary, "query \"github issues\"");
+    }
+
+    /// A namespaced handle emitted DIRECTLY as a tool name is refused before
+    /// the gate (ADR-0105 Consequences): the trio is the one addressing
+    /// surface, so the hallucinated direct call gets a tool-level error
+    /// pointing at `mcp_invoke` -- no approval card, no trace entry.
+    #[test]
+    fn handle_tools_call_direct_handle_emission_is_refused_pregate() {
+        let mut ctx = fresh_ctx();
+        let mut outcome = GatewayOutcome {
+            trace: Vec::new(),
+            promotions: Vec::new(),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "mcp__fakemcp__add", "arguments": {"a": 1, "b": 2}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true);
+                let text = v["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    text.contains("mcp__fakemcp__add"),
+                    "error names the handle: {text}"
+                );
+                assert!(
+                    text.contains("mcp_invoke"),
+                    "error points at the addressing path: {text}"
+                );
+            }
+            _ => panic!("direct emission must return Result"),
+        }
+        assert!(
+            outcome.trace.is_empty(),
+            "direct emission produces no trace entry"
+        );
+    }
+
+    /// An `mcp_invoke` whose handle does not resolve (not namespaced, unknown
+    /// server, or a malformed input) is the call's own failure (ADR-0105
+    /// Decision 4): a tool-level isError result that NAMES the handle, with
+    /// NO trace entry and no `mcp_invoke` shell row -- the call never reached
+    /// a tool.
+    #[test]
+    fn handle_tools_call_invoke_resolution_failure_is_traceless() {
+        for (args, expect_named) in [
+            (json!({"tool": "explore"}), "explore"),
+            (json!({"tool": "mcp__ghost__echo"}), "mcp__ghost__echo"),
+            (json!({}), "parameter `tool`"),
+        ] {
+            let mut ctx = fresh_ctx();
+            let mut outcome = GatewayOutcome {
+                trace: Vec::new(),
+                promotions: Vec::new(),
+            };
+            let msg = json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": "mcp_invoke", "arguments": args}
+            });
+            match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+                Response::Result(v) => {
+                    assert_eq!(v["isError"], true, "resolution failure is isError");
+                    let text = v["content"][0]["text"].as_str().unwrap();
+                    assert!(
+                        text.contains(expect_named),
+                        "failure names the offending handle/param: {text}"
+                    );
+                }
+                _ => panic!("resolution failure must return Result"),
+            }
+            assert!(
+                outcome.trace.is_empty(),
+                "resolution failure produces no trace entry"
+            );
+        }
     }
 
     /// A string JSON-RPC id round-trips into the trace without serde quoting

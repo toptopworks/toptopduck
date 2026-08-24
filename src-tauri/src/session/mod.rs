@@ -1273,24 +1273,20 @@ impl Session {
                     // lifecycle as the gateway path (ADR-0076 Decision +
                     // ADR-0085 Consequences -- spawn + initialize each stdio
                     // server here, drop at scope end so the spawned children
-                    // die with the aggregator). The aggregator's namespaced
-                    // tools merge into the request's tool table so the model
-                    // sees one surface; execute_call routes a namespaced call
-                    // back through the aggregator. The per-server connect
-                    // outcomes are discarded here: a failed connect logs +
-                    // skips inside connect_one, and the per-session status
-                    // IPC that consumed them is retired (ADR-0106 -- config
-                    // enablement is the single axis; diagnostics ride the
-                    // probe + the gateway discovery surface).
+                    // die with the aggregator). The external surface is the
+                    // fixed meta-tool trio (ADR-0105): it extends the
+                    // request's tool table only when a server connected
+                    // this turn, and execute_call serves the trio locally
+                    // (list / search) or resolves an invoke's handle before
+                    // the enforcement points. The per-server connect
+                    // outcomes feed `mcp_list_servers`: a failed connect
+                    // stays visible in the manifest while the catalog holds
+                    // only the connected servers.
                     let mut mcp = crate::mcp::aggregator::McpAggregator::with_tool_output(
                         self.tool_output_path(),
                     );
                     mcp.connect_all(inputs.mcp_servers, inputs.keychain);
-                    request
-                        .tools
-                        .extend(crate::tools::external_tool_definitions(
-                            &mcp.aggregated_tools(),
-                        ));
+                    request.tools.extend(mcp.meta_tool_definitions());
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,

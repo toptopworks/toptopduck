@@ -465,6 +465,19 @@ impl HttpClient {
         client.initialize()?;
         Ok(client)
     }
+
+    /// Test-only: a client at a URL nothing listens on. The aggregator's
+    /// catalog / resolve paths never touch the transport; routing against
+    /// this client fails with a connection error -- exactly the failure
+    /// shape the dispatch-composition pins exercise.
+    #[cfg(test)]
+    pub(crate) fn unreachable_for_test(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            agent: ureq::AgentBuilder::new().build(),
+            next_id: 1,
+        }
+    }
 }
 
 impl McpClient for HttpClient {

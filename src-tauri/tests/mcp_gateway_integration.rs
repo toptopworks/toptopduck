@@ -39,35 +39,79 @@ fn fake_config(id: &str, display: &str) -> McpServerConfig {
     }
 }
 
-/// Collect the namespaced tool names the aggregator advertises (sorted for
-/// assertion stability regardless of server iteration order).
-fn tool_names(agg: &McpAggregator) -> Vec<String> {
+/// Collect the meta-tool names the aggregator mounts on the tool surface
+/// (sorted for assertion stability regardless of definition order).
+fn meta_names(agg: &McpAggregator) -> Vec<String> {
     let mut names: Vec<String> = agg
-        .aggregated_tools()
+        .meta_tool_definitions()
         .iter()
-        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .map(|d| d.name.clone())
         .collect();
     names.sort();
     names
 }
 
 #[test]
-fn connect_all_aggregates_namespaced_tools_and_routes_calls() {
+fn connect_all_mounts_the_trio_and_discovers_by_handle() {
     let keychain = KeychainStore::new();
     let mut agg = McpAggregator::empty();
     agg.connect_all(&[fake_config("srv-1", "FakeMCP")], &keychain);
 
-    // The merged table namespaces the server's native tools. display "FakeMCP"
-    // slugifies to "fakemcp" (ASCII lowercased).
-    let names = tool_names(&agg);
+    // The external surface is the fixed trio (ADR-0105) -- no per-tool
+    // flattened advertisement. (meta_names sorts: invoke < list < search.)
     assert_eq!(
-        names,
+        meta_names(&agg),
         vec![
-            "mcp__fakemcp__add".to_string(),
-            "mcp__fakemcp__echo".to_string(),
-            "mcp__fakemcp__echo_env".to_string(),
+            "mcp_invoke".to_string(),
+            "mcp_list_servers".to_string(),
+            "mcp_search_tools".to_string(),
         ],
-        "namespaced tool table"
+        "meta-tool trio mounted"
+    );
+
+    // An empty query returns the whole catalog; each card's `tool` field is
+    // the handle. display "FakeMCP" slugifies to "fakemcp".
+    let catalog = agg.search_catalog("");
+    let handles: Vec<&str> = catalog["tools"]
+        .as_array()
+        .expect("cards")
+        .iter()
+        .map(|c| c["tool"].as_str().expect("handle"))
+        .collect();
+    assert_eq!(
+        handles,
+        vec![
+            "mcp__fakemcp__echo",
+            "mcp__fakemcp__add",
+            "mcp__fakemcp__echo_env"
+        ],
+        "empty query returns the full catalog in advertised order"
+    );
+    assert_eq!(catalog["total_matched"], 3);
+    let card = &catalog["tools"][1];
+    assert_eq!(card["server"], "FakeMCP", "card names the display name");
+    assert!(
+        card["inputSchema"].is_object(),
+        "card carries the full schema"
+    );
+
+    // The manifest names the connected server with its outcome.
+    let listing = agg.server_listing();
+    assert_eq!(listing["servers"][0]["server"], "FakeMCP");
+    assert_eq!(listing["servers"][0]["connected"], true);
+    assert_eq!(listing["servers"][0]["tool_count"], 3);
+
+    // Invoke resolution: a catalog handle passes, a wrong slug fails naming
+    // the handle (ADR-0105 Decision 4).
+    assert!(agg
+        .resolve_invoke(&json!({"tool": "mcp__fakemcp__add"}))
+        .is_ok());
+    let err = agg
+        .resolve_invoke(&json!({"tool": "mcp__ghost__echo"}))
+        .expect_err("unknown slug");
+    assert!(
+        err.contains("mcp__ghost__echo"),
+        "error names the handle: {err}"
     );
 
     // Route a namespaced call: the gateway strips the prefix, the server sees
@@ -111,14 +155,22 @@ fn connect_all_assigns_unique_slug_suffix_on_display_name_collision() {
         ],
         &keychain,
     );
-    let names = tool_names(&agg);
+    // Collision de-duplication surfaces in the catalog's handles (ADR-0105:
+    // the card's `tool` field is the composed handle).
+    let catalog = agg.search_catalog("");
+    let handles: Vec<&str> = catalog["tools"]
+        .as_array()
+        .expect("cards")
+        .iter()
+        .map(|c| c["tool"].as_str().expect("handle"))
+        .collect();
     assert!(
-        names.contains(&"mcp__fakemcp__echo".into()),
-        "first server keeps bare slug, got {names:?}"
+        handles.contains(&"mcp__fakemcp__echo"),
+        "first server keeps bare slug, got {handles:?}"
     );
     assert!(
-        names.contains(&"mcp__fakemcp_2__echo".into()),
-        "second server gets _2 suffix, got {names:?}"
+        handles.contains(&"mcp__fakemcp_2__echo"),
+        "second server gets _2 suffix, got {handles:?}"
     );
 
     // Both servers are independently routable under their own slug.
@@ -126,6 +178,40 @@ fn connect_all_assigns_unique_slug_suffix_on_display_name_collision() {
         .expect("first server routable");
     agg.route("mcp__fakemcp_2__add", &json!({"a": 2, "b": 2}))
         .expect("second server routable under suffixed slug");
+}
+
+/// ADR-0105 Decision 1's manifest intent: a turn where EVERY enabled server
+/// failed to connect still mounts the trio (the mount condition is the
+/// attempted set), `mcp_list_servers` surfaces the failure reasons, and the
+/// search catalog stays honestly empty.
+#[test]
+fn all_failed_connects_still_mount_the_trio() {
+    let keychain = KeychainStore::new();
+    let mut agg = McpAggregator::empty();
+    let bad = McpServerConfig {
+        id: McpServerId("bad".into()),
+        display_name: "Bad".into(),
+        transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+        enabled: true,
+    };
+    agg.connect_all(&[bad], &keychain);
+    assert_eq!(
+        meta_names(&agg),
+        vec![
+            "mcp_invoke".to_string(),
+            "mcp_list_servers".to_string(),
+            "mcp_search_tools".to_string(),
+        ],
+        "all-failed turn still mounts the trio for diagnostics"
+    );
+    let listing = agg.server_listing();
+    assert_eq!(listing["servers"][0]["server"], "Bad");
+    assert_eq!(listing["servers"][0]["connected"], false);
+    assert!(listing["servers"][0]["error"].is_string());
+    assert_eq!(agg.search_catalog("")["total_matched"], 0, "catalog empty");
 }
 
 #[test]
@@ -146,14 +232,45 @@ fn connect_all_skips_a_server_that_fails_to_spawn_without_bricking_others() {
         enabled: true,
     };
     agg.connect_all(&[bad, good], &keychain);
-    let names = tool_names(&agg);
+    // The catalog holds only the connected server (ADR-0105 Decision 3: a
+    // failed connect leaves no placeholder); the manifest still names the
+    // failed attempt with its reason (Decision 1).
+    let catalog = agg.search_catalog("");
+    let handles: Vec<&str> = catalog["tools"]
+        .as_array()
+        .expect("cards")
+        .iter()
+        .map(|c| c["tool"].as_str().expect("handle"))
+        .collect();
     assert!(
-        names.contains(&"mcp__good__echo".into()),
-        "good server aggregated despite bad sibling, got {names:?}"
+        handles.contains(&"mcp__good__echo"),
+        "good server aggregated despite bad sibling, got {handles:?}"
     );
     assert!(
-        !names.iter().any(|n| n.starts_with("mcp__bad")),
-        "bad server contributed nothing, got {names:?}"
+        !handles.iter().any(|h| h.starts_with("mcp__bad")),
+        "bad server contributed nothing, got {handles:?}"
+    );
+    let listing = agg.server_listing();
+    let entries = listing["servers"].as_array().expect("manifest");
+    assert_eq!(entries.len(), 2, "manifest names both attempts");
+    let bad_entry = entries
+        .iter()
+        .find(|e| e["server"] == "Bad")
+        .expect("bad attempt listed");
+    assert_eq!(bad_entry["connected"], false);
+    assert!(bad_entry["error"].is_string(), "skip reason carried");
+    // The mount condition is the ATTEMPTED set (ADR-0105 Decision 1): a
+    // turn with at least one enabled server mounts the trio regardless of
+    // connect outcomes. (The all-failed shape is pinned in
+    // all_failed_connects_still_mount_the_trio below.)
+    assert_eq!(
+        meta_names(&agg),
+        vec![
+            "mcp_invoke".to_string(),
+            "mcp_list_servers".to_string(),
+            "mcp_search_tools".to_string(),
+        ],
+        "trio mounted while at least one server connected"
     );
 }
 
@@ -722,14 +839,17 @@ fn http_transport_aggregator_connect_and_route() {
     assert_eq!(results.len(), 1);
     assert!(results[0].connected, "http server connected via aggregator");
 
-    let names: Vec<String> = agg
-        .aggregated_tools()
+    // The catalog carries the server's tools as handle cards (ADR-0105).
+    let catalog = agg.search_catalog("");
+    let handles: Vec<&str> = catalog["tools"]
+        .as_array()
+        .expect("cards")
         .iter()
-        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .map(|c| c["tool"].as_str().expect("handle"))
         .collect();
     assert!(
-        names.contains(&"mcp__httpmcp__add".into()),
-        "namespaced tool table, got {names:?}"
+        handles.contains(&"mcp__httpmcp__add"),
+        "handle cards, got {handles:?}"
     );
 
     let result = agg
@@ -830,14 +950,17 @@ fn sse_transport_aggregator_connect_and_route() {
     assert_eq!(results.len(), 1);
     assert!(results[0].connected, "sse server connected via aggregator");
 
-    let names: Vec<String> = agg
-        .aggregated_tools()
+    // The catalog carries the server's tools as handle cards (ADR-0105).
+    let catalog = agg.search_catalog("");
+    let handles: Vec<&str> = catalog["tools"]
+        .as_array()
+        .expect("cards")
         .iter()
-        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .map(|c| c["tool"].as_str().expect("handle"))
         .collect();
     assert!(
-        names.contains(&"mcp__ssemcp__add".into()),
-        "namespaced tool table, got {names:?}"
+        handles.contains(&"mcp__ssemcp__add"),
+        "handle cards, got {handles:?}"
     );
 
     let result = agg

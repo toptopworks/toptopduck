@@ -1,25 +1,32 @@
 //! The gateway's aggregator over connected external MCP servers (ADR-0076,
 //! issue #301 slice C-gw).
 //!
-//! The gateway advertises ONE merged tool table to the bridge / built-in LLM:
-//! the built-in DuckDB tools plus every enabled external server's tools,
-//! namespaced as `mcp__<server_slug>__<tool>` (ADR-0076) so same-name tools
-//! across servers stay distinct and the trace filter (`mcp__` prefix) stays
-//! reliable. A `tools/call` carrying a namespaced name is parsed here and
-//! routed to the matching [`TransportClient`] (the `mcp__<slug>__` prefix is
-//! stripped -- the server only ever sees its own native tool name).
+//! The gateway advertises ONE merged tool surface to the bridge / built-in
+//! LLM: the built-in DuckDB tools stay direct-listed, while the external
+//! servers' tools surface through the fixed meta-tool trio
+//! (`mcp_list_servers` / `mcp_search_tools` / `mcp_invoke`, ADR-0105) instead
+//! of a flattened per-tool advertisement. A tool call addressed by its
+//! `mcp__<server_slug>__<tool>` handle is parsed here and routed to the
+//! matching [`TransportClient`] (the `mcp__<slug>__` prefix is stripped --
+//! the server only ever sees its own native tool name). The handle is the
+//! single identity across search cards, invoke addressing, approval, and
+//! trace, so same-name tools across servers stay distinct and the trace
+//! filter (`mcp__` prefix) stays reliable.
 //!
 //! Turn-local (issue #301 Q2): the gateway constructs one `McpAggregator` per
 //! turn via [`McpAggregator::connect_all`] and drops it at turn end, tearing
 //! down every transport (killing stdio children, stopping SSE reader threads).
 //! A failed connect (transport fault, spawn fault, tools/list error) logs +
 //! skips that server rather than failing the turn -- a misconfigured server
-//! must not brick the gateway.
+//! must not brick the gateway. The search catalog holds only the connected
+//! servers; the failed attempts stay visible through `mcp_list_servers`
+//! (ADR-0105 Decision 3: no placeholder entries in the catalog).
 
 use serde_json::Value;
 
 use crate::mcp::client::{connect_transport, ClientError, SecretEnv, TransportClient};
 use crate::mcp::config::{McpServerConfig, McpServerId};
+use crate::mcp::meta_tools;
 use crate::mcp::secrets::get_mcp_secret;
 use crate::mcp::McpClient;
 use crate::provider::keychain::KeychainStore;
@@ -35,13 +42,30 @@ const NAMESPACED_PREFIX: &str = "mcp__";
 const NAMESPACED_SEP: &str = "__";
 
 /// One connected external server + its (already-listed) tool entries kept in
-/// their server-native shape. The aggregator namespaces the name only when
-/// advertising the merged table (so the stored entries stay the raw server
-/// shape and routing strips the prefix rather than re-deriving it).
+/// their server-native shape. The stored entries stay the raw server shape:
+/// a handle is composed only when a search card is built, and routing strips
+/// the prefix rather than re-deriving it. `display_name` rides alongside so
+/// search cards + the server manifest name the server the way the user
+/// configured it (the slug alone loses case + separators).
 struct AggregatedServer {
     slug: String,
+    display_name: String,
     client: TransportClient,
     tools: Vec<Value>,
+}
+
+/// One attempted connect this turn, retained for `mcp_list_servers`
+/// (ADR-0105 Decision 1): the manifest shows enabled servers that FAILED to
+/// connect too (with the reason), while the search catalog carries only the
+/// connected ones. Derived from the [`ConnectResult`] at connect time so the
+/// turn paths that discard the returned slice still surface the outcomes
+/// through the discovery surface.
+struct ConnectRecord {
+    display_name: String,
+    /// `None` when the connect failed (no slug was allocated).
+    slug: Option<String>,
+    tool_count: usize,
+    error: Option<String>,
 }
 
 /// One configured server's per-turn connect outcome (issue #301 slice D).
@@ -108,6 +132,10 @@ pub fn extract_tool_info(tools: &[Value]) -> Vec<McpToolInfo> {
 /// stdio, stops the reader thread for SSE, no-op for HTTP).
 pub struct McpAggregator {
     servers: Vec<AggregatedServer>,
+    /// Every attempted connect this turn (successes + failures), feeding
+    /// `mcp_list_servers` (ADR-0105 Decision 1). The search catalog reads
+    /// [`Self::servers`] instead -- only connected servers enter it.
+    connect_records: Vec<ConnectRecord>,
     /// The per-session tool-output directory path (ADR-0087 Decision 3). Injected
     /// as `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at
     /// spawn. `None` in tests (no file output expected).
@@ -122,6 +150,7 @@ impl McpAggregator {
     pub fn empty() -> Self {
         Self {
             servers: vec![],
+            connect_records: vec![],
             tool_output_dir: None,
         }
     }
@@ -133,6 +162,7 @@ impl McpAggregator {
     pub fn with_tool_output(tool_output_dir: String) -> Self {
         Self {
             servers: vec![],
+            connect_records: vec![],
             tool_output_dir: Some(tool_output_dir),
         }
     }
@@ -156,6 +186,12 @@ impl McpAggregator {
                     "MCP server {} connect failed, skipping: {e}",
                     config.id
                 );
+                self.connect_records.push(ConnectRecord {
+                    display_name: config.display_name.clone(),
+                    slug: None,
+                    tool_count: 0,
+                    error: Some(e.to_string()),
+                });
                 return ConnectResult {
                     id: config.id.clone(),
                     connected: false,
@@ -176,8 +212,14 @@ impl McpAggregator {
                 // Dropping `client` tears down the transport (kills the child
                 // for stdio, stops the reader thread for SSE, etc.);
                 // a server whose tools/list is broken contributes nothing to the
-                // merged table, so it is not kept around for the turn (matching
-                // the connect-failure skip above).
+                // discovery catalog, so it is not kept around for the turn
+                // (matching the connect-failure skip above).
+                self.connect_records.push(ConnectRecord {
+                    display_name: config.display_name.clone(),
+                    slug: None,
+                    tool_count: 0,
+                    error: Some(format!("tools/list failed: {e}")),
+                });
                 return ConnectResult {
                     id: config.id.clone(),
                     connected: false,
@@ -191,8 +233,15 @@ impl McpAggregator {
         let tool_infos = extract_tool_info(&tools);
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
+        self.connect_records.push(ConnectRecord {
+            display_name: config.display_name.clone(),
+            slug: Some(slug.clone()),
+            tool_count,
+            error: None,
+        });
         self.servers.push(AggregatedServer {
             slug,
+            display_name: config.display_name.clone(),
             client,
             tools,
         });
@@ -245,14 +294,140 @@ impl McpAggregator {
             .collect()
     }
 
-    /// The merged, namespaced tool entries to advertise alongside the built-in
-    /// table. Each entry is the server's own `{name, description, inputSchema}`
-    /// shape with `name` rewritten to `mcp__<slug>__<tool>`.
-    pub fn aggregated_tools(&self) -> Vec<Value> {
-        self.servers
+    /// The meta-tool trio's definitions for this turn's tool surface
+    /// (ADR-0105 Decision 1/6). Empty when NO enabled server was attempted
+    /// this turn (a zero-enabled turn attaches no trio and pays no standing
+    /// cost). The mount condition is the ATTEMPTED set, not the connected
+    /// set: a turn where every enabled server failed to connect still mounts
+    /// the trio so `mcp_list_servers` can surface the failure reasons
+    /// (Decision 1's manifest) -- the search catalog itself stays empty.
+    pub fn meta_tool_definitions(&self) -> Vec<crate::provider::tool_calling::ToolDefinition> {
+        if self.connect_records.is_empty() {
+            return Vec::new();
+        }
+        meta_tools::meta_tool_definitions()
+    }
+
+    /// Query the catalog for `mcp_search_tools` (ADR-0105 Decision 3). The
+    /// catalog holds only servers that connected this turn, iterated in
+    /// registry order with each server's tools in its advertised order --
+    /// that iteration IS the stable sort (no relevance scoring). A card's
+    /// `tool` field is the handle `mcp__<slug>__<tool>` composed here, so the
+    /// card's field is byte-wise the `mcp_invoke` addressing argument. Results
+    /// cap at [`SEARCH_TOP_K`](meta_tools::SEARCH_TOP_K); `total_matched`
+    /// carries the pre-cap count so the agent knows to narrow the query.
+    pub fn search_catalog(&self, query: &str) -> Value {
+        let mut cards = Vec::new();
+        let mut total_matched = 0usize;
+        for server in &self.servers {
+            for entry in &server.tools {
+                // A malformed entry (no non-empty string `name`) has no
+                // addressable handle: its would-be card would read
+                // `mcp__<slug>__`, which `parse_namespaced` rejects, so the
+                // card could never be invoked. Skip it (as `extract_tool_info`
+                // does) so every card the surface emits is callable.
+                let native = match entry.get("name").and_then(Value::as_str) {
+                    Some(n) if !n.is_empty() => n,
+                    _ => continue,
+                };
+                let description = entry
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !meta_tools::matches_query(query, &server.display_name, native, description) {
+                    continue;
+                }
+                total_matched += 1;
+                if cards.len() < meta_tools::SEARCH_TOP_K {
+                    let handle = namespaced_name(&server.slug, native);
+                    let input_schema = entry
+                        .get("inputSchema")
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                    cards.push(meta_tools::search_card(
+                        &server.display_name,
+                        description,
+                        &input_schema,
+                        handle,
+                    ));
+                }
+            }
+        }
+        serde_json::json!({ "tools": cards, "total_matched": total_matched })
+    }
+
+    /// The `mcp_list_servers` manifest (ADR-0105 Decision 1): every attempted
+    /// connect this turn with its outcome, so an enabled-but-failed server is
+    /// visible (with the reason) even though it never entered the catalog.
+    /// The agent sees display names + outcomes only -- the slug is internal
+    /// routing detail the agent never needs (the handle on a search card
+    /// already encodes it).
+    pub fn server_listing(&self) -> Value {
+        let servers: Vec<Value> = self
+            .connect_records
             .iter()
-            .flat_map(|s| namespace_tool_entries(&s.slug, &s.tools).into_iter())
-            .collect()
+            .map(|r| {
+                serde_json::json!({
+                    "server": r.display_name,
+                    "connected": r.slug.is_some(),
+                    "tool_count": r.tool_count,
+                    "error": r.error,
+                })
+            })
+            .collect();
+        serde_json::json!({ "servers": servers })
+    }
+
+    /// Resolve an `mcp_invoke` call input into `(handle, arguments)` BEFORE
+    /// the enforcement points (ADR-0105 Decision 4). `Ok` means the input was
+    /// well-formed AND the handle is namespaced AND its slug matches a
+    /// connected server -- the dispatch site then flows the call through the
+    /// regular external path under the backend identity (classify -> gate ->
+    /// route -> trace all consume the handle). `Err` carries the failure for
+    /// the call's error result: it surfaces as a failed tool result with no
+    /// gate suspension and no trace entry -- the same semantics as a call
+    /// that never reached a tool.
+    pub fn resolve_invoke(&self, input: &Value) -> Result<(String, Value), String> {
+        let (handle, arguments) = meta_tools::parse_invoke_input(input)?;
+        match parse_namespaced(&handle) {
+            None => Err(meta_tools::not_a_handle_failure(&handle)),
+            Some((slug, _)) => {
+                if self.servers.iter().any(|s| s.slug == slug) {
+                    Ok((handle, arguments))
+                } else {
+                    Err(meta_tools::unknown_server_failure(&handle, &slug))
+                }
+            }
+        }
+    }
+
+    /// Test-only: an aggregator whose catalog holds one connected server
+    /// with the given tool entries and no live transport (the client points
+    /// at a port the OS just reclaimed, so routing fails with a connection
+    /// error -- the failure shape the dispatch-composition pins exercise).
+    /// The catalog / resolve paths never touch the client. Records no
+    /// connect attempt, so `meta_tool_definitions` stays empty (mounting is
+    /// pinned through the real `connect_all` paths instead).
+    #[cfg(test)]
+    pub(crate) fn catalog_server_for_test(display_name: &str, tools: Vec<Value>) -> Self {
+        let id = McpServerId("test-catalog-srv".into());
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            listener.local_addr().expect("local addr").port()
+            // The listener drops here: nothing answers on the port, and the
+            // OS is extremely unlikely to rehand it out mid-test.
+        };
+        let client = crate::mcp::client::HttpClient::unreachable_for_test(&format!(
+            "http://127.0.0.1:{port}"
+        ));
+        let mut agg = Self::empty();
+        agg.servers.push(AggregatedServer {
+            slug: slugify(display_name, &id),
+            display_name: display_name.to_string(),
+            client: TransportClient::Http(client),
+            tools,
+        });
+        agg
     }
 
     /// Route a `tools/call` whose name is `mcp__<slug>__<tool>` to the matching
@@ -367,8 +542,11 @@ pub fn slugify(display_name: &str, id: &McpServerId) -> String {
     }
 }
 
-/// Compose the gateway-advertised name for one server-native tool:
-/// `mcp__<server_slug>__<tool>`.
+/// Compose the gateway handle for one server-native tool:
+/// `mcp__<server_slug>__<tool>`. This is a HANDLE, not an advertised name
+/// (ADR-0105): the search card's `tool` field and `mcp_invoke`'s addressing
+/// argument both carry this string verbatim, and routing parses it back
+/// apart.
 pub fn namespaced_name(slug: &str, tool: &str) -> String {
     format!("{NAMESPACED_PREFIX}{slug}{NAMESPACED_SEP}{tool}")
 }
@@ -386,24 +564,6 @@ pub fn parse_namespaced(name: &str) -> Option<(String, String)> {
         return None;
     }
     Some((slug, tool))
-}
-
-/// Rewrite each tool entry's `name` to its namespaced form. The entries are
-/// the server's raw `tools/list` shape (cloned); only `name` is rewritten so
-/// `description` / `inputSchema` ride verbatim. An entry missing a string
-/// `name` is passed through unchanged (a malformed server entry the gateway
-/// surfaces honestly rather than silently dropping).
-pub fn namespace_tool_entries(slug: &str, tools: &[Value]) -> Vec<Value> {
-    tools
-        .iter()
-        .map(|t| {
-            let mut entry = t.clone();
-            if let Some(name) = entry.get("name").and_then(Value::as_str) {
-                entry["name"] = Value::String(namespaced_name(slug, name));
-            }
-            entry
-        })
-        .collect()
 }
 
 /// Extract the first text block from a standard MCP `tools/call` envelope
@@ -554,32 +714,6 @@ mod tests {
         );
     }
 
-    // --- namespace_tool_entries ---------------------------------------------
-
-    #[test]
-    fn namespace_tool_entries_rewrites_name_only() {
-        let tools = vec![
-            json!({"name": "search", "description": "search docs", "inputSchema": {"type": "object"}}),
-            json!({"name": "fetch", "description": "fetch a url"}),
-        ];
-        let out = namespace_tool_entries("github", &tools);
-        assert_eq!(out[0]["name"], "mcp__github__search");
-        assert_eq!(out[0]["description"], "search docs");
-        assert_eq!(out[0]["inputSchema"]["type"], "object");
-        assert_eq!(out[1]["name"], "mcp__github__fetch");
-        assert_eq!(out[1]["description"], "fetch a url");
-    }
-
-    #[test]
-    fn namespace_tool_entries_passes_through_missing_name() {
-        // A malformed entry (no string name) is passed through unchanged --
-        // the gateway surfaces it honestly rather than silently dropping it.
-        let tools = vec![json!({"description": "no name here"})];
-        let out = namespace_tool_entries("github", &tools);
-        assert_eq!(out.len(), 1);
-        assert!(out[0].get("name").is_none());
-    }
-
     // --- first_text_block ----------------------------------------------------
 
     /// `first_text_block` reads the first `type: text` block from an MCP
@@ -621,19 +755,67 @@ mod tests {
         assert_eq!(first_text_block(&empty), "<non-text MCP result>");
     }
 
-    // --- aggregator merged-table shape --------------------------------------
+    // --- aggregator surface shape -------------------------------------------
 
+    /// ADR-0105 Decision 6: a turn whose effective external set is empty
+    /// mounts no trio -- the tool surface stays the built-in four only.
     #[test]
-    fn empty_aggregator_advertises_no_tools() {
+    fn empty_aggregator_attaches_no_trio() {
         let agg = McpAggregator::empty();
-        assert!(agg.aggregated_tools().is_empty());
+        assert!(agg.meta_tool_definitions().is_empty());
+        assert_eq!(agg.server_listing()["servers"].as_array().unwrap().len(), 0);
+        assert_eq!(agg.search_catalog("")["total_matched"], 0);
     }
 
     #[test]
     fn aggregator_default_is_empty() {
         let agg = McpAggregator::default();
         assert!(agg.servers.is_empty());
-        assert!(agg.aggregated_tools().is_empty());
+        assert!(agg.meta_tool_definitions().is_empty());
+    }
+
+    /// ADR-0105 Decision 3: the catalog serves at most `SEARCH_TOP_K` cards
+    /// while `total_matched` carries the pre-truncation count -- a 12-tool
+    /// catalog serves 10 cards and reports 12 matched, so the caller can
+    /// tell matches were dropped and narrow the query.
+    #[test]
+    fn search_catalog_caps_cards_at_search_top_k() {
+        let tools: Vec<Value> = (0..12)
+            .map(|i| {
+                json!({
+                    "name": format!("tool_{i}"),
+                    "description": "a tool",
+                    "inputSchema": {"type": "object"},
+                })
+            })
+            .collect();
+        let agg = McpAggregator::catalog_server_for_test("TopK", tools);
+        let out = agg.search_catalog("");
+        assert_eq!(
+            out["tools"].as_array().unwrap().len(),
+            meta_tools::SEARCH_TOP_K,
+            "served cards cap at SEARCH_TOP_K"
+        );
+        assert_eq!(out["total_matched"], 12, "total counts pre-truncation");
+    }
+
+    /// A malformed entry (no non-empty string `name`) cannot be addressed --
+    /// its would-be handle `mcp__<slug>__` never parses -- so it never
+    /// becomes a card and never counts toward `total_matched`. Every card
+    /// the surface emits must be callable through `mcp_invoke`.
+    #[test]
+    fn search_catalog_skips_entries_without_a_usable_name() {
+        let tools = vec![
+            json!({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}}),
+            json!({"description": "no name at all"}),
+            json!({"name": ""}),
+        ];
+        let agg = McpAggregator::catalog_server_for_test("SkipMalformed", tools);
+        let out = agg.search_catalog("");
+        assert_eq!(out["total_matched"], 1, "only the well-formed entry counts");
+        let cards = out["tools"].as_array().unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["tool"], "mcp__skipmalformed__echo");
     }
 
     // --- route error branches (no spawn; empty aggregator) ------------------
