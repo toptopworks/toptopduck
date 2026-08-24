@@ -539,7 +539,10 @@ type McpServerRowProps = {
   probeState: ProbeState;
   expanded: boolean;
   /** The row's enable-toggle write is in flight (ADR-0106): the switch is
-   *  gated off so a second click cannot stack onto the pending upsert. */
+   *  gated off so a second click cannot stack onto the pending upsert, and
+   *  the row's Test/Edit/Delete buttons gate too -- an edit form opening on
+   *  the pre-toggle snapshot could otherwise save the stale `enabled` back
+   *  over the in-flight write. */
   toggling: boolean;
   onToggleRow: () => void;
   onToggleEnabled: (enabled: boolean) => void;
@@ -660,7 +663,7 @@ function McpServerRow({
                 size="sm"
                 variant="ghost"
                 className="text-muted-foreground h-7 w-7 p-0"
-                disabled={probeState.kind === "testing"}
+                disabled={toggling || probeState.kind === "testing"}
                 aria-label={intl.formatMessage(
                   {
                     id: "settings.mcp.testLabel",
@@ -689,6 +692,7 @@ function McpServerRow({
                 size="sm"
                 variant="ghost"
                 className="text-muted-foreground h-7 w-7 p-0"
+                disabled={toggling}
                 aria-label={intl.formatMessage(
                   {
                     id: "settings.mcp.editLabel",
@@ -713,6 +717,7 @@ function McpServerRow({
                 size="sm"
                 variant="ghost"
                 className="text-muted-foreground hover:text-destructive h-7 w-7 p-0"
+                disabled={toggling}
                 aria-label={intl.formatMessage(
                   {
                     id: "settings.mcp.deleteLabel",

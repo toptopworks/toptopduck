@@ -383,6 +383,59 @@ describe("McpSection (issue #387)", () => {
     expect(await screen.findByText("disk full")).toBeInTheDocument();
   });
 
+  it("quiets the display name of a disabled row (ADR-0106)", () => {
+    renderWithProviders(
+      <McpSection
+        appConfig={makeAppConfig([
+          makeServer({ id: "off-1", display_name: "Dormant", enabled: false }),
+          makeServer({ id: "on-2", display_name: "Live", enabled: true }),
+        ])}
+        onCommit={vi.fn()}
+      />,
+    );
+
+    // A disabled server is dormant: the quieted name keeps the row's state
+    // legible at a glance; an enabled row keeps the normal weight.
+    expect(screen.getByText("Dormant").className).toContain(
+      "text-muted-foreground",
+    );
+    expect(screen.getByText("Live").className).not.toContain(
+      "text-muted-foreground",
+    );
+  });
+
+  it("gates the row's action buttons while the enable toggle is in flight (ADR-0106)", async () => {
+    // The edit form bakes the mount-time `enabled` into every save, so an
+    // Edit opening inside the toggle's in-flight window could write the
+    // stale value back over it -- Test/Edit/Delete gate alongside the switch.
+    const server = makeServer();
+    let resolveUpsert: (value: McpServerConfig) => void = () => {};
+    vi.mocked(upsertMcpServer).mockImplementation(
+      () =>
+        new Promise<McpServerConfig>((resolve) => {
+          resolveUpsert = resolve;
+        }),
+    );
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("switch", { name: "Toggle server My Server" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Test server My Server" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Edit server My Server" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Delete server My Server" }),
+    ).toBeDisabled();
+
+    resolveUpsert({ ...server, enabled: false });
+  });
+
   it("shows error on the list when onCommit fails after form save (H4)", async () => {
     const finalized = makeServer({ id: "srv-new", display_name: "Brand New" });
     vi.mocked(upsertMcpServer).mockResolvedValue(finalized);

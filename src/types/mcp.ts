@@ -100,7 +100,8 @@ export type ImportSource = "claude_desktop" | "codex";
 
 // One server discovered in an external config (issue #390). Mirrors the Rust
 // DiscoveredServer. A subset of McpServerConfig without `id` (empty -- Rust
-// mints a uuid on upsert) or `timeout_ms` (defaults to null). The import
+// mints a uuid on upsert), `timeout_ms` (defaults to null), or `enabled`
+// (the import lands enabled, ADR-0106 Decision 4). The import
 // checklist renders these; the user selects entries to batch-upsert.
 export interface DiscoveredServer {
   display_name: string;

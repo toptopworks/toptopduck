@@ -97,6 +97,22 @@ describe("normalizeJsonToConfig", () => {
     expect(config).toEqual(json);
   });
 
+  it("ignores an `enabled` field in internal-format JSON (ADR-0106)", () => {
+    // Enablement is machine-level state owned by the settings row toggle,
+    // never imported: a JSON `enabled: false` must not survive
+    // normalization (the placeholder governs until the form assembles the
+    // real value).
+    const json = {
+      id: "srv-1",
+      display_name: "existing",
+      transport: { type: "stdio", command: "cmd-a", args: [] },
+      enabled: false,
+    };
+
+    const config = normalizeJsonToConfig(json, "");
+    expect(config.enabled).toBe(true);
+  });
+
   it("rejects internal format with malformed transport (missing command)", () => {
     // transport.type is "stdio" but command/args are missing — must NOT
     // pass through as-is (would crash downstream). Falls through to map

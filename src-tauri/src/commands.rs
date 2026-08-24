@@ -654,8 +654,7 @@ pub async fn ask(
     // cheap LiveProviderConfig clone (stateless keychain + PathBuf) carries the
     // keychain borrow into the spawn_blocking closure so get_mcp_secret can
     // read each server's secret env at spawn (ADR-0029 -- the value never
-    // crosses IPC back out). mcp_servers is a fresh per-turn snapshot of the
-    // app-config file; a config edit between turns is reflected next turn.
+    // crosses IPC back out).
     let live = live.inner().clone();
     // ADR-0106: the effective set is single-axis -- config-level enablement
     // only (see [`LiveProviderConfig::enabled_mcp_servers`]). Skill MCP

@@ -290,6 +290,10 @@ describe("McpImportDialog (issue #390)", () => {
     // upsert was called with empty id (Rust mints uuid).
     expect(upsertMcpServer).toHaveBeenCalledTimes(2);
     expect(vi.mocked(upsertMcpServer).mock.calls[0][0].id).toBe("");
+    // The import lands enabled (ADR-0106 Decision 4 -- the checklist pick
+    // is explicit intent; enablement is machine-level state, never
+    // discovered).
+    expect(vi.mocked(upsertMcpServer).mock.calls[0][0].enabled).toBe(true);
   });
 
   it("unchecking a server excludes it from import", async () => {

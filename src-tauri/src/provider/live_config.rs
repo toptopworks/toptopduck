@@ -283,9 +283,11 @@ impl LiveProviderConfig {
         crate::mcp::secrets::clear_mcp_secret(&self.keychain, id, env_key)
     }
 
-    /// Read-only snapshot of the configured MCP servers (issue #301 slice
-    /// C-gw). The gateway reads this per external turn to connect each
-    /// configured server; the clone is cheap (a Vec of small config structs).
+    /// Read-only snapshot of the configured registry (issue #301 slice
+    /// C-gw): every server, enabled or not (the settings list renders the
+    /// disabled rows too). The turn's effective set is the filtered
+    /// [`Self::enabled_mcp_servers`]; the clone is cheap (a Vec of small
+    /// config structs).
     pub fn mcp_servers(&self) -> Vec<McpServerConfig> {
         self.load().mcp_servers.servers.clone()
     }
@@ -1367,6 +1369,48 @@ mod tests {
             results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             vec!["on-a"],
             "only the enabled server was attempted (off-b never spawned)"
+        );
+        assert!(!results[0].connected, "the bogus command fails when tried");
+    }
+
+    #[test]
+    fn connect_all_skips_disabled_entries_even_when_passed_unfiltered() {
+        // ADR-0106: the dormancy line holds at the chokepoint too. The
+        // semantic axis is `enabled_mcp_servers` (see the tests above), but
+        // `connect_all` itself guards: a caller handing over an unfiltered
+        // registry snapshot -- the shape a future consumer like #657's
+        // meta-tool surface could produce -- still gets disabled servers
+        // skipped (no spawn, no keychain read). Same bogus-command contrast:
+        // the enabled server surfaces as a failed row; the disabled one is
+        // absent.
+        let (_dir, live) = live();
+        let make = |id: &str, enabled: bool| McpServerConfig {
+            id: McpServerId(id.into()),
+            display_name: id.into(),
+            transport: McpTransport::stdio("/bin/toptopduck-definitely-not-a-command", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: if enabled {
+                Vec::new()
+            } else {
+                vec!["API_KEY".into()]
+            },
+            timeout_ms: None,
+            enabled,
+        };
+        live.upsert_mcp_server(make("on-a", true))
+            .expect("upsert on-a");
+        live.upsert_mcp_server(make("off-b", false))
+            .expect("upsert off-b");
+
+        let mut agg = crate::mcp::aggregator::McpAggregator::empty();
+        // Deliberately UNFILTERED: the full registry snapshot, not
+        // `enabled_mcp_servers()` -- the guard is what stands between it and
+        // the spawn/keychain effects.
+        let results = agg.connect_all(&live.mcp_servers(), live.keychain());
+        assert_eq!(
+            results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["on-a"],
+            "the guard skips the disabled entry even in an unfiltered slice"
         );
         assert!(!results[0].connected, "the bogus command fails when tried");
     }

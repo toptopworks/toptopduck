@@ -39,8 +39,10 @@ pub enum ImportSource {
 
 /// One server discovered in an external config (issue #390). A subset of
 /// [`crate::mcp::config::McpServerConfig`] without the `id` (empty -- Rust
-/// mints a uuid v4 on upsert) or `timeout_ms` (defaults to `None` -- the
-/// gateway default applies). The frontend renders these in a checklist, then
+/// mints a uuid v4 on upsert), `timeout_ms` (defaults to `None` -- the
+/// gateway default applies), or `enabled` (the import lands enabled,
+/// ADR-0106 Decision 4 -- enablement is machine-level state, never
+/// discovered). The frontend renders these in a checklist, then
 /// batch-upserts the selected entries via `upsert_mcp_server`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredServer {

@@ -877,22 +877,20 @@ export default function App() {
                         draft={composer.draft}
                         setDraft={composer.setDraft}
                         header={(
-                          // ADR-0092 Decision 6 (#500): the Skills / MCP
-                          // triggers render in BOTH postures — session-active
-                          // (per-session mount set via IPC) and cold start
-                          // (draft mode: empty mount set + shell-level pending
-                          // lists applied when the first submit mints the
-                          // session). Same component pair, no degradation.
-                          <>
-                            <ComposerSkillsTrigger
-                              sessionId={activeSessionId}
-                              loading={composer.loading}
-                              onOpenSettingsSkills={() =>
-                                openSettings({ section: "skills" })}
-                              pendingSkills={pendingSkills}
-                              onPendingSkillsChange={setPendingSkills}
-                            />
-                          </>
+                          // ADR-0092 Decision 6 (#500): the Skills trigger
+                          // renders in BOTH postures — session-active and
+                          // cold start (draft mode) — same component, no
+                          // degradation. (An MCP trigger used to render here
+                          // too; it is retired — enablement is a config-level
+                          // flag, ADR-0106.)
+                          <ComposerSkillsTrigger
+                            sessionId={activeSessionId}
+                            loading={composer.loading}
+                            onOpenSettingsSkills={() =>
+                              openSettings({ section: "skills" })}
+                            pendingSkills={pendingSkills}
+                            onPendingSkillsChange={setPendingSkills}
+                          />
                         )}
                         trailing={
                           providerPicker ? (

@@ -303,7 +303,7 @@ pub struct SessionHandle {
     /// restore call; the runtime choice is restored from the recipe-header
     /// `last_runtime` (ADR-0102 Decision 1, issue #589 -- segment
     /// continuation; the runtime is execution-plane session state, so unlike
-    /// the approval / MCP posture it survives a resume as the session's own
+    /// the approval posture it survives a resume as the session's own
     /// last runtime).
     runtime_posture: Mutex<RuntimePosture>,
     /// ADR-0095: the cached discovered model / thought-level catalog from the

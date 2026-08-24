@@ -329,6 +329,54 @@ describe("McpServerForm (issue #388)", () => {
     expect(onSaved).toHaveBeenCalledWith(finalized, probeResult);
   });
 
+  it("preserves a disabled server's enablement through an edit (ADR-0106)", async () => {
+    // The form never edits `enabled` (the settings row owns it): an edit of
+    // a disabled server must save disabled -- a placeholder regression here
+    // would re-arm the server through an innocent edit.
+    const finalized = makeServer({ id: "srv-1", enabled: false });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(setMcpServerSecret).mockResolvedValue(undefined);
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ enabled: false })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(upsertMcpServer).toHaveBeenCalledOnce();
+    });
+    expect(vi.mocked(upsertMcpServer).mock.calls[0][0].enabled).toBe(false);
+  });
+
+  it("saves a new server enabled (ADR-0106 Decision 4)", async () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(makeServer({ id: "minted-id" }));
+    vi.mocked(setMcpServerSecret).mockResolvedValue(undefined);
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({ id: "" })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Add"));
+
+    await waitFor(() => {
+      expect(upsertMcpServer).toHaveBeenCalledOnce();
+    });
+    expect(vi.mocked(upsertMcpServer).mock.calls[0][0].enabled).toBe(true);
+  });
+
   it("writes secret values to keychain when user enters them", async () => {
     const finalized = makeServer({ id: "minted-id", keychain_env_keys: ["API_KEY"] });
     vi.mocked(upsertMcpServer).mockResolvedValue(finalized);

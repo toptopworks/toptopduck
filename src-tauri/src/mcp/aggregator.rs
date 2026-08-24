@@ -213,7 +213,12 @@ impl McpAggregator {
     /// [`env`](McpServerConfig::env). A server that fails to connect is logged
     /// and skipped via [`Self::connect_one`] -- a misconfigured server does
     /// not brick the turn -- and surfaces as `connected: false` in the
-    /// returned slice.
+    /// returned slice. ADR-0106 defense-in-depth: entries with
+    /// `enabled: false` are skipped here outright -- the semantic axis is
+    /// [`LiveProviderConfig::enabled_mcp_servers`](crate::provider::LiveProviderConfig::enabled_mcp_servers),
+    /// but this guard holds the dormancy line (no connect, no spawn, no
+    /// keychain read) for any caller that hands over an unfiltered registry
+    /// snapshot.
     pub fn connect_all(
         &mut self,
         servers: &[McpServerConfig],
@@ -221,6 +226,18 @@ impl McpAggregator {
     ) -> Vec<ConnectResult> {
         servers
             .iter()
+            .filter(|server| {
+                if server.enabled {
+                    true
+                } else {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} disabled at the config level (ADR-0106); skipping",
+                        server.id
+                    );
+                    false
+                }
+            })
             .map(|server| {
                 let secrets = collect_secrets(keychain, server);
                 self.connect_one(server, &secrets)
