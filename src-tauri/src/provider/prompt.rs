@@ -1043,6 +1043,23 @@ mod tests {
         );
     }
 
+    /// Issue #661: the tool-selection prose states the search card cap as a
+    /// literal. This pin ties that literal to `SEARCH_TOP_K` -- changing the
+    /// constant without updating the prompt (or vice versa) fails here
+    /// instead of silently drifting.
+    #[test]
+    fn tool_selection_prompt_top_k_matches_search_top_k() {
+        let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[]);
+        assert!(
+            prompt.contains(&format!(
+                "最多返回 {} 张卡片",
+                crate::mcp::meta_tools::SEARCH_TOP_K
+            )),
+            "the prompt's card-cap literal must track SEARCH_TOP_K"
+        );
+    }
+
     // --- external-runtime ACP context block + skill block (ADR-0086, issue #368) ---
 
     #[test]

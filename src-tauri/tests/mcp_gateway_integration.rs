@@ -51,33 +51,56 @@ fn meta_names(agg: &McpAggregator) -> Vec<String> {
     names
 }
 
+/// The meta-tool trio as `meta_names` sorts it (invoke < list < search) --
+/// the expected mount surface wherever a test asserts the trio (issue #661:
+/// the sorted list was inlined at every site).
+const META_TRIO: [&str; 3] = ["mcp_invoke", "mcp_list_servers", "mcp_search_tools"];
+
+/// A stdio config whose command does not exist: the connect fails instantly
+/// and deterministically (the broken sibling in the mixed-outcome tests).
+fn broken_config(id: &str, display: &str) -> McpServerConfig {
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: display.into(),
+        transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+        enabled: true,
+    }
+}
+
+/// The handle cards of a FETCHED catalog, in advertised order (the shared
+/// extraction the mount / collision / skip / transport tests assert on).
+/// Taking the catalog (not the aggregator) lets a caller that already holds
+/// it reuse it instead of re-running the search.
+fn catalog_handles(catalog: &Value) -> Vec<String> {
+    catalog["tools"]
+        .as_array()
+        .expect("cards")
+        .iter()
+        .map(|c| c["tool"].as_str().expect("handle").to_string())
+        .collect()
+}
+
 #[test]
 fn connect_all_mounts_the_trio_and_discovers_by_handle() {
     let keychain = KeychainStore::new();
     let mut agg = McpAggregator::empty();
-    agg.connect_all(&[fake_config("srv-1", "FakeMCP")], &keychain);
+    let results = agg.connect_all(&[fake_config("srv-1", "FakeMCP")], &keychain);
 
     // The external surface is the fixed trio (ADR-0105) -- no per-tool
     // flattened advertisement. (meta_names sorts: invoke < list < search.)
     assert_eq!(
         meta_names(&agg),
-        vec![
-            "mcp_invoke".to_string(),
-            "mcp_list_servers".to_string(),
-            "mcp_search_tools".to_string(),
-        ],
+        META_TRIO.to_vec(),
         "meta-tool trio mounted"
     );
 
     // An empty query returns the whole catalog; each card's `tool` field is
     // the handle. display "FakeMCP" slugifies to "fakemcp".
     let catalog = agg.search_catalog("");
-    let handles: Vec<&str> = catalog["tools"]
-        .as_array()
-        .expect("cards")
-        .iter()
-        .map(|c| c["tool"].as_str().expect("handle"))
-        .collect();
+    let handles = catalog_handles(&catalog);
     assert_eq!(
         handles,
         vec![
@@ -90,16 +113,26 @@ fn connect_all_mounts_the_trio_and_discovers_by_handle() {
     assert_eq!(catalog["total_matched"], 3);
     let card = &catalog["tools"][1];
     assert_eq!(card["server"], "FakeMCP", "card names the display name");
-    assert!(
-        card["inputSchema"].is_object(),
-        "card carries the full schema"
+    // The card carries the server's OWN schema verbatim (issue #661: the
+    // fake's `add` schema is non-trivial). Full-schema equality (issue #663
+    // review: the previous two-field probe let a re-wrap that adds a field
+    // while preserving the probe pair pass).
+    assert_eq!(
+        card["inputSchema"],
+        json!({"type": "object",
+               "properties": {"a": {"type": "integer"},
+                              "b": {"type": "integer"}},
+               "required": ["a", "b"]}),
+        "card carries the server's schema verbatim, field for field"
     );
 
-    // The manifest names the connected server with its outcome.
+    // The manifest names the connected server with its outcome, mirroring
+    // the returned ConnectResult from the one typed outcome (issue #661).
     let listing = agg.server_listing();
     assert_eq!(listing["servers"][0]["server"], "FakeMCP");
     assert_eq!(listing["servers"][0]["connected"], true);
-    assert_eq!(listing["servers"][0]["tool_count"], 3);
+    assert_eq!(listing["servers"][0]["tool_count"], results[0].tool_count);
+    assert_eq!(results[0].tool_count, 3);
 
     // Invoke resolution: a catalog handle passes, a wrong slug fails naming
     // the handle (ADR-0105 Decision 4).
@@ -157,19 +190,13 @@ fn connect_all_assigns_unique_slug_suffix_on_display_name_collision() {
     );
     // Collision de-duplication surfaces in the catalog's handles (ADR-0105:
     // the card's `tool` field is the composed handle).
-    let catalog = agg.search_catalog("");
-    let handles: Vec<&str> = catalog["tools"]
-        .as_array()
-        .expect("cards")
-        .iter()
-        .map(|c| c["tool"].as_str().expect("handle"))
-        .collect();
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
-        handles.contains(&"mcp__fakemcp__echo"),
+        handles.iter().any(|h| h == "mcp__fakemcp__echo"),
         "first server keeps bare slug, got {handles:?}"
     );
     assert!(
-        handles.contains(&"mcp__fakemcp_2__echo"),
+        handles.iter().any(|h| h == "mcp__fakemcp_2__echo"),
         "second server gets _2 suffix, got {handles:?}"
     );
 
@@ -188,30 +215,27 @@ fn connect_all_assigns_unique_slug_suffix_on_display_name_collision() {
 fn all_failed_connects_still_mount_the_trio() {
     let keychain = KeychainStore::new();
     let mut agg = McpAggregator::empty();
-    let bad = McpServerConfig {
-        id: McpServerId("bad".into()),
-        display_name: "Bad".into(),
-        transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
-        env: BTreeMap::new(),
-        keychain_env_keys: Vec::new(),
-        timeout_ms: None,
-        enabled: true,
-    };
-    agg.connect_all(&[bad], &keychain);
+    agg.connect_all(&[broken_config("bad", "Bad")], &keychain);
     assert_eq!(
         meta_names(&agg),
-        vec![
-            "mcp_invoke".to_string(),
-            "mcp_list_servers".to_string(),
-            "mcp_search_tools".to_string(),
-        ],
+        META_TRIO.to_vec(),
         "all-failed turn still mounts the trio for diagnostics"
     );
     let listing = agg.server_listing();
     assert_eq!(listing["servers"][0]["server"], "Bad");
     assert_eq!(listing["servers"][0]["connected"], false);
     assert!(listing["servers"][0]["error"].is_string());
-    assert_eq!(agg.search_catalog("")["total_matched"], 0, "catalog empty");
+    // An all-failed turn's catalog is EMPTY (not merely matchless): the
+    // search result self-explains via the note (issue #661).
+    let search = agg.search_catalog("");
+    assert_eq!(search["total_matched"], 0, "catalog empty");
+    assert!(
+        search["note"]
+            .as_str()
+            .unwrap()
+            .contains("mcp_list_servers"),
+        "the empty-catalog note points at the manifest"
+    );
 }
 
 #[test]
@@ -222,28 +246,13 @@ fn connect_all_skips_a_server_that_fails_to_spawn_without_bricking_others() {
     let keychain = KeychainStore::new();
     let mut agg = McpAggregator::empty();
     let good = fake_config("good", "Good");
-    let bad = McpServerConfig {
-        id: McpServerId("bad".into()),
-        display_name: "Bad".into(),
-        transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
-        env: BTreeMap::new(),
-        keychain_env_keys: Vec::new(),
-        timeout_ms: None,
-        enabled: true,
-    };
-    agg.connect_all(&[bad, good], &keychain);
+    agg.connect_all(&[broken_config("bad", "Bad"), good], &keychain);
     // The catalog holds only the connected server (ADR-0105 Decision 3: a
     // failed connect leaves no placeholder); the manifest still names the
     // failed attempt with its reason (Decision 1).
-    let catalog = agg.search_catalog("");
-    let handles: Vec<&str> = catalog["tools"]
-        .as_array()
-        .expect("cards")
-        .iter()
-        .map(|c| c["tool"].as_str().expect("handle"))
-        .collect();
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
-        handles.contains(&"mcp__good__echo"),
+        handles.iter().any(|h| h == "mcp__good__echo"),
         "good server aggregated despite bad sibling, got {handles:?}"
     );
     assert!(
@@ -265,11 +274,7 @@ fn connect_all_skips_a_server_that_fails_to_spawn_without_bricking_others() {
     // all_failed_connects_still_mount_the_trio below.)
     assert_eq!(
         meta_names(&agg),
-        vec![
-            "mcp_invoke".to_string(),
-            "mcp_list_servers".to_string(),
-            "mcp_search_tools".to_string(),
-        ],
+        META_TRIO.to_vec(),
         "trio mounted while at least one server connected"
     );
 }
@@ -366,15 +371,7 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
     // skip paths and is shape-covered by them.)
     let keychain = KeychainStore::new();
     let mut agg = McpAggregator::empty();
-    let bad_spawn = McpServerConfig {
-        id: McpServerId("bad-spawn".into()),
-        display_name: "BadSpawn".into(),
-        transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
-        env: BTreeMap::new(),
-        keychain_env_keys: Vec::new(),
-        timeout_ms: None,
-        enabled: true,
-    };
+    let bad_spawn = broken_config("bad-spawn", "BadSpawn");
     let http_fail = McpServerConfig {
         id: McpServerId("http-fail".into()),
         display_name: "HttpFail".into(),
@@ -840,15 +837,9 @@ fn http_transport_aggregator_connect_and_route() {
     assert!(results[0].connected, "http server connected via aggregator");
 
     // The catalog carries the server's tools as handle cards (ADR-0105).
-    let catalog = agg.search_catalog("");
-    let handles: Vec<&str> = catalog["tools"]
-        .as_array()
-        .expect("cards")
-        .iter()
-        .map(|c| c["tool"].as_str().expect("handle"))
-        .collect();
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
-        handles.contains(&"mcp__httpmcp__add"),
+        handles.iter().any(|h| h == "mcp__httpmcp__add"),
         "handle cards, got {handles:?}"
     );
 
@@ -951,15 +942,9 @@ fn sse_transport_aggregator_connect_and_route() {
     assert!(results[0].connected, "sse server connected via aggregator");
 
     // The catalog carries the server's tools as handle cards (ADR-0105).
-    let catalog = agg.search_catalog("");
-    let handles: Vec<&str> = catalog["tools"]
-        .as_array()
-        .expect("cards")
-        .iter()
-        .map(|c| c["tool"].as_str().expect("handle"))
-        .collect();
+    let handles = catalog_handles(&agg.search_catalog(""));
     assert!(
-        handles.contains(&"mcp__ssemcp__add"),
+        handles.iter().any(|h| h == "mcp__ssemcp__add"),
         "handle cards, got {handles:?}"
     );
 

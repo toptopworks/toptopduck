@@ -270,15 +270,26 @@ pub struct ApprovalRequestBody {
     pub tool: String,
     pub operation_kind: OperationKind,
     /// Short agent-readable parameter summary for the card body (ADR-0083).
-    /// NOT the full call arguments -- those may be large or sensitive; the
-    /// bridge summarizes (e.g. "GET https://example.com/x" / "write ~/file").
+    /// Two summary families feed this field, with different content rules:
     ///
-    /// **Sanitization contract (issue #312):** the bridge is the PRIMARY
-    /// cleansing layer. This field MUST NOT carry raw credentials, API keys,
-    /// bearer tokens, `file:///` PII, or query-string credentials. The
-    /// gateway applies a length cap ([`truncate_summary`] /
-    /// [`SUMMARY_MAX_CHARS`]) as a SECONDARY defense -- it bounds the
-    /// broadcast surface, it does not sanitize content.
+    /// - Bridge-authored summaries (ACP adapters) are compact descriptions
+    ///   ("GET https://example.com/x" / "write ~/file"), never the full
+    ///   call arguments -- those may be large or sensitive.
+    /// - External-call argument previews (issue #661) deliberately carry
+    ///   the call's arguments as truncated compact JSON: the point of the
+    ///   card is that the approver sees what the external server is about
+    ///   to receive, so masking would reintroduce the blind sign-off the
+    ///   preview exists to prevent. The audience is the approver's own
+    ///   panes and the local session file -- the surfaces the approved
+    ///   call's trace excerpt already reaches.
+    ///
+    /// **Sanitization contract (issue #312):** for bridge-authored
+    /// summaries the bridge is the PRIMARY cleansing layer and MUST NOT
+    /// carry raw credentials, API keys, bearer tokens, `file:///` PII, or
+    /// query-string credentials. The gateway applies a length cap
+    /// ([`truncate_summary`] / [`SUMMARY_MAX_CHARS`]) as a SECONDARY
+    /// defense -- it bounds the broadcast surface, it does not sanitize
+    /// content.
     pub summary: String,
 }
 

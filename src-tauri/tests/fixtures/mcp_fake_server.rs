@@ -67,7 +67,10 @@ fn main() {
                         {"name": "echo", "description": "echo the message field",
                          "inputSchema": {"type": "object"}},
                         {"name": "add", "description": "sum a and b",
-                         "inputSchema": {"type": "object"}},
+                         "inputSchema": {"type": "object",
+                                         "properties": {"a": {"type": "integer"},
+                                                        "b": {"type": "integer"}},
+                                         "required": ["a", "b"]}},
                         {"name": "echo_env", "description": "reflect a child env var",
                          "inputSchema": {"type": "object"}}
                     ]

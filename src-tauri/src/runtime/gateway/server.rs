@@ -102,7 +102,7 @@ pub struct GatewayCtx<'a> {
 /// The trace + promotions a serve collected from the bridge's tool calls
 /// (ADR-0078 cross-runtime trace contract). The turn assembler (slice 9c)
 /// merges this with the built-in loop's output shape verbatim.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct GatewayOutcome {
     pub trace: Vec<TraceEntry>,
     pub promotions: Vec<Promotion>,
@@ -170,12 +170,7 @@ pub fn serve_connection(
         // Cancel fired before any bridge connected: return the empty outcome so
         // the turn assembler's termination (single-source ACP) decides the
         // TurnOutcome (Cancelled), not a gateway serve error.
-        None => {
-            return Ok(GatewayOutcome {
-                trace: Vec::new(),
-                promotions: Vec::new(),
-            });
-        }
+        None => return Ok(GatewayOutcome::default()),
         Some(pair) => pair,
     };
     // The listener accepted exactly one bridge (ADR-0085 per-bridge lifecycle);
@@ -188,10 +183,7 @@ pub fn serve_connection(
 
     verify_bridge(&mut reader, &mut writer, &token)?;
 
-    let mut outcome = GatewayOutcome {
-        trace: Vec::new(),
-        promotions: Vec::new(),
-    };
+    let mut outcome = GatewayOutcome::default();
     loop {
         if ctx.cancel.is_requested() {
             return Ok(outcome);
@@ -348,13 +340,7 @@ fn handle_method(
             // server connected this turn. The bridge / LLM never sees a
             // per-tool flattened advertisement.
             let mut tools: Vec<Value> = builtin_table().iter().map(tool_to_mcp).collect();
-            tools.extend(
-                ctx.mcp
-                    .meta_tool_definitions()
-                    .iter()
-                    .map(tool_to_mcp)
-                    .collect::<Vec<_>>(),
-            );
+            tools.extend(ctx.mcp.meta_tool_definitions().iter().map(tool_to_mcp));
             Response::Result(json!({ "tools": tools }))
         }
         "tools/call" => handle_tools_call(msg, ctx, outcome),
@@ -413,111 +399,26 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         name,
         input: arguments,
     };
-    match call.name.as_str() {
-        meta_tools::META_LIST_SERVERS => {
-            let payload = ctx.mcp.server_listing();
-            return local_meta_result(&call, "list connected servers", payload, outcome);
+    // The shared dispatch classification (issue #663 review): the trio match,
+    // the parse-first invoke resolution, and the direct-handle refusal all
+    // live in `meta_tools::resolve_meta_call` -- this site maps each variant
+    // onto the gateway envelope. `Resolved` is an owned replacement call that
+    // outlives the match through `resolved`; `Fallthrough` borrows the
+    // original; both take the shared classify -> gate -> dispatch path below.
+    let resolved;
+    let call: &ToolUse = match meta_tools::resolve_meta_call(&ctx.mcp, &call) {
+        meta_tools::MetaDispatch::Local { summary, payload } => {
+            return local_meta_result(&call, &summary, payload, outcome);
         }
-        meta_tools::META_SEARCH_TOOLS => {
-            return match call.input.get("query").and_then(Value::as_str) {
-                Some(query) => {
-                    let summary = meta_tools::query_summary(query);
-                    let payload = ctx.mcp.search_catalog(query);
-                    local_meta_result(&call, &summary, payload, outcome)
-                }
-                None => resolution_failure(meta_tools::missing_query_failure()),
-            };
+        meta_tools::MetaDispatch::Refused(message) => return resolution_failure(message),
+        meta_tools::MetaDispatch::Resolved(replacement) => {
+            resolved = replacement;
+            &resolved
         }
-        meta_tools::META_INVOKE => {
-            // Parse-first (ADR-0105 Decision 4): the handle resolves against
-            // the turn's catalog BEFORE any gate / trace. On success the call
-            // flows the regular external path under the backend identity.
-            return match ctx.mcp.resolve_invoke(&call.input) {
-                Err(message) => resolution_failure(message),
-                Ok((handle, arguments)) => gated_external_call(
-                    &ToolUse {
-                        id: call.id.clone(),
-                        name: handle,
-                        input: arguments,
-                    },
-                    ctx,
-                    outcome,
-                ),
-            };
-        }
-        _ => {}
-    }
-    // A handle emitted directly as a tool name is not a valid call form on
-    // the discovery surface: `mcp_invoke` is the one addressing path
-    // (ADR-0105 Consequences -- the bridge/LLM addresses external tools via
-    // the invoke, not by emitting the namespaced name). Fail as a tool-level
-    // error BEFORE the gate, so a hallucinated direct call never surfaces an
-    // approval card for a name the surface never advertised.
-    if aggregator::parse_namespaced(&call.name).is_some() {
-        return resolution_failure(format!(
-            "tool `{}` is a namespaced external handle; address it via mcp_invoke, \
-             not as a direct tool call",
-            call.name
-        ));
-    }
-    let (key, operation_kind, summary) = classify_call(&call);
-    let gate_req = ApprovalRequest {
-        key,
-        operation_kind,
-        summary: summary.clone(),
+        meta_tools::MetaDispatch::Fallthrough(call) => call,
     };
-    match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
-        Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
-        Ok(GateOutcome::Denied) => {
-            outcome.trace.push(TraceEntry {
-                tool_use_id: call.id.clone(),
-                name: call.name.clone(),
-                operation_kind,
-                summary,
-                success: false,
-                result_excerpt: "denied by approval gateway".to_string(),
-            });
-            Response::Result(json!({
-                "content": [{"type": "text", "text": "tool call denied by the approval gateway"}],
-                "isError": true,
-            }))
-        }
-        Ok(GateOutcome::Allow) => {
-            let dispatched = dispatch(&call, &mut ctx.deps, ctx.cancel, ctx.materializer);
-            if let Some(promotion) = dispatched.promotion {
-                outcome.promotions.push(promotion);
-            }
-            let is_error = dispatched.result.is_error;
-            outcome.trace.push(TraceEntry {
-                tool_use_id: call.id.clone(),
-                name: call.name.clone(),
-                operation_kind,
-                summary,
-                success: !is_error,
-                result_excerpt: truncate_trace_excerpt(
-                    &dispatched.result.content,
-                    TRACE_EXCERPT_MAX,
-                ),
-            });
-            Response::Result(json!({
-                "content": [{"type": "text", "text": dispatched.result.content}],
-                "isError": is_error,
-            }))
-        }
-    }
-}
-
-/// Drive one backend-identity external call through classify -> gate -> route
-/// (ADR-0076 gateway routing; reached from `mcp_invoke` resolution and from
-/// direct handle emission). The gate consumes the RESOLVED identity
-/// (ADR-0105 Decision 4), so an approval card names the backend server +
-/// handle, never "mcp_invoke". The server's envelope is relayed verbatim via
-/// [`external_call_outcome`] and the trace entry names the handle.
-fn gated_external_call(
-    call: &ToolUse,
-    ctx: &mut GatewayCtx,
-    outcome: &mut GatewayOutcome,
-) -> Response {
+    // The gate consumes the RESOLVED identity (ADR-0105 Decision 4), so an
+    // approval card names the backend server + handle, never "mcp_invoke".
     let (key, operation_kind, summary) = classify_call(call);
     let gate_req = ApprovalRequest {
         key,
@@ -541,8 +442,43 @@ fn gated_external_call(
             }))
         }
         Ok(GateOutcome::Allow) => {
-            let route_result = ctx.mcp.route(&call.name, &call.input);
-            let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
+            // Route by name shape (ADR-0076 gateway routing + ADR-0105
+            // Decision 4): a namespaced name (an `mcp_invoke` fall-through)
+            // routes to the external server and the server's envelope is
+            // relayed VERBATIM via [`external_call_outcome`]; anything else
+            // is a built-in dispatch whose promotion rides the side-effect
+            // channel. Either way exactly one trace row lands, naming the
+            // call's final identity.
+            // NOTE: the namespaced check here re-reads `call.name` rather
+            // than hoisting one `is_external` above the trio match -- the
+            // `mcp_invoke` fall-through REPLACES the name with the resolved
+            // handle between the two sites, so the guard above judges the
+            // EMITTED name while this judges the final identity (a hoisted
+            // bool would be stale for exactly the invoke path).
+            let (response, is_error, excerpt) = if aggregator::is_namespaced(&call.name) {
+                let route_result = ctx.mcp.route(&call.name, &call.input);
+                let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
+                (Response::Result(envelope), is_error, excerpt)
+            } else {
+                let dispatched = dispatch(call, &mut ctx.deps, ctx.cancel, ctx.materializer);
+                if let Some(promotion) = dispatched.promotion {
+                    outcome.promotions.push(promotion);
+                }
+                let is_error = dispatched.result.is_error;
+                // Truncate via borrow BEFORE the move into the envelope -- a
+                // full-content clone would double peak memory per built-in
+                // call (issue #663 review); the trace-side re-truncation in
+                // the push below is idempotent on the truncated string.
+                let excerpt = truncate_trace_excerpt(&dispatched.result.content, TRACE_EXCERPT_MAX);
+                (
+                    Response::Result(json!({
+                        "content": [{"type": "text", "text": dispatched.result.content}],
+                        "isError": is_error,
+                    })),
+                    is_error,
+                    excerpt,
+                )
+            };
             outcome.trace.push(TraceEntry {
                 tool_use_id: call.id.clone(),
                 name: call.name.clone(),
@@ -551,7 +487,7 @@ fn gated_external_call(
                 success: !is_error,
                 result_excerpt: truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
             });
-            Response::Result(envelope)
+            response
         }
     }
 }
@@ -639,15 +575,17 @@ fn generate_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink};
+    use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ToolKey};
+    use crate::provider::keychain::KeychainStore;
     use crate::session::engine::AdminEngine;
     use crate::session::materializer::FakeMaterializer;
     use crate::workingset::WorkingSet;
     use serde_json::{json, Value};
     use std::collections::HashMap;
-    use std::io::Cursor;
-    use std::net::TcpStream;
+    use std::io::{BufRead, BufReader, Cursor, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
@@ -703,6 +641,200 @@ mod tests {
             cancel,
             mcp: McpAggregator::default(),
         }
+    }
+
+    /// A minimal in-process HTTP MCP server for the wire-level pins (issue
+    /// #661): binds a localhost port and answers `initialize` / `tools/list`
+    /// / `tools/call` POSTs with plain JSON bodies. The stdio fake-server
+    /// fixture is unreachable from lib unit tests (`CARGO_BIN_EXE_*` is set
+    /// for integration tests only), so this stands in for the route target.
+    /// One accept thread, one request per connection; `Drop` stops the loop.
+    /// The `add` tool advertises a NON-TRIVIAL inputSchema (the
+    /// verbatim-schema pins need one distinguishable from the degraded empty
+    /// object) and answers `a + b`; `fail` answers an `isError: true`
+    /// envelope (the wire-level error-relay fixture).
+    struct LiveMcpServer {
+        port: u16,
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl LiveMcpServer {
+        fn spawn() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            listener.set_nonblocking(true).expect("nonblocking");
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = Arc::clone(&shutdown);
+            let handle = thread::spawn(move || {
+                while !flag.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => serve_one_rpc(stream),
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                port,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+    }
+
+    impl Drop for LiveMcpServer {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    /// Serve one HTTP request: read the request line + headers (for
+    /// content-length), read the body, answer the JSON-RPC method, close.
+    /// A notification (no id) gets a bare 202, the same contract the
+    /// integration fake uses.
+    fn serve_one_rpc(mut stream: TcpStream) {
+        // Every early return below eprintln!s its failure (issue #663
+        // review): the fixture answers transport faults with an empty 202,
+        // which would otherwise surface later as an unrelated rmcp timeout
+        // -- the exact "confusing failure" mode `live_ctx` avoids at connect.
+        let read_half = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("serve_one_rpc: stream clone failed: {e}");
+                return;
+            }
+        };
+        let mut reader = BufReader::new(read_half);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+            eprintln!("serve_one_rpc: connection closed before a request line");
+            return;
+        }
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                eprintln!("serve_one_rpc: connection closed mid-headers");
+                return;
+            }
+            if header.trim().is_empty() {
+                break;
+            }
+            if let Some(rest) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = rest.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 && reader.read_exact(&mut body).is_err() {
+            eprintln!("serve_one_rpc: short body read ({content_length} declared)");
+            return;
+        }
+        let resp = match serde_json::from_slice::<Value>(&body) {
+            Ok(req) => rpc_answer(&req),
+            Err(e) => {
+                eprintln!("serve_one_rpc: body parse failed: {e}");
+                Value::Null
+            }
+        };
+        if resp.is_null() {
+            let _ = stream.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return;
+        }
+        let body = resp.to_string();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(header.as_bytes());
+        let _ = stream.write_all(body.as_bytes());
+        let _ = stream.flush();
+    }
+
+    /// The JSON-RPC answer builder: `add` sums a+b, `fail` reports the
+    /// intentional `isError: true` envelope, and `tools/list` carries the
+    /// non-trivial schema.
+    fn rpc_answer(req: &Value) -> Value {
+        let id = req.get("id").cloned();
+        if id.is_none() {
+            return Value::Null;
+        }
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+        let result = match method {
+            "initialize" => json!({
+                "protocolVersion": crate::mcp::MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "serverInfo": {"name": "live-test-mcp", "version": "0.0.0"}
+            }),
+            "tools/list" => json!({"tools": [
+                {"name": "add", "description": "sum a and b",
+                 "inputSchema": {"type": "object",
+                                 "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                                 "required": ["a", "b"]}},
+                {"name": "fail", "description": "always fails",
+                 "inputSchema": {"type": "object"}},
+            ]}),
+            "tools/call" => {
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                match name {
+                    "add" => {
+                        let a = params["arguments"]["a"].as_i64().unwrap_or(0);
+                        let b = params["arguments"]["b"].as_i64().unwrap_or(0);
+                        json!({"content": [{"type": "text", "text": format!("{}", a + b)}],
+                               "isError": false})
+                    }
+                    _ => json!({"content": [{"type": "text",
+                                "text": "boom: intentional failure fixture"}],
+                               "isError": true}),
+                }
+            }
+            _ => return Value::Null,
+        };
+        json!({"jsonrpc": "2.0", "id": id, "result": result})
+    }
+
+    /// An HTTP `McpServerConfig` pointing at a [`LiveMcpServer`].
+    fn live_config(url: &str) -> crate::mcp::config::McpServerConfig {
+        crate::mcp::config::McpServerConfig {
+            id: crate::mcp::config::McpServerId("live-srv".into()),
+            display_name: "LiveMCP".into(),
+            transport: crate::mcp::config::McpTransport::Http {
+                url: url.to_string(),
+            },
+            env: std::collections::BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        }
+    }
+
+    /// A fresh ctx whose aggregator has CONNECTED to the live fixture, with
+    /// the connect outcome asserted up front -- a loopback blip would
+    /// otherwise surface later as a confusing "unknown slug" resolution
+    /// failure instead of the transport error that caused it.
+    fn live_ctx(server: &LiveMcpServer) -> GatewayCtx<'static> {
+        let mut ctx = fresh_ctx();
+        let results = ctx
+            .mcp
+            .connect_all(&[live_config(&server.url())], &KeychainStore::new());
+        assert!(
+            results.iter().all(|r| r.connected),
+            "fixture server must connect (a transport failure here is a test-env \
+             loopback issue, not a gateway defect): {results:?}"
+        );
+        ctx
     }
 
     // --- pure helpers ------------------------------------------------------
@@ -808,10 +940,7 @@ mod tests {
     #[test]
     fn handle_method_initialize_advertises_gateway_server_info() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
         match handle_method("initialize", &msg, &mut ctx, &mut outcome) {
             Response::Result(v) => {
@@ -825,10 +954,7 @@ mod tests {
     #[test]
     fn handle_method_tools_list_advertises_builtin_table() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
         match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
             Response::Result(v) => {
@@ -863,10 +989,7 @@ mod tests {
         };
         ctx.mcp
             .connect_all(&[config], &crate::provider::keychain::KeychainStore::new());
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
         match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
             Response::Result(v) => {
@@ -891,10 +1014,7 @@ mod tests {
     #[test]
     fn handle_method_unknown_returns_method_not_found() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 3, "method": "frobnicate"});
         match handle_method("frobnicate", &msg, &mut ctx, &mut outcome) {
             Response::Error(code, m) => {
@@ -908,10 +1028,7 @@ mod tests {
     #[test]
     fn handle_method_notification_returns_none_no_envelope() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         // No id -> a notification; the match arm returns Response::None, which
         // the caller's id-check drops without writing a response.
         let msg = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
@@ -1185,10 +1302,7 @@ mod tests {
     #[test]
     fn handle_tools_call_allow_path_runs_builtin_through_dispatch() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1224,10 +1338,7 @@ mod tests {
     #[test]
     fn handle_tools_call_missing_name_returns_params_error() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 5,
@@ -1252,10 +1363,7 @@ mod tests {
     #[test]
     fn handle_tools_call_list_servers_serves_locally_with_one_trace_row() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -1274,6 +1382,10 @@ mod tests {
         }
         assert_eq!(outcome.trace.len(), 1, "one meta call -> one trace row");
         assert_eq!(outcome.trace[0].name, "mcp_list_servers");
+        // The trace summary is the shared constant, not a re-inlined literal
+        // (issue #663 review: LIST_SUMMARY had no end-to-end pin at either
+        // dispatch site).
+        assert_eq!(outcome.trace[0].summary, meta_tools::LIST_SUMMARY);
         assert!(outcome.trace[0].success);
         assert_eq!(outcome.trace[0].operation_kind, OperationKind::Read);
     }
@@ -1284,10 +1396,7 @@ mod tests {
     #[test]
     fn handle_tools_call_search_tools_carries_query_in_summary() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 8,
@@ -1314,10 +1423,7 @@ mod tests {
     #[test]
     fn handle_tools_call_direct_handle_emission_is_refused_pregate() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": 11,
@@ -1358,10 +1464,7 @@ mod tests {
             (json!({}), "parameter `tool`"),
         ] {
             let mut ctx = fresh_ctx();
-            let mut outcome = GatewayOutcome {
-                trace: Vec::new(),
-                promotions: Vec::new(),
-            };
+            let mut outcome = GatewayOutcome::default();
             let msg = json!({
                 "jsonrpc": "2.0",
                 "id": 9,
@@ -1392,10 +1495,7 @@ mod tests {
     #[test]
     fn handle_tools_call_string_id_not_double_quoted() {
         let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome {
-            trace: Vec::new(),
-            promotions: Vec::new(),
-        };
+        let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
             "id": "req-abc",
@@ -1487,5 +1587,162 @@ mod tests {
             "error carries the route failure: {text}"
         );
         assert_eq!(excerpt, text, "excerpt is the error text");
+    }
+
+    // --- wire-level pins over a live server (issue #661) -------------------
+
+    /// A `mcp_search_tools` call without a usable query fails with the SHARED
+    /// message (the same `meta_tools` source the built-in loop consumes), as
+    /// a tool-level error with no trace entry.
+    #[test]
+    fn handle_tools_call_search_tools_without_a_query_fails_with_the_shared_message() {
+        for args in [json!({}), json!({"query": 7})] {
+            let mut ctx = fresh_ctx();
+            let mut outcome = GatewayOutcome::default();
+            let msg = json!({
+                "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                "params": {"name": "mcp_search_tools", "arguments": args}
+            });
+            match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+                Response::Result(v) => {
+                    assert_eq!(v["isError"], true, "malformed search is isError");
+                    assert_eq!(
+                        v["content"][0]["text"].as_str().unwrap(),
+                        meta_tools::missing_query_failure(),
+                        "the failure message comes from the shared source"
+                    );
+                }
+                _ => panic!("malformed search must return Result"),
+            }
+            assert!(
+                outcome.trace.is_empty(),
+                "a malformed search never reached a tool -> no trace row"
+            );
+        }
+    }
+
+    /// The gateway-level `mcp_invoke` success chain (issue #661):
+    /// invoke -> resolve -> gate -> route -> verbatim envelope, over a live
+    /// in-process server. Asserts the three-part contract: the server's
+    /// envelope relays verbatim, exactly ONE trace row lands naming the
+    /// backend handle, and NO `mcp_invoke` shell row exists (the gate and
+    /// trace consume the resolved identity, ADR-0105 Decision 4). The gate
+    /// passes via seeded trust, keeping the pin off the interactive path.
+    #[test]
+    fn handle_tools_call_invoke_success_chain_relays_verbatim() {
+        let server = LiveMcpServer::spawn();
+        let mut ctx = live_ctx(&server);
+        ctx.approval
+            .seed_trust(&ToolKey::external("livemcp", "mcp__livemcp__add"));
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 42, "method": "tools/call",
+            "params": {"name": "mcp_invoke",
+                       "arguments": {"tool": "mcp__livemcp__add", "arguments": {"a": 2, "b": 3}}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => assert_eq!(
+                v,
+                json!({"content": [{"type": "text", "text": "5"}], "isError": false}),
+                "the server's envelope relays verbatim"
+            ),
+            _ => panic!("invoke success chain must return Result"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "exactly one trace row");
+        let row = &outcome.trace[0];
+        assert_eq!(row.name, "mcp__livemcp__add", "the row names the handle");
+        assert_eq!(row.tool_use_id, "42");
+        assert!(row.success);
+        assert!(
+            !outcome
+                .trace
+                .iter()
+                .any(|r| r.name == meta_tools::META_INVOKE),
+            "no mcp_invoke shell row"
+        );
+    }
+
+    /// The discovery loop's within-turn reuse contract (issue #661): a
+    /// search over the SAME server's catalog returns handle cards whose
+    /// `inputSchema` is the server's own schema verbatim (non-trivial here,
+    /// distinguishable from the degraded empty object), and the card's
+    /// handle then invokes successfully through the same aggregator.
+    #[test]
+    fn handle_tools_call_search_then_invoke_reuse_the_same_catalog() {
+        let server = LiveMcpServer::spawn();
+        let mut ctx = live_ctx(&server);
+        ctx.approval
+            .seed_trust(&ToolKey::external("livemcp", "mcp__livemcp__add"));
+        let mut outcome = GatewayOutcome::default();
+        // 1) search: the card carries the handle + the server's schema.
+        let search = json!({
+            "jsonrpc": "2.0", "id": 50, "method": "tools/call",
+            "params": {"name": "mcp_search_tools", "arguments": {"query": "add"}}
+        });
+        match handle_tools_call(&search, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                let payload: Value =
+                    serde_json::from_str(v["content"][0]["text"].as_str().expect("catalog json"))
+                        .expect("parse catalog");
+                let card = &payload["tools"][0];
+                assert_eq!(card["tool"], "mcp__livemcp__add");
+                assert_eq!(
+                    card["inputSchema"]["properties"]["a"]["type"], "integer",
+                    "the card carries the server's non-trivial schema verbatim"
+                );
+                assert_eq!(
+                    card["inputSchema"]["required"],
+                    json!(["a", "b"]),
+                    "schema fields survive untouched"
+                );
+            }
+            _ => panic!("search must return Result"),
+        }
+        // 2) invoke the handle the card handed out, same aggregator.
+        let invoke = json!({
+            "jsonrpc": "2.0", "id": 51, "method": "tools/call",
+            "params": {"name": "mcp_invoke",
+                       "arguments": {"tool": "mcp__livemcp__add", "arguments": {"a": 10, "b": 20}}}
+        });
+        match handle_tools_call(&invoke, &mut ctx, &mut outcome) {
+            Response::Result(v) => assert_eq!(
+                v,
+                json!({"content": [{"type": "text", "text": "30"}], "isError": false}),
+                "the card's handle invokes through the same catalog"
+            ),
+            _ => panic!("invoke must return Result"),
+        }
+        // Two rows: the meta search itself, then the backend handle.
+        assert_eq!(outcome.trace.len(), 2);
+        assert_eq!(outcome.trace[0].name, "mcp_search_tools");
+        assert_eq!(outcome.trace[1].name, "mcp__livemcp__add");
+    }
+
+    /// A server-reported `isError: true` envelope relays verbatim through
+    /// the invoke chain (issue #661 wire fixture): the gateway does not mask
+    /// the server's error, and the trace row records the failure.
+    #[test]
+    fn handle_tools_call_invoke_relays_a_server_error_envelope_verbatim() {
+        let server = LiveMcpServer::spawn();
+        let mut ctx = live_ctx(&server);
+        ctx.approval
+            .seed_trust(&ToolKey::external("livemcp", "mcp__livemcp__fail"));
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 60, "method": "tools/call",
+            "params": {"name": "mcp_invoke", "arguments": {"tool": "mcp__livemcp__fail"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => assert_eq!(
+                v,
+                json!({"content": [{"type": "text", "text": "boom: intentional failure fixture"}],
+                       "isError": true}),
+                "the server's error envelope relays verbatim"
+            ),
+            _ => panic!("a server-side error is still a Result envelope"),
+        }
+        let row = &outcome.trace[0];
+        assert_eq!(row.name, "mcp__livemcp__fail");
+        assert!(!row.success, "the trace row records the failure");
     }
 }
