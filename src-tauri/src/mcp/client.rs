@@ -235,9 +235,10 @@ struct SseEvent {
 /// [`LINE_MAX_BYTES`] (issue #647):
 /// - line level: lines longer than the cap are dropped by
 ///   [`read_line_bounded`];
-/// - event level: the summed bytes of one event's `data:` parts are bounded
-///   (a stream that never sends the terminating blank line cannot grow the
-///   accumulation past one capped line's worth).
+/// - event level: the summed bytes of one event's `data:` parts -- the "\n"
+///   join byte included, so zero-length parts cannot slip past -- are
+///   bounded (a stream that never sends the terminating blank line cannot
+///   grow the accumulation past one capped line's worth).
 ///
 /// A cap breach voids the WHOLE in-progress event: the accumulated fields are
 /// cleared, the surviving lines are skipped until the blank line that
@@ -329,7 +330,11 @@ fn read_sse_event_bounded<R: BufRead>(
             // stripped; everything else (including additional spaces) is
             // retained as data.
             let data = rest.strip_prefix(' ').unwrap_or(rest);
-            data_bytes += data.len();
+            // The +1 is the "\n" the join below inserts between parts:
+            // counting it keeps zero-length parts (each costing one budget
+            // byte) from growing `data_parts` without bound, and bounds the
+            // joined string's length.
+            data_bytes += data.len() + 1;
             if data_bytes > max {
                 log::warn!(
                     target: "toptopduck::mcp",
@@ -1303,7 +1308,8 @@ mod tests {
     #[test]
     fn read_sse_event_data_budget_voids_oversized_event() {
         // Each line is 13 bytes (under the 16-byte line cap) but the three
-        // parts sum to 21 data bytes (over the budget).
+        // parts, join bytes included, sum to 24 budget bytes (over the
+        // budget; the breach lands on the third part).
         let wire = "data: 1234567\ndata: 1234567\ndata: 1234567\n\ndata: ok\n\n";
         let mut reader = Cursor::new(wire.as_bytes().to_vec());
         let event = read_sse_event_bounded(&mut reader, 16)
@@ -1352,6 +1358,78 @@ mod tests {
             other => panic!("expected Err(Framing), got {other:?}"),
         }
         assert!(rx.recv().is_err(), "reader exits after propagating");
+    }
+
+    /// Issue #647, consumer side: a malformed `message` event fails the
+    /// WAITING request in `SseClient::request` -- the full chain (reader
+    /// loop → channel → the `Ok(Err(err))` arm), not just the send side
+    /// pinned above. The POST endpoint is a one-shot `TcpListener` answering
+    /// `202 Accepted` (the transport contract: the response arrives on the
+    /// SSE stream, not in the POST's own body); the first forwarded message
+    /// carries a foreign id, so the request is still waiting when the reader
+    /// propagates the framing failure. A regression of the consumption arm
+    /// to log-and-continue would leave this test hanging exactly like
+    /// production hung pre-#647.
+    #[test]
+    fn sse_client_request_fails_fast_on_propagated_malformed_event() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept POST");
+            // Read timeout: a stuck client fails this thread instead of
+            // hanging the test (the ACP-chain e2e lesson).
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf); // The one-line JSON-RPC POST.
+            stream
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .expect("write 202");
+        });
+
+        // The healthy message carries a foreign id (skipped by the waiting
+        // request); the malformed event then reaches it as Err.
+        let wire = b"data: {\"id\":99,\"ok\":true}\n\ndata: not-json\n\n";
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_reader = stop.clone();
+        let reader_thread = thread::spawn(move || {
+            sse_reader_loop(Cursor::new(wire.to_vec()), tx, stop_for_reader);
+        });
+
+        let mut client = SseClient {
+            response_rx: rx,
+            post_url: format!("http://127.0.0.1:{port}/message"),
+            agent: ureq::AgentBuilder::new()
+                .timeout_read(SSE_READ_TIMEOUT)
+                .build(),
+            stop,
+            reader_thread: Some(reader_thread),
+            next_id: 1,
+        };
+
+        let err = client
+            .request(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+            .expect_err("the malformed event fails the waiting request");
+        match err {
+            ClientError::Framing(ref e) => {
+                assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidData,
+                    "malformed -> Framing(InvalidData), got {e:?}"
+                );
+                assert!(
+                    e.to_string().contains("malformed JSON in SSE event"),
+                    "the propagated wording, got {e}"
+                );
+            }
+            other => panic!("expected Err(Framing), got {other:?}"),
+        }
+        server.join().expect("server thread");
     }
 
     /// `check_rpc_response` returns the `result` field on success and maps an

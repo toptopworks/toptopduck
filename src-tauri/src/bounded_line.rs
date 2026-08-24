@@ -1,13 +1,14 @@
 //! The bounded single-line reader every untrusted-input surface shares
-//! (issues #629/#639/#643).
+//! (issues #629/#639/#643/#647).
 //!
-//! Four faces read untrusted peer output through this one implementation:
+//! Five faces read untrusted peer output through this one implementation:
 //! the ACP adapter stdout readers (`spawn_line_reader` in the ACP process
 //! module), the gateway's NDJSON frame reader (`read_message` in the
-//! gateway framing module), the gateway's bridge-auth check, and the
-//! acp_bridge handshake. The cap is a security invariant against untrusted
-//! child output, not a tunable -- it stays a compile-time constant (see
-//! [`LINE_MAX_BYTES`]).
+//! gateway framing module), the gateway's bridge-auth check, the
+//! acp_bridge handshake, and the MCP client's SSE event reader
+//! (`read_sse_event_bounded` in the MCP client module). The cap is a
+//! security invariant against untrusted peer output, not a tunable -- it
+//! stays a compile-time constant (see [`LINE_MAX_BYTES`]).
 //!
 //! This file is deliberately pure std. The bridge binary must not link the
 //! lib crate (ADR-0085: a zero-dependency `[[bin]]` so release LTO
@@ -17,9 +18,11 @@
 //!
 //! An over-long line is drained and surfaced as [`LineRead::Overlong`]; the
 //! disposition is the caller's -- the ACP readers drop it with a warning, the
-//! gateway framing fails the connection (issue #646), and both bridge-auth
+//! gateway framing fails the connection (issue #646), both bridge-auth
 //! handshakes refuse (the log target is domain-specific, and the bridge has
-//! no logging surface at all).
+//! no logging surface at all), and the MCP SSE reader voids the whole
+//! in-progress event and resyncs at the next event boundary, the stream
+//! continuing (issue #647).
 use std::io::{BufRead, Read};
 
 /// The byte cap on a single incoming line (issue #629): an untrusted
