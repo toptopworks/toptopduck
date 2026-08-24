@@ -34,7 +34,7 @@ use crate::provider::prompt::{resolve_locale_from_tag, ResponseLocale};
 pub struct LiveProviderConfig {
     keychain: KeychainStore,
     path: PathBuf,
-    /// Serializes the in-process writers (`store` + MCP upsert/remove + sessions-dir).
+    /// Serializes the in-process writers (`store` + MCP upsert + sessions-dir).
     /// All do read-modify-write on the config file; without coordination two writers
     /// interleave and lose an entire update (`T1 load -> T2 load -> T1 write ->
     /// T2 write` drops T1). Mirrors the `.duck` single-writer (issue #50).
@@ -218,10 +218,11 @@ impl LiveProviderConfig {
     // User-configured external MCP servers live in app-config (`mcp_servers`);
     // their SECRET env values live in the OS keychain under `mcp-<id>-<env_key>`
     // (mcp::secrets). These wrappers give the IPC commands a single entry point:
-    // upsert/remove touch app-config (write-locked via `store`), set/clear
-    // secret touch the keychain (stateless). remove does NOT clean up keychain
-    // entries -- the frontend orchestrates clear-then-remove; orphaned entries
-    // keyed by the removed server's (uuid) id are inert.
+    // upsert touches app-config (write-locked via `store`), set/clear secret
+    // touch the keychain (stateless). Deletion is NOT a dedicated IPC -- the
+    // frontend writes the filtered full config, then clears the removed
+    // server's keychain entries best-effort; an orphaned entry keyed by a
+    // removed server's (uuid) id is inert (nothing reads it).
 
     /// Upsert one MCP server into app-config: mint a uuid v4 id when the
     /// incoming id is empty (a new server from the frontend), fill
@@ -233,7 +234,7 @@ impl LiveProviderConfig {
         server: McpServerConfig,
     ) -> Result<McpServerConfig, app_config::WriteError> {
         // Hold write_lock across the full load -> mutate -> store so a concurrent
-        // upsert / remove cannot interleave and drop this server (a lost update
+        // upsert cannot interleave and drop this server (a lost update
         // would orphan its keychain anchor). store_inner -- not store -- because
         // the guard is already held and std::sync::Mutex is non-reentrant.
         let _guard = self
@@ -383,7 +384,7 @@ impl LiveProviderConfig {
     /// Normalize + atomically persist the app-config, returning the normalized
     /// value that was stored. The caller receives exactly what landed on disk.
     /// Acquires [`Self::write_lock`] so concurrent writers (`store`, MCP
-    /// upsert/remove, `set_sessions_dir`) serialize -- app-config has no
+    /// upsert, `set_sessions_dir`) serialize -- app-config has no
     /// version/CAS, so last-writer-wins needs the lock to avoid lost updates
     /// (issue #53).
     pub fn store(&self, cfg: AppConfig) -> Result<AppConfig, app_config::WriteError> {
@@ -395,7 +396,7 @@ impl LiveProviderConfig {
     }
 
     /// Normalize + persist WITHOUT taking [`Self::write_lock`] -- for callers
-    /// (MCP upsert/remove, `set_sessions_dir`) that already hold the lock as part
+    /// (MCP upsert, `set_sessions_dir`) that already hold the lock as part
     /// of a load-modify-write transaction. `std::sync::Mutex` is NOT reentrant,
     /// so `store` cannot recurse into this while a guard is held.
     /// (`migrate_from_legacy_blob` inlines its own normalize + write_at rather

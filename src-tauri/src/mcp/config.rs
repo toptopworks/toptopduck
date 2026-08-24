@@ -202,7 +202,7 @@ fn default_enabled() -> bool {
 /// The user-configured MCP server registry (issue #301): the named wrapper
 /// [`crate::app_config::AppConfig`] carries as its `mcp_servers` field. Parallels
 /// [`crate::model::ProviderConfig`] as a cohesive sub-structure with its own
-/// invariant + upsert/remove CRUD helpers. Default is empty -- the app ships
+/// invariant + upsert helper. Default is empty -- the app ships
 /// with no preconfigured external servers; the user adds them from settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct McpServerRegistry {
@@ -233,7 +233,7 @@ impl McpServerRegistry {
     /// `display_name` from the id when empty, then replace an existing entry
     /// with the same id or append. Returns the finalized config (with the
     /// stable id) so the IPC layer hands the id back to the frontend for
-    /// subsequent secret / remove calls.
+    /// subsequent secret calls.
     pub fn upsert(&mut self, mut server: McpServerConfig) -> McpServerConfig {
         if server.id.as_str().trim().is_empty() {
             server.id = McpServerId(uuid::Uuid::new_v4().simple().to_string());

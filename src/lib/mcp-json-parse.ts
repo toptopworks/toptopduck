@@ -1,5 +1,5 @@
 // Normalize common MCP server JSON formats from the web into a single
-// McpServerConfig for the server form's JSON mode.
+// McpServerDraft for the server form's JSON mode.
 //
 // Supported input shapes (single-server form takes the FIRST entry):
 // 1. {"mcpServers": {"name": {command, args, env}}}  — Claude Desktop format
@@ -138,7 +138,7 @@ export function normalizeJsonToConfig(
   return buildConfigFromFlat(name, config, fallbackId);
 }
 
-/** Build a McpServerConfig from a flat web-format server entry
+/** Build a McpServerDraft from a flat web-format server entry
  *  ({command, args, env, url, type, headers}). For http/sse the key-value map
  *  field is "headers" (request headers); for stdio it is "env". */
 function buildConfigFromFlat(

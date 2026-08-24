@@ -195,7 +195,7 @@ export function McpServerForm({
     };
   }
 
-  /** Parse JSON text into a McpServerConfig, returning an error string on
+  /** Parse JSON text into a McpServerDraft, returning an error string on
    *  failure. Accepts our internal format AND common web formats (Claude
    *  Desktop `{"mcpServers": {...}}`, bare `{"name": {...}}` — the first entry
    *  is used). Shared by mode-switch and save (M7). */
