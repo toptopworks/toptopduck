@@ -23,6 +23,7 @@ function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
     env: { LOG_LEVEL: "info" },
     keychain_env_keys: ["API_KEY"],
     timeout_ms: null,
+    enabled: true,
     ...overrides,
   };
 }

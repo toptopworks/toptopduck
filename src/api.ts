@@ -14,7 +14,6 @@ import type {
   ImportSource,
   McpProbeResult,
   McpServerConfig,
-  McpServerStatusEntry,
 } from "./types/mcp";
 import type {
   ImportItem,
@@ -472,30 +471,6 @@ export async function setMcpServerSecret(
 // can tell the user the secret did not come out (ADR-0029 trust root).
 export async function clearMcpServerSecret(id: string, envKey: string): Promise<void> {
   await invoke<void>("clear_mcp_server_secret", { id, envKey });
-}
-
-// List every configured MCP server with THIS session's enablement + last
-// connect outcome (issue #301 slice D, AC#3; consumed by the composer "+"
-// panel badge, ADR-0083 issue #351). Session-scoped (ADR-0056): enablement is
-// per session. Lock-light server-side -- safe to call while a turn is in
-// flight. A reject (e.g. the session closed mid-flight) propagates to the
-// caller; the panel coalesces an undefined read to an empty count, so a
-// mid-flight session-close never surfaces a user-facing error.
-export async function listMcpServerStatus(sessionId: string): Promise<McpServerStatusEntry[]> {
-  return invoke<McpServerStatusEntry[]>("list_mcp_server_status", { sessionId });
-}
-
-// Toggle one MCP server's enabled state for this session (issue #301 slice D
-// AC#3, used by the composer "+" panel MCP section, issue #369). Session-
-// scoped: enabling includes all the server's tools in the next turn's
-// connect_all; disabling removes them. The change lands next turn (per-turn
-// spawn, ADR-0076 Q2).
-export async function toggleMcpServer(
-  sessionId: string,
-  serverId: string,
-  enabled: boolean,
-): Promise<void> {
-  await invoke<void>("toggle_mcp_server", { sessionId, serverId, enabled });
 }
 
 // Probe one MCP server's connectivity (issue #387). Global (not session-

@@ -29,6 +29,7 @@ function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
     env: {},
     keychain_env_keys: [],
     timeout_ms: null,
+    enabled: true,
     ...overrides,
   };
 }
@@ -345,6 +346,41 @@ describe("McpSection (issue #387)", () => {
     const mutated = mutateFn(makeAppConfig([]));
     expect(mutated.mcp_servers.servers).toHaveLength(1);
     expect(mutated.mcp_servers.servers[0].id).toBe("srv-new");
+  });
+
+  it("row enable switch writes via upsert and syncs the mirror (ADR-0106)", async () => {
+    const server = makeServer();
+    const onCommit = vi.fn().mockResolvedValue(null);
+    vi.mocked(upsertMcpServer).mockResolvedValue({ ...server, enabled: false });
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={onCommit} />,
+    );
+
+    // The row renders an on switch; flipping it issues an upsert carrying the
+    // flipped flag -- the toggle IS an upsert, no dedicated IPC exists.
+    const toggle = screen.getByRole("switch", { name: "Toggle server My Server" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(upsertMcpServer).toHaveBeenCalledWith({ ...server, enabled: false }),
+    );
+    // The mirror mutate replaces the entry with the finalized (disabled) server.
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutateFn = onCommit.mock.calls[0][0];
+    const mutated = mutateFn(makeAppConfig([server]));
+    expect(mutated.mcp_servers.servers[0].enabled).toBe(false);
+  });
+
+  it("row enable switch surfaces the error when the upsert rejects (ADR-0106)", async () => {
+    const server = makeServer();
+    vi.mocked(upsertMcpServer).mockRejectedValue(new Error("disk full"));
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("switch", { name: "Toggle server My Server" }));
+    expect(await screen.findByText("disk full")).toBeInTheDocument();
   });
 
   it("shows error on the list when onCommit fails after form save (H4)", async () => {

@@ -17,8 +17,16 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 import type { AppConfig } from "../../types/app-config";
-import type { McpProbeResult, McpServerConfig, McpToolInfo } from "../../types/mcp";
-import { clearMcpServerSecret, probeMcpServer } from "../../api";
+import type {
+  McpProbeResult,
+  McpServerConfig,
+  McpToolInfo,
+} from "../../types/mcp";
+import {
+  clearMcpServerSecret,
+  probeMcpServer,
+  upsertMcpServer,
+} from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { cn } from "../../lib/utils";
 import {
@@ -33,6 +41,7 @@ import {
 } from "../ui/alert-dialog";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Switch } from "../ui/switch";
 import {
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
@@ -68,6 +77,14 @@ type FormTarget = {
   isEdit: boolean;
 };
 
+/** Commit shape shared by every write path in this section: rebuild the MCP
+ *  server list inside an AppConfig immutably. Callers pass the already
+ *  rebuilt slice (map-replace preserves row order for the toggle; save /
+ *  import / delete rebuild via filter). */
+function withMcpServers(cfg: AppConfig, servers: McpServerConfig[]): AppConfig {
+  return { ...cfg, mcp_servers: { ...cfg.mcp_servers, servers } };
+}
+
 export function McpSection({
   appConfig,
   onCommit,
@@ -82,7 +99,9 @@ export function McpSection({
 
   // Probe state keyed by server id. Survives across re-renders; the form's
   // onSaved callback seeds the entry for a newly added/edited server.
-  const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>({});
+  const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>(
+    {},
+  );
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -93,6 +112,9 @@ export function McpSection({
   const [importEpoch, setImportEpoch] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  // The server whose enable toggle write is in flight (gates just that row's
+  // switch so a slow write does not freeze the whole list).
+  const [togglingId, setTogglingId] = useState<string | null>(null);
 
   const servers = appConfig.mcp_servers.servers;
   const existingNames = useMemo(
@@ -114,6 +136,9 @@ export function McpSection({
         env: {},
         keychain_env_keys: [],
         timeout_ms: null,
+        // A new server saves enabled (ADR-0106 Decision 4 -- the form's save
+        // is explicit intent); the row toggle is the only writer afterwards.
+        enabled: true,
       },
       isEdit: false,
     });
@@ -121,6 +146,36 @@ export function McpSection({
 
   function handleEdit(server: McpServerConfig) {
     setFormTarget({ server, isEdit: true });
+  }
+
+  /** ADR-0106: the row-level enable toggle. One field edit over the SAME
+   *  upsert path the form uses (no dedicated switch IPC -- the toggle is an
+   *  upsert, nothing more). Enabled = the server enters every session's
+   *  effective tool surface; disabled = dormant (no connect, no spawn, no
+   *  keychain secret read). Persists on disk, then syncs the React-state
+   *  mirror like every other write here. */
+  async function handleToggleEnabled(
+    server: McpServerConfig,
+    enabled: boolean,
+  ) {
+    setTogglingId(server.id);
+    setError(null);
+    try {
+      const finalized = await upsertMcpServer({ ...server, enabled });
+      const err = await onCommit((cfg) =>
+        withMcpServers(
+          cfg,
+          cfg.mcp_servers.servers.map((s) =>
+            s.id === finalized.id ? finalized : s,
+          ),
+        ),
+      );
+      if (err) setError(err);
+    } catch (e) {
+      setError(fmtError(e, intl));
+    } finally {
+      setTogglingId(null);
+    }
   }
 
   /** Called by the form after upsert + secrets + probe complete. Syncs the
@@ -143,14 +198,10 @@ export function McpSection({
     // are surfaced so the user knows the commit failed (C3).
     try {
       const err = await onCommit((cfg) => {
-        const others = cfg.mcp_servers.servers.filter((s) => s.id !== finalized.id);
-        return {
-          ...cfg,
-          mcp_servers: {
-            ...cfg.mcp_servers,
-            servers: [...others, finalized],
-          },
-        };
+        const others = cfg.mcp_servers.servers.filter(
+          (s) => s.id !== finalized.id,
+        );
+        return withMcpServers(cfg, [...others, finalized]);
       });
       if (err) setError(err);
     } catch (e) {
@@ -185,14 +236,13 @@ export function McpSection({
     try {
       const err = await onCommit((cfg) => {
         const existingIds = new Set(results.map((r) => r.config.id));
-        const others = cfg.mcp_servers.servers.filter((s) => !existingIds.has(s.id));
-        return {
-          ...cfg,
-          mcp_servers: {
-            ...cfg.mcp_servers,
-            servers: [...others, ...results.map((r) => r.config)],
-          },
-        };
+        const others = cfg.mcp_servers.servers.filter(
+          (s) => !existingIds.has(s.id),
+        );
+        return withMcpServers(cfg, [
+          ...others,
+          ...results.map((r) => r.config),
+        ]);
       });
       if (err) setError(err);
     } catch (e) {
@@ -217,7 +267,10 @@ export function McpSection({
     setError(null);
     try {
       const result = await probeMcpServer(server);
-      setProbeStates((prev) => ({ ...prev, [server.id]: { kind: "done", result } }));
+      setProbeStates((prev) => ({
+        ...prev,
+        [server.id]: { kind: "done", result },
+      }));
       // Auto-expand the row so the user sees the tools immediately on success.
       if (result.connected) {
         setExpandedRows((prev) => new Set(prev).add(server.id));
@@ -242,13 +295,12 @@ export function McpSection({
       // the server is still intact — secrets are preserved (reversed from
       // the original clear-then-remove order to avoid a partial-failure
       // window where secrets are wiped but the config persists).
-      const err = await onCommit((cfg) => ({
-        ...cfg,
-        mcp_servers: {
-          ...cfg.mcp_servers,
-          servers: cfg.mcp_servers.servers.filter((s) => s.id !== deleteTarget.id),
-        },
-      }));
+      const err = await onCommit((cfg) =>
+        withMcpServers(
+          cfg,
+          cfg.mcp_servers.servers.filter((s) => s.id !== deleteTarget.id),
+        ),
+      );
       if (err) {
         setError(err);
       } else {
@@ -302,7 +354,12 @@ export function McpSection({
   return (
     <div>
       <PaneHeader
-        title={<FormattedMessage id="settings.nav.mcp" defaultMessage="MCP Servers" />}
+        title={(
+          <FormattedMessage
+            id="settings.nav.mcp"
+            defaultMessage="MCP Servers"
+          />
+        )}
         description={(
           <FormattedMessage
             id="settings.mcp.description"
@@ -333,7 +390,10 @@ export function McpSection({
 
       {servers.length > 0 && (
         <div className="mb-3 flex items-center gap-2">
-          <Search className="text-muted-foreground size-4 shrink-0" aria-hidden />
+          <Search
+            className="text-muted-foreground size-4 shrink-0"
+            aria-hidden
+          />
           <input
             type="text"
             value={searchQuery}
@@ -385,7 +445,9 @@ export function McpSection({
               server={server}
               probeState={probeStates[server.id] ?? { kind: "idle" }}
               expanded={expandedRows.has(server.id)}
+              toggling={togglingId === server.id}
               onToggleRow={() => toggleRow(server.id)}
+              onToggleEnabled={(next) => void handleToggleEnabled(server, next)}
               onProbe={() => void handleProbe(server)}
               onEdit={() => handleEdit(server)}
               onDelete={() =>
@@ -399,7 +461,9 @@ export function McpSection({
         )}
       </SettingsCard>
 
-      {error && <p className="settings-error mt-3 text-destructive text-sm">{error}</p>}
+      {error && (
+        <p className="settings-error mt-3 text-destructive text-sm">{error}</p>
+      )}
 
       {deleteTarget && (
         <AlertDialog
@@ -474,7 +538,11 @@ type McpServerRowProps = {
   server: McpServerConfig;
   probeState: ProbeState;
   expanded: boolean;
+  /** The row's enable-toggle write is in flight (ADR-0106): the switch is
+   *  gated off so a second click cannot stack onto the pending upsert. */
+  toggling: boolean;
   onToggleRow: () => void;
+  onToggleEnabled: (enabled: boolean) => void;
   onProbe: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -484,14 +552,19 @@ function McpServerRow({
   server,
   probeState,
   expanded,
+  toggling,
   onToggleRow,
+  onToggleEnabled,
   onProbe,
   onEdit,
   onDelete,
 }: McpServerRowProps) {
   const intl = useIntl();
   return (
-    <div data-testid={`mcp-server-row-${server.id}`} className="hover:bg-accent/50 px-4 py-3">
+    <div
+      data-testid={`mcp-server-row-${server.id}`}
+      className="hover:bg-accent/50 px-4 py-3"
+    >
       <div className="flex items-center gap-3">
         <button
           type="button"
@@ -511,11 +584,23 @@ function McpServerRow({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium truncate">
+            <span
+              className={cn(
+                "text-sm font-medium truncate",
+                // A disabled server is dormant (ADR-0106): the quieted name
+                // keeps the row's state legible at a glance.
+                !server.enabled && "text-muted-foreground",
+              )}
+            >
               {server.display_name}
             </span>
-            {probeState.kind === "done" && probeState.result.connected && probeState.result.tools.length > 0 && (
-              <Badge variant="secondary" className="shrink-0 text-muted-foreground font-normal">
+            {probeState.kind === "done" &&
+              probeState.result.connected &&
+              probeState.result.tools.length > 0 && (
+              <Badge
+                variant="secondary"
+                className="shrink-0 text-muted-foreground font-normal"
+              >
                 <FormattedMessage
                   id="settings.mcp.toolCount"
                   defaultMessage="{count} tools"
@@ -527,11 +612,47 @@ function McpServerRow({
           <div className="text-muted-foreground mt-1 truncate text-xs">
             {server.transport.type}
             {" · "}
-            {"url" in server.transport ? server.transport.url : server.transport.command}
+            {"url" in server.transport
+              ? server.transport.url
+              : server.transport.command}
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
+          {/* The enable toggle (ADR-0106): the row's machine-level state.
+           * Sits BEFORE the action buttons so it reads as the row's primary
+           * control, not an action. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Switch
+                checked={server.enabled}
+                disabled={toggling}
+                onCheckedChange={onToggleEnabled}
+                aria-label={intl.formatMessage(
+                  {
+                    id: "settings.mcp.enableToggleLabel",
+                    defaultMessage: "Toggle server {name}",
+                  },
+                  { name: server.display_name },
+                )}
+                className="mr-1.5"
+              />
+            </TooltipTrigger>
+            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+              {server.enabled ? (
+                <FormattedMessage
+                  id="settings.mcp.enabledTooltip"
+                  defaultMessage="Enabled"
+                />
+              ) : (
+                <FormattedMessage
+                  id="settings.mcp.disabledTooltip"
+                  defaultMessage="Disabled"
+                />
+              )}
+            </TooltipContent>
+          </Tooltip>
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -541,7 +662,10 @@ function McpServerRow({
                 className="text-muted-foreground h-7 w-7 p-0"
                 disabled={probeState.kind === "testing"}
                 aria-label={intl.formatMessage(
-                  { id: "settings.mcp.testLabel", defaultMessage: "Test server {name}" },
+                  {
+                    id: "settings.mcp.testLabel",
+                    defaultMessage: "Test server {name}",
+                  },
                   { name: server.display_name },
                 )}
                 onClick={onProbe}
@@ -566,7 +690,10 @@ function McpServerRow({
                 variant="ghost"
                 className="text-muted-foreground h-7 w-7 p-0"
                 aria-label={intl.formatMessage(
-                  { id: "settings.mcp.editLabel", defaultMessage: "Edit server {name}" },
+                  {
+                    id: "settings.mcp.editLabel",
+                    defaultMessage: "Edit server {name}",
+                  },
                   { name: server.display_name },
                 )}
                 onClick={onEdit}
@@ -587,7 +714,10 @@ function McpServerRow({
                 variant="ghost"
                 className="text-muted-foreground hover:text-destructive h-7 w-7 p-0"
                 aria-label={intl.formatMessage(
-                  { id: "settings.mcp.deleteLabel", defaultMessage: "Delete server {name}" },
+                  {
+                    id: "settings.mcp.deleteLabel",
+                    defaultMessage: "Delete server {name}",
+                  },
                   { name: server.display_name },
                 )}
                 onClick={onDelete}
@@ -616,26 +746,45 @@ function StatusDot({ probeState }: { probeState: ProbeState }) {
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          <span role="img" aria-label="Not tested" className={cn(dotClass, "bg-muted-foreground/40 cursor-help")} />
+          <span
+            role="img"
+            aria-label="Not tested"
+            className={cn(dotClass, "bg-muted-foreground/40 cursor-help")}
+          />
         </TooltipTrigger>
         <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-          <FormattedMessage id="settings.mcp.notTestedHint" defaultMessage="Not tested" />
+          <FormattedMessage
+            id="settings.mcp.notTestedHint"
+            defaultMessage="Not tested"
+          />
         </TooltipContent>
       </Tooltip>
     );
   }
   if (probeState.kind === "testing") {
     return (
-      <span role="img" aria-label="Testing" className={cn(dotClass, "bg-yellow-500 animate-pulse")} />
+      <span
+        role="img"
+        aria-label="Testing"
+        className={cn(dotClass, "bg-yellow-500 animate-pulse")}
+      />
     );
   }
   if (probeState.result.connected) {
     return (
-      <CheckCircle2 role="img" aria-label="Connected" className={cn("size-4 shrink-0 text-green-500")} />
+      <CheckCircle2
+        role="img"
+        aria-label="Connected"
+        className={cn("size-4 shrink-0 text-green-500")}
+      />
     );
   }
   return (
-    <AlertCircle role="img" aria-label="Connection failed" className={cn("size-4 shrink-0 text-destructive")} />
+    <AlertCircle
+      role="img"
+      aria-label="Connection failed"
+      className={cn("size-4 shrink-0 text-destructive")}
+    />
   );
 }
 
@@ -691,10 +840,16 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
         <thead className="bg-muted/50">
           <tr>
             <th className="text-left font-medium px-2 py-1.5 w-2/5">
-              <FormattedMessage id="settings.mcp.toolName" defaultMessage="Tool" />
+              <FormattedMessage
+                id="settings.mcp.toolName"
+                defaultMessage="Tool"
+              />
             </th>
             <th className="text-left font-medium px-2 py-1.5">
-              <FormattedMessage id="common.description" defaultMessage="Description" />
+              <FormattedMessage
+                id="common.description"
+                defaultMessage="Description"
+              />
             </th>
           </tr>
         </thead>
@@ -708,7 +863,13 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
                     <TooltipTrigger asChild>
                       <span className="block truncate">{tool.description}</span>
                     </TooltipTrigger>
-                    <TooltipContent side="top" className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-sm max-h-40 overflow-y-auto")}>
+                    <TooltipContent
+                      side="top"
+                      className={cn(
+                        SETTINGS_TOOLTIP_CLASS,
+                        "max-w-sm max-h-40 overflow-y-auto",
+                      )}
+                    >
                       {tool.description}
                     </TooltipContent>
                   </Tooltip>

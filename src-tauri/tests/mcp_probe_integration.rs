@@ -39,6 +39,7 @@ fn stdio_config(id: &str, bin: &str) -> McpServerConfig {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     }
 }
 
@@ -118,6 +119,7 @@ fn spawn_stdio_child_rejects_non_stdio_transport() {
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
+        enabled: true,
     };
     let err = spawn_stdio_child(&config, &[]).unwrap_err();
     assert!(

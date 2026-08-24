@@ -107,9 +107,6 @@ vi.mock("../api", async (importOriginal) => {
     listProviderProfiles: vi.fn(async () => [
       { profile_id: "default", has_key: true, keychain_fault: null },
     ]),
-    // Per-session MCP status feeds the composer "+" badge (issue #351).
-    // Default empty read; the badge tests override it.
-    listMcpServerStatus: vi.fn(async () => []),
     // The composer auth-mode chip reads / writes the session's authorization
     // posture (issue #352). Default per_call read + no-op write; the chip
     // tests override per scenario.
@@ -133,9 +130,6 @@ vi.mock("../api", async (importOriginal) => {
     listMountedSkills: vi.fn(async () => []),
     mountSkill: vi.fn(async () => {}),
     unmountSkill: vi.fn(async () => {}),
-    // The cold-start MCP draft applies the pending enable list via per-session
-    // toggles (#500); default no-op write keeps unwired scenarios quiet.
-    toggleMcpServer: vi.fn(async () => {}),
   };
 });
 
@@ -153,7 +147,6 @@ import {
   getSessionRuntime,
   ingestFile,
   listAdapters,
-  listMcpServerStatus,
   listProviderProfiles,
   listSessions,
   listSkills,
@@ -165,10 +158,9 @@ import {
   setAppConfig,
   setAuthorizationMode,
   setSessionRuntime,
-  toggleMcpServer,
 } from "../api";
 import type { AppConfig } from "../types/app-config";
-import type { McpServerConfig, McpServerStatusEntry } from "../types/mcp";
+import type { McpServerConfig } from "../types/mcp";
 import type { SkillEntry } from "../types/skills";
 
 // ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
@@ -888,10 +880,11 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   });
 
   it("cold-start bar renders the full composer control row — no degraded controls (ADR-0092 D6, #500)", async () => {
-    // The centered bar carries the SAME six controls as the session bar:
-    // Skills + MCP trigger chips, the "+" file button, the auth-mode chip,
+    // The centered bar carries the same control row as the session bar:
+    // the Skills trigger chip, the "+" file button, the auth-mode chip,
     // and the runtime picker. None of them disappear or degrade on cold
-    // start, and none of them mints a session by rendering.
+    // start, and none of them mints a session by rendering. (The MCP trigger
+    // chip is retired, ADR-0106 -- its assertion flipped to absence.)
     vi.mocked(getAppConfig).mockResolvedValue(
       baseAppConfig({ sidebar_collapsed: false }),
     );
@@ -900,11 +893,12 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
       const bar = document.querySelector(".question-bar") as HTMLElement;
       expect(bar).not.toBeNull();
-      // Skills + MCP trigger chips (draft mode: empty mount set / registry).
+      // Skills trigger chip (draft mode: empty mount set); no MCP chip.
       const skills = await screen.findByRole("button", { name: /技能 \(0\/0\)/ });
-      const mcp = screen.getByRole("button", { name: /MCP \(0\/0\)/ });
       expect(bar.contains(skills)).toBe(true);
-      expect(bar.contains(mcp)).toBe(true);
+      expect(
+        screen.queryByRole("button", { name: /MCP/ }),
+      ).not.toBeInTheDocument();
       // The "+" file button + the auth-mode chip.
       expect(bar.contains(screen.getByRole("button", { name: "添加文件" }))).toBe(true);
       expect(
@@ -915,7 +909,6 @@ describe("App multi-session shell (issue #81 ACs)", () => {
         bar.contains(await screen.findByRole("button", { name: /运行时/ })),
       ).toBe(true);
       // Draft mode fires NO per-session IPC.
-      expect(listMcpServerStatus).not.toHaveBeenCalled();
       expect(getAuthorizationMode).not.toHaveBeenCalled();
       expect(createSession).not.toHaveBeenCalled();
     } finally {
@@ -924,11 +917,12 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   });
 
   it("cold-start draft selections all apply to the minted session on first submit (#500)", async () => {
-    // The full draft-mode contract: a skill pick, an MCP pick, a queued file,
-    // and an auth-mode switch made on the centered bar (no session) all land
-    // on the session the first submit mints — skill mount + MCP enable +
-    // auth-mode write via mintAndRegister, the file through the ingest
-    // pipeline BEFORE the first turn fires.
+    // The draft-mode contract: a skill pick, a queued file, and an auth-mode
+    // switch made on the centered bar (no session) all land on the session
+    // the first submit mints — skill mount + auth-mode write via
+    // mintAndRegister, the file through the ingest pipeline BEFORE the first
+    // turn fires. (The MCP draft pick retired with the per-session mount
+    // chain, ADR-0106; config enablement replaced it.)
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
       mcp_servers: { servers: [mcpServer("srv")] },
@@ -954,13 +948,6 @@ describe("App multi-session shell (issue #81 ACs)", () => {
         await screen.findByRole("checkbox", { name: "挂载技能 charting" }),
       );
       expect(mountSkill).not.toHaveBeenCalled();
-
-      // MCP draft: pick srv (the registry row, no per-session status IPC).
-      fireEvent.click(screen.getByRole("button", { name: /MCP/ }));
-      fireEvent.click(
-        await screen.findByRole("checkbox", { name: /切换 MCP 服务器 srv/ }),
-      );
-      expect(toggleMcpServer).not.toHaveBeenCalled();
 
       // Files draft: the "+" pick queues into the pending list — the chip
       // shows the queue; nothing ingests yet.
@@ -989,7 +976,6 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       fireEvent.click(screen.getByRole("button", { name: "提问" }));
       await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(mountSkill).toHaveBeenCalledWith("sess-1", "charting"));
-      await waitFor(() => expect(toggleMcpServer).toHaveBeenCalledWith("sess-1", "srv", true));
       await waitFor(() =>
         expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
       );
@@ -1588,12 +1574,8 @@ function mcpServer(id: string): McpServerConfig {
     env: {},
     keychain_env_keys: [],
     timeout_ms: null,
+    enabled: true,
   };
-}
-
-// A per-session MCP status row (issue #301 slice D shape).
-function mcpStatus(id: string, enabled: boolean): McpServerStatusEntry {
-  return { id, display_name: id, enabled, source: enabled ? { kind: "user" } : null, connected: false, tool_count: 0, tools: [], error: null };
 }
 
 describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
@@ -2190,7 +2172,6 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(activeDataset).mockImplementation(async () => null);
-    vi.mocked(listMcpServerStatus).mockResolvedValue([]);
     // Same pin for the auth-mode chip IPC pair (issue #352): the resume
     // describe's overrides survive clearAllMocks.
     vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");
@@ -2318,41 +2299,20 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/b.csv"));
   });
 
-  it("with configured MCP servers the trigger chips render and open popovers", async () => {
+  it("the skills trigger chip renders even with configured MCP servers; no MCP chip (ADR-0106)", async () => {
+    // ADR-0106: the composer MCP mount chip is retired (config-level
+    // enablement replaced per-session mounting). With servers configured the
+    // skills chip still renders above the QuestionBar and opens its popover,
+    // but no MCP trigger chip exists anywhere in the bar.
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
       mcp_servers: { servers: [mcpServer("srv")] },
     });
-    // Issue #369: mock one server so the MCP section has content.
-    vi.mocked(listMcpServerStatus).mockResolvedValue([mcpStatus("srv", false)]);
     render(<App />);
     await openSession();
 
-    // Skills + MCP trigger chips render above the QuestionBar.
     expect(await screen.findByRole("button", { name: /技能/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /MCP/ })).toBeInTheDocument();
-
-    // Click MCP chip -> popover opens with the server list.
-    fireEvent.click(screen.getByRole("button", { name: /MCP/ }));
-    expect(await screen.findByText("srv")).toBeInTheDocument();
-  });
-
-  it("shows the enabled MCP count on the MCP trigger chip", async () => {
-    vi.mocked(getAppConfig).mockResolvedValue({
-      ...baseAppConfig({ sidebar_collapsed: false }),
-      mcp_servers: { servers: [mcpServer("srv"), mcpServer("srv2")] },
-    });
-    vi.mocked(listMcpServerStatus).mockResolvedValue([
-      mcpStatus("srv", true),
-      mcpStatus("srv2", false),
-    ]);
-    render(<App />);
-    await openSession();
-
-    // One of the two configured servers is enabled -> chip shows (1/2).
-    expect(
-      await screen.findByRole("button", { name: /MCP \(1\/2\)/ }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /MCP/ })).not.toBeInTheDocument();
   });
 
   it("hosts the provider/model picker inside the question-bar once app-config resolves", async () => {

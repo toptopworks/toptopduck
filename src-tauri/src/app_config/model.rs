@@ -907,6 +907,7 @@ mod tests {
                 env,
                 keychain_env_keys: Vec::new(),
                 timeout_ms: None,
+                enabled: true,
             });
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
@@ -944,6 +945,7 @@ mod tests {
             env: std::collections::BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         cfg.mcp_servers.servers = vec![
             make("dup", "First"),

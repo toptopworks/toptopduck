@@ -14,13 +14,15 @@ import { useStartupRuntime } from "./shell/useStartupRuntime";
 import { useSidebarResize } from "./shell/useSidebarResize";
 import { useRailResize } from "./shell/useRailResize";
 import { useProfileKeys } from "./shell/useProfileKeys";
-import { useComposerState, IDLE_SESSION_FIELDS } from "./session/useComposerState";
+import {
+  useComposerState,
+  IDLE_SESSION_FIELDS,
+} from "./session/useComposerState";
 import type { ComposerSessionFields } from "./session/useComposerState";
 import { QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillsTrigger } from "./components/thread/ComposerSkillsTrigger";
-import { ComposerMcpTrigger } from "./components/thread/ComposerMcpTrigger";
 import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
@@ -119,7 +121,8 @@ export default function App() {
   // The live settings section is shell-owned (issue #288): lifted out of
   // SettingsView so the back/forward history can restore it. Seeded "general"
   // and reset on close, matching the prior one-shot entry hint default.
-  const [liveSettingsSection, setLiveSettingsSection] = useState<SettingsSection>("general");
+  const [liveSettingsSection, setLiveSettingsSection] =
+    useState<SettingsSection>("general");
   // Settings nav collapse toggle lives in the topbar (App-owned), so the state
   // stays here. Reset to expanded on every open so each visit starts from the
   // full nav (issue #285).
@@ -180,9 +183,18 @@ export default function App() {
   // delta, keeping the workspace visually fixed). The rail handle is
   // per-SessionPane but the width is global so it stays consistent across
   // keep-alive session switches.
-  const { width: railWidth, isDragging: railDragging, onResizeStart: onRailResizeStart, adjustWidth: adjustRailWidth } = useRailResize();
+  const {
+    width: railWidth,
+    isDragging: railDragging,
+    onResizeStart: onRailResizeStart,
+    adjustWidth: adjustRailWidth,
+  } = useRailResize();
 
-  const { width: sidebarWidth, isDragging: sidebarDragging, onResizeStart: onSidebarResizeStart } = useSidebarResize({
+  const {
+    width: sidebarWidth,
+    isDragging: sidebarDragging,
+    onResizeStart: onSidebarResizeStart,
+  } = useSidebarResize({
     onDelta: (delta) => adjustRailWidth(-delta),
   });
 
@@ -195,7 +207,9 @@ export default function App() {
   // useShellSessions also takes the QueryClient seam (ADR-0051/0055 cache drop
   // on unmount) + refreshSessions (save/delete/rename re-fetch) + setShellError
   // (shell-layer AppError surface, issue #194).
-  const { sessions, sessionsError, refreshSessions } = usePersistedSessions({ intl });
+  const { sessions, sessionsError, refreshSessions } = usePersistedSessions({
+    intl,
+  });
   const {
     openSessions,
     activeSessionId,
@@ -299,16 +313,18 @@ export default function App() {
   // frame instead of one frame at rail-width geometry followed by a 280ms
   // slide into the collapsed track.
   const activeWsCollapsed =
-    activeSessionId !== null && (activeSessionFields?.workspaceCollapsed ?? true);
+    activeSessionId !== null &&
+    (activeSessionFields?.workspaceCollapsed ?? true);
 
   // ADR-0092 Decision 6 (#500): shell-level pending composer posture for the
   // cold-start bar. Every composer control renders on the centered bar with
   // NO session in draft mode; the selections land here and are applied to the
   // session the first submit mints (consumed = reset to the unset posture /
   // empty lists, so each cold-start visit starts from the default posture).
-  // runtime / authMode / skills / mcpServers apply via per-session IPC writes
-  // in useShellSessions.mintAndRegister; the file list rides the new session's
-  // pendingIngestPaths.
+  // runtime / authMode / skills apply via per-session IPC writes in
+  // useShellSessions.mintAndRegister (MCP servers are config-level
+  // enablement since ADR-0106 -- nothing to apply per session); the file
+  // list rides the new session's pendingIngestPaths.
   //
   // ADR-0098 Decision 4 (issue #572): the runtime facet starts UNSET (null)
   // -- before any pick it reads as the resolved default_runtime below, so the
@@ -329,13 +345,16 @@ export default function App() {
   // model ids are adapter-namespaced (ADR-0100 Decision 2), so a posture
   // picked under one CLI must not leak into another (or into the built-in
   // runtime, whose posture is the active profile's model).
-  const handlePendingRuntimeChange = useCallback((runtime: SessionRuntimeChoice) => {
-    setPendingRuntime(runtime);
-    setPendingModelPosture(null);
-  }, []);
-  const [pendingAuthMode, setPendingAuthMode] = useState<AuthMode>(AUTH_MODE_DEFAULT);
+  const handlePendingRuntimeChange = useCallback(
+    (runtime: SessionRuntimeChoice) => {
+      setPendingRuntime(runtime);
+      setPendingModelPosture(null);
+    },
+    [],
+  );
+  const [pendingAuthMode, setPendingAuthMode] =
+    useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingSkills, setPendingSkills] = useState<string[]>([]);
-  const [pendingMcpServers, setPendingMcpServers] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
 
   // The startup resolution of the persisted default_runtime against the
@@ -346,7 +365,10 @@ export default function App() {
   // create_session resolution, so an unset pending skips the runtime write
   // (the minted session already carries the resolved runtime) while an
   // explicit pick still applies via setSessionRuntime.
-  const startupRuntime = useStartupRuntime(queryClient, appConfig?.default_runtime);
+  const startupRuntime = useStartupRuntime(
+    queryClient,
+    appConfig?.default_runtime,
+  );
   const effectivePendingRuntime = pendingRuntime ?? startupRuntime;
   // The effective runtime can move WITHOUT an explicit picker pick:
   // default_runtime changes in Settings or an adapter-table refetch move the
@@ -424,11 +446,10 @@ export default function App() {
           : null;
       const authMode = pendingAuthMode;
       const skills = pendingSkills;
-      const mcpServers = pendingMcpServers;
       const files = pendingFiles;
       void createSessionWithQuestion(
         question,
-        { runtime, modelPosture, authMode, skills, mcpServers },
+        { runtime, modelPosture, authMode, skills },
         files,
       ).then((created) => {
         if (created) {
@@ -436,7 +457,6 @@ export default function App() {
           setPendingModelPosture(null);
           setPendingAuthMode(AUTH_MODE_DEFAULT);
           setPendingSkills([]);
-          setPendingMcpServers([]);
           setPendingFiles([]);
           // The mint-time set IPCs landed the explicit pair in the startup
           // backfill entry (record_last_model_posture, the single write
@@ -461,7 +481,6 @@ export default function App() {
       pendingModelPosture,
       pendingAuthMode,
       pendingSkills,
-      pendingMcpServers,
       pendingFiles,
       builtInGateOpen,
       profileKeys.activeProfileId,
@@ -651,7 +670,12 @@ export default function App() {
             <NavigationHistoryProvider location={location} restore={restore}>
               <div
                 className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${railDragging ? " rail-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}${isColdStart ? " cold-start-mode" : ""}`}
-                style={{ "--sidebar-width": `${sidebarWidth}px`, "--rail-width": `${railWidth}px` } as CSSProperties}
+                style={
+                  {
+                    "--sidebar-width": `${sidebarWidth}px`,
+                    "--rail-width": `${railWidth}px`,
+                  } as CSSProperties
+                }
               >
                 {/* Col 1: session sidebar (ADR-0060) -- full height, independent
               column (R1: the shell-level bar does NOT span over it). */}
@@ -667,7 +691,8 @@ export default function App() {
                   onNew={goToEmptyState}
                   onOpenDuck={() => void handleOpenDuck()}
                   onActivate={activateSession}
-                  onOpenPersisted={(path, name) => void openPersisted(path, name)}
+                  onOpenPersisted={(path, name) =>
+                    void openPersisted(path, name)}
                   onSwitchGrouping={switchSidebarGrouping}
                   onOpenSearch={openSearch}
                   provider={appConfig?.provider ?? null}
@@ -699,7 +724,10 @@ export default function App() {
               exempts .topbar from the overlay hide, and the rail owns settings
               chrome (the dual-state gear lives at the left columns' bottoms,
               issue #282 -- the topbar carries no settings entry). */}
-                <header className="topbar gap-3 px-4 border-b border-border bg-background" data-tauri-drag-region>
+                <header
+                  className="topbar gap-3 px-4 border-b border-border bg-background"
+                  data-tauri-drag-region
+                >
                   {platform === "macos" && <WindowControls />}
                   {settingsView.open ? (
                     <SidebarToggle
@@ -722,15 +750,15 @@ export default function App() {
                   {!settingsView.open && (
                     <>
                       {atSoftCap && (
-                      // Session-count soft-cap hint (ADR-0046): too many open
-                      // sessions risk memory pressure. A warning Alert (ADR-0050,
-                      // issue #108) -- role="status" is polite, matching the
-                      // stale/viz-degradation warnings in ResultView. The topbar is
-                      // a compact flex row, so className shrinks the Alert's default
-                      // w-full block chrome to an inline chip (cn tailwind-merge
-                      // reshapes the base, cf. DisclosureBanner's AlertDescription
-                      // override); the variant still supplies the --warning token so
-                      // this recolors with .dark like every other warning surface.
+                        // Session-count soft-cap hint (ADR-0046): too many open
+                        // sessions risk memory pressure. A warning Alert (ADR-0050,
+                        // issue #108) -- role="status" is polite, matching the
+                        // stale/viz-degradation warnings in ResultView. The topbar is
+                        // a compact flex row, so className shrinks the Alert's default
+                        // w-full block chrome to an inline chip (cn tailwind-merge
+                        // reshapes the base, cf. DisclosureBanner's AlertDescription
+                        // override); the variant still supplies the --warning token so
+                        // this recolors with .dark like every other warning surface.
                         <Alert
                           variant="warning"
                           role="status"
@@ -754,7 +782,9 @@ export default function App() {
                     centered and the pane host collapses. flex-grow interpolates
                     between the two postures (CSS transition), so the bar glides
                     centered <-> bottom on first submit / "+" navigation. */}
-                <main className={`main-area${activeWsCollapsed ? " workspace-collapsed" : ""}`}>
+                <main
+                  className={`main-area${activeWsCollapsed ? " workspace-collapsed" : ""}`}
+                >
                   <div className="session-pane-host">
                     {openSessions.map((s) => (
                       <div
@@ -771,7 +801,9 @@ export default function App() {
                         <ErrorBoundary
                           name="session"
                           onReset={() => {
-                            void queryClient.removeQueries({ queryKey: ["session", s.sid] });
+                            void queryClient.removeQueries({
+                              queryKey: ["session", s.sid],
+                            });
                           }}
                         >
                           <SessionPane
@@ -780,10 +812,13 @@ export default function App() {
                             pendingIngestPaths={s.pendingIngestPaths}
                             onIngestConsumed={() => clearPendingIngest(s.sid)}
                             pendingQuestion={s.pendingQuestion}
-                            onQuestionConsumed={() => clearPendingQuestion(s.sid)}
+                            onQuestionConsumed={() =>
+                              clearPendingQuestion(s.sid)}
                             onSeedDraft={composer.seedDraft}
                             onComposerFields={handleComposerFields}
-                            onComposerFieldsUnmount={handleComposerFieldsUnmount}
+                            onComposerFieldsUnmount={
+                              handleComposerFieldsUnmount
+                            }
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
                             approvalEvents={approvalEvents}
@@ -823,7 +858,10 @@ export default function App() {
                     className={`shell-bar-slot${isColdStart ? " centered" : " bottom"}${activeWsCollapsed ? " ws-collapsed" : ""}`}
                   >
                     {isColdStart && (
-                      <label htmlFor="question-bar-input" className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground">
+                      <label
+                        htmlFor="question-bar-input"
+                        className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground"
+                      >
                         <FormattedMessage
                           id="coldStart.greeting"
                           defaultMessage="What would you like to analyze?"
@@ -838,42 +876,37 @@ export default function App() {
                         phase={composer.phase}
                         draft={composer.draft}
                         setDraft={composer.setDraft}
-                        header={
+                        header={(
                           // ADR-0092 Decision 6 (#500): the Skills / MCP
                           // triggers render in BOTH postures — session-active
                           // (per-session mount set via IPC) and cold start
                           // (draft mode: empty mount set + shell-level pending
                           // lists applied when the first submit mints the
                           // session). Same component pair, no degradation.
-                          (
-                            <>
-                              <ComposerSkillsTrigger
-                                sessionId={activeSessionId}
-                                loading={composer.loading}
-                                onOpenSettingsSkills={() => openSettings({ section: "skills" })}
-                                pendingSkills={pendingSkills}
-                                onPendingSkillsChange={setPendingSkills}
-                              />
-                              <ComposerMcpTrigger
-                                sessionId={activeSessionId}
-                                loading={composer.loading}
-                                onOpenSettingsMcp={() => openSettings({ section: "mcp" })}
-                                registry={appConfig?.mcp_servers}
-                                pendingMcpServers={pendingMcpServers}
-                                onPendingMcpServersChange={setPendingMcpServers}
-                              />
-                            </>
-                          )
-                        }
+                          <>
+                            <ComposerSkillsTrigger
+                              sessionId={activeSessionId}
+                              loading={composer.loading}
+                              onOpenSettingsSkills={() =>
+                                openSettings({ section: "skills" })}
+                              pendingSkills={pendingSkills}
+                              onPendingSkillsChange={setPendingSkills}
+                            />
+                          </>
+                        )}
                         trailing={
                           providerPicker ? (
                             <ComposerProviderPicker
                               sessionId={activeSessionId}
                               onPendingRuntimeChange={
-                                isColdStart ? handlePendingRuntimeChange : undefined
+                                isColdStart
+                                  ? handlePendingRuntimeChange
+                                  : undefined
                               }
                               pendingRuntime={
-                                isColdStart ? effectivePendingRuntime : undefined
+                                isColdStart
+                                  ? effectivePendingRuntime
+                                  : undefined
                               }
                               onPendingModelPostureChange={
                                 isColdStart ? setPendingModelPosture : undefined
@@ -906,7 +939,10 @@ export default function App() {
                       full height — including the shell-level QuestionBar below
                       the pane host — matching the sidebar handle's reach. Hidden
                       via CSS when cold-start, settings mode, or workspace folded. */}
-                  <div className="rail-resize-handle" onPointerDown={onRailResizeStart} />
+                  <div
+                    className="rail-resize-handle"
+                    onPointerDown={onRailResizeStart}
+                  />
 
                   {/* Resume progress strip (ADR-0034). Absent unless an open/
                       resume runs -- `idle` is the ADT's resting state (issue
@@ -916,7 +952,9 @@ export default function App() {
                       former in-flow shell-grid row-2 placement shifted the whole
                       main area down on mount + back up on unmount, bouncing the
                       visible session header on every open/resume. */}
-                  {resumeStatus.kind !== "idle" && <ResumeProgress status={resumeStatus} />}
+                  {resumeStatus.kind !== "idle" && (
+                    <ResumeProgress status={resumeStatus} />
+                  )}
                 </main>
 
                 {shellError && (
@@ -970,7 +1008,8 @@ export default function App() {
                   openSessions={openSessions}
                   activeSessionId={activeSessionId}
                   onActivate={activateSession}
-                  onOpenPersisted={(path, name) => void openPersisted(path, name)}
+                  onOpenPersisted={(path, name) =>
+                    void openPersisted(path, name)}
                 />
               </div>
             </NavigationHistoryProvider>

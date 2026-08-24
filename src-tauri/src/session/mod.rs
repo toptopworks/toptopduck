@@ -523,14 +523,6 @@ pub struct Session {
     /// next auto-write persists a selection made WITHOUT a following turn
     /// (the resume promise, ADR-0095 D6).
     runtime_facts: SessionRuntimeFacts,
-    /// The last turn's per-server MCP connect outcomes (issue #301 slice D).
-    /// Updated at the top of each turn (the aggregator's `connect_all` result)
-    /// so the command layer can snapshot it into the SessionHandle for
-    /// `list_mcp_server_status` without taking the session lock a turn holds.
-    /// Empty until the first turn runs and after a resume (a fresh Session is
-    /// constructed by `open_duck`; the enablement set on the handle + this
-    /// cache reset together -- the ADR-0080 reset lineage, server-granularity cousin).
-    last_mcp_connect: Vec<crate::mcp::aggregator::ConnectResult>,
     /// The session's currently-mounted skills (ADR-0086, issue #363). A live
     /// memoization of the timeline's Mount/Unmount fold -- [`Self::build_recipe`]
     /// is the single source of truth (the recipe never stores a snapshot, only
@@ -679,9 +671,9 @@ impl TurnAudit {
 /// growing further, and prevents `ask_with_phase` from exceeding the
 /// threshold as more data inputs are added.
 pub struct TurnInputs<'a> {
-    /// The effective MCP server configs for this turn (enabled ∪
-    /// skill-declared, computed at the command boundary). The gateway
-    /// connects each one per turn (ADR-0076).
+    /// The effective MCP server configs for this turn (the config-level
+    /// enabled slice, computed at the command boundary -- ADR-0106 single
+    /// axis). The gateway connects each one per turn (ADR-0076).
     pub mcp_servers: &'a [McpServerConfig],
     /// Borrow of the OS keychain (ADR-0029). The gateway reads each server's
     /// secret env values at spawn; the values never cross IPC back out.
@@ -870,7 +862,6 @@ impl Session {
             external_runtime: None,
             last_discovered_runtime: None,
             runtime_facts: SessionRuntimeFacts::default(),
-            last_mcp_connect: Vec::new(),
             mounted_skills: Vec::new(),
         })
     }
@@ -891,15 +882,6 @@ impl Session {
     /// clone it to observe `is_in_flight` / drive `request` from another thread.
     pub fn cancel_token(&self) -> Arc<CancelToken> {
         Arc::clone(&self.cancel)
-    }
-
-    /// A snapshot of the last turn's per-server MCP connect outcomes (issue
-    /// #301 slice D). The command layer reads this after a turn to mirror into
-    /// the SessionHandle so `list_mcp_server_status` is lock-light (the status
-    /// IPC never takes the session lock an in-flight turn holds). Empty until
-    /// the first turn runs and after a resume (the Session is fresh).
-    pub fn last_mcp_connect(&self) -> &[crate::mcp::aggregator::ConnectResult] {
-        &self.last_mcp_connect
     }
 
     /// Attach the store-shared closing flag (ADR-0055). [`SessionStore::create`]
@@ -1294,16 +1276,16 @@ impl Session {
                     // die with the aggregator). The aggregator's namespaced
                     // tools merge into the request's tool table so the model
                     // sees one surface; execute_call routes a namespaced call
-                    // back through the aggregator. Slice D: connect_all returns
-                    // the per-server outcomes, snapshotted into
-                    // self.last_mcp_connect BEFORE deps borrows &mut
-                    // self.working_set (disjoint field, but the assignment
-                    // preceding the borrow keeps borrowck structural so the
-                    // command layer can mirror it into the SessionHandle).
+                    // back through the aggregator. The per-server connect
+                    // outcomes are discarded here: a failed connect logs +
+                    // skips inside connect_one, and the per-session status
+                    // IPC that consumed them is retired (ADR-0106 -- config
+                    // enablement is the single axis; diagnostics ride the
+                    // probe + the gateway discovery surface).
                     let mut mcp = crate::mcp::aggregator::McpAggregator::with_tool_output(
                         self.tool_output_path(),
                     );
-                    self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
+                    mcp.connect_all(inputs.mcp_servers, inputs.keychain);
                     request
                         .tools
                         .extend(crate::tools::external_tool_definitions(
@@ -1516,13 +1498,12 @@ impl Session {
             // back through the aggregator. A failed connect logs + skips that
             // server rather than failing the turn (McpAggregator::connect_all
             // / connect_one); the spawned children die with the aggregator at
-            // scope end. Slice D: connect_all returns the per-server outcomes,
-            // snapshotted into self.last_mcp_connect BEFORE deps borrows &mut
-            // self.working_set (disjoint field, assignment-first keeps borrowck
-            // structural for the command-layer mirror).
+            // scope end. The per-server connect outcomes are discarded (the
+            // per-session status IPC that consumed them is retired, ADR-0106;
+            // a failed connect logs + skips inside connect_one).
             let mut mcp =
                 crate::mcp::aggregator::McpAggregator::with_tool_output(self.tool_output_path());
-            self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
+            mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,

@@ -177,6 +177,22 @@ pub struct McpServerConfig {
     /// surface as a gateway fault, not a config-layer reject).
     #[serde(default)]
     pub timeout_ms: Option<u32>,
+    /// Machine-level persistent enablement (ADR-0106). Enabled = the server
+    /// enters every session's effective tool surface (connected + catalogued
+    /// at turn assembly); disabled = dormant -- no connect, no child spawn,
+    /// no keychain secret read, no catalog entry. Disabled is absolute: no
+    /// skill declaration or other path re-arms it. `#[serde(default = ...)]`
+    /// true so a config written before this field existed (legacy migration),
+    /// a new entry, or a partial hand-edit all default to enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+/// Serde default for [`McpServerConfig::enabled`]: `true` (ADR-0106 Decision 4
+/// -- every existing entry migrates enabled; the three write entries -- form
+/// save, import, legacy config -- all carry explicit user intent).
+fn default_enabled() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +370,7 @@ mod tests {
             env,
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: false,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -399,6 +416,10 @@ mod tests {
             cfg.timeout_ms.is_none(),
             "missing timeout_ms -> None default"
         );
+        assert!(
+            cfg.enabled,
+            "missing enabled -> true default (ADR-0106: legacy migration stays enabled)"
+        );
     }
 
     // --- McpServerRegistry -------------------------------------------------
@@ -422,6 +443,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         });
         assert!(reg.get(&McpServerId("alpha".into())).is_some());
         assert!(reg.get(&McpServerId("missing".into())).is_none());
@@ -441,6 +463,7 @@ mod tests {
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
                     timeout_ms: None,
+                    enabled: true,
                 },
                 McpServerConfig {
                     id: McpServerId("dup".into()),
@@ -449,6 +472,7 @@ mod tests {
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
                     timeout_ms: None,
+                    enabled: true,
                 },
                 McpServerConfig {
                     id: McpServerId("unique".into()),
@@ -457,6 +481,7 @@ mod tests {
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
                     timeout_ms: None,
+                    enabled: true,
                 },
             ],
         };
@@ -481,6 +506,7 @@ mod tests {
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
                 timeout_ms: None,
+                enabled: true,
             }],
         };
         let before = reg.clone();
@@ -503,6 +529,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = reg.upsert(incoming);
         assert_ne!(stored.id.as_str(), "");
@@ -529,6 +556,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = reg.upsert(incoming);
         assert_ne!(stored.id.as_str(), "   \t");
@@ -547,6 +575,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = reg.upsert(incoming);
         assert_eq!(stored.display_name, "github-mcp");
@@ -563,6 +592,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = reg.upsert(incoming);
         assert_eq!(stored.display_name, "My GitHub");
@@ -578,6 +608,7 @@ mod tests {
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
                 timeout_ms: None,
+                enabled: true,
             }],
         };
         let updated = McpServerConfig {
@@ -587,6 +618,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = reg.upsert(updated);
         assert_eq!(reg.servers.len(), 1, "replace not append");
@@ -611,6 +643,7 @@ mod tests {
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
                 timeout_ms: None,
+                enabled: true,
             }],
         };
         let beta = McpServerConfig {
@@ -620,6 +653,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = reg.upsert(beta);
         assert_eq!(reg.servers.len(), 2);
@@ -638,6 +672,7 @@ mod tests {
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
                     timeout_ms: None,
+                    enabled: true,
                 },
                 McpServerConfig {
                     id: McpServerId("beta".into()),
@@ -646,6 +681,7 @@ mod tests {
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
                     timeout_ms: None,
+                    enabled: true,
                 },
             ],
         };
@@ -664,6 +700,7 @@ mod tests {
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
                 timeout_ms: None,
+                enabled: true,
             }],
         };
         reg.remove(&McpServerId("missing".into()));
@@ -685,6 +722,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: Some(45_000),
+            enabled: true,
         };
         let json = serde_json::to_value(&with_timeout).unwrap();
         assert_eq!(json["timeout_ms"], 45_000);
@@ -696,6 +734,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let json = serde_json::to_value(&null_timeout).unwrap();
         assert!(json["timeout_ms"].is_null());
@@ -722,6 +761,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: Some(45_000),
+            enabled: true,
         };
         let stored = reg.upsert(with_timeout);
         assert_eq!(stored.timeout_ms, Some(45_000));
@@ -735,6 +775,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let stored = reg.upsert(without_timeout);
         assert_eq!(stored.timeout_ms, None);
@@ -757,6 +798,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: vec!["API_KEY".into(), "WEBHOOK_SECRET".into()],
             timeout_ms: None,
+            enabled: true,
         };
         let json = serde_json::to_value(&cfg).unwrap();
         assert_eq!(
@@ -775,6 +817,7 @@ mod tests {
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
             timeout_ms: None,
+            enabled: true,
         };
         let json = serde_json::to_value(&empty).unwrap();
         assert!(json["keychain_env_keys"].is_array());

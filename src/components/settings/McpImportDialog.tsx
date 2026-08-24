@@ -174,7 +174,8 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
     for (const { server: discovered } of items) {
       // Convert DiscoveredServer to McpServerConfig (empty id → Rust mints
       // uuid). Shallow-copy nested fields so the config is independent of the
-      // discovery state (immutability).
+      // discovery state (immutability). Imported servers land enabled
+      // (ADR-0106 Decision 4 -- the import checklist pick is explicit intent).
       const config: McpServerConfig = {
         id: "",
         display_name: discovered.display_name,
@@ -182,6 +183,7 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
         env: { ...discovered.env },
         keychain_env_keys: [...discovered.keychain_env_keys],
         timeout_ms: null,
+        enabled: true,
       };
       try {
         const finalized = await upsertMcpServer(config);

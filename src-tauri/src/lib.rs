@@ -398,8 +398,6 @@ pub fn run() {
             commands::clear_mcp_server_secret,
             commands::probe_mcp_server,
             commands::discover_mcp_servers,
-            commands::toggle_mcp_server,
-            commands::list_mcp_server_status,
             commands::list_sessions,
             commands::delete_session,
             commands::rename_session,

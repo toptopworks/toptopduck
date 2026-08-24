@@ -33,6 +33,7 @@ function makeFinalized(overrides: Partial<McpServerConfig> = {}): McpServerConfi
     env: {},
     keychain_env_keys: [],
     timeout_ms: null,
+    enabled: true,
     ...overrides,
   };
 }

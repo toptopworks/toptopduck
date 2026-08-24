@@ -63,7 +63,6 @@ vi.mock("../../api", async (importOriginal) => {
     })),
     setAuthorizationMode: vi.fn(async () => {}),
     mountSkill: vi.fn(async () => {}),
-    toggleMcpServer: vi.fn(async () => {}),
   };
 });
 
@@ -94,7 +93,6 @@ import {
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
-  toggleMcpServer,
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
@@ -114,7 +112,6 @@ const DEFAULT_POSTURE: PendingComposerPosture = {
   modelPosture: null,
   authMode: AUTH_MODE_DEFAULT,
   skills: [],
-  mcpServers: [],
 };
 
 /** Build a CreateSessionReply for mock returns (ADR-0089). */
@@ -194,7 +191,6 @@ describe("useShellSessions", () => {
         modelPosture: null,
         authMode: "no_confirmation",
         skills: [],
-        mcpServers: [],
       }, []);
     });
     expect(setSessionRuntime).toHaveBeenCalledWith("s1", { kind: "external", data: "gemini" });
@@ -213,7 +209,6 @@ describe("useShellSessions", () => {
     expect(setSessionPosture).not.toHaveBeenCalled();
     expect(setAuthorizationMode).not.toHaveBeenCalled();
     expect(mountSkill).not.toHaveBeenCalled();
-    expect(toggleMcpServer).not.toHaveBeenCalled();
   });
 
   it("createSessionWithQuestion writes an explicit model posture AFTER the runtime write (ADR-0100)", async () => {
@@ -230,7 +225,6 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
-          mcpServers: [],
         },
         [],
       );
@@ -256,7 +250,6 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: null },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
-          mcpServers: [],
         },
         [],
       );
@@ -284,7 +277,6 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
-          mcpServers: [],
         },
         [],
       );
@@ -313,7 +305,6 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
-          mcpServers: [],
         },
         [],
       );
@@ -322,10 +313,11 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions).toHaveLength(1);
   });
 
-  it("createSessionWithQuestion mounts pending skills then enables pending MCP servers BEFORE registering (#500)", async () => {
-    // Draft-mode picks land as one IPC per entry, skills BEFORE MCP enables (a
-    // skill-declared server the user also picked lands either way), and all of
-    // it before registerOpen so the pane mounts under the applied posture.
+  it("createSessionWithQuestion mounts pending skills BEFORE registering (#500)", async () => {
+    // Draft-mode skill picks land as one mount IPC per entry, all of it
+    // before registerOpen so the pane mounts under the applied posture.
+    // (The pending-MCP enable step retired with the per-session mount chain,
+    // ADR-0106.)
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
     const { result } = renderSessions();
     let sessionsWhenFirstSkillApplied = -1;
@@ -340,19 +332,12 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["data-cleaning", "charting"],
-          mcpServers: ["srv-a"],
         },
         [],
       );
     });
     expect(mountSkill).toHaveBeenNthCalledWith(1, "s1", "data-cleaning");
     expect(mountSkill).toHaveBeenNthCalledWith(2, "s1", "charting");
-    expect(toggleMcpServer).toHaveBeenCalledTimes(1);
-    expect(toggleMcpServer).toHaveBeenCalledWith("s1", "srv-a", true);
-    // Skills before MCP enables...
-    expect(
-      vi.mocked(mountSkill).mock.invocationCallOrder[1],
-    ).toBeLessThan(vi.mocked(toggleMcpServer).mock.invocationCallOrder[0]);
     // ...and everything before the pane can mount.
     expect(sessionsWhenFirstSkillApplied).toBe(0);
     expect(result.current.openSessions).toHaveLength(1);
@@ -374,16 +359,14 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["broken", "charting"],
-          mcpServers: ["srv-a"],
         },
         [],
       );
     });
     expect(created).toBe(true);
     expect(setShellError).toHaveBeenCalledTimes(1);
-    // The second skill + the MCP enable still land.
+    // The second skill still lands.
     expect(mountSkill).toHaveBeenNthCalledWith(2, "s1", "charting");
-    expect(toggleMcpServer).toHaveBeenCalledWith("s1", "srv-a", true);
     expect(result.current.openSessions).toHaveLength(1);
     expect(log.warn).toHaveBeenCalled();
   });
