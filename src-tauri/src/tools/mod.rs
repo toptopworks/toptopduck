@@ -175,33 +175,26 @@ pub(crate) fn dispatch(
 /// Shared test scaffolding for the built-in tool modules (issue #292).
 #[cfg(test)]
 pub(crate) mod test_support {
+    use crate::session::engine::AdminEngine;
     use crate::session::materializer::TurnDeps;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use std::collections::HashMap;
     use std::path::Path;
 
-    /// A throwaway [`TurnDeps`] over locally-owned conn + sources + working set,
-    /// with inert cap defaults and `temp_path = "."`. Suitable for tool executors
-    /// that never touch the filesystem (explore / describe / sample). Centralized
-    /// so the four-tool dispatch tests cannot drift apart on the cap defaults
-    /// (DRY); the materialize tests use [`inert_deps_with_temp`] for a real
-    /// `TempDir` without re-spelling the caps.
+    /// A throwaway [`TurnDeps`] over a locally-owned materialized engine +
+    /// sources + working set, with inert cap defaults and `temp_path = "."`.
+    /// Suitable for tool executors that never touch the filesystem (explore /
+    /// describe / sample). Centralized so the four-tool dispatch tests cannot
+    /// drift apart on the cap defaults (DRY); the materialize tests use
+    /// [`inert_deps_with_temp`] for a real `TempDir` without re-spelling the
+    /// caps.
     pub fn inert_deps<'a>(
-        conn: &'a Connection,
+        engine: &'a AdminEngine,
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
     ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: Path::new("."),
-            tool_output_refs,
-        }
+        TurnDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
     }
 
     /// Same inert cap defaults as [`inert_deps`] but with a caller-owned
@@ -210,21 +203,13 @@ pub(crate) mod test_support {
     /// borrow in -- this covers the materialize tests without duplicating the
     /// cap literals, so a future production-cap change tracks one site.
     pub fn inert_deps_with_temp<'a>(
-        conn: &'a Connection,
+        engine: &'a AdminEngine,
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         temp_path: &'a Path,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
     ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path,
-            tool_output_refs,
-        }
+        TurnDeps::test_deps(engine, ws, sources, temp_path, tool_output_refs)
     }
 }
 
@@ -233,10 +218,10 @@ mod tests {
     use super::*;
     use crate::model::DatasetDescriptor;
     use crate::provider::tool_calling::ToolUse;
+    use crate::session::engine::AdminEngine;
     use crate::session::materializer::FakeMaterializer;
     use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -314,11 +299,11 @@ mod tests {
     /// executor runs, so no DuckDB / working-set side effect.
     #[test]
     fn unknown_tool_name_is_a_tool_error() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = FakeMaterializer::new(vec![]);
         let call = ToolUse {
@@ -349,7 +334,7 @@ mod tests {
     #[test]
     fn success_outcome_serializes_as_non_error_content() {
         use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         ws.register(DatasetDescriptor {
             reference_name: "people".into(),
@@ -368,7 +353,7 @@ mod tests {
         });
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = FakeMaterializer::new(vec![]);
         let call = ToolUse {
@@ -396,11 +381,11 @@ mod tests {
     /// the ADR-0077 self-correction path: the agent reads the error and adjusts.
     #[test]
     fn executor_error_reaches_wire_as_tool_error() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = FakeMaterializer::new(vec![]);
         let call = ToolUse {
@@ -430,10 +415,14 @@ mod tests {
         use crate::tools::test_support::inert_deps_with_temp;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE result_1 (id INTEGER)")
+        let engine = AdminEngine::materialized();
+        engine
+            .conn()
+            .execute_batch("CREATE TABLE result_1 (id INTEGER)")
             .unwrap();
-        conn.execute_batch("INSERT INTO result_1 VALUES (1), (2)")
+        engine
+            .conn()
+            .execute_batch("INSERT INTO result_1 VALUES (1), (2)")
             .unwrap();
         let mut ws = WorkingSet::default();
         ws.register_result(DatasetDescriptor {
@@ -454,7 +443,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 

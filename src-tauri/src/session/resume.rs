@@ -768,7 +768,7 @@ impl super::Session {
             // K-1 results preserved, K rendered as Failed, AC6).
             let replay_break = {
                 let mut deps = TurnDeps {
-                    conn: session.admin_engine.conn(),
+                    engine: &session.admin_engine,
                     source_files: &mut session.source_files,
                     working_set: &mut session.working_set,
                     result_row_cap: session.result_row_cap,
@@ -1124,10 +1124,10 @@ mod tests {
     use crate::persistence::recipe::{
         RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef, TurnTimestamps,
     };
+    use crate::session::engine::AdminEngine;
     use crate::session::materializer::FakeMaterializer;
     use crate::session::{ActiveAbandoned, ActiveResolution};
 
-    use duckdb::Connection;
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
     use std::sync::Arc;
@@ -1231,20 +1231,12 @@ mod tests {
     /// the struct only needs to satisfy the `&mut TurnDeps` parameter so the
     /// live signature is tested, not a parallel test-only one.
     fn inert_deps<'a>(
-        conn: &'a Connection,
+        engine: &'a AdminEngine,
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
     ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: Path::new("."),
-            tool_output_refs,
-        }
+        TurnDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
     }
 
     // --- phase 2: resolve_active --------------------------------------------
@@ -1415,11 +1407,11 @@ mod tests {
             Ok(result_descriptor("result_2")),
             Ok(result_descriptor("result_3")),
         ]);
-        let conn = Connection::open_in_memory().expect("in-memory db");
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let break_point = resumer.replay(&mut deps, &mut |_| {}).unwrap();
         assert!(break_point.is_none(), "whole chain succeeded -> no break");
@@ -1447,11 +1439,11 @@ mod tests {
             Ok(result_descriptor("result_2")),
             Err(ExecError::new(ExecErrorKind::Resource, "结果行数超过上限")),
         ]);
-        let conn = Connection::open_in_memory().expect("in-memory db");
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let brk = resumer
             .replay(&mut deps, &mut |_| {})
@@ -1483,11 +1475,11 @@ mod tests {
         let cancel = Arc::new(CancelToken::new());
         cancel.request();
         let mut fake = FakeMaterializer::new(vec![Ok(result_descriptor("result_1"))]);
-        let conn = Connection::open_in_memory().expect("in-memory db");
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
         let err = resumer.replay(&mut deps, &mut |_| {}).unwrap_err();
         assert!(matches!(err, ResumeError::Cancelled), "got {err:?}");

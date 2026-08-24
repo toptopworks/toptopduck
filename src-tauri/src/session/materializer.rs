@@ -14,7 +14,7 @@
 //! The trait is object-safe (no generics, no `Self` return) so the `Session`
 //! holds `Box<dyn Materializer>` -- dyn, not generic, so it does not
 //! parameterize `commands.rs` / `lib.rs` (ADR-0053 Decision 4). Live state
-//! (admin connection, source paths, working set, caps) is aggregated in the
+//! (admin engine, source paths, working set, caps) is aggregated in the
 //! Session root and borrowed per turn via [`TurnDeps`]; the materializer owns
 //! none of it (ADR-0053 Decision 4 -- stateless, owned by none).
 
@@ -31,6 +31,7 @@ use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 use crate::sandbox_sql::{
     preflight_read_sql, run_sandboxed_read, PreflightError, SandboxDeps, SandboxExecError,
 };
+use crate::session::engine::AdminEngine;
 use crate::session::{derived_source, sandbox, snapshot::derive_table};
 use crate::workingset::WorkingSet;
 
@@ -73,17 +74,22 @@ impl CachedDerivedRef {
 }
 
 /// The shared session state a materialize step borrows (ADR-0053 Decision 4):
-/// the admin connection, the source snapshot paths, the mutable working set,
-/// and the two resource caps. Aggregated in the Session root and borrowed per
-/// turn -- the materializer is stateless and owns none of this.
+/// the on-demand admin engine source, the source snapshot paths, the mutable
+/// working set, and the two resource caps. Aggregated in the Session root and
+/// borrowed per turn -- the materializer is stateless and owns none of this.
 ///
 /// Disjoint borrows via a struct let one call site hand a materializer
-/// `&mut working_set` alongside `&conn` / `&mut source_files` / `&temp_path`
+/// `&mut working_set` alongside `&engine` / `&mut source_files` / `&temp_path`
 /// without widening to `&mut Session`. The `&mut source_files` lets a
 /// materialize step register derived sources mid-turn (issue #433,
 /// ADR-0087 D4).
 pub(crate) struct TurnDeps<'a> {
-    pub conn: &'a Connection,
+    /// The on-demand admin engine source (ADR-0104 Decision 2): turn assembly
+    /// borrows the unit WITHOUT resolving the connection -- only the actual
+    /// consumers (built-in tools, derived-source attach, ghost rollback)
+    /// resolve it at their execution point. The reference never crosses
+    /// threads; it lives inside the session lock for the turn's duration.
+    pub engine: &'a AdminEngine,
     /// `&mut` so a materialize step can register derived sources (issue #433,
     /// ADR-0087 D4): a `read_*` referencing a `tool_output` file triggers
     /// copy_in + ATTACH, inserting a new snapshot path here.
@@ -105,17 +111,19 @@ pub(crate) struct TurnDeps<'a> {
 #[cfg(test)]
 impl<'a> TurnDeps<'a> {
     /// Build `TurnDeps` with default caps (1 000 rows / 100 results) over a
-    /// real in-memory connection + real temp dir. Shared by derived-source and
-    /// materializer tests so the field list stays in one place.
+    /// materialized in-memory engine + real temp dir. The one TurnDeps
+    /// constructor carrying the cap literals; every other fixture (the tools
+    /// `test_support` wrappers, resume, gateway) delegates here so the field
+    /// list stays in one place.
     pub(crate) fn test_deps(
-        conn: &'a Connection,
+        engine: &'a AdminEngine,
         ws: &'a mut WorkingSet,
         source_files: &'a mut HashMap<String, std::path::PathBuf>,
         temp_path: &'a Path,
         tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
     ) -> Self {
         TurnDeps {
-            conn,
+            engine,
             source_files,
             working_set: ws,
             result_row_cap: 1_000,
@@ -202,6 +210,11 @@ impl Materializer for RealMaterializer {
                 | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
             })?;
 
+        // Resolve the admin connection once at this execution point (ADR-0104
+        // Decision 2); the steps below (sandbox mirror, install, derive,
+        // rollback) all reuse the same borrow.
+        let admin = deps.engine.conn();
+
         // Sandbox lifecycle + cap + cancel checkpoints, shared with the explore
         // path. The new result_N lands on the sandbox first; the tail below
         // installs it onto admin.
@@ -209,7 +222,7 @@ impl Materializer for RealMaterializer {
             &sql,
             &result_name,
             &SandboxDeps {
-                admin_conn: deps.conn,
+                admin_conn: admin,
                 source_files: deps.source_files,
                 working_set: deps.working_set,
                 result_row_cap: deps.result_row_cap,
@@ -229,19 +242,18 @@ impl Materializer for RealMaterializer {
 
         // Install the new result onto admin (Value mirror). A failure can leave
         // a partial result_N on admin, so roll it back (ADR-0022 never-reused).
-        if let Err(e) = sandbox::install_result(deps.conn, &table.conn, &result_name, &result_name)
-        {
-            let detail = rollback_result(deps.conn, &result_name, e.detail);
+        if let Err(e) = sandbox::install_result(admin, &table.conn, &result_name, &result_name) {
+            let detail = rollback_result(admin, &result_name, e.detail);
             return Err(ExecError::new(ExecErrorKind::Runtime, detail));
         }
 
         // Derive the result's shape from admin's installed table -- the same
         // derivation a source snapshot uses (DRY). A derive failure also rolls
         // back result_N (orphan table would wedge later turns, ADR-0022).
-        let shape = match derive_table(deps.conn, &result_name, deps.temp_path, &result_name) {
+        let shape = match derive_table(admin, &result_name, deps.temp_path, &result_name) {
             Ok(shape) => shape,
             Err(e) => {
-                let detail = rollback_result(deps.conn, &result_name, e.to_string());
+                let detail = rollback_result(admin, &result_name, e.to_string());
                 return Err(ExecError::new(ExecErrorKind::Runtime, detail));
             }
         };
@@ -301,7 +313,7 @@ fn gc_stale_results(deps: &mut TurnDeps) -> Vec<String> {
     let candidates = deps.working_set.gc_stale_candidates(deps.result_count_cap);
     for name in &candidates {
         let drop_sql = format!("DROP TABLE {}", quote_ident(name));
-        if let Err(e) = deps.conn.execute_batch(&drop_sql) {
+        if let Err(e) = deps.engine.conn().execute_batch(&drop_sql) {
             // Best-effort, and deliberately warn (not error). The asymmetry
             // vs `rollback_result`'s error-grade DROP is grounded in ADR-0022:
             // rollback drops an UN-registered result_N, so an orphan makes the
@@ -423,9 +435,9 @@ mod real_tests {
     use super::{Materializer, RealMaterializer, TurnDeps};
     use crate::cancel::CancelToken;
     use crate::model::{StaleAnchor, StaleReason};
+    use crate::session::engine::AdminEngine;
     use crate::session::TOOL_OUTPUT_DIR_NAME;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -443,7 +455,7 @@ mod real_tests {
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -455,7 +467,7 @@ mod real_tests {
         let cancel = CancelToken::new();
         let mat = RealMaterializer;
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let descriptor = mat
             .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
             .expect("materialize succeeds");
@@ -471,7 +483,8 @@ mod real_tests {
         assert!(!ws.is_result("data"), "data is a source, not a result");
 
         // result_1 has the data on admin.
-        let count: i64 = conn
+        let count: i64 = engine
+            .conn()
             .query_row("SELECT COUNT(*) FROM result_1", [], |r| r.get(0))
             .expect("result_1 exists on admin");
         assert_eq!(count, 2);
@@ -509,7 +522,7 @@ mod real_tests {
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -526,7 +539,7 @@ mod real_tests {
         let cancel = CancelToken::new();
         let mat = RealMaterializer;
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let descriptor = mat
             .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
             .expect("materialize succeeds");
@@ -540,7 +553,8 @@ mod real_tests {
         );
 
         // The rewritten SQL executed — result_1 has the count.
-        let count: i64 = conn
+        let count: i64 = engine
+            .conn()
             .query_row("SELECT cnt FROM result_1", [], |r| r.get(0))
             .expect("result_1 exists and has cnt column");
         assert_eq!(count, 2, "scalar subquery returned correct count");

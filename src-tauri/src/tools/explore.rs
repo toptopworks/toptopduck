@@ -115,7 +115,7 @@ fn run_explore(
         sql,
         SCRATCH_TABLE,
         &SandboxDeps {
-            admin_conn: deps.conn,
+            admin_conn: deps.engine.conn(),
             source_files: deps.source_files,
             working_set: deps.working_set,
             result_row_cap: deps.result_row_cap,
@@ -211,6 +211,7 @@ fn tool_err(detail: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::engine::AdminEngine;
     use crate::tools::test_support::inert_deps;
 
     /// `sample_rows` defaults to 10 when omitted, clamps to [0, 50] when
@@ -234,11 +235,11 @@ mod tests {
     /// field -- the agent gets actionable feedback, not an opaque failure.
     #[test]
     fn dispatch_errors_when_sql_missing() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let err = dispatch(&json!({}), &mut deps, &cancel).unwrap_err();
         assert!(
@@ -256,10 +257,14 @@ mod tests {
     fn explore_runs_against_a_mirrored_result_and_leaves_no_trace() {
         use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE result_1 (id INTEGER, label VARCHAR)")
+        let engine = AdminEngine::materialized();
+        engine
+            .conn()
+            .execute_batch("CREATE TABLE result_1 (id INTEGER, label VARCHAR)")
             .unwrap();
-        conn.execute_batch("INSERT INTO result_1 VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+        engine
+            .conn()
+            .execute_batch("INSERT INTO result_1 VALUES (1, 'a'), (2, 'b'), (3, 'c')")
             .unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         ws.register_result(DatasetDescriptor {
@@ -285,7 +290,7 @@ mod tests {
         });
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let payload = dispatch(
             &json!({"sql": "SELECT * FROM result_1 WHERE id > 1 ORDER BY id"}),
@@ -322,7 +327,7 @@ mod tests {
         assert_eq!(deps.working_set.next_result_number(), 2);
         // And admin has no _explore_scratch and no new result_N table -- the
         // sandbox was dropped, so a scratch table cannot survive.
-        let count: i64 = conn
+        let count: i64 = engine.conn()
             .query_row(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '_explore_scratch'",
                 [],
@@ -338,8 +343,10 @@ mod tests {
     fn explore_surfaces_sql_error_as_tool_error() {
         use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE result_1 (id INTEGER)")
+        let engine = AdminEngine::materialized();
+        engine
+            .conn()
+            .execute_batch("CREATE TABLE result_1 (id INTEGER)")
             .unwrap();
         let mut ws = crate::workingset::WorkingSet::default();
         ws.register_result(DatasetDescriptor {
@@ -359,7 +366,7 @@ mod tests {
         });
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": "SELECT nonexistent FROM result_1"}),
@@ -381,11 +388,11 @@ mod tests {
     /// the one cancel checkpoint reachable without driving a real query.
     #[test]
     fn explore_returns_cancelled_when_cancel_already_requested() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         cancel.request();
         let err = dispatch(&json!({"sql": "SELECT 1"}), &mut deps, &cancel).unwrap_err();
@@ -400,7 +407,7 @@ mod tests {
     /// forbidden). The scratch table dies with the sandbox, so no trace survives.
     #[test]
     fn explore_refuses_result_exceeding_row_cap() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -408,7 +415,7 @@ mod tests {
         // sandbox, COUNT (3) > cap (2) -> refused. The cap is below the helper's
         // default, so this test hand-builds TurnDeps for the one-off bound.
         let mut deps = crate::session::materializer::TurnDeps {
-            conn: &conn,
+            engine: &engine,
             source_files: &mut sources,
             working_set: &mut ws,
             result_row_cap: 2,
@@ -443,7 +450,7 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -453,7 +460,7 @@ mod tests {
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
         fs::write(&outside_file, "x").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
@@ -483,7 +490,7 @@ mod tests {
         use std::fs;
         use tempfile::{NamedTempFile, TempDir};
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -504,7 +511,7 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .expect("escape-target filename is valid UTF-8");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('../{target_name}')")}),
@@ -538,7 +545,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -551,7 +558,7 @@ mod tests {
         // follows the link, so the resolved path is outside temp_root.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).expect("symlink creation failed");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!(
@@ -586,7 +593,7 @@ mod tests {
         use std::os::windows::fs::symlink_dir;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -596,7 +603,7 @@ mod tests {
         let link = temp.path().join("alias");
         symlink_dir(outside.path(), &link)
             .expect("Windows symlink creation needs Developer Mode / admin");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": format!(
@@ -629,7 +636,7 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -639,7 +646,7 @@ mod tests {
         // engine executes read_csv_auto successfully.
         let inside = temp.path().join("scratch.csv");
         fs::write(&inside, "val\n1\n2\n").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let payload = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", inside.to_string_lossy())}),
@@ -663,7 +670,7 @@ mod tests {
         use crate::model::{
             DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor, StaleReason,
         };
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         ws.register_result(DatasetDescriptor {
             reference_name: "result_1".into(),
@@ -686,7 +693,7 @@ mod tests {
         });
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": "SELECT * FROM result_1"}),

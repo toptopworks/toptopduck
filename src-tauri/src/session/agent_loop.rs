@@ -485,7 +485,7 @@ fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
         "rolling back ghost {ghost} left by a panicked dispatch"
     );
     let drop_sql = format!("DROP TABLE {}", quote_ident(&ghost));
-    if let Err(e) = deps.conn.execute_batch(&drop_sql) {
+    if let Err(e) = deps.engine.conn().execute_batch(&drop_sql) {
         log::error!(
             target: "toptopduck::agent_loop",
             "ghost rollback DROP of {ghost} failed: {e}; leaving result_{prev_next} \
@@ -1054,10 +1054,10 @@ mod tests {
     use crate::provider::prompt::ResponseLocale;
     use crate::provider::tool_calling::ToolTurnMessage;
     use crate::provider::{ProviderReply, ProviderRequest};
+    use crate::session::engine::AdminEngine;
     use crate::session::materializer::RealMaterializer;
     use crate::tools::builtin_table;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use serde_json::json;
     use std::collections::HashMap;
     use std::path::Path;
@@ -1419,8 +1419,8 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -1508,8 +1508,8 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -1587,27 +1587,6 @@ mod tests {
         let _ = RecipeTraceEntry::from_live_trace(&entry);
     }
 
-    /// Throwaway TurnDeps over a real in-memory connection. Mirrors the
-    /// `tools::test_support` cap defaults so the loop drives the same engine
-    /// shape the dispatch tests do.
-    fn deps<'a>(
-        conn: &'a Connection,
-        ws: &'a mut WorkingSet,
-        sources: &'a mut HashMap<String, std::path::PathBuf>,
-        temp: &'a Path,
-        tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps {
-            conn,
-            source_files: sources,
-            working_set: ws,
-            result_row_cap: 1_000,
-            result_count_cap: 100,
-            temp_path: temp,
-            tool_output_refs,
-        }
-    }
-
     /// Drive a loop with a scripted provider + the real materializer + a fresh
     /// approval state. No watchdog (wall_clock=None) so the step-cap /
     /// cancellation tests are deterministic.
@@ -1617,12 +1596,12 @@ mod tests {
         step_cap: u32,
         question: &str,
         ws: &mut WorkingSet,
-        conn: &Connection,
+        engine: &AdminEngine,
         temp: &Path,
     ) -> LoopOutcome {
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(conn, ws, &mut sources, temp, &mut refs);
+        let mut d = TurnDeps::test_deps(engine, ws, &mut sources, temp, &mut refs);
         let approval = ApprovalState::new();
         let sink = RecordingSink::default();
         AgentLoop::new(provider, cancel)
@@ -1638,19 +1617,19 @@ mod tests {
             )
     }
 
-    /// Shared engine setup: an in-memory DuckDB connection + a temp dir for the
-    /// materializer. The loop tests use literal SQL (no working-set source
-    /// registered), so the sandbox runs the same shape the real engine would
-    /// for an empty working set.
+    /// Shared engine setup: a materialized in-memory admin engine + a temp
+    /// dir for the materializer. The loop tests use literal SQL (no
+    /// working-set source registered), so the sandbox runs the same shape the
+    /// real engine would for an empty working set.
     struct Engine {
-        conn: Connection,
+        admin_engine: AdminEngine,
         temp: TempDir,
     }
     impl Engine {
         fn new() -> Self {
-            let conn = Connection::open_in_memory().expect("in-memory db");
+            let admin_engine = AdminEngine::materialized();
             let temp = TempDir::new().unwrap();
-            Self { conn, temp }
+            Self { admin_engine, temp }
         }
     }
 
@@ -1694,8 +1673,8 @@ mod tests {
         let captured = provider.captured_tool_turns();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -1801,8 +1780,8 @@ mod tests {
         let captured = provider.captured_tool_turns();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -1928,8 +1907,8 @@ mod tests {
         let captured = provider.captured_tool_turns();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -2000,8 +1979,8 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -2050,7 +2029,7 @@ mod tests {
             24,
             "summarize people",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Text("done".into()));
@@ -2101,7 +2080,7 @@ mod tests {
             24,
             "self-correct",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Text("done".into()));
@@ -2143,7 +2122,7 @@ mod tests {
             24,
             "two-promote",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         let names: Vec<String> = outcome
@@ -2187,7 +2166,7 @@ mod tests {
             24,
             "two-in-one",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Text("done".into()));
@@ -2274,7 +2253,7 @@ mod tests {
             3,
             "loop-forever",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::StepCap(3));
@@ -2310,7 +2289,7 @@ mod tests {
             24,
             "slow",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Cancelled);
@@ -2343,7 +2322,7 @@ mod tests {
             24,
             "loop",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Cancelled);
@@ -2395,7 +2374,7 @@ mod tests {
             24,
             "narrated-cancel",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Cancelled);
@@ -2440,7 +2419,7 @@ mod tests {
             24,
             "bare-cancel",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::Cancelled);
@@ -2467,8 +2446,8 @@ mod tests {
             .scripted_tool_turn_blocking("stuck", ToolTurnReply::Text("never".into()));
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -2513,7 +2492,7 @@ mod tests {
             24,
             "anything",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(outcome.termination, Termination::NotWired);
@@ -2539,7 +2518,7 @@ mod tests {
             24,
             "bad-config",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         match outcome.termination {
@@ -2566,7 +2545,7 @@ mod tests {
             24,
             "transport",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         match outcome.termination {
@@ -2596,7 +2575,7 @@ mod tests {
             24,
             "just-text",
             &mut ws,
-            &engine.conn,
+            &engine.admin_engine,
             engine.temp.path(),
         );
         assert_eq!(
@@ -2794,7 +2773,8 @@ mod tests {
                 "CREATE TABLE {} AS SELECT 1 AS x",
                 quote_ident(&result_name)
             );
-            deps.conn
+            deps.engine
+                .conn()
                 .execute_batch(&create_sql)
                 .expect("fixture CREATE TABLE");
             let descriptor = DatasetDescriptor {
@@ -2825,8 +2805,8 @@ mod tests {
         let provider = PanickingProvider;
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -2879,8 +2859,8 @@ mod tests {
         );
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = deps(
-            &engine.conn,
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
             &mut ws,
             &mut sources,
             engine.temp.path(),
@@ -2923,7 +2903,8 @@ mod tests {
         // Verify the physical table was dropped by the rollback (not just
         // unregistered from the working set).
         let table_count: i64 = d
-            .conn
+            .engine
+            .conn()
             .query_row(
                 "SELECT COUNT(*) FROM information_schema.tables \
                  WHERE table_name = 'result_1'",
