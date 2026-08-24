@@ -141,7 +141,6 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
                 for prev in &registered {
                     let _ = deps
                         .engine
-                        .conn()
                         .execute_batch(&format!("DETACH {}", quote_ident(prev)));
                     deps.source_files.remove(prev);
                     deps.working_set.remove(prev);
@@ -206,7 +205,7 @@ fn process_one_derived(
         "ATTACH '{attach_path}' AS {} (READ_ONLY);",
         quote_ident(ref_name)
     );
-    if let Err(e) = deps.engine.conn().execute_batch(&attach_sql) {
+    if let Err(e) = deps.engine.execute_batch(&attach_sql) {
         let _ = std::fs::remove_file(&snap.file_path);
         let _ = std::fs::remove_file(&persistent_path);
         return Err(ExecError::new(
@@ -1396,6 +1395,21 @@ mod tests {
             refs.is_empty(),
             "session cache invalidated on rollback, got: {:?}",
             refs
+        );
+        // Effect-level pin (PR #654 deferred note): the rollback DETACH is
+        // silent (`let _`), so the physical effect must be probed -- the
+        // first file's registered snapshot must be gone from the catalog.
+        let attached: i64 = engine
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM duckdb_databases() WHERE database_name = 'data'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("duckdb_databases probe");
+        assert_eq!(
+            attached, 0,
+            "the rolled-back snapshot is physically detached"
         );
     }
 

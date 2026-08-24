@@ -357,8 +357,8 @@ pub enum RowReadError {
     /// A row read targeted a reference name that is not in the working set.
     UnknownDataset(String),
     /// The row-page query failed in the engine (a read-side DuckDB error while
-    /// counting or paging rows). Distinct from a turn's SQL failing, which is
-    /// now a [`TurnOutcome::Failed`].
+    /// counting or paging rows), or the session engine failed to materialize.
+    /// Distinct from a turn's SQL failing, which is now a [`TurnOutcome::Failed`].
     Execute(String),
 }
 

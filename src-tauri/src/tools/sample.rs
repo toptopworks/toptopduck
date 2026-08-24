@@ -110,9 +110,11 @@ fn read_page(
         selects.join(", "),
         from,
     );
-    let mut stmt = deps
+    let conn = deps
         .engine
-        .conn()
+        .acquire()
+        .map_err(|e| format!("engine materialization failed: {e}"))?;
+    let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("sample failed: {e}"))?;
     let mut rows = stmt.query([]).map_err(|e| format!("sample failed: {e}"))?;

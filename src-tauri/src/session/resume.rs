@@ -1076,7 +1076,7 @@ impl super::Session {
             "ATTACH '{attach_path}' AS {} (READ_ONLY);",
             quote_ident(reference_name)
         );
-        if let Err(e) = self.admin_engine.conn().execute_batch(&attach_sql) {
+        if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
             if let Err(io_err) = fs::remove_file(&snap.file_path) {
                 log::warn!(
                     target: "toptopduck::session",
@@ -1125,7 +1125,7 @@ mod tests {
         RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef, TurnTimestamps,
     };
     use crate::session::engine::AdminEngine;
-    use crate::session::materializer::FakeMaterializer;
+    use crate::session::materializer::{FakeMaterializer, RealMaterializer};
     use crate::session::{ActiveAbandoned, ActiveResolution};
 
     use std::collections::{HashMap, HashSet};
@@ -1462,6 +1462,59 @@ mod tests {
         assert!(ws.get("result_1").is_some());
         assert!(ws.get("result_2").is_some());
         assert!(ws.get("result_3").is_none());
+    }
+
+    /// ADR-0104 (issue #652): a recipe with no productive SQL (the zero-source,
+    /// zero-SQL session's shape) replays without touching the engine -- the
+    /// replay loop resolves nothing outside the materializer calls it never
+    /// makes. Together with the constructor pin (construction materializes
+    /// nothing) this keeps a zero-source resume at zero DuckDB instances.
+    #[test]
+    fn replay_without_sql_turns_keeps_the_engine_unmaterialized() {
+        let recipe = recipe_with(vec![], None);
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(vec![]);
+        let engine = AdminEngine::new();
+        assert!(!engine.is_materialized());
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
+        let mut resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let brk = resumer.replay(&mut deps, &mut |_| {}).unwrap();
+        assert!(brk.is_none(), "nothing to replay, no break: {brk:?}");
+        assert!(
+            !engine.is_materialized(),
+            "an empty replay chain leaves the engine unmaterialized"
+        );
+    }
+
+    /// ADR-0104 (issue #652): replaying the first productive SQL turn IS the
+    /// resumed session's first SQL need -- the real materializer acquires the
+    /// engine there (with-sources / with-SQL resume materializes at resume).
+    #[test]
+    fn replay_materializes_the_engine_at_the_first_sql_turn() {
+        let recipe = recipe_with(vec![materialized_turn("result_1", "SELECT 1 AS n")], None);
+        let cancel = Arc::new(CancelToken::new());
+        let mut real = RealMaterializer;
+        let engine = AdminEngine::new();
+        assert!(!engine.is_materialized());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
+        // inert_deps pins temp_path to "."; a real materialize writes sandbox
+        // files, so point the deps at a real temp dir instead.
+        deps.temp_path = temp.path();
+        let mut resumer = Resumer::new(&cancel, &mut real, &recipe);
+        let brk = resumer.replay(&mut deps, &mut |_| {}).unwrap();
+        assert!(brk.is_none(), "SELECT 1 replays cleanly: {brk:?}");
+        assert!(
+            engine.is_materialized(),
+            "the replayed SQL turn materialized the engine"
+        );
+        assert!(ws.get("result_1").is_some(), "result_1 re-registered");
     }
 
     #[test]
