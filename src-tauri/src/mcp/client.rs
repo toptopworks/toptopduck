@@ -46,6 +46,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 use crate::mcp::config::{McpServerConfig, McpTransport};
 use crate::mcp::MCP_PROTOCOL_VERSION;
 use crate::runtime::gateway::framing;
@@ -230,35 +231,82 @@ struct SseEvent {
     data: String,
 }
 
-/// Read one SSE event from a buffered reader. An event is terminated by a
-/// blank line; lines starting with `:` are comments (skipped). `event:` and
-/// `data:` fields are accumulated; other fields (`id:`, `retry:`) are ignored.
-/// Returns `Ok(None)` at clean EOF (stream closed). Multiple `data:` lines
-/// within one event are joined with `\n` per the SSE spec.
+/// Read one SSE event from a buffered reader, with both caps from
+/// [`LINE_MAX_BYTES`] (issue #647):
+/// - line level: lines longer than the cap are dropped by
+///   [`read_line_bounded`];
+/// - event level: the summed bytes of one event's `data:` parts are bounded
+///   (a stream that never sends the terminating blank line cannot grow the
+///   accumulation past one capped line's worth).
+///
+/// A cap breach voids the WHOLE in-progress event: the accumulated fields are
+/// cleared, the surviving lines are skipped until the blank line that
+/// terminates the broken event (event-boundary resync), and a warn is logged
+/// -- dropping only the offending line would stitch the remaining fields into
+/// a partial franken-event the consumer cannot parse. The stream then
+/// continues with the next event.
+///
+/// An event is terminated by a blank line; lines starting with `:` are
+/// comments (skipped). `event:` and `data:` fields are accumulated; other
+/// fields (`id:`, `retry:`) are ignored. Returns `Ok(None)` at clean EOF
+/// (stream closed). Multiple `data:` lines within one event are joined with
+/// `\n` per the SSE spec.
 fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent>> {
+    read_sse_event_bounded(reader, LINE_MAX_BYTES)
+}
+
+/// The cap-parameterized core of [`read_sse_event`]. The `max` parameter
+/// exists for the unit tests (small caps keep fixtures tiny -- the same
+/// convention as [`read_line_bounded`]); every production caller passes
+/// [`LINE_MAX_BYTES`].
+fn read_sse_event_bounded<R: BufRead>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<SseEvent>> {
     let mut event_type: Option<String> = None;
     let mut data_parts: Vec<String> = Vec::new();
+    let mut data_bytes = 0;
+    // Set while skipping the surviving lines of a voided event, until the
+    // blank line that ends it.
+    let mut resyncing = false;
 
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            // EOF: return any buffered event, else None (clean close).
-            if data_parts.is_empty() && event_type.is_none() {
-                return Ok(None);
+        let line = match read_line_bounded(reader, max)? {
+            LineRead::Eof => {
+                // EOF: return any buffered event, else None (clean close).
+                // A voided event that never reached its boundary is dropped.
+                if resyncing || (data_parts.is_empty() && event_type.is_none()) {
+                    return Ok(None);
+                }
+                return Ok(Some(SseEvent {
+                    event: event_type,
+                    data: data_parts.join("\n"),
+                }));
             }
-            return Ok(Some(SseEvent {
-                event: event_type,
-                data: data_parts.join("\n"),
-            }));
-        }
+            LineRead::Overlong => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "SSE event dropped: line exceeds {max} bytes; resyncing at the next event boundary"
+                );
+                event_type = None;
+                data_parts.clear();
+                data_bytes = 0;
+                resyncing = true;
+                continue;
+            }
+            LineRead::Line(line) => line,
+        };
 
         let trimmed = line.trim_end_matches(['\r', '\n']);
 
         if trimmed.is_empty() {
             // Blank line = event boundary. Leading blank lines (before any
             // field) are skipped so a keepalive gap does not produce an empty
-            // event.
+            // event; one hit while resyncing just ends the voided event.
+            if resyncing {
+                resyncing = false;
+                continue;
+            }
             if data_parts.is_empty() && event_type.is_none() {
                 continue;
             }
@@ -266,6 +314,10 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
                 event: event_type,
                 data: data_parts.join("\n"),
             }));
+        }
+
+        if resyncing {
+            continue; // Surviving field of the voided event.
         }
 
         if trimmed.starts_with(':') {
@@ -277,6 +329,18 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
             // stripped; everything else (including additional spaces) is
             // retained as data.
             let data = rest.strip_prefix(' ').unwrap_or(rest);
+            data_bytes += data.len();
+            if data_bytes > max {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "SSE event dropped: accumulated data exceeds {max} bytes; resyncing at the next event boundary"
+                );
+                event_type = None;
+                data_parts.clear();
+                data_bytes = 0;
+                resyncing = true;
+                continue;
+            }
             data_parts.push(data.to_string());
         }
         // id:, retry:, and unknown fields are silently ignored.
@@ -561,8 +625,10 @@ impl McpClient for HttpClient {
 /// The agent's `timeout_read` (2 s) lets the reader periodically check the
 /// stop flag so [`Drop`] can join the thread cleanly.
 pub struct SseClient {
-    /// Receives JSON-RPC messages forwarded by the reader thread.
-    response_rx: mpsc::Receiver<Value>,
+    /// Receives JSON-RPC messages forwarded by the reader thread. `Err`
+    /// carries a reader-side failure (malformed message event, issue #647)
+    /// propagated to the waiting request.
+    response_rx: mpsc::Receiver<Result<Value, ClientError>>,
     /// The POST endpoint URL (from the server's initial `endpoint` event).
     post_url: String,
     /// HTTP agent for POST requests (the GET agent's stream is owned by the
@@ -658,10 +724,14 @@ impl McpClient for SseClient {
         // The POST response is typically 202 Accepted; the actual JSON-RPC
         // response arrives on the SSE stream.
         loop {
-            let msg = self
-                .response_rx
-                .recv()
-                .map_err(|_| ClientError::ServerClosed)?;
+            let msg = match self.response_rx.recv() {
+                Ok(Ok(msg)) => msg,
+                // A reader-side failure (malformed message event, issue #647)
+                // fails the waiting request fast instead of hanging until the
+                // turn watchdog cancels it.
+                Ok(Err(err)) => return Err(err),
+                Err(_) => return Err(ClientError::ServerClosed),
+            };
             if msg.get("id") != id.as_ref() || id.is_none() {
                 continue;
             }
@@ -700,12 +770,14 @@ impl Drop for SseClient {
 
 /// The SSE reader thread loop: continuously reads SSE events and forwards
 /// JSON-RPC messages ([`SseEvent`] with `event: message` or default) through
-/// the channel. Exits when `stop` is set or the stream closes / errors. Read
-/// timeouts (from the agent's `timeout_read`) are treated as a wakeup to
-/// re-check the stop flag — the TCP connection stays open between timeouts.
+/// the channel. Exits when `stop` is set, the stream closes / errors, or a
+/// malformed message event propagates its failure to the waiting request and
+/// stops the reader (issue #647). Read timeouts (from the agent's
+/// `timeout_read`) are treated as a wakeup to re-check the stop flag — the
+/// TCP connection stays open between timeouts.
 fn sse_reader_loop<R: BufRead + Send>(
     mut reader: R,
-    tx: mpsc::SyncSender<Value>,
+    tx: mpsc::SyncSender<Result<Value, ClientError>>,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::SeqCst) {
@@ -722,19 +794,32 @@ fn sse_reader_loop<R: BufRead + Send>(
                 if is_message {
                     match serde_json::from_str::<Value>(&event.data) {
                         Ok(msg) => {
-                            if msg.is_object() && tx.send(msg).is_err() {
+                            if msg.is_object() && tx.send(Ok(msg)).is_err() {
                                 break; // Channel closed (client dropped).
                             }
                         }
                         Err(e) => {
-                            // Malformed JSON in a message event: the matching
-                            // JSON-RPC response is lost, so log for
-                            // observability rather than silently dropping it.
+                            // Malformed JSON in a message event: the waiting
+                            // request's response is unrecoverable. Propagate
+                            // the failure (the streamable-HTTP path's
+                            // `Framing(InvalidData)` attribution) instead of
+                            // warn-and-continue, which left the request
+                            // hanging until the turn watchdog cancelled it.
+                            // Best-effort send: a closed channel just means
+                            // the client already dropped.
+                            let err = ClientError::Framing(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "malformed JSON in SSE event ({} bytes): {e}",
+                                    event.data.len()
+                                ),
+                            ));
                             log::warn!(
                                 target: "toptopduck::mcp",
-                                "SSE reader: dropping malformed message event ({} bytes): {e}",
-                                event.data.len()
+                                "SSE reader: {err}; stopping reader thread"
                             );
+                            let _ = tx.send(Err(err));
+                            break;
                         }
                     }
                 }
@@ -903,7 +988,6 @@ pub enum ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bounded_line::LINE_MAX_BYTES;
     use serde_json::json;
     use std::io::Cursor;
 
@@ -1170,6 +1254,104 @@ mod tests {
         assert_eq!(e2.data, "msg1");
         let e3 = read_sse_event(&mut reader).expect("read 3");
         assert!(e3.is_none(), "third read -> EOF");
+    }
+
+    /// Issue #647: a line longer than the cap voids the WHOLE in-progress
+    /// event -- not just the offending line -- and the reader resyncs at the
+    /// next blank-line boundary. Dropping only the line would stitch the
+    /// surviving fields into a partial franken-event the consumer cannot
+    /// parse; the next full event after the boundary parses normally.
+    #[test]
+    fn read_sse_event_overlong_line_voids_event_and_resyncs_at_boundary() {
+        // First `data:` line is 30 bytes (over the 16-byte cap); the short
+        // `data: tail` survivor is skipped during the resync, not stitched.
+        let wire = format!(
+            "data: {}\ndata: tail\n\ndata: {{\"ok\":1}}\n\n",
+            "a".repeat(24)
+        );
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the event after the voided one");
+        assert!(event.event.is_none());
+        assert_eq!(event.data, "{\"ok\":1}");
+        // The stream continues past the drop: the next read is clean EOF.
+        let next = read_sse_event_bounded(&mut reader, 16).expect("read 2");
+        assert!(next.is_none(), "stream continues to clean EOF");
+    }
+
+    /// The voided event's already-accumulated fields are cleared too: an
+    /// `event:` line seen before the over-long line must not leak into the
+    /// next event's type.
+    #[test]
+    fn read_sse_event_overlong_line_clears_accumulated_fields() {
+        let wire = format!("event: ping\ndata: {}\n\ndata: x\n\n", "a".repeat(24));
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("event after the voided one");
+        assert!(
+            event.event.is_none(),
+            "no field leaks from the voided event"
+        );
+        assert_eq!(event.data, "x");
+    }
+
+    /// Issue #647: the per-event `data:` accumulation budget (same source as
+    /// the line cap) voids an event whose parts sum past it even when every
+    /// individual line fits the line cap; the next event arrives normally.
+    #[test]
+    fn read_sse_event_data_budget_voids_oversized_event() {
+        // Each line is 13 bytes (under the 16-byte line cap) but the three
+        // parts sum to 21 data bytes (over the budget).
+        let wire = "data: 1234567\ndata: 1234567\ndata: 1234567\n\ndata: ok\n\n";
+        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the event after the voided one");
+        assert_eq!(event.data, "ok");
+    }
+
+    /// EOF while still resyncing (the broken event never reached its blank
+    /// boundary) drops the voided event: nothing half-parsed is returned.
+    #[test]
+    fn read_sse_event_eof_while_resyncing_returns_none() {
+        let wire = format!("data: {}\ndata: tail", "a".repeat(24));
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16).expect("read");
+        assert!(
+            event.is_none(),
+            "EOF mid-resync -> None, not a partial event"
+        );
+    }
+
+    /// Issue #647: a malformed `message` event propagates to the waiting
+    /// consumer as a `Framing(InvalidData)` failure (the streamable-HTTP
+    /// path's attribution) instead of warn-and-continue, which left the
+    /// pending request hanging until the turn watchdog cancelled it. After
+    /// propagating, the reader exits (drops the sender), so a later `recv()`
+    /// reports the channel closed.
+    #[test]
+    fn sse_reader_loop_propagates_malformed_message_and_exits() {
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        let wire = b"data: {\"id\":1,\"ok\":true}\n\ndata: not-json\n\n";
+        // Finite input: the loop runs to EOF on this thread (no stop needed).
+        sse_reader_loop(
+            Cursor::new(wire.to_vec()),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let first = rx.recv().expect("healthy message forwarded");
+        assert_eq!(first.expect("Ok"), json!({"id": 1, "ok": true}));
+        let second = rx.recv().expect("malformed event forwarded as Err");
+        match second {
+            Err(ClientError::Framing(ref e)) => assert!(
+                e.kind() == std::io::ErrorKind::InvalidData,
+                "malformed -> Framing(InvalidData), got {e:?}"
+            ),
+            other => panic!("expected Err(Framing), got {other:?}"),
+        }
+        assert!(rx.recv().is_err(), "reader exits after propagating");
     }
 
     /// `check_rpc_response` returns the `result` field on success and maps an
