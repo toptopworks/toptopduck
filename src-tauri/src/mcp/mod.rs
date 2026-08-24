@@ -13,8 +13,11 @@
 //!   (slice B, issue #301).
 //! - [`client`]: the stdio JSON-RPC client the gateway drives per turn (slice
 //!   C1, issue #301).
-//! - [`aggregator`]: the merged tool-table view + `tools/call` router over
+//! - [`aggregator`]: the merged tool-surface view + `tools/call` router over
 //!   connected external servers (slice C-gw, issue #301).
+//! - [`meta_tools`]: the fixed discovery trio (`mcp_list_servers` /
+//!   `mcp_search_tools` / `mcp_invoke`) that replaces the flattened
+//!   per-tool advertisement (ADR-0105, issue #657).
 
 /// The MCP protocol version the gateway speaks on both ends (ADR-0076). The
 /// client ([`client`]) advertises it at `initialize`; the server-side initialize
@@ -31,6 +34,7 @@ pub mod aggregator;
 pub mod client;
 pub mod config;
 pub mod import;
+pub mod meta_tools;
 pub mod secrets;
 
 pub use client::McpClient;

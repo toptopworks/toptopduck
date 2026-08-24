@@ -256,7 +256,7 @@ pub const TOOL_CALLING_PROMPT: &str = "\
 【工具选择】
 DuckDB 是你进行表格型分析（查询、聚合、统计）的默认工具。下方「能力边界」描述 DuckDB 工具的默认能力范围。
 
-当用户的请求超出 DuckDB 能力范围时，优先检查工具箱中是否存在匹配的外部工具——若存在则使用。不区分工具来源：技能声明的工具与用户直接配置的工具同等对待。
+当用户的请求超出 DuckDB 能力范围时，用 mcp_search_tools 搜索外部工具目录（关键词命中服务器名、工具名或工具描述；空查询列出目录，最多返回 10 张卡片）。命中后按卡片提供的 tool 句柄与 inputSchema 组装参数，用 mcp_invoke 调用；句柄原样复制，不要自行拼接、拆分或改写。可用 mcp_list_servers 查看当轮连接的服务器及连接结果。不区分工具来源：技能声明的工具与用户直接配置的工具同等对待。当目录中没有匹配工具时，按下方能力边界的越界行为回应。
 
 【能力边界 v1】
 IN-SCOPE（DuckDB 原生能力）：
@@ -861,6 +861,25 @@ mod tests {
         assert!(!p.contains("你有四个工具"), "old hardcoded count retired");
     }
 
+    /// ADR-0105 / issue #657: the external-tool guidance directs search +
+    /// invoke through the meta-tool trio instead of implying directly
+    /// callable flattened tools in the toolbox.
+    #[test]
+    fn tool_calling_prompt_directs_external_discovery_through_the_trio() {
+        let p = TOOL_CALLING_PROMPT;
+        assert!(p.contains("mcp_search_tools"), "search guidance present");
+        assert!(p.contains("mcp_invoke"), "invoke guidance present");
+        assert!(
+            p.contains("mcp_list_servers"),
+            "server manifest guidance present"
+        );
+        assert!(p.contains("句柄原样复制"), "handle-verbatim rule present");
+        assert!(
+            !p.contains("优先检查工具箱中是否存在匹配的外部工具"),
+            "old flattened-toolbox guidance retired"
+        );
+    }
+
     #[test]
     fn build_tool_system_prompt_orders_boundary_directive_schema() {
         // ADR-0052: the locale directive is inserted between the boundary and
@@ -921,8 +940,8 @@ mod tests {
             "default-tool scope (tabular analysis) pinned"
         );
         assert!(
-            p.contains("匹配的外部工具"),
-            "matching external tools named"
+            p.contains("外部工具目录"),
+            "external-tool discovery catalog named"
         );
         assert!(
             p.contains("不区分工具来源"),
