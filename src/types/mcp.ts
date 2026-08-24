@@ -57,13 +57,14 @@ export interface McpServerConfig {
   enabled: boolean;
 }
 
-// Placeholder `enabled` for parsed / drafted configs (ADR-0106): neither JSON
-// mode nor the form edits enablement -- the settings row toggle owns the
-// field -- so parsers and the form's draft builder carry this constant and
-// the form's save overwrites it with the server's current value (an edit
-// never re-arms a disabled server). New / imported entries land enabled as
-// explicit intent (Decision 4), not via this placeholder.
-export const MCP_ENABLED_PLACEHOLDER = true;
+// A parsed / drafted config WITHOUT the enablement flag (ADR-0106, #659):
+// neither JSON mode nor the form edits enablement -- the settings row toggle
+// owns the field -- so the parsers and the form's builder produce this Draft
+// shape and the form's save is the single assembly point that stamps
+// `enabled` (preserving the existing value on edit; new / imported entries
+// land enabled as explicit intent, Decision 4). The type makes a stale
+// placeholder value impossible: consumers of a Draft cannot read `enabled`.
+export type McpServerDraft = Omit<McpServerConfig, "enabled">;
 
 // The user-configured MCP server registry carried by AppConfig.mcp_servers
 // (issue #301). Mirrors the Rust McpServerRegistry: insertion-ordered server

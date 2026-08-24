@@ -7,9 +7,14 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 
 import { McpSection } from "../McpSection";
+import { upsertMirror } from "../mcp-mirror";
 import { clearMcpServerSecret, discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
-import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
+import type {
+  DiscoveredServer,
+  McpServerConfig,
+  McpProbeResult,
+} from "../../../types/mcp";
 
 // The pane drives everything through IPC; mock the API so the test never
 // touches Tauri.
@@ -66,6 +71,50 @@ function renderWithProviders(ui: ReactElement) {
     </QueryClientProvider>,
   );
 }
+
+describe("upsertMirror (#659)", () => {
+  it("replaces an existing id in place", () => {
+    const a = makeServer({ id: "srv-a" });
+    const b = makeServer({ id: "srv-b" });
+    const c = makeServer({ id: "srv-c" });
+    const edited = makeServer({ id: "srv-b", display_name: "B edited" });
+
+    expect(upsertMirror([a, b, c], edited).map((s) => s.id)).toEqual([
+      "srv-a",
+      "srv-b",
+      "srv-c",
+    ]);
+    expect(upsertMirror([a, b, c], edited)[1].display_name).toBe("B edited");
+  });
+
+  it("appends a new id at the end", () => {
+    const a = makeServer({ id: "srv-a" });
+    const fresh = makeServer({ id: "srv-new" });
+
+    expect(upsertMirror([a], fresh).map((s) => s.id)).toEqual([
+      "srv-a",
+      "srv-new",
+    ]);
+  });
+
+  it("batch upsert keeps existing ids in place and appends new ids", () => {
+    // The import path folds a batch through upsertMirror: an imported id
+    // matching a configured row replaces it in place, unseen ids append —
+    // mirroring the backend registry's per-entry upsert semantics.
+    const a = makeServer({ id: "srv-a" });
+    const b = makeServer({ id: "srv-b" });
+    const c = makeServer({ id: "srv-c" });
+    const bEdited = makeServer({ id: "srv-b", display_name: "B imported" });
+    const fresh = makeServer({ id: "srv-new" });
+
+    const batch = [bEdited, fresh].reduce(
+      (acc, next) => upsertMirror(acc, next),
+      [a, b, c],
+    );
+    expect(batch.map((s) => s.id)).toEqual(["srv-a", "srv-b", "srv-c", "srv-new"]);
+    expect(batch[1].display_name).toBe("B imported");
+  });
+});
 
 describe("McpSection (issue #387)", () => {
   beforeEach(() => {
@@ -464,6 +513,40 @@ describe("McpSection (issue #387)", () => {
     expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument();
   });
 
+  it("keeps row order when editing an existing server (#659)", async () => {
+    // The registry's upsert replaces in place (order preserved on disk), so
+    // the React mirror must not shuffle the edited row to the end -- a
+    // restart would otherwise snap the row back to its disk position.
+    const a = makeServer({ id: "srv-a", display_name: "A" });
+    const b = makeServer({ id: "srv-b", display_name: "B" });
+    const c = makeServer({ id: "srv-c", display_name: "C" });
+    const finalized = makeServer({ id: "srv-b", display_name: "B edited" });
+    vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    const onCommit = vi.fn().mockResolvedValue(null);
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([a, b, c])} onCommit={onCommit} />,
+    );
+
+    // Edit B, rename it, save.
+    fireEvent.click(screen.getByRole("button", { name: "Edit server B" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "B edited" },
+    });
+    fireEvent.click(screen.getByText("Save"));
+
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutateFn = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    const mutated = mutateFn(makeAppConfig([a, b, c]));
+    expect(mutated.mcp_servers.servers.map((s) => s.id)).toEqual([
+      "srv-a",
+      "srv-b",
+      "srv-c",
+    ]);
+    expect(mutated.mcp_servers.servers[1].display_name).toBe("B edited");
+  });
+
   // --- Import button (issue #390) -----------------------------------------
 
   it("shows an Import button in the header", () => {
@@ -487,5 +570,65 @@ describe("McpSection (issue #387)", () => {
     await waitFor(() => {
       expect(screen.getByText("Import MCP servers")).toBeInTheDocument();
     });
+  });
+
+  it("keeps row order when importing — existing ids replace in place, new ids append (#659)", async () => {
+    // The import path folds every finalized config through upsertMirror:
+    // a finalized id matching a configured row replaces it in place
+    // (mirroring the backend registry), an unseen id appends — the old
+    // filter+append would shuffle the replaced row to the end while disk
+    // kept its position, snapping back on restart.
+    const a = makeServer({ id: "srv-a", display_name: "A" });
+    const b = makeServer({ id: "srv-b", display_name: "B" });
+    const c = makeServer({ id: "srv-c", display_name: "C" });
+    const discoveredB: DiscoveredServer = {
+      display_name: "Imported B",
+      transport: { type: "stdio", command: "/bin/imported-b", args: [] },
+      env: {},
+      keychain_env_keys: [],
+    };
+    const discoveredNew: DiscoveredServer = {
+      display_name: "Brand New",
+      transport: { type: "stdio", command: "/bin/imported-new", args: [] },
+      env: {},
+      keychain_env_keys: [],
+    };
+    // Discovery only reports Claude Desktop (the dialog dedupes nothing
+    // here — these display names are not yet configured).
+    vi.mocked(discoverMcpServers).mockImplementation(async (src) =>
+      src === "claude_desktop"
+        ? { servers: [discoveredB, discoveredNew], config_path: "/home/u/.claude.json" }
+        : { servers: [], config_path: null },
+    );
+    // The IPC boundary's finalized configs: the first lands on the EXISTING
+    // srv-b id (replace in place), the second on a fresh id (append).
+    vi.mocked(upsertMcpServer)
+      .mockResolvedValueOnce(makeServer({ id: "srv-b", display_name: "Imported B" }))
+      .mockResolvedValueOnce(makeServer({ id: "srv-new", display_name: "Brand New" }));
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    const onCommit = vi.fn().mockResolvedValue(null);
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([a, b, c])} onCommit={onCommit} />,
+    );
+
+    // Open the dialog, wait for discovery, select the source's servers,
+    // import.
+    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: "Claude Desktop" }),
+    );
+    fireEvent.click(screen.getByTestId("import-action"));
+
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    const mutateFn = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    const mutated = mutateFn(makeAppConfig([a, b, c]));
+    expect(mutated.mcp_servers.servers.map((s) => s.id)).toEqual([
+      "srv-a",
+      "srv-b",
+      "srv-c",
+      "srv-new",
+    ]);
+    expect(mutated.mcp_servers.servers[1].display_name).toBe("Imported B");
   });
 });

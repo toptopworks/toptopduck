@@ -11,6 +11,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 
+import { getAppConfig } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import type { AppConfig } from "../../types/app-config";
 import { bareButtonReset } from "../../lib/buttonReset";
@@ -179,6 +180,7 @@ function SectionContent({
 export function SettingsView({
   appConfig,
   onCommitAppConfig,
+  onReplaceAppConfig,
   onSessionsDirChanged,
   onDefaultRuntimeChanged,
   onClose,
@@ -194,6 +196,12 @@ export function SettingsView({
   // Persist a full app-config; MUST return the IPC promise so commits can await
   // + catch failures (App passes commitAppConfig unwrapped).
   onCommitAppConfig: (cfg: AppConfig) => Promise<void>;
+  // Replace local appConfig state WITHOUT an IPC write (#659). When a commit
+  // AND its compensating write both fail, the disk truth is unknown (the
+  // first write may have landed despite rejecting); the view re-reads it and
+  // hands the disk config back through this state-only sync so the controls
+  // show what is actually stored.
+  onReplaceAppConfig: (cfg: AppConfig) => void;
   // Replace local appConfig state WITHOUT an IPC write (issue #452). After
   // setSessionsDir IPC persists + returns the updated config, this syncs the
   // frontend state + triggers the sidebar re-scan.
@@ -252,7 +260,21 @@ export function SettingsView({
             try {
               await onCommitAppConfig(prev);
             } catch {
-              // Best effort -- the surfaced error already tells the user.
+              // The compensating write failed too (#659): the disk truth is
+              // now unknown (the original write may have landed despite
+              // rejecting). Re-read it and sync both this view's mirror and
+              // the shell state so the controls show what is actually stored
+              // instead of a silent divergence that survives until the next
+              // successful write or restart.
+              try {
+                const disk = await getAppConfig();
+                latestRef.current = disk;
+                onReplaceAppConfig(disk);
+              } catch {
+                // The read failed as well (backend unavailable): the surfaced
+                // error stays the only signal -- nothing more this layer
+                // can do.
+              }
             }
             return fmtError(e, intl);
           }
@@ -269,7 +291,7 @@ export function SettingsView({
       );
       return result;
     },
-    [onCommitAppConfig, intl],
+    [onCommitAppConfig, onReplaceAppConfig, intl],
   );
 
   // Sessions-dir IPC bypasses commitWithRevert (it uses a dedicated IPC, not

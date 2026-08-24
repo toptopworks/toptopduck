@@ -446,15 +446,9 @@ export async function getSessionsDir(): Promise<string> {
 // Upsert one MCP server. Send an empty `id` for a new server (Rust mints a uuid
 // v4); send the existing id to edit. Rust fills `display_name` from the id when
 // empty. Returns the finalized config (with the stable id) so the UI can address
-// the server in subsequent secret / remove calls.
+// the server in subsequent secret calls.
 export async function upsertMcpServer(server: McpServerConfig): Promise<McpServerConfig> {
   return invoke<McpServerConfig>("upsert_mcp_server", { server });
-}
-
-// Remove the MCP server with the given id (idempotent). Does NOT clear the
-// server's keychain secrets -- the UI orchestrates clear-then-remove.
-export async function removeMcpServer(id: string): Promise<void> {
-  await invoke<void>("remove_mcp_server", { id });
 }
 
 // Store one MCP server secret in the OS keychain under mcp-<id>-<env_key>

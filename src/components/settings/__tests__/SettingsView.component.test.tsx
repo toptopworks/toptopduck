@@ -8,6 +8,7 @@ import {
   setProfileKey,
   setSessionsDir,
   getSessionsDir,
+  getAppConfig,
   setDefaultRuntime,
   listAdapters,
   rescanAdapters,
@@ -31,6 +32,7 @@ vi.mock("../../../api", async (importOriginal) => {
     clearProfileKey: vi.fn(),
     setSessionsDir: vi.fn(),
     getSessionsDir: vi.fn(),
+    getAppConfig: vi.fn(),
     setDefaultRuntime: vi.fn(),
     listAdapters: vi.fn(),
     rescanAdapters: vi.fn(),
@@ -55,6 +57,7 @@ type CommitFn = (cfg: AppConfig) => Promise<void>;
 function SettingsViewHarness({
   appConfig,
   onCommitAppConfig,
+  onReplaceAppConfig,
   onSessionsDirChanged,
   onDefaultRuntimeChanged,
   onClose,
@@ -62,6 +65,7 @@ function SettingsViewHarness({
 }: {
   appConfig: AppConfig;
   onCommitAppConfig: Mock<CommitFn>;
+  onReplaceAppConfig: (cfg: AppConfig) => void;
   onSessionsDirChanged: (cfg: AppConfig) => void;
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   onClose: () => void;
@@ -75,6 +79,7 @@ function SettingsViewHarness({
       section={section}
       onSectionChange={setSection}
       onCommitAppConfig={onCommitAppConfig}
+      onReplaceAppConfig={onReplaceAppConfig}
       onSessionsDirChanged={onSessionsDirChanged}
       onDefaultRuntimeChanged={onDefaultRuntimeChanged}
       onClose={onClose}
@@ -160,6 +165,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   function renderView({
     appConfig = baseConfig,
     onCommitAppConfig = vi.fn<CommitFn>().mockResolvedValue(undefined),
+    onReplaceAppConfig = vi.fn(),
     onSessionsDirChanged = vi.fn(),
     onDefaultRuntimeChanged = vi.fn(),
     onClose = vi.fn(),
@@ -167,6 +173,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   }: {
     appConfig?: AppConfig;
     onCommitAppConfig?: Mock<CommitFn>;
+    onReplaceAppConfig?: (cfg: AppConfig) => void;
     onSessionsDirChanged?: (cfg: AppConfig) => void;
     onDefaultRuntimeChanged?: (cfg: AppConfig) => void;
     onClose?: () => void;
@@ -176,6 +183,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       <SettingsViewHarness
         appConfig={appConfig}
         onCommitAppConfig={onCommitAppConfig}
+        onReplaceAppConfig={onReplaceAppConfig}
         onSessionsDirChanged={onSessionsDirChanged ?? (() => undefined)}
         onDefaultRuntimeChanged={onDefaultRuntimeChanged}
         onClose={onClose}
@@ -219,11 +227,68 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   });
 
   it("a failed immediate commit surfaces an inline error (revert-on-fail)", async () => {
-    const onCommitAppConfig = vi.fn<CommitFn>().mockRejectedValue(new Error("disk full"));
+    // The commit rejects once; the compensating revert write then succeeds,
+    // keeping this test on the single-failure path (the double-failure
+    // branch is pinned separately below).
+    const onCommitAppConfig = vi
+      .fn<CommitFn>()
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockResolvedValue(undefined);
     renderView({ onCommitAppConfig });
     openSelect(screen.getByRole("combobox", { name: "Theme" }));
     chooseOption("Dark");
     expect(await screen.findByText("disk full")).toBeInTheDocument();
+    // Single failure: the compensating write landed, so the disk re-read
+    // must not fire.
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(getAppConfig)).not.toHaveBeenCalled();
+  });
+
+  it("a double-failed commit re-reads the disk truth instead of diverging (#659)", async () => {
+    // Both the commit and its compensating write reject: the disk value is
+    // then unknown (the first write may have landed despite rejecting), so
+    // the view re-reads it and feeds the disk config through
+    // onReplaceAppConfig -- the control shows what is stored, not a
+    // silently divergent pre-commit snapshot.
+    const diskConfig = {
+      ...baseConfig,
+      theme: "dark" as const,
+      // A field the pre-commit snapshot does NOT carry, so the third
+      // commit's payload can prove which config it derived from.
+      engine: { ...baseConfig.engine, threads: 8 },
+    };
+    let calls = 0;
+    const onCommitAppConfig = vi.fn<CommitFn>().mockImplementation(() => {
+      calls += 1;
+      return calls <= 2
+        ? Promise.reject(new Error("write broken"))
+        : Promise.resolve();
+    });
+    vi.mocked(getAppConfig).mockResolvedValue(diskConfig);
+    const onReplaceAppConfig = vi.fn();
+
+    renderView({ onCommitAppConfig, onReplaceAppConfig });
+
+    openSelect(screen.getByRole("combobox", { name: "Theme" }));
+    chooseOption("Dark");
+
+    // The commit + its compensating revert both fired (and both rejected).
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(onReplaceAppConfig).toHaveBeenCalledWith(diskConfig),
+    );
+    // The surfaced error stays the user-facing signal.
+    expect(await screen.findByText("write broken")).toBeInTheDocument();
+
+    // The re-read re-syncs the commit chain's mirror too: the NEXT commit
+    // derives from the disk config (threads 8), not the stale pre-commit
+    // snapshot (threads 2) -- deleting the latestRef sync would pass every
+    // assertion above while reintroducing the divergence.
+    openSelect(screen.getByRole("combobox", { name: "Theme" }));
+    chooseOption("Light");
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(3));
+    expect(onCommitAppConfig.mock.calls[2][0].theme).toBe("light");
+    expect(onCommitAppConfig.mock.calls[2][0].engine.threads).toBe(8);
   });
 
   // --- Sessions directory row (issue #452) ---------------------------------

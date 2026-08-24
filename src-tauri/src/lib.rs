@@ -393,7 +393,6 @@ pub fn run() {
             commands::get_app_config,
             commands::set_app_config,
             commands::upsert_mcp_server,
-            commands::remove_mcp_server,
             commands::set_mcp_server_secret,
             commands::clear_mcp_server_secret,
             commands::probe_mcp_server,

@@ -202,7 +202,7 @@ fn default_enabled() -> bool {
 /// The user-configured MCP server registry (issue #301): the named wrapper
 /// [`crate::app_config::AppConfig`] carries as its `mcp_servers` field. Parallels
 /// [`crate::model::ProviderConfig`] as a cohesive sub-structure with its own
-/// invariant + upsert/remove CRUD helpers. Default is empty -- the app ships
+/// invariant + upsert helper. Default is empty -- the app ships
 /// with no preconfigured external servers; the user adds them from settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct McpServerRegistry {
@@ -233,7 +233,7 @@ impl McpServerRegistry {
     /// `display_name` from the id when empty, then replace an existing entry
     /// with the same id or append. Returns the finalized config (with the
     /// stable id) so the IPC layer hands the id back to the frontend for
-    /// subsequent secret / remove calls.
+    /// subsequent secret calls.
     pub fn upsert(&mut self, mut server: McpServerConfig) -> McpServerConfig {
         if server.id.as_str().trim().is_empty() {
             server.id = McpServerId(uuid::Uuid::new_v4().simple().to_string());
@@ -246,14 +246,6 @@ impl McpServerRegistry {
             None => self.servers.push(server.clone()),
         }
         server
-    }
-
-    /// Remove the server with the given id (idempotent: a missing id is a
-    /// no-op). Does NOT clear the server's keychain secrets -- the caller
-    /// orchestrates clear-then-remove so the secret env_keys (UI-side knowledge
-    /// until the gateway injection contract lands) stay explicit (issue #301).
-    pub fn remove(&mut self, id: &McpServerId) {
-        self.servers.retain(|s| &s.id != id);
     }
 }
 
@@ -659,52 +651,6 @@ mod tests {
         assert_eq!(reg.servers.len(), 2);
         assert_eq!(reg.servers[1].id, McpServerId("beta".into()));
         assert_eq!(stored.id, McpServerId("beta".into()));
-    }
-
-    #[test]
-    fn registry_remove_drops_by_id() {
-        let mut reg = McpServerRegistry {
-            servers: vec![
-                McpServerConfig {
-                    id: McpServerId("alpha".into()),
-                    display_name: "Alpha".into(),
-                    transport: McpTransport::stdio("/bin/a", Vec::new()),
-                    env: BTreeMap::new(),
-                    keychain_env_keys: Vec::new(),
-                    timeout_ms: None,
-                    enabled: true,
-                },
-                McpServerConfig {
-                    id: McpServerId("beta".into()),
-                    display_name: "Beta".into(),
-                    transport: McpTransport::stdio("/bin/b", Vec::new()),
-                    env: BTreeMap::new(),
-                    keychain_env_keys: Vec::new(),
-                    timeout_ms: None,
-                    enabled: true,
-                },
-            ],
-        };
-        reg.remove(&McpServerId("alpha".into()));
-        assert_eq!(reg.servers.len(), 1);
-        assert_eq!(reg.servers[0].id, McpServerId("beta".into()));
-    }
-
-    #[test]
-    fn registry_remove_missing_id_is_noop() {
-        let mut reg = McpServerRegistry {
-            servers: vec![McpServerConfig {
-                id: McpServerId("solo".into()),
-                display_name: "Solo".into(),
-                transport: McpTransport::stdio("/bin/s", Vec::new()),
-                env: BTreeMap::new(),
-                keychain_env_keys: Vec::new(),
-                timeout_ms: None,
-                enabled: true,
-            }],
-        };
-        reg.remove(&McpServerId("missing".into()));
-        assert_eq!(reg.servers.len(), 1, "missing id -> no-op");
     }
 
     // --- timeout_ms (T1) ----------------------------------------------------

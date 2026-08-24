@@ -972,6 +972,9 @@ export default function App() {
                     // no-rollback (ADR-0068); the revert is the view's compensating
                     // write on a caught reject.
                     onCommitAppConfig={(cfg) => commitAppConfig(cfg)}
+                    // State-only sync for a double-failed commit (#659): the
+                    // view re-reads the disk truth and hands it back here.
+                    onReplaceAppConfig={replaceAppConfig}
                     onSessionsDirChanged={handleSessionsDirChanged}
                     onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
                     onClose={() => {
