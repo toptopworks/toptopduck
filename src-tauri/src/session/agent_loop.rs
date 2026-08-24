@@ -485,10 +485,10 @@ fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
         "rolling back ghost {ghost} left by a panicked dispatch"
     );
     let drop_sql = format!("DROP TABLE {}", quote_ident(&ghost));
-    if let Err(e) = deps.engine.conn().execute_batch(&drop_sql) {
+    if let Err(e) = deps.engine.execute_batch(&drop_sql) {
         log::error!(
             target: "toptopduck::agent_loop",
-            "ghost rollback DROP of {ghost} failed: {e}; leaving result_{prev_next} \
+            "ghost rollback of {ghost} failed: {e}; leaving result_{prev_next} \
              registered so next_result_number skips it -- delete manually"
         );
         return;

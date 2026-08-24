@@ -839,11 +839,11 @@ impl Session {
         // is a disk / OS issue surfaced honestly rather than silently skipped.
         fs::create_dir_all(temp_path.join(TOOL_OUTPUT_DIR_NAME))
             .map_err(|e| anyhow::anyhow!("failed to create tool_output dir: {e}"))?;
-        // The admin engine is an on-demand unit (ADR-0104 Decision 1); slice
-        // #650 keeps construction eager, so materialize immediately --
-        // observable behavior identical to the eager open this replaces.
+        // The admin engine is an on-demand unit (ADR-0104 Decision 1): the
+        // session is constructed with no DuckDB instance; the first SQL need
+        // resolves through the unit's acquisition point, and the connection
+        // is then held until session close (no idle reclaim).
         let admin_engine = AdminEngine::new();
-        admin_engine.materialize()?;
         // The provider + materializer live on the Session behind `Box<dyn>`
         // (dyn, not generic) so this struct does not parameterize the IPC
         // layer (ADR-0053). The agent loop borrows both per turn; the resume
@@ -1802,9 +1802,11 @@ impl Session {
             limit,
             offset
         );
-        let mut stmt = self
+        let conn = self
             .admin_engine
-            .conn()
+            .acquire()
+            .map_err(|e| RowReadError::Execute(e.to_string()))?;
+        let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| RowReadError::Execute(e.to_string()))?;
         let mut rows = stmt
@@ -1833,11 +1835,12 @@ impl Session {
         })
     }
 
-    /// Run arbitrary SQL on the session connection. Exposed for the read-only
-    /// enforcement tests (AC5): writes against a source snapshot are rejected by
-    /// the engine. Not part of the public ingest contract.
-    pub fn execute_batch(&self, sql: &str) -> Result<(), duckdb::Error> {
-        self.admin_engine.conn().execute_batch(sql)
+    /// Run arbitrary SQL on the session connection, materializing the engine
+    /// on first need. Exposed for the read-only enforcement tests (AC5):
+    /// writes against a source snapshot are rejected by the engine. Not part
+    /// of the public ingest contract.
+    pub fn execute_batch(&self, sql: &str) -> anyhow::Result<()> {
+        self.admin_engine.execute_batch(sql)
     }
 
     /// Count rows in a snapshot's `data` table through its reference name
@@ -1845,12 +1848,13 @@ impl Session {
     /// Exposed for the black-box tests alongside [`Self::execute_batch`] -- not
     /// part of the public ingest contract (the real query path arrives with the
     /// query loop, PRD #1).
-    pub fn snapshot_row_count(&self, reference_name: &str) -> Result<i64, duckdb::Error> {
-        self.admin_engine.conn().query_row(
+    pub fn snapshot_row_count(&self, reference_name: &str) -> anyhow::Result<i64> {
+        let conn = self.admin_engine.acquire()?;
+        Ok(conn.query_row(
             &format!("SELECT COUNT(*) FROM {}.data", quote_ident(reference_name)),
             [],
             |r| r.get(0),
-        )
+        )?)
     }
 }
 
@@ -2640,6 +2644,22 @@ mod tests {
             session.get("result_1").is_none(),
             "result_1 GC'd from the working set"
         );
+        // Effect-level pin (PR #654 deferred note): the GC branch is
+        // warn-only, so the physical DROP must be probed -- a broken DROP
+        // would stay green through the bookkeeping assertions above.
+        let remaining: i64 = session
+            .admin_engine
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'result_1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("information_schema probe");
+        assert_eq!(
+            remaining, 0,
+            "result_1 physically dropped from the engine by GC"
+        );
 
         let recipe = session.build_recipe();
         // q1 is gone: its sole promotion (result_1) was GC'd, so the turn
@@ -3073,15 +3093,126 @@ mod tests {
         );
     }
 
+    // --- ADR-0104 on-demand materialization (issue #652) ----------------------
+
+    /// AC1/AC7: a session that only chats never materializes the engine --
+    /// zero DuckDB instances from creation to close -- and working-set
+    /// metadata reads (descriptor-only paths) don't materialize either.
+    #[test]
+    fn text_only_session_never_materializes_the_engine() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "你好",
+            vec![Ok(ToolTurnReply::Text("你好！有什么可以帮你的？".into()))],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        assert!(
+            !session.admin_engine.is_materialized(),
+            "construction materializes nothing"
+        );
+        match session.ask("你好") {
+            TurnOutcome::Textual { .. } => {}
+            other => panic!("expected a textual turn, got {other:?}"),
+        }
+        // Metadata reads: descriptor-only paths over the working set.
+        let _ = session.list();
+        let _ = session.active();
+        let _ = session.get("anything");
+        assert!(
+            !session.admin_engine.is_materialized(),
+            "a no-tool turn + metadata reads keep the engine at zero instances"
+        );
+    }
+
+    /// AC2: a turn whose only tool call routes to an external (MCP) tool
+    /// never touches the engine. The key is pre-trusted so the call actually
+    /// dispatches (an untrusted PerCall key would suspend on the approval
+    /// gate until the watchdog): the empty aggregator surfaces the
+    /// unknown-server route error as a tool result, and the model answers on
+    /// top of it -- the real external-only shape, ending Textual.
+    #[test]
+    fn external_tool_only_turn_does_not_materialize_the_engine() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "查天气",
+            vec![
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
+                    id: "tu_x".into(),
+                    name: "mcp__weather__lookup".into(),
+                    input: json!({ "city": "上海" }),
+                }])),
+                Ok(ToolTurnReply::Text("没有可用的天气服务。".into())),
+            ],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        let approval = crate::approval::ApprovalState::new();
+        approval.seed_trust(&crate::approval::ToolKey::external(
+            "weather",
+            "mcp__weather__lookup",
+        ));
+        let keychain = super::KeychainStore::new();
+        let inputs = super::TurnInputs::empty(&keychain);
+        let outcome = session.ask_with_phase(
+            "查天气",
+            &approval,
+            &super::NullApprovalSink,
+            |_| {},
+            &inputs,
+        );
+        match outcome {
+            TurnOutcome::Textual { .. } => {}
+            other => panic!("expected a textual turn after the routed error, got {other:?}"),
+        }
+        assert!(
+            !session.admin_engine.is_materialized(),
+            "an external-tool-only turn keeps the engine at zero instances"
+        );
+    }
+
+    /// AC3/AC4: literal SQL on an empty working set is a legal materialize --
+    /// it materializes the engine on the spot, and the engine then stays
+    /// held (one-way, no idle reclaim) across later no-tool turns.
+    #[test]
+    fn literal_sql_on_an_empty_working_set_materializes_and_holds() {
+        let provider = FakeProvider::new()
+            .scripted_tool_turn_seq(
+                "q1",
+                vec![
+                    Ok(materialize_call("SELECT 1 AS one")),
+                    Ok(ToolTurnReply::Text("done".into())),
+                ],
+            )
+            .scripted_tool_turn_seq("q2", vec![Ok(ToolTurnReply::Text("again".into()))]);
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        assert!(
+            !session.admin_engine.is_materialized(),
+            "empty working set starts at zero instances"
+        );
+        match session.ask("q1") {
+            TurnOutcome::Materialized { .. } => {}
+            other => panic!("expected Materialized, got {other:?}"),
+        }
+        assert!(
+            session.admin_engine.is_materialized(),
+            "the first SQL need materialized the engine"
+        );
+        let _ = session.ask("q2");
+        assert!(
+            session.admin_engine.is_materialized(),
+            "a materialized engine is held -- no idle reclaim"
+        );
+    }
+
     #[test]
     fn resource_caps_are_applied_to_the_session_connection() {
-        // AC3 (issue #25): the engine-level resource caps are set on the session
-        // connection at construction (ADR-0005 L3). Read back via duckdb_settings
-        // (PRAGMA-as-query is unsupported in this DuckDB for these keys).
+        // AC3 (issue #25): the engine-level resource caps are set when the
+        // engine materializes (ADR-0005 L3 + ADR-0104 Decision 1: open +
+        // caps in one step). Read back via duckdb_settings (PRAGMA-as-query
+        // is unsupported in this DuckDB for these keys).
         let session = Session::new().expect("session");
-        let threads: String = session
+        let conn = session
             .admin_engine
-            .conn()
+            .acquire()
+            .expect("first need materializes the engine");
+        let threads: String = conn
             .query_row(
                 "SELECT value FROM duckdb_settings() WHERE name='threads'",
                 [],
@@ -3089,9 +3220,7 @@ mod tests {
             )
             .expect("threads setting");
         assert_eq!(threads, crate::guardrail::MAX_THREADS.to_string());
-        let mem: String = session
-            .admin_engine
-            .conn()
+        let mem: String = conn
             .query_row(
                 "SELECT value FROM duckdb_settings() WHERE name='memory_limit'",
                 [],

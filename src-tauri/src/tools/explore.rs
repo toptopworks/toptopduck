@@ -108,6 +108,12 @@ fn run_explore(
         | PreflightError::Unparseable(s) => s,
     })?;
 
+    // First-SQL-need acquisition (ADR-0104 Decision 2): literal SQL on an
+    // empty working set materializes the engine right here.
+    let admin_conn = deps
+        .engine
+        .acquire()
+        .map_err(|e| format!("engine materialization failed: {e}"))?;
     // Sandbox lifecycle + cap + cancel checkpoints, shared with the materialize
     // path. The scratch table lives on the sandbox connection only (turn-local,
     // no naming, no working-set entry -- AC #1).
@@ -115,7 +121,7 @@ fn run_explore(
         sql,
         SCRATCH_TABLE,
         &SandboxDeps {
-            admin_conn: deps.engine.conn(),
+            admin_conn,
             source_files: deps.source_files,
             working_set: deps.working_set,
             result_row_cap: deps.result_row_cap,

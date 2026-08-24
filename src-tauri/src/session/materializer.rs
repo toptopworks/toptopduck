@@ -210,10 +210,16 @@ impl Materializer for RealMaterializer {
                 | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
             })?;
 
-        // Resolve the admin connection once at this execution point (ADR-0104
-        // Decision 2); the steps below (sandbox mirror, install, derive,
-        // rollback) all reuse the same borrow.
-        let admin = deps.engine.conn();
+        // Acquire the admin connection once at this execution point (ADR-0104
+        // Decision 2): this is the materialization point when the turn's SQL
+        // is the session's first need, and the steps below (sandbox mirror,
+        // install, derive, rollback) all reuse the same borrow.
+        let admin = deps.engine.acquire().map_err(|e| {
+            ExecError::new(
+                ExecErrorKind::Runtime,
+                format!("engine materialization failed: {e}"),
+            )
+        })?;
 
         // Sandbox lifecycle + cap + cancel checkpoints, shared with the explore
         // path. The new result_N lands on the sandbox first; the tail below
@@ -313,7 +319,7 @@ fn gc_stale_results(deps: &mut TurnDeps) -> Vec<String> {
     let candidates = deps.working_set.gc_stale_candidates(deps.result_count_cap);
     for name in &candidates {
         let drop_sql = format!("DROP TABLE {}", quote_ident(name));
-        if let Err(e) = deps.engine.conn().execute_batch(&drop_sql) {
+        if let Err(e) = deps.engine.execute_batch(&drop_sql) {
             // Best-effort, and deliberately warn (not error). The asymmetry
             // vs `rollback_result`'s error-grade DROP is grounded in ADR-0022:
             // rollback drops an UN-registered result_N, so an orphan makes the
