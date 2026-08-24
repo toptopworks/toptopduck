@@ -140,7 +140,8 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
                 // Rollback previously registered sources from this call.
                 for prev in &registered {
                     let _ = deps
-                        .conn
+                        .engine
+                        .conn()
                         .execute_batch(&format!("DETACH {}", quote_ident(prev)));
                     deps.source_files.remove(prev);
                     deps.working_set.remove(prev);
@@ -205,7 +206,7 @@ fn process_one_derived(
         "ATTACH '{attach_path}' AS {} (READ_ONLY);",
         quote_ident(ref_name)
     );
-    if let Err(e) = deps.conn.execute_batch(&attach_sql) {
+    if let Err(e) = deps.engine.conn().execute_batch(&attach_sql) {
         let _ = std::fs::remove_file(&snap.file_path);
         let _ = std::fs::remove_file(&persistent_path);
         return Err(ExecError::new(
@@ -1206,9 +1207,9 @@ mod tests {
 
     // --- Integration: process() with real DuckDB + filesystem ----------
 
+    use crate::session::engine::AdminEngine;
     use crate::session::materializer::TurnDeps;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -1225,7 +1226,7 @@ mod tests {
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1237,7 +1238,7 @@ mod tests {
 
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
             // SQL was rewritten to a catalog reference.
@@ -1265,12 +1266,15 @@ mod tests {
             assert!(sources.contains_key("data"), "snapshot in source_files");
 
             // The rewritten SQL executes on the connection and returns data.
-            let count: i64 = conn
+            let count: i64 = engine
+                .conn()
                 .query_row(&rewritten, [], |r| r.get::<_, i64>(0))
                 .unwrap_or_else(|_| {
                     // If the simple SELECT fails (column index), try a COUNT.
                     let count_sql = format!("SELECT COUNT(*) FROM ({rewritten}) AS _check");
-                    conn.query_row(&count_sql, [], |r| r.get(0))
+                    engine
+                        .conn()
+                        .query_row(&count_sql, [], |r| r.get(0))
                         .expect("rewritten SQL executes")
                 });
             assert!(count > 0, "rewritten SQL returns data");
@@ -1286,7 +1290,7 @@ mod tests {
         let outside_csv = outside.path().join("external.csv");
         std::fs::write(&outside_csv, "x\n1\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1296,7 +1300,7 @@ mod tests {
             outside_csv.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — no tool_output paths detected.
@@ -1309,13 +1313,13 @@ mod tests {
     #[test]
     fn process_passes_through_sql_with_no_reads() {
         let temp = TempDir::new().unwrap();
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
 
         let sql = "SELECT 1 AS x";
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(sql, &mut deps).expect("process succeeds");
         assert_eq!(rewritten, "SELECT 1 AS x");
     }
@@ -1333,13 +1337,13 @@ mod tests {
         std::fs::write(&secret, "id\n999\n").unwrap();
         let traversal = format!("{}/../secret.csv", tool_output_dir.to_string_lossy());
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
 
         let sql = format!("SELECT * FROM read_csv_auto('{traversal}')");
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — traversal path rejected by is_in_tool_output.
@@ -1362,7 +1366,7 @@ mod tests {
         let foo_path = tool_output_dir.join("bad.foo");
         std::fs::write(&foo_path, "garbage").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1373,7 +1377,7 @@ mod tests {
             foo_path.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let result = process(&sql, &mut deps);
 
         assert!(result.is_err(), "process fails on unsupported format");
@@ -1408,7 +1412,7 @@ mod tests {
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1421,7 +1425,7 @@ mod tests {
         // First call: registers "data", populates session cache.
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
             assert!(
                 rewritten.contains(r#""data".data"#),
@@ -1432,7 +1436,7 @@ mod tests {
         // Second call: must reuse "data", NOT create "data_2".
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             assert!(
                 rewritten.contains(r#""data".data"#),
@@ -1477,7 +1481,7 @@ mod tests {
         let csv_b = tool_output_dir.join("b.csv");
         std::fs::write(&csv_b, "id\n2\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1486,7 +1490,7 @@ mod tests {
         {
             let sql = format!("SELECT * FROM read_csv_auto('{}')", csv_a.to_string_lossy());
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
             assert!(rewritten.contains(r#""a".data"#), "first: {rewritten}");
         }
@@ -1495,7 +1499,7 @@ mod tests {
         {
             let sql = format!("SELECT * FROM read_csv_auto('{}')", csv_b.to_string_lossy());
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             assert!(rewritten.contains(r#""b".data"#), "second: {rewritten}");
         }
@@ -1518,7 +1522,7 @@ mod tests {
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1531,10 +1535,11 @@ mod tests {
         // First call stages + ATTACHes "data".
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
             // Execute the rewritten SQL to confirm ATTACH landed.
-            let count: i64 = conn
+            let count: i64 = engine
+                .conn()
                 .query_row(
                     &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
                     [],
@@ -1548,9 +1553,10 @@ mod tests {
         // because the existing ATTACH is reused.
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
-            let count: i64 = conn
+            let count: i64 = engine
+                .conn()
                 .query_row(
                     &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
                     [],
@@ -1574,7 +1580,7 @@ mod tests {
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1587,7 +1593,7 @@ mod tests {
         // First call registers "data".
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             process(&sql, &mut deps).expect("first process succeeds");
         }
         assert_eq!(refs.len(), 1, "cache populated");
@@ -1597,21 +1603,22 @@ mod tests {
         // exercises the defensive stale-entry removal (derived_source.rs
         // lines 104-105) — the ref is gone from the working set, so the cache
         // must detect this and re-register rather than trusting a dangling name.
-        let _ = conn.execute_batch("DETACH \"data\"");
+        let _ = engine.conn().execute_batch("DETACH \"data\"");
         sources.remove("data");
         ws.remove("data");
 
         // Second call: re-registers "data" (not a dangling reuse).
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             assert!(
                 rewritten.contains(r#""data".data"#),
                 "re-registered under same base name: {rewritten}"
             );
             // The rewritten SQL must execute (the new ATTACH is live).
-            let count: i64 = conn
+            let count: i64 = engine
+                .conn()
                 .query_row(
                     &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
                     [],
@@ -1640,7 +1647,7 @@ mod tests {
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -1653,9 +1660,10 @@ mod tests {
         // First call: registers "data" with 2 rows.
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
-            let count: i64 = conn
+            let count: i64 = engine
+                .conn()
                 .query_row(
                     &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
                     [],
@@ -1673,9 +1681,10 @@ mod tests {
         // stale snapshot. The rewritten SQL must return the NEW row count.
         {
             let mut deps =
-                TurnDeps::test_deps(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
-            let count: i64 = conn
+            let count: i64 = engine
+                .conn()
                 .query_row(
                     &format!("SELECT COUNT(*) FROM ({rewritten}) AS _c"),
                     [],

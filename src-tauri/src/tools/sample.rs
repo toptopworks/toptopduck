@@ -111,7 +111,8 @@ fn read_page(
         from,
     );
     let mut stmt = deps
-        .conn
+        .engine
+        .conn()
         .prepare(&sql)
         .map_err(|e| format!("sample failed: {e}"))?;
     let mut rows = stmt.query([]).map_err(|e| format!("sample failed: {e}"))?;
@@ -134,9 +135,9 @@ mod tests {
         ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
         StaleReason,
     };
+    use crate::session::engine::AdminEngine;
     use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use std::collections::HashMap;
 
     /// `limit` defaults to 10, clamps to [1, 50]; `offset` defaults to 0 and is
@@ -161,11 +162,11 @@ mod tests {
     /// can self-correct to a registered name.
     #[test]
     fn unknown_dataset_returns_tool_error() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let err = dispatch(&json!({"reference_name": "ghost"}), &mut deps).unwrap_err();
         assert!(err.contains("unknown dataset"), "{err}");
         assert!(err.contains("ghost"), "{err}");
@@ -175,7 +176,7 @@ mod tests {
     /// rows, so the tool surfaces the staleness rather than returning data.
     #[test]
     fn stale_dataset_is_refused() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -198,7 +199,7 @@ mod tests {
                 reason: StaleReason::Deleted,
             }),
         });
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let err = dispatch(&json!({"reference_name": "result_1"}), &mut deps).unwrap_err();
         assert!(err.contains("stale"), "{err}");
         assert!(err.contains("result_1"), "{err}");
@@ -208,11 +209,11 @@ mod tests {
     /// lookup or query runs.
     #[test]
     fn missing_parameter_errors_with_field_name() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let err = dispatch(&json!({}), &mut deps).unwrap_err();
         assert!(err.contains("`reference_name`"), "{err}");
     }
@@ -222,13 +223,17 @@ mod tests {
     /// offset/limit echo.
     #[test]
     fn reads_rows_from_a_backed_result() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         // Backing table on the session (admin) connection: result_1 with two
         // rows. The tool resolves FROM "result_1" (a result, not a source) and
         // CASTs each cell to VARCHAR.
-        conn.execute_batch("CREATE TABLE result_1 (id INTEGER, label VARCHAR)")
+        engine
+            .conn()
+            .execute_batch("CREATE TABLE result_1 (id INTEGER, label VARCHAR)")
             .unwrap();
-        conn.execute_batch("INSERT INTO result_1 VALUES (1, 'a'), (2, 'b')")
+        engine
+            .conn()
+            .execute_batch("INSERT INTO result_1 VALUES (1, 'a'), (2, 'b')")
             .unwrap();
         let mut ws = WorkingSet::default();
         // register_result (not register) so the working set treats result_1 as
@@ -257,7 +262,7 @@ mod tests {
         });
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let payload = dispatch(
             &json!({"reference_name": "result_1", "limit": 10}),
             &mut deps,

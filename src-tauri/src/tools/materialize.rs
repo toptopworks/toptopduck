@@ -191,8 +191,8 @@ fn err_message(result_name: &str, e: ExecError) -> String {
 mod tests {
     use super::*;
     use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
+    use crate::session::engine::AdminEngine;
     use crate::tools::test_support::{inert_deps, inert_deps_with_temp};
-    use duckdb::Connection;
 
     /// A descriptor factory for the payload-shape test.
     fn descriptor(reference_name: &str) -> DatasetDescriptor {
@@ -283,11 +283,11 @@ mod tests {
     /// materializer is touched -- no result_N is computed, no DuckDB call runs.
     #[test]
     fn dispatch_errors_when_sql_missing_without_touching_materializer() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = ExplodingMaterializer;
         let err = dispatch(&json!({}), &mut deps, &cancel, &mut materializer).unwrap_err();
@@ -308,12 +308,12 @@ mod tests {
         use crate::session::materializer::RealMaterializer;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 
@@ -367,12 +367,12 @@ mod tests {
         use crate::session::materializer::RealMaterializer;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let payload = dispatch(
@@ -410,12 +410,12 @@ mod tests {
         use crate::session::materializer::RealMaterializer;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
 
@@ -498,13 +498,13 @@ mod tests {
         use tempfile::TempDir;
 
         for blank in ["   ", ""] {
-            let conn = Connection::open_in_memory().unwrap();
+            let engine = AdminEngine::materialized();
             let mut ws = crate::workingset::WorkingSet::default();
             let mut sources = std::collections::HashMap::new();
             let mut refs = std::collections::HashMap::new();
             let temp = TempDir::new().unwrap();
             let mut deps =
-                inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+                inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let cancel = CancelToken::new();
             let mut materializer = RealMaterializer;
             let payload = dispatch(
@@ -606,7 +606,7 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -615,7 +615,7 @@ mod tests {
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
         fs::write(&outside_file, "x").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -651,7 +651,7 @@ mod tests {
         use std::fs;
         use tempfile::{NamedTempFile, TempDir};
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -672,7 +672,7 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .expect("escape-target filename is valid UTF-8");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -709,7 +709,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -722,7 +722,7 @@ mod tests {
         // follows the link, so the resolved path is outside temp_root.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).expect("symlink creation failed");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -761,7 +761,7 @@ mod tests {
         use std::os::windows::fs::symlink_dir;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -771,7 +771,7 @@ mod tests {
         let link = temp.path().join("alias");
         symlink_dir(outside.path(), &link)
             .expect("Windows symlink creation needs Developer Mode / admin");
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(
@@ -821,13 +821,13 @@ mod tests {
         );
 
         // Explore surface.
-        let conn_e = Connection::open_in_memory().unwrap();
+        let engine_e = AdminEngine::materialized();
         let mut ws_e = crate::workingset::WorkingSet::default();
         let mut sources_e = std::collections::HashMap::new();
         let mut refs_e = std::collections::HashMap::new();
         let temp_e = TempDir::new().unwrap();
         let mut deps_e = inert_deps_with_temp(
-            &conn_e,
+            &engine_e,
             &mut ws_e,
             &mut sources_e,
             temp_e.path(),
@@ -838,13 +838,13 @@ mod tests {
             explore::dispatch(&json!({"sql": sql.clone()}), &mut deps_e, &cancel_e).unwrap_err();
 
         // Materialize surface.
-        let conn_m = Connection::open_in_memory().unwrap();
+        let engine_m = AdminEngine::materialized();
         let mut ws_m = crate::workingset::WorkingSet::default();
         let mut sources_m = std::collections::HashMap::new();
         let mut refs_m = std::collections::HashMap::new();
         let temp_m = TempDir::new().unwrap();
         let mut deps_m = inert_deps_with_temp(
-            &conn_m,
+            &engine_m,
             &mut ws_m,
             &mut sources_m,
             temp_m.path(),
@@ -895,7 +895,7 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
@@ -905,7 +905,7 @@ mod tests {
         // engine executes read_csv_auto and materialize promotes the result.
         let inside = temp.path().join("scratch.csv");
         fs::write(&inside, "val\n1\n2\n").unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let payload = dispatch(
@@ -937,12 +937,12 @@ mod tests {
         use crate::session::materializer::RealMaterializer;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         cancel.request();
         let mut materializer = RealMaterializer;
@@ -968,14 +968,14 @@ mod tests {
     fn materialize_refuses_result_exceeding_row_cap() {
         use crate::session::materializer::RealMaterializer;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         // cap = 2; range(3) yields 3 rows -> cap+1 land on the sandbox, COUNT
         // (3) > cap (2) -> refused. Hand-built for the one-off bound.
         let mut deps = crate::session::materializer::TurnDeps {
-            conn: &conn,
+            engine: &engine,
             source_files: &mut sources,
             working_set: &mut ws,
             result_row_cap: 2,
@@ -1024,7 +1024,7 @@ mod tests {
         use crate::session::materializer::RealMaterializer;
         use tempfile::TempDir;
 
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = crate::workingset::WorkingSet::default();
         ws.register_result(DatasetDescriptor {
             reference_name: "result_1".into(),
@@ -1048,7 +1048,7 @@ mod tests {
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
-        let mut deps = inert_deps_with_temp(&conn, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(

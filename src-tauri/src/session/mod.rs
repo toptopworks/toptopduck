@@ -4,7 +4,7 @@
 
 pub mod agent_loop;
 pub mod derived_source;
-mod engine;
+pub(crate) mod engine;
 pub mod ingest;
 pub mod inline_materialize;
 pub mod materializer;
@@ -1279,7 +1279,7 @@ impl Session {
                 // thinking-disabled, byte-identical to the status quo.
                 request.thought_level = self.runtime_facts.thought_level.clone();
                 // Disjoint field borrows: the loop borrows `&*self.provider`
-                // while TurnDeps borrows `self.admin_engine.conn()` /
+                // while TurnDeps borrows `&self.admin_engine` /
                 // `&mut self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop takes
                 // `&mut *self.materializer` -- distinct Session fields, so they
@@ -1310,7 +1310,7 @@ impl Session {
                             &mcp.aggregated_tools(),
                         ));
                     let mut deps = TurnDeps {
-                        conn: self.admin_engine.conn(),
+                        engine: &self.admin_engine,
                         source_files: &mut self.source_files,
                         working_set: &mut self.working_set,
                         result_row_cap: self.result_row_cap,
@@ -1524,7 +1524,7 @@ impl Session {
                 crate::mcp::aggregator::McpAggregator::with_tool_output(self.tool_output_path());
             self.last_mcp_connect = mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
-                conn: self.admin_engine.conn(),
+                engine: &self.admin_engine,
                 source_files: &mut self.source_files,
                 working_set: &mut self.working_set,
                 result_row_cap: self.result_row_cap,

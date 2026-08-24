@@ -503,9 +503,9 @@ fn generate_token() -> String {
 mod tests {
     use super::*;
     use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink};
+    use crate::session::engine::AdminEngine;
     use crate::session::materializer::FakeMaterializer;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use serde_json::{json, Value};
     use std::collections::HashMap;
     use std::io::Cursor;
@@ -521,13 +521,13 @@ mod tests {
     /// do not touch DuckDB; the engine exists only to satisfy TurnDeps's borrows
     /// so the same scaffolding serves the serve-connection end-to-end case too.
     struct Engine {
-        conn: Connection,
+        admin_engine: AdminEngine,
         temp: TempDir,
     }
     impl Engine {
         fn new() -> Self {
             Self {
-                conn: Connection::open_in_memory().expect("in-memory db"),
+                admin_engine: AdminEngine::materialized(),
                 temp: TempDir::new().expect("temp dir"),
             }
         }
@@ -558,7 +558,7 @@ mod tests {
         let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
         let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
         let deps = TurnDeps {
-            conn: &engine.conn,
+            engine: &engine.admin_engine,
             source_files: sources,
             working_set: ws,
             result_row_cap: 1_000,

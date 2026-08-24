@@ -57,6 +57,16 @@ impl AdminEngine {
         Ok(())
     }
 
+    /// Test convenience: construct + materialize in one step -- the eager
+    /// shape every `TurnDeps` fixture wants while session construction stays
+    /// eager (slice #650; the deferred-construction flip is #652).
+    #[cfg(test)]
+    pub(crate) fn materialized() -> Self {
+        let engine = Self::new();
+        engine.materialize().expect("test engine materializes");
+        engine
+    }
+
     /// Borrow the materialized connection. Panics when the engine was never
     /// materialized: session construction materializes eagerly (slice #650),
     /// so an unmaterialized engine at a consumer is a logic error, not an

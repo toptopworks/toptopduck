@@ -45,9 +45,9 @@ mod tests {
         ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
         StaleReason,
     };
+    use crate::session::engine::AdminEngine;
     use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
-    use duckdb::Connection;
     use std::collections::HashMap;
 
     fn register_dataset(ws: &mut WorkingSet, name: &str, columns: Vec<ColumnSchema>) {
@@ -69,7 +69,7 @@ mod tests {
     /// No SQL runs -- the descriptor is the source of truth.
     #[test]
     fn returns_cached_columns_and_row_count() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -87,7 +87,7 @@ mod tests {
                 },
             ],
         );
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let payload = dispatch(&json!({"reference_name": "people"}), &mut deps).unwrap();
         // describe is a schema read; no side effect to report.
         assert!(payload.promotion.is_none());
@@ -105,11 +105,11 @@ mod tests {
     /// working set).
     #[test]
     fn unknown_dataset_returns_tool_error() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let err = dispatch(&json!({"reference_name": "ghost"}), &mut deps).unwrap_err();
         assert!(err.contains("unknown dataset"), "{err}");
         assert!(err.contains("ghost"), "{err}");
@@ -120,7 +120,7 @@ mod tests {
     /// agent can reason about why the dataset is unusable.
     #[test]
     fn stale_dataset_is_refused() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
@@ -143,7 +143,7 @@ mod tests {
                 reason: StaleReason::Deleted,
             }),
         });
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let err = dispatch(&json!({"reference_name": "result_1"}), &mut deps).unwrap_err();
         assert!(err.contains("stale"), "{err}");
         assert!(err.contains("result_1"), "{err}");
@@ -154,11 +154,11 @@ mod tests {
     /// before any lookup runs.
     #[test]
     fn missing_parameter_errors_with_field_name() {
-        let conn = Connection::open_in_memory().unwrap();
+        let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut deps = inert_deps(&conn, &mut ws, &mut sources, &mut refs);
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
         let err = dispatch(&json!({}), &mut deps).unwrap_err();
         assert!(err.contains("`reference_name`"), "{err}");
     }
