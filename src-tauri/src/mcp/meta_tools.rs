@@ -63,10 +63,45 @@ pub(crate) fn missing_query_failure() -> String {
     "mcp_search_tools failed: parameter `query`: expected a string".to_string()
 }
 
+/// Parse an `mcp_search_tools` input into its query string (the search
+/// counterpart of [`parse_invoke_input`]). A missing or non-string `query`
+/// maps to [`missing_query_failure`] -- shared by both dispatch sites so a
+/// malformed search fails identically regardless of which runtime served it.
+pub(crate) fn parse_search_input(input: &Value) -> Result<&str, String> {
+    input
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or_else(missing_query_failure)
+}
+
+/// The trace/approval summary for an `mcp_list_servers` call. Shared by both
+/// dispatch sites so the manifest row reads identically regardless of which
+/// runtime served the call.
+pub(crate) const LIST_SUMMARY: &str = "list connected servers";
+
 /// The trace/approval summary for one `mcp_search_tools` call.
 pub(crate) fn query_summary(query: &str) -> String {
     format!("query \"{query}\"")
 }
+
+/// The failure message for a namespaced handle emitted DIRECTLY as a tool
+/// name (ADR-0105 Consequences: `mcp_invoke` is the one addressing path).
+/// Shared by both dispatch sites so the agent sees one error shape
+/// regardless of which runtime refused the call.
+pub(crate) fn direct_handle_failure(name: &str) -> String {
+    format!(
+        "tool `{name}` is a namespaced external handle; address it via \
+         mcp_invoke, not as a direct tool call"
+    )
+}
+
+/// The note an empty-catalog search result carries (issue #661):
+/// `mcp_search_tools` over a turn where NO server connected is otherwise
+/// indistinguishable from a no-match search over a live catalog. The note
+/// points the agent at `mcp_list_servers` inside the same response, so a
+/// single search self-explains instead of forcing a second hop.
+pub(crate) const EMPTY_CATALOG_NOTE: &str =
+    "no MCP servers are connected this turn; call mcp_list_servers for connect outcomes";
 
 /// The trio's definitions as advertised on the tool surface. Attached ONLY
 /// when the turn's effective external set is non-empty (ADR-0105 Decision 6:
@@ -283,5 +318,34 @@ mod tests {
         assert!(parse_invoke_input(&json!({"arguments": {}})).is_err());
         assert!(parse_invoke_input(&json!({"tool": ""})).is_err());
         assert!(parse_invoke_input(&json!({"tool": "mcp__a__b", "arguments": 3})).is_err());
+    }
+
+    /// The shared dispatch pieces both dispatch sites consume (issue #661):
+    /// the list summary, the direct-emission refusal, and the search input
+    /// parse. Pinned in ONE place -- each site previously held its own copy,
+    /// and a re-inlined literal at either site now shows up as a shape
+    /// change against this single source.
+    #[test]
+    fn shared_dispatch_pieces_have_one_pinned_shape() {
+        assert_eq!(LIST_SUMMARY, "list connected servers");
+        assert_eq!(
+            direct_handle_failure("mcp__fake__echo"),
+            "tool `mcp__fake__echo` is a namespaced external handle; \
+             address it via mcp_invoke, not as a direct tool call"
+        );
+        assert_eq!(
+            parse_search_input(&json!({"query": "github"})),
+            Ok("github")
+        );
+        assert_eq!(
+            parse_search_input(&json!({})),
+            Err(missing_query_failure()),
+            "a missing query fails through the shared message"
+        );
+        assert_eq!(
+            parse_search_input(&json!({"query": 7})),
+            Err(missing_query_failure()),
+            "a non-string query fails like a missing one"
+        );
     }
 }

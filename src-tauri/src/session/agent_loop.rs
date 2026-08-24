@@ -48,8 +48,9 @@ use crate::approval::{
 use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::aggregator::{self, McpAggregator, RouteError};
+use crate::mcp::meta_tools;
 use crate::model::{Promotion, ThinkingTrace, TraceEntryView, TraceRound, TurnPhase};
-use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
+use crate::persistence::recipe::{truncate_trace_summary, RecipeTraceEntry, RecipeTraceRound};
 use crate::provider::tool_calling::{
     ThinkingBlock, ToolResult, ToolTurnMessage, ToolTurnOutcome, ToolTurnReply, ToolTurnRequest,
     ToolUse,
@@ -620,30 +621,27 @@ fn execute_call(
     // that never reached a tool.
     let resolved;
     let call = match call.name.as_str() {
-        crate::mcp::meta_tools::META_LIST_SERVERS => {
+        meta_tools::META_LIST_SERVERS => {
             let payload = mcp.server_listing();
             return Ok(local_meta_call(
                 call,
-                "list connected servers",
+                meta_tools::LIST_SUMMARY,
                 payload,
                 outputs,
                 on_phase,
             ));
         }
-        crate::mcp::meta_tools::META_SEARCH_TOOLS => {
-            return match call.input.get("query").and_then(serde_json::Value::as_str) {
-                Some(query) => {
-                    let summary = crate::mcp::meta_tools::query_summary(query);
+        meta_tools::META_SEARCH_TOOLS => {
+            return match meta_tools::parse_search_input(&call.input) {
+                Ok(query) => {
+                    let summary = meta_tools::query_summary(query);
                     let payload = mcp.search_catalog(query);
                     Ok(local_meta_call(call, &summary, payload, outputs, on_phase))
                 }
-                None => Ok(meta_failure(
-                    call,
-                    &crate::mcp::meta_tools::missing_query_failure(),
-                )),
+                Err(message) => Ok(meta_failure(call, &message)),
             };
         }
-        crate::mcp::meta_tools::META_INVOKE => match mcp.resolve_invoke(&call.input) {
+        meta_tools::META_INVOKE => match mcp.resolve_invoke(&call.input) {
             Err(message) => return Ok(meta_failure(call, &message)),
             Ok((handle, arguments)) => {
                 resolved = ToolUse {
@@ -664,11 +662,7 @@ fn execute_call(
         _ if aggregator::parse_namespaced(&call.name).is_some() => {
             return Ok(meta_failure(
                 call,
-                &format!(
-                    "tool `{}` is a namespaced external handle; address it via mcp_invoke, \
-                     not as a direct tool call",
-                    call.name
-                ),
+                &meta_tools::direct_handle_failure(&call.name),
             ));
         }
         _ => call,
@@ -847,8 +841,7 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             // `mcp__<slug>__<tool>` name resolves the server slug for the
             // approval key + trace so a card / row names the real server; a
             // bare unknown name keeps the "unknown" server. Either way the
-            // call badges Network and the summary names the tool so an
-            // approval card can surface it.
+            // call badges Network.
             //
             // Issue #312: `try_external` rejects the reserved `"builtin"`
             // server name. A malicious model can spoof `mcp__builtin__*`; we
@@ -871,11 +864,17 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
                     ToolKey::external(ToolKey::RESERVED_SPOOF_SERVER, other)
                 }
             };
-            (
-                key,
-                OperationKind::Network,
-                format!("external tool `{other}`"),
-            )
+            // The summary carries the call's arguments (issue #661): the
+            // approval card's `summary` field is designed for a parameter
+            // digest, and a handle-only card makes the user blind-sign
+            // whatever the external server is about to receive. The input is
+            // compact-JSON'd under the trace summary cap; the emit-side
+            // `truncate_summary` cap backstops the IPC broadcast.
+            let summary = format!(
+                "external tool `{other}` with {}",
+                truncate_trace_summary(&call.input.to_string())
+            );
+            (key, OperationKind::Network, summary)
         }
     }
 }
@@ -952,7 +951,7 @@ fn shape_external_outcome(
 /// synthetic single-call trace and a live `materialize` summary match.
 fn summarize_field(input: &Value, field: &str, fallback: &str) -> String {
     let value = input.get(field).and_then(Value::as_str).unwrap_or(fallback);
-    crate::persistence::recipe::truncate_trace_summary(value)
+    truncate_trace_summary(value)
 }
 
 /// Truncate a string to `max` chars, appending an ellipsis when it was cut.
@@ -2744,6 +2743,39 @@ mod tests {
         assert!(calls[0].success, "local catalog read succeeds");
     }
 
+    /// A `mcp_search_tools` call without a usable query fails through the
+    /// SHARED parse (issue #661): the model gets the call's own error (the
+    /// same `missing_query_failure` message the gateway serves) with no
+    /// phase events and no trace entry -- the same traceless shape as a
+    /// resolution failure.
+    #[test]
+    fn meta_tool_search_without_a_query_fails_traceless_with_the_shared_message() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "meta-search-malformed",
+            vec![
+                Ok(call("mcp_search_tools", json!({}))),
+                Ok(ToolTurnReply::Text("recovered".into())),
+            ],
+        );
+        let outcome = run_loop(
+            &provider,
+            cancel,
+            24,
+            "meta-search-malformed",
+            &mut ws,
+            &engine.admin_engine,
+            engine.temp.path(),
+        );
+        assert_eq!(outcome.termination, Termination::Text("recovered".into()));
+        assert!(
+            outcome.trace.is_empty(),
+            "a malformed search never reached a tool -> no trace entry"
+        );
+    }
+
     /// A namespaced handle emitted DIRECTLY as a tool name is refused before
     /// the gate (ADR-0105 Consequences): the model gets the call's own error
     /// pointing at `mcp_invoke`, the round records no call, and the retained
@@ -2946,6 +2978,14 @@ mod tests {
         assert!(
             unknown.2.contains("acme_fetch"),
             "external summary names the tool: {}",
+            unknown.2
+        );
+        // Issue #661: the external summary carries the call's arguments (the
+        // approval card's parameter digest) -- a handle-only summary makes
+        // the user blind-sign what the external server receives.
+        assert!(
+            unknown.2.contains("with {"),
+            "external summary carries the argument JSON: {}",
             unknown.2
         );
     }

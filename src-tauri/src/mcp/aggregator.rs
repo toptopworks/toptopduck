@@ -57,15 +57,30 @@ struct AggregatedServer {
 /// One attempted connect this turn, retained for `mcp_list_servers`
 /// (ADR-0105 Decision 1): the manifest shows enabled servers that FAILED to
 /// connect too (with the reason), while the search catalog carries only the
-/// connected ones. Derived from the [`ConnectResult`] at connect time so the
-/// turn paths that discard the returned slice still surface the outcomes
-/// through the discovery surface.
+/// connected ones. Built by the single [`McpAggregator::record_outcome`]
+/// helper next to the [`ConnectResult`] it mirrors, so the two surfaces
+/// cannot drift.
 struct ConnectRecord {
     display_name: String,
-    /// `None` when the connect failed (no slug was allocated).
-    slug: Option<String>,
-    tool_count: usize,
-    error: Option<String>,
+    outcome: ConnectOutcome,
+}
+
+/// The two legal shapes of one connect attempt (issue #661): the flat
+/// `slug: Option` + `tool_count` + `error: Option` triple allowed 14 illegal
+/// combinations; the enum makes a misshapen outcome unrepresentable.
+/// `Connected` carries the live tool count + the projected tool list (a
+/// failure has no tools -- the empty-Vec placeholder the flat shape needed
+/// is gone); `Failed` carries the skip reason. The manifest-facing record
+/// reads only these fields (the allocated slug stays on [`AggregatedServer`],
+/// the sole consumer of routing keys).
+enum ConnectOutcome {
+    Connected {
+        tool_count: usize,
+        tools: Vec<McpToolInfo>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// One configured server's per-turn connect outcome (issue #301 slice D).
@@ -186,19 +201,13 @@ impl McpAggregator {
                     "MCP server {} connect failed, skipping: {e}",
                     config.id
                 );
-                self.connect_records.push(ConnectRecord {
-                    display_name: config.display_name.clone(),
-                    slug: None,
-                    tool_count: 0,
-                    error: Some(e.to_string()),
-                });
-                return ConnectResult {
-                    id: config.id.clone(),
-                    connected: false,
-                    tool_count: 0,
-                    tools: Vec::new(),
-                    error: Some(e.to_string()),
-                };
+                return self.record_outcome(
+                    &config.display_name,
+                    &config.id,
+                    ConnectOutcome::Failed {
+                        error: e.to_string(),
+                    },
+                );
             }
         };
         let tools = match client.list_tools() {
@@ -214,44 +223,70 @@ impl McpAggregator {
                 // a server whose tools/list is broken contributes nothing to the
                 // discovery catalog, so it is not kept around for the turn
                 // (matching the connect-failure skip above).
-                self.connect_records.push(ConnectRecord {
-                    display_name: config.display_name.clone(),
-                    slug: None,
-                    tool_count: 0,
-                    error: Some(format!("tools/list failed: {e}")),
-                });
-                return ConnectResult {
-                    id: config.id.clone(),
-                    connected: false,
-                    tool_count: 0,
-                    tools: Vec::new(),
-                    error: Some(format!("tools/list failed: {e}")),
-                };
+                return self.record_outcome(
+                    &config.display_name,
+                    &config.id,
+                    ConnectOutcome::Failed {
+                        error: format!("tools/list failed: {e}"),
+                    },
+                );
             }
         };
         let tool_count = tools.len();
         let tool_infos = extract_tool_info(&tools);
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
-        self.connect_records.push(ConnectRecord {
-            display_name: config.display_name.clone(),
-            slug: Some(slug.clone()),
-            tool_count,
-            error: None,
-        });
         self.servers.push(AggregatedServer {
             slug,
             display_name: config.display_name.clone(),
             client,
             tools,
         });
-        ConnectResult {
-            id: config.id.clone(),
-            connected: true,
-            tool_count,
-            tools: tool_infos,
-            error: None,
-        }
+        self.record_outcome(
+            &config.display_name,
+            &config.id,
+            ConnectOutcome::Connected {
+                tool_count,
+                tools: tool_infos,
+            },
+        )
+    }
+
+    /// Record one connect attempt in BOTH durable surfaces -- the
+    /// `mcp_list_servers` manifest record and the per-server
+    /// [`ConnectResult`] -- from the single typed outcome (issue #661).
+    /// The `connect_one` branches previously pushed a record AND returned a
+    /// result built in parallel, two construction sites that could drift;
+    /// this is now the one place either shape is built.
+    fn record_outcome(
+        &mut self,
+        display_name: &str,
+        id: &McpServerId,
+        outcome: ConnectOutcome,
+    ) -> ConnectResult {
+        let result = match &outcome {
+            ConnectOutcome::Connected {
+                tool_count, tools, ..
+            } => ConnectResult {
+                id: id.clone(),
+                connected: true,
+                tool_count: *tool_count,
+                tools: tools.clone(),
+                error: None,
+            },
+            ConnectOutcome::Failed { error } => ConnectResult {
+                id: id.clone(),
+                connected: false,
+                tool_count: 0,
+                tools: Vec::new(),
+                error: Some(error.clone()),
+            },
+        };
+        self.connect_records.push(ConnectRecord {
+            display_name: display_name.to_string(),
+            outcome,
+        });
+        result
     }
 
     /// Spawn + initialize every configured server (issue #301 slice C-gw) and
@@ -316,6 +351,13 @@ impl McpAggregator {
     /// card's field is byte-wise the `mcp_invoke` addressing argument. Results
     /// cap at [`SEARCH_TOP_K`](meta_tools::SEARCH_TOP_K); `total_matched`
     /// carries the pre-cap count so the agent knows to narrow the query.
+    ///
+    /// An empty catalog (nothing connected) additionally carries the note so
+    /// a single search distinguishes "no server connected" from "connected
+    /// but no match" without a second hop (issue #661). A server connected
+    /// with zero usable tools stays note-free: the catalog is technically
+    /// live, and the manifest already reports the server honestly as
+    /// connected with tool_count 0.
     pub fn search_catalog(&self, query: &str) -> Value {
         let mut cards = Vec::new();
         let mut total_matched = 0usize;
@@ -353,7 +395,13 @@ impl McpAggregator {
                 }
             }
         }
-        serde_json::json!({ "tools": cards, "total_matched": total_matched })
+        let mut result = serde_json::json!({ "tools": cards, "total_matched": total_matched });
+        if self.servers.is_empty() {
+            // The empty-catalog note (see the method doc): the only
+            // shape difference between "nothing connected" and "no match".
+            result["note"] = serde_json::json!(meta_tools::EMPTY_CATALOG_NOTE);
+        }
+        result
     }
 
     /// The `mcp_list_servers` manifest (ADR-0105 Decision 1): every attempted
@@ -367,11 +415,15 @@ impl McpAggregator {
             .connect_records
             .iter()
             .map(|r| {
+                let (connected, tool_count, error) = match &r.outcome {
+                    ConnectOutcome::Connected { tool_count, .. } => (true, *tool_count, None),
+                    ConnectOutcome::Failed { error } => (false, 0, Some(error.as_str())),
+                };
                 serde_json::json!({
                     "server": r.display_name,
-                    "connected": r.slug.is_some(),
-                    "tool_count": r.tool_count,
-                    "error": r.error,
+                    "connected": connected,
+                    "tool_count": tool_count,
+                    "error": error,
                 })
             })
             .collect();
@@ -816,6 +868,102 @@ mod tests {
         let cards = out["tools"].as_array().unwrap();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0]["tool"], "mcp__skipmalformed__echo");
+    }
+
+    /// Issue #661: an empty catalog (no server connected) is distinguishable
+    /// from a no-match search over a live catalog -- the empty shape carries
+    /// the note pointing at `mcp_list_servers`, while a no-match search (and
+    /// a live-but-zero-tools catalog) stay note-free.
+    #[test]
+    fn search_catalog_empty_vs_no_match_are_distinguishable() {
+        // Empty catalog: nothing connected -> the note rides the result.
+        let empty = McpAggregator::empty();
+        let out = empty.search_catalog("");
+        assert_eq!(out["total_matched"], 0);
+        assert_eq!(
+            out["note"].as_str().unwrap(),
+            meta_tools::EMPTY_CATALOG_NOTE,
+            "empty catalog self-explains via the note"
+        );
+
+        // Live catalog, no match: same tools/total_matched shape, NO note --
+        // the agent knows servers exist and the query simply missed.
+        let live = McpAggregator::catalog_server_for_test(
+            "Live",
+            vec![json!({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}})],
+        );
+        let out = live.search_catalog("zzz-no-such-tool");
+        assert_eq!(out["total_matched"], 0);
+        assert_eq!(out["tools"].as_array().unwrap().len(), 0);
+        assert!(
+            out.get("note").is_none(),
+            "a no-match search over a live catalog carries no note"
+        );
+
+        // A server connected with zero usable tools stays note-free: the
+        // catalog is technically live, and the manifest already reports the
+        // server honestly as connected with tool_count 0.
+        let zero =
+            McpAggregator::catalog_server_for_test("Zero", vec![json!({"description": "no name"})]);
+        let out = zero.search_catalog("");
+        assert_eq!(out["total_matched"], 0);
+        assert!(
+            out.get("note").is_none(),
+            "a live-but-zero-tools catalog carries no note"
+        );
+    }
+
+    /// A missing `inputSchema` on a catalog entry degrades to an empty
+    /// object on the card (issue #661) -- the complement of the
+    /// verbatim-schema pins (the gateway + integration tests pin a
+    /// non-trivial schema surviving untouched; this pins the degraded
+    /// shape, so neither can be mistaken for the other).
+    #[test]
+    fn search_card_degrades_a_missing_schema_to_an_empty_object() {
+        let agg = McpAggregator::catalog_server_for_test(
+            "Deg",
+            vec![json!({"name": "echo", "description": "echo"})],
+        );
+        let out = agg.search_catalog("");
+        assert_eq!(
+            out["tools"][0]["inputSchema"],
+            json!({}),
+            "a schema-less entry degrades to an empty object, not null/missing"
+        );
+    }
+
+    /// The manifest record and the returned `ConnectResult` are built from
+    /// ONE typed outcome (issue #661): a failed connect surfaces the same
+    /// reason in both surfaces, and the manifest's connected/tool_count
+    /// agree with the result. (The success side is pinned end-to-end over a
+    /// live fake server in `mcp_gateway_integration`.)
+    #[test]
+    fn connect_outcomes_mirror_between_manifest_and_connect_result() {
+        let mut failed = McpAggregator::empty();
+        let config = McpServerConfig {
+            id: McpServerId("bad".into()),
+            display_name: "Bad".into(),
+            transport: crate::mcp::config::McpTransport::stdio(
+                "/no/such/toptopduck-binary",
+                Vec::new(),
+            ),
+            env: std::collections::BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        let result = failed.connect_one(&config, &[]);
+        assert!(!result.connected, "spawn failure skips the server");
+        let reason = result.error.clone().expect("failure reason");
+        let entry = &failed.server_listing()["servers"][0];
+        assert_eq!(entry["server"], "Bad");
+        assert_eq!(entry["connected"], false);
+        assert_eq!(entry["tool_count"], 0);
+        assert_eq!(
+            entry["error"].as_str().unwrap(),
+            reason,
+            "manifest + ConnectResult carry the SAME reason from one outcome"
+        );
     }
 
     // --- route error branches (no spawn; empty aggregator) ------------------
