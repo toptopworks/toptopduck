@@ -10,9 +10,13 @@
 //!   MCP registry, ADR-0109 Decision 9), name-collision validation against
 //!   the reserved tool names, the argv template renderer, and the tool-table
 //!   definitions builder for the direct-listed surface (ADR-0108 Decision 6).
+//! - [`builtin`] -- the shipped definition set + install detection +
+//!   auto-registration (issue #675, ADR-0109 Decisions 1/3/4): the version
+//!   asset that registers `source = Builtin` entries on detected installs.
 //! - [`executor`] -- the spawn engine: byte-capped stdout/stderr, exit-code
 //!   mapping onto the model-facing tool result, and round-level cancellation
 //!   mapped to process-tree termination (ADR-0108 Decision 5).
 
+pub mod builtin;
 pub mod config;
 pub mod executor;

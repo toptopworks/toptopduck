@@ -576,5 +576,15 @@
   "settings.cli.form.envHint": "Literal values merged over the inherited environment at launch. Secret-named keys (api key, token, …) are refused.",
   "settings.cli.form.envKey": "Env name (row {row})",
   "settings.cli.form.envValue": "Env value (row {row})",
-  "settings.cli.form.removeEnv": "Remove env (row {row})"
+  "settings.cli.form.removeEnv": "Remove env (row {row})",
+  "settings.cli.rescan": "Rescan",
+  "settings.cli.rescanning": "Scanning…",
+  "settings.cli.builtin.title": "Built-in tools",
+  "settings.cli.builtin.description": "Curated tools that register automatically when installed on this machine. Install one, then rescan to use it.",
+  "settings.cli.builtin.state.detected": "Installed",
+  "settings.cli.builtin.state.dormant": "Not detected",
+  "settings.cli.builtin.state.conflict": "Name conflict",
+  "settings.cli.builtin.conflictHint": "Your registration owns this name. Rename or remove it, then rescan.",
+  "settings.cli.builtinBadge": "Built-in",
+  "settings.cli.disabledBadge": "Disabled"
 }

@@ -985,6 +985,26 @@ pub fn remove_cli_tool(
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 
+/// The manual rescan (issue #675): detect the shipped builtin definitions'
+/// executables on PATH (existence only, never a spawn) and auto-register
+/// the hits in one read-modify-write. Also the conflict catch-up point:
+/// after the user renames or removes an entry that owned a builtin name,
+/// this registers the deferred builtin. Returns the updated full config
+/// plus the detection snapshot (the frontend syncs both from the return).
+#[tauri::command]
+pub fn rescan_builtin_cli_tools(
+    live: State<'_, LiveProviderConfig>,
+) -> Result<crate::cli_tools::builtin::BuiltinScanResult, StoreCommandError> {
+    live.scan_and_register(None).map_err(|e| match e {
+        crate::provider::live_config::CliToolWriteError::Invalid(detail) => {
+            StoreCommandError::InvalidCliTool(detail)
+        }
+        crate::provider::live_config::CliToolWriteError::Write(e) => {
+            StoreCommandError::ConfigWriteFailure(e.to_string())
+        }
+    })
+}
+
 /// Store one MCP server secret in the OS keychain under `mcp-<id>-<env_key>`
 /// (issue #301, ADR-0029 one-shot frontend -> Rust transfer). The value never
 /// crosses IPC back out.
@@ -3300,18 +3320,18 @@ mod tests {
 
     #[test]
     fn dangling_cli_refs_flags_missing_and_disabled_but_not_enabled() {
-        let tools = vec![cli_tool("pandoc", true), cli_tool("office-cli", false)];
+        let tools = vec![cli_tool("my-pandoc", true), cli_tool("my-office", false)];
         let referenced = vec![
-            "pandoc".to_string(),
-            "office-cli".to_string(),
+            "my-pandoc".to_string(),
+            "my-office".to_string(),
             "ghost-tool".to_string(),
         ];
         let dangling = dangling_cli_refs(&referenced, &tools);
         // Enabled: live on the tool surface -- not dangling.
-        assert!(!dangling.contains(&"pandoc".to_string()));
+        assert!(!dangling.contains(&"my-pandoc".to_string()));
         // Registered but disabled: dormant (ADR-0106) -- dangles exactly like
         // the unregistered name; both states must warn (issue #674 AC).
-        assert!(dangling.contains(&"office-cli".to_string()));
+        assert!(dangling.contains(&"my-office".to_string()));
         assert!(dangling.contains(&"ghost-tool".to_string()));
         assert_eq!(dangling.len(), 2);
     }
@@ -3329,9 +3349,9 @@ mod tests {
             crate::provider::keychain::KeychainStore::new(),
             cfg_dir.path().join("config.json"),
         );
-        live.upsert_cli_tool(cli_tool("pandoc", true))
+        live.upsert_cli_tool(cli_tool("my-pandoc", true))
             .expect("upsert 1");
-        live.upsert_cli_tool(cli_tool("office-cli", false))
+        live.upsert_cli_tool(cli_tool("my-office", false))
             .expect("upsert 2");
 
         let skills = tempfile::tempdir().expect("skills tempdir");
@@ -3340,7 +3360,7 @@ mod tests {
         std::fs::write(
             root.join("doc-writer").join("SKILL.md"),
             "---\nname: doc-writer\ndescription: Test skill.\nmetadata:\n  \
-             toptopduck_cli_tools: pandoc, office-cli\n---\nBody.\n",
+             toptopduck_cli_tools: my-pandoc, my-office\n---\nBody.\n",
         )
         .unwrap();
 
@@ -3353,7 +3373,7 @@ mod tests {
         let dangling = dangling_cli_refs(&frag.cli_tools, &live.enabled_cli_tools());
         assert_eq!(
             dangling,
-            vec!["office-cli".to_string()],
+            vec!["my-office".to_string()],
             "registered-but-disabled dangles through the real enabled slice"
         );
     }

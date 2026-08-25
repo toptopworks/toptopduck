@@ -5,8 +5,9 @@ import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 
 import { CliSection } from "../CliSection";
-import { removeCliTool, upsertCliTool } from "../../../api";
+import { removeCliTool, rescanBuiltinCliTools, upsertCliTool } from "../../../api";
 import { blankCliTool } from "../../../types/cli-tool";
+import type { BuiltinScanEntry } from "../../../types/cli-tool";
 import type { AppConfig } from "../../../types/app-config";
 
 // The section drives everything through IPC; mock the API so the test never
@@ -14,6 +15,7 @@ import type { AppConfig } from "../../../types/app-config";
 vi.mock("../../../api", () => ({
   upsertCliTool: vi.fn(),
   removeCliTool: vi.fn(),
+  rescanBuiltinCliTools: vi.fn(),
 }));
 
 function makeTool(overrides: Partial<Parameters<typeof upsertCliTool>[0]> = {}) {
@@ -72,9 +74,27 @@ function renderWithProviders(ui: ReactElement) {
   );
 }
 
+function makeScanEntry(
+  overrides: Partial<BuiltinScanEntry> = {},
+): BuiltinScanEntry {
+  return {
+    name: "pandoc",
+    description: "Convert documents between formats.",
+    state: "dormant",
+    ...overrides,
+  };
+}
+
 describe("CliSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The mount effect rescan resolves quietly in every test: no builtin
+    // rows render and the sync callback fires with an empty registry (the
+    // per-test rescan expectations override this with mockResolvedValueOnce).
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
+      config: makeAppConfig([]),
+      scan: [],
+    });
   });
 
   it("renders the empty state when nothing is registered", () => {
@@ -123,6 +143,12 @@ describe("CliSection", () => {
   it("syncs the returned full config after the enable toggle's upsert", async () => {
     const next = makeAppConfig([makeTool({ enabled: false })]);
     vi.mocked(upsertCliTool).mockResolvedValue(next);
+    // The mount rescan also syncs `next` so the reference-equality assertion
+    // below holds whichever call landed first (mount vs toggle).
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
+      config: next,
+      scan: [],
+    });
     const onCliToolsChanged = vi.fn();
     renderWithProviders(
       <CliSection
@@ -160,5 +186,120 @@ describe("CliSection", () => {
       // The removal's returned full config syncs state the same way.
       expect(onCliToolsChanged).toHaveBeenCalledWith(next);
     });
+  });
+});
+
+describe("CliSection builtin panel (issue #675)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
+      config: makeAppConfig([]),
+      scan: [],
+    });
+  });
+
+  it("renders the three detection states on mount", async () => {
+    const scan = [
+      makeScanEntry({
+        name: "pandoc",
+        state: "detected",
+        executable: "pandoc",
+      }),
+      makeScanEntry({ name: "python", state: "dormant" }),
+      makeScanEntry({ name: "office-cli", state: "conflict" }),
+    ];
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
+      config: makeAppConfig([]),
+      scan,
+    });
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    expect(
+      await screen.findByTestId("builtin-cli-row-pandoc"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("builtin-cli-row-python")).toBeInTheDocument();
+    expect(screen.getByTestId("builtin-cli-row-office-cli")).toBeInTheDocument();
+    expect(screen.getByText("Installed")).toBeInTheDocument();
+    expect(screen.getByText("Not detected")).toBeInTheDocument();
+    expect(screen.getByText("Name conflict")).toBeInTheDocument();
+    // The conflict row swaps the description for the disposition hint.
+    expect(
+      screen.getByText(
+        "Your registration owns this name. Rename or remove it, then rescan.",
+      ),
+    ).toBeInTheDocument();
+    // The mount rescan syncs the returned config (no re-fetch).
+    expect(onCliToolsChanged).toHaveBeenCalledWith(makeAppConfig([]));
+  });
+
+  it("keeps the pane usable when the mount rescan fails silently", async () => {
+    vi.mocked(rescanBuiltinCliTools).mockRejectedValueOnce(new Error("ipc down"));
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    // No builtin panel renders and no error lane fires from the mount scan;
+    // only the explicit Rescan button surfaces errors.
+    await waitFor(() => {
+      expect(rescanBuiltinCliTools).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId("builtin-cli-panel")).not.toBeInTheDocument();
+    expect(screen.queryByText(/ipc down/)).not.toBeInTheDocument();
+  });
+
+  it("refreshes the snapshot and syncs the config on the Rescan button", async () => {
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
+      config: makeAppConfig([]),
+      scan: [makeScanEntry({ name: "python", state: "dormant" })],
+    });
+    const next = {
+      config: makeAppConfig([]),
+      scan: [
+        makeScanEntry({
+          name: "python",
+          state: "detected",
+          executable: "python3",
+        }),
+      ],
+    };
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce(next);
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    // Wait for the mount scan to land, then click the manual rescan.
+    await screen.findByTestId("builtin-cli-row-python");
+    expect(screen.getByText("Not detected")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    expect(await screen.findByText("Installed")).toBeInTheDocument();
+    expect(onCliToolsChanged).toHaveBeenLastCalledWith(next.config);
+  });
+
+  it("badges builtin rows and disabled rows on the registration list", () => {
+    const builtin = makeTool({
+      name: "pandoc",
+      source: "builtin",
+      baseline: "following",
+    });
+    const disabledUser = makeTool({ name: "my-tool", enabled: false });
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([builtin, disabledUser])}
+        onCliToolsChanged={vi.fn()}
+      />,
+    );
+    const builtinRow = screen.getByTestId("cli-tool-row-pandoc");
+    expect(builtinRow).toHaveTextContent("Built-in");
+    expect(builtinRow).not.toHaveTextContent("Disabled");
+    const disabledRow = screen.getByTestId("cli-tool-row-my-tool");
+    expect(disabledRow).toHaveTextContent("Disabled");
+    expect(disabledRow).not.toHaveTextContent("Built-in");
   });
 });

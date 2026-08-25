@@ -171,10 +171,22 @@ impl CliToolConfig {
                 self.name
             ));
         }
-        if is_reserved_name(&self.name) {
+        // The reserved-name rule as a legal-shape check (ADR-0109
+        // Decision 7): a user entry may take any non-reserved name, and a
+        // builtin entry may take exactly its OWN builtin-CLI name. Every
+        // other combination rejects -- including a hand-edited or IPC-
+        // claimed `source: "builtin"` entry named after a built-in DuckDB
+        // tool, an `mcp__` handle, a meta tool, or any foreign name. The
+        // read-side filter keeps the same scoping.
+        let name_is_legal = match self.source {
+            CliToolSource::User => !is_reserved_name(&self.name),
+            CliToolSource::Builtin => crate::cli_tools::builtin::is_builtin_name(&self.name),
+        };
+        if !name_is_legal {
             return Err(format!(
                 "name `{}` collides with a reserved tool name (built-in tool, \
-                 `mcp__` handle prefix, or meta tool)",
+                 `mcp__` handle prefix, meta tool, or builtin CLI entry), or the \
+                 entry claims builtin provenance for a foreign name",
                 self.name
             ));
         }
@@ -315,16 +327,18 @@ impl CliToolConfig {
     }
 }
 
-/// The reserved-name check (ADR-0108 Decision 2): a registration name may
-/// not collide with a built-in DuckDB tool name, the `mcp__` namespaced
-/// handle prefix, or a meta-tool name. Checks the live tables (not literal
-/// copies) so a future built-in / meta tool extends the reservation for
-/// free. The builtin-CLI-entry-name class (ADR-0109 Decision 7) joins here
-/// when those entries exist (#675). Also the read-side filter's authority:
-/// `enabled_cli_tools` drops a reserved-named entry a hand-edited file
-/// smuggled past the upsert boundary.
+/// The reserved-name check (ADR-0108 Decision 2 + ADR-0109 Decision 7): a
+/// USER registration name may not collide with a built-in DuckDB tool
+/// name, the `mcp__` namespaced handle prefix, a meta-tool name, or a
+/// builtin CLI entry name (static full-set membership -- installed or
+/// not). Checks the live tables (not literal copies) so a future built-in
+/// / meta tool extends the reservation for free. Also the read-side
+/// filter's authority: `enabled_cli_tools` drops a reserved-named USER
+/// entry a hand-edited file smuggled past the upsert boundary (builtin
+/// entries legitimately carry their own reserved name).
 pub(crate) fn is_reserved_name(name: &str) -> bool {
     name.starts_with("mcp__")
+        || crate::cli_tools::builtin::is_builtin_name(name)
         || crate::tools::definitions::builtin_metadata(name).is_some()
         || name == crate::mcp::meta_tools::META_LIST_SERVERS
         || name == crate::mcp::meta_tools::META_SEARCH_TOOLS
@@ -697,7 +711,7 @@ mod tests {
 
     #[test]
     fn validate_accepts_kebab_case_names() {
-        assert!(tool("pandoc").validate().is_ok());
+        assert!(tool("my-pandoc").validate().is_ok());
         assert!(tool("pdf-to-text").validate().is_ok());
         assert!(tool("tool2").validate().is_ok());
     }
@@ -705,7 +719,7 @@ mod tests {
     #[test]
     fn validate_rejects_non_kebab_names() {
         for bad in ["Pandoc", "pdf_to_text", "-lead", "trail-", "dou--ble", ""] {
-            let mut t = tool("pandoc");
+            let mut t = tool("my-pandoc");
             t.name = bad.to_string();
             assert!(t.validate().is_err(), "name `{bad}` must be rejected");
         }
@@ -713,7 +727,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_over_long_names() {
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.name = "a".repeat(NAME_MAX_LEN + 1);
         assert!(t.validate().is_err());
         t.name = "a".repeat(NAME_MAX_LEN);
@@ -721,9 +735,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_a_builtin_claim_on_a_foreign_or_reserved_name() {
+        // Provenance is not caller-choosable: a `source = Builtin` entry
+        // must carry its OWN builtin-CLI name. A builtin claim on a
+        // reserved name (the DuckDB tool) or any foreign name rejects --
+        // the hand-edit / IPC smuggling path both review axes flagged.
+        let mut reserved = tool("explore");
+        reserved.source = CliToolSource::Builtin;
+        assert!(reserved.validate().is_err());
+        let mut foreign = tool("my-fake");
+        foreign.source = CliToolSource::Builtin;
+        assert!(foreign.validate().is_err());
+        // The one legal builtin shape: its own name.
+        let mut own = tool("pandoc");
+        own.source = CliToolSource::Builtin;
+        own.baseline = Some(CliBaselineState::Following);
+        assert!(own.validate().is_ok());
+    }
+
+    #[test]
     fn validate_rejects_reserved_names() {
         for reserved in ["explore", "materialize", "mcp__srv__tool", "mcp_invoke"] {
-            let mut t = tool("pandoc");
+            let mut t = tool("my-pandoc");
             t.name = reserved.to_string();
             assert!(t.validate().is_err(), "`{reserved}` must be reserved");
         }
@@ -731,10 +764,10 @@ mod tests {
 
     #[test]
     fn validate_requires_description_and_executable() {
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.description = "  ".to_string();
         assert!(t.validate().is_err());
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.executable = String::new();
         assert!(t.validate().is_err());
     }
@@ -744,7 +777,7 @@ mod tests {
         // The registration-time twin of the config read-time scan: a
         // secret-named key accepted here would take the whole file down to
         // defaults on the next load.
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.env
             .insert("MY_API_KEY".to_string(), "sk-test".to_string());
         let err = t.validate().unwrap_err();
@@ -753,7 +786,7 @@ mod tests {
             "the refusal names the key: {err}"
         );
         // A benign key passes: the refusal is shape-based, not a blanket ban.
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.env
             .insert("PANDOC_MODE".to_string(), "strict".to_string());
         assert!(t.validate().is_ok());
@@ -761,14 +794,14 @@ mod tests {
 
     #[test]
     fn validate_rejects_unknown_and_varargs_placeholders() {
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.argv_template = vec!["{nope}".to_string()];
         assert!(
             t.validate().is_err(),
             "unknown placeholder must be rejected"
         );
 
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.argv_template = vec!["convert".to_string(), "{rest}".to_string()];
         t.params = vec![param("unused"), varargs("rest")];
         assert!(
@@ -779,7 +812,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_second_varargs_and_unreferenced_param() {
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.params = vec![param("input"), varargs("a"), varargs("b")];
         t.argv_template = vec![placeholder("input")];
         assert!(
@@ -787,7 +820,7 @@ mod tests {
             "two varargs parameters must be rejected"
         );
 
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.params = vec![param("input"), param("orphan")];
         t.argv_template = vec![placeholder("input")];
         assert!(
@@ -800,7 +833,7 @@ mod tests {
     fn validate_allows_executable_only_invocation() {
         // A tool may take only varargs (whole-binary wrapper registration,
         // ADR-0108 Decision 4): empty template + one varargs parameter.
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.argv_template = Vec::new();
         t.params = vec![varargs("args")];
         assert!(t.validate().is_ok());
@@ -811,7 +844,7 @@ mod tests {
     #[test]
     fn partial_entry_fills_defaults() {
         let raw = json!({
-            "name": "pandoc",
+            "name": "my-pandoc",
             "description": "convert documents",
             "executable": "pandoc"
         });
@@ -826,19 +859,19 @@ mod tests {
 
     #[test]
     fn user_entry_round_trips_with_explicit_source_and_no_baseline() {
-        let json = serde_json::to_value(tool("pandoc")).unwrap();
+        let json = serde_json::to_value(tool("my-pandoc")).unwrap();
         assert_eq!(json["source"], "user", "source always serializes");
         assert!(
             json.get("baseline").is_none(),
             "baseline is skipped when None"
         );
         let back: CliToolConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(back, tool("pandoc"));
+        assert_eq!(back, tool("my-pandoc"));
     }
 
     #[test]
     fn builtin_reservation_round_trips() {
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.source = CliToolSource::Builtin;
         t.baseline = Some(CliBaselineState::Edited);
         let back: CliToolConfig =
@@ -851,12 +884,12 @@ mod tests {
     #[test]
     fn registry_upsert_validates_replaces_and_appends() {
         let mut reg = CliToolRegistry::default();
-        reg.upsert(tool("pandoc")).unwrap();
-        let mut edited = tool("pandoc");
+        reg.upsert(tool("my-pandoc")).unwrap();
+        let mut edited = tool("my-pandoc");
         edited.description = "v2".to_string();
         reg.upsert(edited.clone()).unwrap();
         assert_eq!(reg.tools.len(), 1, "same-name upsert replaces in place");
-        assert_eq!(reg.get("pandoc"), Some(&edited));
+        assert_eq!(reg.get("my-pandoc"), Some(&edited));
 
         let mut invalid = tool("UPPER");
         invalid.name = "UPPER".to_string();
@@ -867,8 +900,8 @@ mod tests {
     #[test]
     fn registry_normalize_dedupes_by_name_keeping_first() {
         let mut reg = CliToolRegistry::default();
-        reg.tools.push(tool("pandoc"));
-        let mut second = tool("pandoc");
+        reg.tools.push(tool("my-pandoc"));
+        let mut second = tool("my-pandoc");
         second.description = "duplicate".to_string();
         reg.tools.push(second);
         reg.normalize();
@@ -879,16 +912,16 @@ mod tests {
     #[test]
     fn registry_remove_reports_whether_an_entry_was_removed() {
         let mut reg = CliToolRegistry::default();
-        reg.upsert(tool("pandoc")).unwrap();
-        assert!(reg.remove("pandoc"));
-        assert!(!reg.remove("pandoc"));
+        reg.upsert(tool("my-pandoc")).unwrap();
+        assert!(reg.remove("my-pandoc"));
+        assert!(!reg.remove("my-pandoc"));
     }
 
     // --- argv rendering --------------------------------------------------------
 
     #[test]
     fn render_call_substitutes_placeholders_and_verbatim_elements() {
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.argv_template = vec![
             "convert".to_string(),
             placeholder("input"),
@@ -1015,7 +1048,7 @@ mod tests {
 
     #[test]
     fn render_call_errors_on_missing_non_string_and_broken_shapes() {
-        let t = tool("pandoc");
+        let t = tool("my-pandoc");
         assert!(
             render_call(&t, &json!({}), Path::new("/tmp"), "tu_1").is_err(),
             "missing parameter errors"
@@ -1027,7 +1060,7 @@ mod tests {
 
         // Hand-edited degrade paths: a stdin parameter smuggled into the
         // template, and two stdin parameters past the single-pipe cap.
-        let mut t = tool("pandoc");
+        let mut t = tool("my-pandoc");
         t.argv_template = vec!["run".to_string(), placeholder("payload")];
         t.params = vec![param("payload")];
         t.params[0].delivery = CliParamDelivery::Stdin;

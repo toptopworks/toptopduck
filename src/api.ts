@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { AppConfig, DefaultRuntime, ModelPosture } from "./types/app-config";
-import type { CliToolConfig } from "./types/cli-tool";
+import type { BuiltinScanResult, CliToolConfig } from "./types/cli-tool";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -467,6 +467,14 @@ export async function upsertCliTool(tool: CliToolConfig): Promise<AppConfig> {
 // full app-config.
 export async function removeCliTool(name: string): Promise<AppConfig> {
   return invoke<AppConfig>("remove_cli_tool", { name });
+}
+
+// The manual rescan (issue #675): detect the shipped builtin definitions'
+// executables on PATH and auto-register the hits (also the conflict
+// catch-up point after the user disposes of a name-clashing entry).
+// Returns the updated full config plus the detection snapshot.
+export async function rescanBuiltinCliTools(): Promise<BuiltinScanResult> {
+  return invoke<BuiltinScanResult>("rescan_builtin_cli_tools");
 }
 
 // Store one MCP server secret in the OS keychain under mcp-<id>-<env_key>
