@@ -111,6 +111,7 @@
   "error.skillMount.notMounted": "Skill \"{name}\" is not mounted",
   "error.store.configWriteFailure": "Failed to save settings",
   "error.store.destinationExists": "A folder with this name already exists; choose a different name",
+  "error.store.invalidCliTool": "Invalid CLI tool registration",
   "error.store.ioFailure": "A file operation failed",
   "error.store.keychainFailure": "Failed to access the OS keychain",
   "error.store.noActiveProfile": "No provider profile is active; create or activate one first",
@@ -584,7 +585,7 @@
   "settings.cli.builtin.state.detected": "Installed",
   "settings.cli.builtin.state.dormant": "Not detected",
   "settings.cli.builtin.state.conflict": "Name conflict",
-  "settings.cli.builtin.conflictHint": "Your registration owns this name. Rename or remove it, then rescan.",
+  "settings.cli.builtin.conflictHint": "Your registration owns this name. Remove it, then rescan.",
   "settings.cli.builtinBadge": "Built-in",
   "settings.cli.disabledBadge": "Disabled"
 }

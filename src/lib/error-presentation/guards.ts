@@ -214,6 +214,7 @@ export function isStoreCommandError(e: unknown): e is StoreCommandError {
     case "KeychainFailure":
     case "ConfigWriteFailure":
     case "UnknownAdapter":
+    case "InvalidCliTool":
       return typeof (e as { data?: unknown }).data === "string";
     case "NoActiveProfile":
       return true;

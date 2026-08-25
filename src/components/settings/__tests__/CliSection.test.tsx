@@ -230,7 +230,7 @@ describe("CliSection builtin panel (issue #675)", () => {
     // The conflict row swaps the description for the disposition hint.
     expect(
       screen.getByText(
-        "Your registration owns this name. Rename or remove it, then rescan.",
+        "Your registration owns this name. Remove it, then rescan.",
       ),
     ).toBeInTheDocument();
     // The mount rescan syncs the returned config (no re-fetch).

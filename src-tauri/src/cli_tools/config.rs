@@ -172,21 +172,19 @@ impl CliToolConfig {
             ));
         }
         // The reserved-name rule as a legal-shape check (ADR-0109
-        // Decision 7): a user entry may take any non-reserved name, and a
-        // builtin entry may take exactly its OWN builtin-CLI name. Every
+        // Decision 7): a user entry may take any non-reserved name, a
+        // builtin entry a builtin-CLI name plus a declared baseline. Every
         // other combination rejects -- including a hand-edited or IPC-
         // claimed `source: "builtin"` entry named after a built-in DuckDB
-        // tool, an `mcp__` handle, a meta tool, or any foreign name. The
-        // read-side filter keeps the same scoping.
-        let name_is_legal = match self.source {
-            CliToolSource::User => !is_reserved_name(&self.name),
-            CliToolSource::Builtin => crate::cli_tools::builtin::is_builtin_name(&self.name),
-        };
-        if !name_is_legal {
+        // tool, an `mcp__` handle, a meta tool, or any foreign name, and a
+        // builtin claim with no baseline. `has_legal_shape` is the one
+        // source; the read-side filter keeps the same scoping.
+        if !has_legal_shape(self) {
             return Err(format!(
                 "name `{}` collides with a reserved tool name (built-in tool, \
-                 `mcp__` handle prefix, meta tool, or builtin CLI entry), or the \
-                 entry claims builtin provenance for a foreign name",
+                 `mcp__` handle prefix, meta tool, or builtin CLI entry), the \
+                 entry claims builtin provenance for a foreign name, or a \
+                 builtin entry carries no baseline",
                 self.name
             ));
         }
@@ -343,6 +341,22 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
         || name == crate::mcp::meta_tools::META_LIST_SERVERS
         || name == crate::mcp::meta_tools::META_SEARCH_TOOLS
         || name == crate::mcp::meta_tools::META_INVOKE
+}
+
+/// The legal-shape rule in one place (ADR-0109 Decision 7, issue #675
+/// review): a USER entry takes a non-reserved name; a BUILTIN entry takes
+/// a builtin-CLI name AND carries a baseline (`baseline = None` is the
+/// user-entry-only state -- a builtin entry is always Following or Edited,
+/// never untracked, so a hand-edited builtin row must at least declare its
+/// baseline posture). `validate` and the `enabled_cli_tools` read filter
+/// both consume this predicate so the two sides cannot drift.
+pub(crate) fn has_legal_shape(tool: &CliToolConfig) -> bool {
+    match tool.source {
+        CliToolSource::User => !is_reserved_name(&tool.name),
+        CliToolSource::Builtin => {
+            crate::cli_tools::builtin::is_builtin_name(&tool.name) && tool.baseline.is_some()
+        }
+    }
 }
 
 /// The registry (the app-config carrier, ADR-0109 Decision 9). Default is
@@ -751,11 +765,30 @@ mod tests {
         own.source = CliToolSource::Builtin;
         own.baseline = Some(CliBaselineState::Following);
         assert!(own.validate().is_ok());
+        // A builtin entry always declares its baseline posture: `None` is
+        // the user-entry-only state (a hand-edited builtin row must at
+        // least say Following or Edited).
+        let mut no_baseline = tool("pandoc");
+        no_baseline.source = CliToolSource::Builtin;
+        no_baseline.baseline = None;
+        assert!(no_baseline.validate().is_err());
     }
 
     #[test]
     fn validate_rejects_reserved_names() {
-        for reserved in ["explore", "materialize", "mcp__srv__tool", "mcp_invoke"] {
+        // The builtin CLI names are reserved for user entries regardless of
+        // what this machine has installed (ADR-0109 Decision 7's static
+        // full-set membership) -- a user `pandoc` would race the
+        // conflict-deference mechanism for the builtin entry's own name.
+        for reserved in [
+            "explore",
+            "materialize",
+            "mcp__srv__tool",
+            "mcp_invoke",
+            "pandoc",
+            "python",
+            "office-cli",
+        ] {
             let mut t = tool("my-pandoc");
             t.name = reserved.to_string();
             assert!(t.validate().is_err(), "`{reserved}` must be reserved");

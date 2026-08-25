@@ -160,7 +160,7 @@ export function CliToolForm({
             className="mt-1"
             value={tool.name}
             disabled={isEdit}
-            placeholder="pandoc"
+            placeholder="my-pandoc"
             onChange={(e) => patch({ name: e.target.value })}
           />
         </label>

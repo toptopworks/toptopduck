@@ -314,7 +314,7 @@ pub fn run() {
             // the frontend loads its first config snapshot (setup completes
             // before any webview IPC -- the structural timing guarantee).
             // Failures log and degrade: the settings-page rescan retries.
-            if let Err(detail) = cli_tools::builtin::startup_register(&live) {
+            if let Err(detail) = cli_tools::builtin::startup_register(&live, None) {
                 log::warn!(
                     "builtin CLI startup registration failed (the settings-page \
                      rescan retries on demand): {detail}"

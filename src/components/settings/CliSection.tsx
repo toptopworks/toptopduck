@@ -366,7 +366,7 @@ function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
           <p className="text-destructive mt-1 text-xs">
             <FormattedMessage
               id="settings.cli.builtin.conflictHint"
-              defaultMessage="Your registration owns this name. Rename or remove it, then rescan."
+              defaultMessage="Your registration owns this name. Remove it, then rescan."
             />
           </p>
         ) : (

@@ -316,12 +316,21 @@ impl LiveProviderConfig {
             &cfg.cli_tools,
             resolve,
         );
-        for tool in to_register {
-            cfg.cli_tools
-                .upsert(tool)
-                .map_err(CliToolWriteError::Invalid)?;
-        }
-        let config = self.store_inner(cfg).map_err(CliToolWriteError::Write)?;
+        let config = if to_register.is_empty() {
+            // Nothing to persist: every shipped definition is dormant or
+            // already registered. Skip the rewrite so startup and pane
+            // mounts do not churn the config file (normalize + atomic
+            // write) -- and a fresh install with no hits keeps the lazily
+            // materialized no-config state.
+            cfg
+        } else {
+            for tool in to_register {
+                cfg.cli_tools
+                    .upsert(tool)
+                    .map_err(CliToolWriteError::Invalid)?;
+            }
+            self.store_inner(cfg).map_err(CliToolWriteError::Write)?
+        };
         Ok(crate::cli_tools::builtin::BuiltinScanResult { config, scan })
     }
 
@@ -351,17 +360,23 @@ impl LiveProviderConfig {
             .filter(|tool| tool.enabled)
             .filter(|tool| {
                 // The validate-side legal-shape rule's read twin (issue
-                // #675): (user, non-reserved) or (builtin, its own name)
-                // passes; everything else drops -- a hand-edited file
-                // claiming builtin provenance still cannot shadow a DuckDB
-                // tool / mcp__ handle / meta tool or smuggle a foreign name.
-                let name_is_legal = match tool.source {
-                    CliToolSource::User => !crate::cli_tools::config::is_reserved_name(&tool.name),
-                    CliToolSource::Builtin => {
-                        crate::cli_tools::builtin::is_builtin_name(&tool.name)
-                    }
-                };
-                if !name_is_legal {
+                // #675): one predicate, `has_legal_shape`, serves both
+                // sides. A hand-edited file claiming builtin provenance
+                // still cannot shadow a DuckDB tool / mcp__ handle / meta
+                // tool, smuggle a foreign name, or carry no baseline. The
+                // drop log names the actual failure mode.
+                if crate::cli_tools::config::has_legal_shape(tool) {
+                    true
+                } else if tool.source == CliToolSource::Builtin {
+                    log::warn!(
+                        "cli tool `{}` in the config file claims builtin \
+                         provenance on a foreign name or carries no baseline; \
+                         it is excluded from the tool surface (remove the \
+                         entry or restore its baseline)",
+                        tool.name
+                    );
+                    false
+                } else {
                     log::warn!(
                         "cli tool `{}` in the config file uses a reserved \
                          name; it is excluded from the tool surface (rename \
@@ -369,8 +384,6 @@ impl LiveProviderConfig {
                         tool.name
                     );
                     false
-                } else {
-                    true
                 }
             })
             .filter(|tool| {
@@ -801,6 +814,13 @@ mod tests {
             live.upsert_cli_tool(reserved),
             Err(CliToolWriteError::Invalid(_))
         ));
+        // The builtin CLI names are equally reserved at the upsert boundary
+        // (ADR-0109 Decision 7): a user `pandoc` would race the
+        // conflict-deference mechanism for the builtin entry's own name.
+        assert!(matches!(
+            live.upsert_cli_tool(cli_tool("pandoc")),
+            Err(CliToolWriteError::Invalid(_))
+        ));
         assert_eq!(live.cli_tools().len(), 1);
     }
 
@@ -863,9 +883,11 @@ mod tests {
         let mut cfg = AppConfig::defaults();
         let mut reserved = cli_tool("my-pandoc");
         reserved.name = "explore".to_string();
+        let mut builtin_named = cli_tool("my-pandoc");
+        builtin_named.name = "python".to_string();
         let mut dup = cli_tool("my-pandoc");
         dup.executable = "other-bin".to_string();
-        cfg.cli_tools.tools = vec![cli_tool("my-pandoc"), reserved, dup];
+        cfg.cli_tools.tools = vec![cli_tool("my-pandoc"), reserved, builtin_named, dup];
         let path = dir.path().join("config.json");
         std::fs::write(&path, serde_json::to_string(&cfg).unwrap()).unwrap();
         let enabled = live.enabled_cli_tools();
@@ -903,7 +925,7 @@ mod tests {
             } else {
                 (*name).to_string()
             };
-            std::fs::write(dir.path().join(file), b"").expect("write exe");
+            std::fs::write(dir.path().join(file), b"bin").expect("write exe");
         }
         dir
     }
@@ -1015,6 +1037,63 @@ mod tests {
                 .enabled,
             "a rescan never re-arms a disabled builtin entry"
         );
+    }
+
+    #[test]
+    fn startup_register_registers_hits_through_the_passed_path() {
+        // The startup window's trigger (ADR-0109 Decision 3, one of its
+        // two): the `path_env` seam keeps the register semantics pinnable
+        // against a controlled PATH instead of this machine's installs.
+        let (_dir, live) = live();
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        crate::cli_tools::builtin::startup_register(&live, Some(path_env)).expect("startup");
+        let tools = live.cli_tools();
+        let builtin = tools
+            .iter()
+            .find(|t| t.name == "pandoc")
+            .expect("registered at startup");
+        assert_eq!(builtin.source, CliToolSource::Builtin);
+        assert!(builtin.enabled);
+    }
+
+    #[test]
+    fn startup_register_stays_dormant_and_writes_nothing_on_a_full_miss() {
+        // No hits -> no registration AND no config write: the startup scan
+        // on a fresh install with nothing installed keeps the lazily
+        // materialized no-config state (the empty-registration store skip).
+        let (dir, live) = live();
+        let empty_dir = tempfile::tempdir().expect("tempdir");
+        let path_env = std::env::join_paths([empty_dir.path()]).expect("join");
+        crate::cli_tools::builtin::startup_register(&live, Some(path_env)).expect("startup");
+        assert!(live.cli_tools().is_empty());
+        assert!(
+            !dir.path().join("config.json").exists(),
+            "a full miss must not materialize the config file"
+        );
+    }
+
+    #[test]
+    fn startup_register_defers_to_a_user_entry_and_succeeds() {
+        // The conflict path is log-and-continue at startup: the call returns
+        // Ok, the user entry survives untouched, and nothing registers
+        // alongside it.
+        let (_dir, live) = live();
+        let mut user_pandoc = cli_tool("my-pandoc");
+        user_pandoc.name = "pandoc".to_string();
+        let mut cfg = AppConfig::defaults();
+        cfg.cli_tools.tools = vec![user_pandoc];
+        std::fs::write(live.path(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        crate::cli_tools::builtin::startup_register(&live, Some(path_env)).expect("startup");
+        let tools = live.cli_tools();
+        assert_eq!(
+            tools.len(),
+            1,
+            "no builtin registration alongside the user entry"
+        );
+        assert_eq!(tools[0].source, CliToolSource::User);
     }
 
     /// An app-config with one active anthropic profile -- the pre-0098 stored

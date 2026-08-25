@@ -135,7 +135,8 @@ export type StoreCommandError =
   | { kind: "KeychainFailure"; data: string }
   | { kind: "ConfigWriteFailure"; data: string }
   | { kind: "NoActiveProfile" }
-  | { kind: "UnknownAdapter"; data: string };
+  | { kind: "UnknownAdapter"; data: string }
+  | { kind: "InvalidCliTool"; data: string };
 
 // --- Progress side-channel events ----------------------------------------
 

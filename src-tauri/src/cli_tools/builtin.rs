@@ -14,7 +14,7 @@
 //! uninstalled mid-run surfaces as a structured tool error, the entry
 //! stays, and it re-arms on reinstall without a rescan.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -155,8 +155,10 @@ pub(crate) fn is_builtin_name(name: &str) -> bool {
 /// process environment. On Windows a name with no extension is matched
 /// against the standard executable suffixes (`.exe` first; `.bat` / `.cmd`
 /// cover npm shims); POSIX needs no suffix. `is_file` guards against PATH
-/// entries pointing at a non-file; executability is enforced by the spawn
-/// itself at call time, not by this scan.
+/// entries pointing at a non-file, and on Windows the zero-length
+/// app-execution-alias stub shape is skipped (see [`is_empty_stub`]);
+/// executability is enforced by the spawn itself at call time, not by this
+/// scan.
 pub(crate) fn which_in(name: &str, path_env: &OsStr) -> Option<PathBuf> {
     let candidates: Vec<String> = if cfg!(windows) && PathBuf::from(name).extension().is_none() {
         [".exe", ".bat", ".cmd"]
@@ -169,12 +171,33 @@ pub(crate) fn which_in(name: &str, path_env: &OsStr) -> Option<PathBuf> {
     for dir in std::env::split_paths(path_env) {
         for candidate in &candidates {
             let resolved = dir.join(candidate);
-            if resolved.is_file() {
+            if resolved.is_file() && !is_empty_stub(&resolved) {
                 return Some(resolved);
             }
         }
     }
     None
+}
+
+/// Reject the Windows app-execution-alias stub shape: stock Windows 11
+/// ships `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe` (and `python3`)
+/// as a ZERO-LENGTH reparse file that `is_file()` reports as true even with
+/// no interpreter installed. Counting it as a hit would auto-register
+/// `python` on machines where every call lands on the Store redirector
+/// (and where `WindowsApps` precedes a user-Path install, the stub shadows
+/// the real interpreter). The stub is always empty; a real executable
+/// never is. Unreadable metadata counts as a miss (conservative).
+#[cfg(windows)]
+fn is_empty_stub(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true)
+}
+
+/// POSIX has no such alias class; every regular file counts.
+#[cfg(not(windows))]
+fn is_empty_stub(_path: &std::path::Path) -> bool {
+    false
 }
 
 /// Resolve against the process PATH (the production wrapper over
@@ -275,12 +298,16 @@ pub(crate) fn scan(
 
 /// The startup-window scan: detect + auto-register in one read-modify-write
 /// BEFORE the frontend loads its first config snapshot (the structural
-/// timing guarantee -- `setup` completes before any webview IPC). Failures
-/// are the caller's to log-and-degrade; the settings-page rescan retries.
+/// timing guarantee -- `setup` completes before any webview IPC). `path_env`
+/// mirrors [`crate::provider::live_config::LiveProviderConfig::scan_and_register`]:
+/// `None` reads the process environment, `Some` is the tests' controlled
+/// PATH. Failures are the caller's to log-and-degrade; the settings-page
+/// rescan retries.
 pub fn startup_register(
     live: &crate::provider::live_config::LiveProviderConfig,
+    path_env: Option<OsString>,
 ) -> Result<(), crate::provider::live_config::CliToolWriteError> {
-    let result = live.scan_and_register(None)?;
+    let result = live.scan_and_register(path_env)?;
     for entry in &result.scan {
         if entry.state == BuiltinDetectionState::Conflict {
             log::warn!(
@@ -326,7 +353,7 @@ mod tests {
         } else {
             "present"
         };
-        std::fs::write(dir.path().join(name), b"").expect("write");
+        std::fs::write(dir.path().join(name), b"bin").expect("write");
         let found = which_in("present", path_env_of(dir.path()).as_os_str());
         assert_eq!(found, Some(dir.path().join(name)));
     }
@@ -356,10 +383,33 @@ mod tests {
         // A bare name resolves through the .exe/.bat/.cmd suffix list on
         // Windows (`.exe` first).
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("tool.bat"), b"").expect("write bat");
+        std::fs::write(dir.path().join("tool.bat"), b"@echo off").expect("write bat");
         assert_eq!(
             which_in("tool", path_env_of(dir.path()).as_os_str()),
             Some(dir.path().join("tool.bat"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn which_in_skips_the_windows_app_execution_alias_stub() {
+        // The Store alias shape: a zero-length reparse file that `is_file()`
+        // reports as true (stock Win11 ships python.exe this way with no
+        // interpreter installed). It must not count as a hit, and the scan
+        // keeps looking: the real `.bat` in the same directory resolves.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("tool.exe"), b"").expect("write stub");
+        std::fs::write(dir.path().join("tool.bat"), b"@echo off").expect("write bat");
+        assert_eq!(
+            which_in("tool", path_env_of(dir.path()).as_os_str()),
+            Some(dir.path().join("tool.bat"))
+        );
+        // A stub alone means dormant, not detected.
+        let stub_only = tempfile::tempdir().expect("tempdir");
+        std::fs::write(stub_only.path().join("tool.exe"), b"").expect("write stub");
+        assert_eq!(
+            which_in("tool", path_env_of(stub_only.path()).as_os_str()),
+            None
         );
     }
 
@@ -367,7 +417,7 @@ mod tests {
     #[test]
     fn which_in_matches_the_bare_name_on_posix() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("tool"), b"").expect("write");
+        std::fs::write(dir.path().join("tool"), b"bin").expect("write");
         assert_eq!(
             which_in("tool", path_env_of(dir.path()).as_os_str()),
             Some(dir.path().join("tool"))
