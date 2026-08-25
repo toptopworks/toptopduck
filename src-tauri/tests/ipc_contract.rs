@@ -433,11 +433,12 @@ fn skill_entry_serializes_with_snake_case_acquired() {
             license: None,
             compatibility: None,
             mcp_servers: vec!["github-mcp".into()],
+            cli_tools: vec!["pandoc".into()],
             body: "Body.\n".into(),
             link_target: Some("/src/pdf-tools".into()),
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
         },
-        r#"{"name":"pdf-tools","description":"Work with PDF files.","acquired":"linked","license":null,"compatibility":null,"mcp_servers":["github-mcp"],"body":"Body.\n","link_target":"/src/pdf-tools","content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        r#"{"name":"pdf-tools","description":"Work with PDF files.","acquired":"linked","license":null,"compatibility":null,"mcp_servers":["github-mcp"],"cli_tools":["pandoc"],"body":"Body.\n","link_target":"/src/pdf-tools","content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
     );
     assert_wire(
         &SkillEntry {
@@ -447,11 +448,12 @@ fn skill_entry_serializes_with_snake_case_acquired() {
             license: Some("MIT".into()),
             compatibility: Some("requires network".into()),
             mcp_servers: Vec::new(),
+            cli_tools: Vec::new(),
             body: "Body.\n".into(),
             link_target: None,
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
         },
-        r#"{"name":"mine","description":"Authored in-app.","acquired":"local","license":"MIT","compatibility":"requires network","mcp_servers":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        r#"{"name":"mine","description":"Authored in-app.","acquired":"local","license":"MIT","compatibility":"requires network","mcp_servers":[],"cli_tools":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
     );
 }
 
@@ -501,6 +503,7 @@ fn skill_listing_wraps_skills_and_ignored() {
                 license: None,
                 compatibility: None,
                 mcp_servers: Vec::new(),
+                cli_tools: Vec::new(),
                 body: "Body.\n".into(),
                 link_target: None,
                 content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -513,7 +516,7 @@ fn skill_listing_wraps_skills_and_ignored() {
             }],
             root_error: None,
         },
-        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"mcp_servers":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}],"root_error":null}"#,
+        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"mcp_servers":[],"cli_tools":[],"body":"Body.\n","link_target":null,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}],"root_error":null}"#,
     );
     assert_wire(
         &SkillListing {

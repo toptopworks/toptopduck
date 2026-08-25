@@ -38,6 +38,7 @@ const localSkill: SkillEntry = {
   license: "MIT",
   compatibility: null,
   mcp_servers: [],
+  cli_tools: [],
   body: "Use this skill when working with PDFs.\n",
   link_target: null,
   content_hash: "deadbeef",
@@ -50,6 +51,7 @@ const linkedSkill: SkillEntry = {
   license: null,
   compatibility: null,
   mcp_servers: [],
+  cli_tools: [],
   body: "External body.\n",
   link_target: "/home/u/.claude/skills/external-skill",
   content_hash: "deadbeef",
@@ -85,7 +87,7 @@ describe("SkillsSection (issue #362)", () => {
       ignored: [],
       root_error: null,
     });
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
 
     expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
     expect(screen.getByText("Work with PDF files.")).toBeInTheDocument();
@@ -100,7 +102,7 @@ describe("SkillsSection (issue #362)", () => {
       ignored: [],
       root_error: null,
     });
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("pdf-tools");
 
     fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
@@ -114,7 +116,7 @@ describe("SkillsSection (issue #362)", () => {
   it("creates a skill via the New drawer", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(createSkill).mockResolvedValue(localSkill);
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("No skills yet. Click New to author one.");
 
     fireEvent.click(screen.getByRole("button", { name: /New/i }));
@@ -133,7 +135,7 @@ describe("SkillsSection (issue #362)", () => {
   it("opens a local skill in the edit drawer and saves via updateSkill", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("pdf-tools");
 
     // Click the skill's name text -- it sits inside the row's click surface.
@@ -154,10 +156,46 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
+  it("edits a skill's CLI tool references through the multi-select", async () => {
+    // Issue #674: the drawer's CLI multi-select mirrors the MCP one. The
+    // option list merges the registered names with the skill's existing
+    // references, so a stale (unregistered) name stays visible + removable.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [{ ...localSkill, cli_tools: ["stale-tool"] }],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(updateSkill).mockResolvedValue(localSkill);
+    renderWithProviders(
+      <SkillsSection configuredMcpIds={[]} configuredCliIds={["pandoc", "office-cli"]} />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    // The merged option list: both registered tools + the stale reference.
+    expect(await screen.findByLabelText("pandoc")).toBeInTheDocument();
+    expect(screen.getByLabelText("office-cli")).toBeInTheDocument();
+    expect(screen.getByLabelText("stale-tool")).toBeInTheDocument();
+
+    // Toggle one registered tool on, drop the stale reference, save.
+    fireEvent.click(screen.getByLabelText("pandoc"));
+    fireEvent.click(screen.getByLabelText("stale-tool"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(updateSkill).toHaveBeenCalledWith(
+        "pdf-tools",
+        expect.objectContaining({
+          cli_tools: ["pandoc"],
+        }),
+      );
+    });
+  });
+
   it("renders a linked skill read-only with an Open source location button", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [linkedSkill], ignored: [], root_error: null });
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("external-skill");
 
     fireEvent.click(screen.getByText("external-skill"));
@@ -177,7 +215,7 @@ describe("SkillsSection (issue #362)", () => {
   it("deletes a skill after confirmation", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("pdf-tools");
 
     // The delete icon button's aria-label is the skill name (exact match
@@ -197,7 +235,7 @@ describe("SkillsSection (issue #362)", () => {
       kind: "NameTaken",
       data: "pdf-tools",
     });
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("No skills yet. Click New to author one.");
 
     fireEvent.click(screen.getByRole("button", { name: /New/i }));
@@ -217,7 +255,7 @@ describe("SkillsSection (issue #362)", () => {
   it("opens the import dialog when the Import button is clicked (issue #367)", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(listSkillSources).mockResolvedValue([]);
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("No skills yet. Click New to author one.");
 
     // The Import button is now enabled (was disabled before #367); clicking it
@@ -231,7 +269,7 @@ describe("SkillsSection (issue #362)", () => {
 
   it("does not render the ignored section when the registry is clean", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("pdf-tools");
 
     expect(screen.queryByTestId("skills-ignored-details")).not.toBeInTheDocument();
@@ -253,7 +291,7 @@ describe("SkillsSection (issue #362)", () => {
       ],
       root_error: null,
     });
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
     await screen.findByText("pdf-tools");
 
     // The summary is always visible (the fold is closed by default); the
@@ -276,7 +314,7 @@ describe("SkillsSection (issue #362)", () => {
 
   it("surfaces a listSkills IPC rejection as a formatted error (issue #375)", async () => {
     vi.mocked(listSkills).mockRejectedValue("IPC transport error");
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
 
     // A raw string reject falls through fmtError to the typeof === "string"
     // branch, rendered verbatim so the user sees the IPC failure rather than
@@ -291,7 +329,7 @@ describe("SkillsSection (issue #362)", () => {
       ignored: [],
       root_error: "read skills root `/locked` failed: Permission denied (os error 13)",
     });
-    renderWithProviders(<SkillsSection configuredMcpIds={[]} />);
+    renderWithProviders(<SkillsSection configuredMcpIds={[]} configuredCliIds={[]} />);
 
     // The locale-catalog prefix renders, and the dynamic root_error detail
     // rides verbatim so the user sees the OS-level reason.

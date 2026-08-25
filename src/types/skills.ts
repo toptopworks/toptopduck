@@ -29,6 +29,10 @@ export interface SkillEntry {
   compatibility: string | null;
   // The ids under metadata.toptopduck_mcp_servers (empty when absent).
   mcp_servers: string[];
+  // The names under metadata.toptopduck_cli_tools (issue #674, ADR-0108
+  // Decision 7; empty when absent). Declarative only -- a reference never
+  // configures or enables the tool.
+  cli_tools: string[];
   // The Markdown body after the frontmatter -- the prompt fragment.
   body: string;
   // The resolved link target for `linked` skills (the "open source location"
@@ -91,6 +95,9 @@ export interface SkillUpdate {
   compatibility: string | null;
   // Empty removes the metadata.toptopduck_mcp_servers extension key.
   mcp_servers: string[];
+  // Empty removes the metadata.toptopduck_cli_tools extension key (issue
+  // #674) -- the exact mcp_servers semantics.
+  cli_tools: string[];
   // Required non-blank (a skill without a prompt fragment has nothing to
   // inject on mount).
   body: string;

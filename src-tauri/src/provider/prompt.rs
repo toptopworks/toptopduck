@@ -962,6 +962,7 @@ mod tests {
             // prompt; the renderer ignores it, so a placeholder is fine here.
             content_hash: "deadbeef".into(),
             mcp_servers: Vec::new(),
+            cli_tools: Vec::new(),
         }
     }
 

@@ -377,6 +377,8 @@
   "settings.skills.drawerEditTitle": "Edit skill {name}",
   "settings.skills.empty": "No skills yet. Click New to author one.",
   "settings.skills.fieldBody": "Body",
+  "settings.skills.fieldCliTools": "CLI tool references",
+  "settings.skills.fieldCliToolsEmpty": "No CLI tools registered.",
   "settings.skills.fieldCompatibility": "Compatibility",
   "settings.skills.fieldLicense": "License",
   "settings.skills.fieldMcpServers": "MCP server references",

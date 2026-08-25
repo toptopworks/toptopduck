@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use super::frontmatter::{mcp_servers_from_yaml, split_frontmatter};
+use super::frontmatter::{cli_tools, mcp_servers, split_frontmatter};
 use super::model::is_valid_skill_name;
 use crate::util::sha256_hex;
 
@@ -48,6 +48,13 @@ pub struct SkillPromptFragment {
     /// contributes to the effective MCP set -- the command layer checks the
     /// ids against the global registry solely to warn on unknown ids.
     pub mcp_servers: Vec<String>,
+    /// The CLI tool registration names declared under
+    /// `metadata.toptopduck_cli_tools` (issue #674, ADR-0108 Decision 7). The
+    /// exact sibling of [`Self::mcp_servers`]: empty when absent or
+    /// unparseable, declarative only -- the command layer warns on names that
+    /// are neither registered nor enabled; the declaration itself never
+    /// configures or enables anything.
+    pub cli_tools: Vec<String>,
 }
 
 /// Resolve the mounted-skill names into prompt fragments for both the system
@@ -89,6 +96,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
             body: String::new(),
             content_hash: String::new(),
             mcp_servers: Vec::new(),
+            cli_tools: Vec::new(),
         };
     }
     let path = root.join(name).join(SKILL_MD);
@@ -106,6 +114,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
                 body: String::new(),
                 content_hash: String::new(),
                 mcp_servers: Vec::new(),
+                cli_tools: Vec::new(),
             };
         }
     };
@@ -116,19 +125,32 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     // structural (fence lines), not semantic (YAML parse), so a body is still
     // recoverable when an externally edited frontmatter is malformed YAML --
     // the user's prompt fragment stays live until they repair or unmount.
-    // The frontmatter YAML string is also captured so the MCP server ids can
-    // be extracted (issue #369) -- a malformed YAML degrades to empty, so a
-    // broken frontmatter injects the body but contributes no MCP servers.
+    // ONE YAML parse feeds both extension keys (MCP server ids, issue #369;
+    // CLI tool names, issue #674): a malformed YAML logs a single degrade
+    // line and contributes no references, but the body is still injected.
     let raw = String::from_utf8_lossy(&bytes);
-    let (body, mcp_servers) = match split_frontmatter(&raw) {
-        Ok((yaml, body)) => (body, mcp_servers_from_yaml(&yaml)),
+    let (body, mcp_servers, cli_tools) = match split_frontmatter(&raw) {
+        Ok((yaml, body)) => match serde_yaml::from_str::<serde_yaml::Value>(&yaml) {
+            Ok(serde_yaml::Value::Mapping(mapping)) => {
+                (body, mcp_servers(&mapping), cli_tools(&mapping))
+            }
+            _ => {
+                log::warn!(
+                    target: "skills",
+                    "mounted skill `{name}` has unparseable frontmatter YAML -- \
+                     extension-key declarations contribute nothing (the body is \
+                     still injected)",
+                );
+                (body, Vec::new(), Vec::new())
+            }
+        },
         Err(reason) => {
             log::warn!(
                 target: "skills",
                 "mounted skill `{name}` has a malformed SKILL.md fence ({reason}) \
                  -- injecting no body, recording hash only",
             );
-            (String::new(), Vec::new())
+            (String::new(), Vec::new(), Vec::new())
         }
     };
     SkillPromptFragment {
@@ -136,6 +158,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
         body,
         content_hash,
         mcp_servers,
+        cli_tools,
     }
 }
 
@@ -329,5 +352,75 @@ mod tests {
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0].body, "Body.\n");
         assert!(fragments[0].mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn fragment_extracts_cli_tools_from_frontmatter() {
+        // A skill declaring CLI tool references via the metadata extension
+        // key yields the parsed names on the fragment (issue #674).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_skill_fm(
+            root,
+            "doc-convert",
+            "\nmetadata:\n  toptopduck_cli_tools: pandoc, office-cli",
+            "Use the document tools.\n",
+        );
+        let fragments = resolve_prompt_fragments(root, &["doc-convert".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(
+            fragments[0].cli_tools,
+            vec!["pandoc".to_string(), "office-cli".to_string()],
+        );
+    }
+
+    #[test]
+    fn fragment_carries_both_extension_keys_independently() {
+        // One skill declaring BOTH reference keys: each lands on its own
+        // fragment field, neither pollutes the other (issue #674 AC).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_skill_fm(
+            root,
+            "both-refs",
+            "\nmetadata:\n  toptopduck_mcp_servers: github-mcp\n  toptopduck_cli_tools: pandoc",
+            "Body.\n",
+        );
+        let fragments = resolve_prompt_fragments(root, &["both-refs".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(
+            fragments[0].mcp_servers,
+            vec!["github-mcp".to_string()],
+            "the CLI key must not leak into the MCP list"
+        );
+        assert_eq!(
+            fragments[0].cli_tools,
+            vec!["pandoc".to_string()],
+            "the MCP key must not leak into the CLI list"
+        );
+    }
+
+    #[test]
+    fn fragment_cli_tools_empty_when_absent_or_unparseable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Absent metadata: no CLI names.
+        put_skill(root, "plain-skill", "Body.\n");
+        let fragments = resolve_prompt_fragments(root, &["plain-skill".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert!(fragments[0].cli_tools.is_empty());
+
+        // Malformed YAML (structural fence survives): body still injected,
+        // cli_tools degrades to empty -- the same ladder as mcp_servers.
+        std::fs::create_dir_all(root.join("bad-yaml")).unwrap();
+        std::fs::write(
+            root.join("bad-yaml").join(SKILL_MD),
+            "---\nname: bad-yaml\ndescription: d\nmetadata: [invalid yaml\n---\nBody.\n",
+        )
+        .unwrap();
+        let fragments = resolve_prompt_fragments(root, &["bad-yaml".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].body, "Body.\n");
+        assert!(fragments[0].cli_tools.is_empty());
     }
 }
