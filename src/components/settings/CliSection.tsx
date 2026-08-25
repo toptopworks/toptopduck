@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Pencil, Plus, Terminal, Trash2 } from "lucide-react";
+import { Pencil, Plus, RefreshCw, Terminal, Trash2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 import type { AppConfig } from "../../types/app-config";
-import type { CliToolConfig } from "../../types/cli-tool";
-import { upsertCliTool, removeCliTool } from "../../api";
+import type { BuiltinScanEntry, CliToolConfig } from "../../types/cli-tool";
+import { upsertCliTool, removeCliTool, rescanBuiltinCliTools } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { cn } from "../../lib/utils";
 import {
@@ -59,6 +59,48 @@ export function CliSection({
   const [error, setError] = useState<string | null>(null);
 
   const tools = appConfig.cli_tools.tools;
+  const [scan, setScan] = useState<BuiltinScanEntry[] | null>(null);
+  const [scanning, setScanning] = useState(false);
+
+  /** Opening the pane refreshes the detection snapshot (issue #675): one
+   * read-modify-write IPC returns the full config + snapshot together. A
+   * mount failure stays silent -- the explicit Rescan button surfaces
+   * errors through the shared error lane. */
+  useEffect(() => {
+    let cancelled = false;
+    rescanBuiltinCliTools()
+      .then((result) => {
+        if (cancelled) return;
+        setScan(result.scan);
+        onCliToolsChanged(result.config);
+      })
+      .catch(() => {
+        /* silent on mount; the manual rescan surfaces errors */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `onCliToolsChanged` is a stable pass-through from the settings view
+    // (the same mount-once contract as the other settings panes).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** The manual rescan (issue #675): refresh the detection snapshot and
+   * sync the registry view from the returned full config; also the
+   * conflict catch-up point after the user disposes of a clashing entry. */
+  async function handleRescan() {
+    setScanning(true);
+    setError(null);
+    try {
+      const result = await rescanBuiltinCliTools();
+      setScan(result.scan);
+      onCliToolsChanged(result.config);
+    } catch (e) {
+      setError(fmtError(e, intl));
+    } finally {
+      setScanning(false);
+    }
+  }
 
   /** The shared error half of every write here: surface a resolve-to-error
    *  or rejection through setError (the McpSection runCommit contract). */
@@ -141,14 +183,39 @@ export function CliSection({
           />
         )}
         action={(
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => setFormTarget({ tool: blankCliTool(), isEdit: false })}
-          >
-            <Plus className="size-4" aria-hidden />
-            <FormattedMessage id="settings.cli.new" defaultMessage="New" />
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={scanning}
+              onClick={() => void handleRescan()}
+            >
+              <RefreshCw
+                className={cn("size-4", scanning && "animate-spin")}
+                aria-hidden
+              />
+              {scanning ? (
+                <FormattedMessage
+                  id="settings.cli.rescanning"
+                  defaultMessage="Scanning…"
+                />
+              ) : (
+                <FormattedMessage
+                  id="settings.cli.rescan"
+                  defaultMessage="Rescan"
+                />
+              )}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => setFormTarget({ tool: blankCliTool(), isEdit: false })}
+            >
+              <Plus className="size-4" aria-hidden />
+              <FormattedMessage id="settings.cli.new" defaultMessage="New" />
+            </Button>
+          </div>
         )}
       />
 
@@ -188,6 +255,28 @@ export function CliSection({
           ))
         )}
       </SettingsCard>
+
+      {scan && (
+        <div className="mt-6" data-testid="builtin-cli-panel">
+          <p className="text-sm font-medium">
+            <FormattedMessage
+              id="settings.cli.builtin.title"
+              defaultMessage="Built-in tools"
+            />
+          </p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            <FormattedMessage
+              id="settings.cli.builtin.description"
+              defaultMessage="Curated tools that register automatically when installed on this machine. Install one, then rescan to use it."
+            />
+          </p>
+          <SettingsCard data-testid="builtin-cli-scan" className="mt-2">
+            {scan.map((entry) => (
+              <BuiltinRow key={entry.name} entry={entry} />
+            ))}
+          </SettingsCard>
+        </div>
+      )}
 
       {error && (
         <p className="settings-error mt-3 text-destructive text-sm">{error}</p>
@@ -255,6 +344,74 @@ export function CliSection({
   );
 }
 
+/** One shipped definition's detection row (issue #675): name + description
+ * with the three-state badge; a conflict row swaps the description for the
+ * disposition hint (rename or remove the user entry, then rescan). */
+function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
+  return (
+    <div
+      data-testid={`builtin-cli-row-${entry.name}`}
+      className="hover:bg-accent/50 flex items-center gap-3 px-4 py-3"
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium truncate">{entry.name}</span>
+          {entry.state === "detected" && entry.executable && (
+            <span className="text-muted-foreground truncate font-mono text-xs">
+              {entry.executable}
+            </span>
+          )}
+        </div>
+        {entry.state === "conflict" ? (
+          <p className="text-destructive mt-1 text-xs">
+            <FormattedMessage
+              id="settings.cli.builtin.conflictHint"
+              defaultMessage="Your registration owns this name. Remove it, then rescan."
+            />
+          </p>
+        ) : (
+          <div className="text-muted-foreground mt-1 truncate text-xs">
+            {entry.description}
+          </div>
+        )}
+      </div>
+      {/* The DESIGN.md badge token: typography.badge (12px/500) on
+       * rounded.md with 2px 8px padding; the secondary coloring, with
+       * destructive text only for the conflict state. */}
+      <span
+        className={cn(
+          "bg-muted shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none",
+          entry.state === "detected" && "text-muted-foreground",
+          entry.state === "dormant" && "text-muted-foreground/60",
+          entry.state === "conflict" && "text-destructive",
+        )}
+      >
+        {/* One literal FormattedMessage per state: the extractor needs a
+         * static id + defaultMessage (the same rule the delivery labels
+         * follow). */}
+        {entry.state === "detected" && (
+          <FormattedMessage
+            id="settings.cli.builtin.state.detected"
+            defaultMessage="Installed"
+          />
+        )}
+        {entry.state === "dormant" && (
+          <FormattedMessage
+            id="settings.cli.builtin.state.dormant"
+            defaultMessage="Not detected"
+          />
+        )}
+        {entry.state === "conflict" && (
+          <FormattedMessage
+            id="settings.cli.builtin.state.conflict"
+            defaultMessage="Name conflict"
+          />
+        )}
+      </span>
+    </div>
+  );
+}
+
 function CliToolRow({
   tool,
   toggling,
@@ -296,6 +453,22 @@ function CliToolRow({
           >
             {tool.name}
           </span>
+          {tool.source === "builtin" && (
+            <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+              <FormattedMessage
+                id="settings.cli.builtinBadge"
+                defaultMessage="Built-in"
+              />
+            </span>
+          )}
+          {!tool.enabled && (
+            <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+              <FormattedMessage
+                id="settings.cli.disabledBadge"
+                defaultMessage="Disabled"
+              />
+            </span>
+          )}
         </div>
         <div className="text-muted-foreground mt-1 truncate text-xs">
           {tool.executable}

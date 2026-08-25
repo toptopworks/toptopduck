@@ -5,6 +5,7 @@
 // All values are non-secret by construction: the backend's config read-time
 // secret-name scan refuses a secret-named env key exactly as it does for MCP
 // server env.
+import type { AppConfig } from "./app-config";
 
 // How one parameter's value reaches the child process, declared per
 // parameter at registration (ADR-0108 Decision 4): inline on the command
@@ -80,4 +81,29 @@ export function blankCliTool(): CliToolConfig {
     source: "user",
     baseline: null,
   };
+}
+
+// One shipped builtin definition's detection outcome (issue #675, ADR-0109
+// Decision 3): a computed snapshot, never persisted. "detected" = a
+// candidate resolved on PATH (registered now or already in the registry);
+// "dormant" = no candidate resolved (no config entry exists);
+// "conflict" = a user registration owns the name (the builtin entry defers
+// until the user renames or removes theirs, then the next scan registers).
+export type BuiltinDetectionState = "detected" | "dormant" | "conflict";
+
+export interface BuiltinScanEntry {
+  name: string;
+  description: string;
+  state: BuiltinDetectionState;
+  // The resolved candidate name (what got written into the registration);
+  // present only when detected.
+  executable?: string;
+}
+
+// The rescan command's return: the updated full config (the ADR-0109
+// Decision 9 sync contract -- commit wholesale, no re-fetch) plus the
+// detection snapshot for the built-in panel.
+export interface BuiltinScanResult {
+  config: AppConfig;
+  scan: BuiltinScanEntry[];
 }

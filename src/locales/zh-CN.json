@@ -111,6 +111,7 @@
   "error.skillMount.notMounted": "技能「{name}」未挂载",
   "error.store.configWriteFailure": "保存设置失败",
   "error.store.destinationExists": "同名文件夹已存在，请更换名称",
+  "error.store.invalidCliTool": "CLI 注册项无效",
   "error.store.ioFailure": "文件操作失败",
   "error.store.keychainFailure": "系统钥匙串访问失败",
   "error.store.noActiveProfile": "当前没有激活的服务商档案，请先创建或激活档案",
@@ -576,5 +577,15 @@
   "settings.cli.form.envHint": "启动时与继承环境合并的字面值。秘密命名的键（api key、token 等）会被拒绝。",
   "settings.cli.form.envKey": "环境变量名（第 {row} 行）",
   "settings.cli.form.envValue": "环境变量值（第 {row} 行）",
-  "settings.cli.form.removeEnv": "移除环境变量（第 {row} 行）"
+  "settings.cli.form.removeEnv": "移除环境变量（第 {row} 行）",
+  "settings.cli.rescan": "重新扫描",
+  "settings.cli.rescanning": "扫描中…",
+  "settings.cli.builtin.title": "内置工具",
+  "settings.cli.builtin.description": "随版策展的工具，检测到本机已安装即自动注册。安装后重新扫描即可使用。",
+  "settings.cli.builtin.state.detected": "已安装",
+  "settings.cli.builtin.state.dormant": "未检测到",
+  "settings.cli.builtin.state.conflict": "名称冲突",
+  "settings.cli.builtin.conflictHint": "你的注册项占用了该名称。删除后重新扫描。",
+  "settings.cli.builtinBadge": "内置",
+  "settings.cli.disabledBadge": "已禁用"
 }

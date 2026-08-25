@@ -308,6 +308,18 @@ pub fn run() {
             // sessions on demand. LiveProviderConfig is shared -- the per-session
             // provider reads key + endpoint through it.
             app.manage(Arc::new(SessionStore::new()));
+            // The builtin-CLI startup window (issue #675, ADR-0109 Decision 9):
+            // detect the shipped definitions' executables on PATH (existence
+            // only, never a spawn) and silently auto-register the hits BEFORE
+            // the frontend loads its first config snapshot (setup completes
+            // before any webview IPC -- the structural timing guarantee).
+            // Failures log and degrade: the settings-page rescan retries.
+            if let Err(detail) = cli_tools::builtin::startup_register(&live, None) {
+                log::warn!(
+                    "builtin CLI startup registration failed (the settings-page \
+                     rescan retries on demand): {detail}"
+                );
+            }
             app.manage(live);
             app.manage(SessionsRoot::new(sessions_root));
             app.manage(SkillsRoot(skills_root));
@@ -396,6 +408,7 @@ pub fn run() {
             commands::upsert_mcp_server,
             commands::upsert_cli_tool,
             commands::remove_cli_tool,
+            commands::rescan_builtin_cli_tools,
             commands::set_mcp_server_secret,
             commands::clear_mcp_server_secret,
             commands::probe_mcp_server,

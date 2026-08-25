@@ -622,35 +622,13 @@ fn flatten_option_values(options: Option<&serde_json::Value>) -> Vec<String> {
 }
 
 /// `which`-style PATH lookup for a single binary name. Returns the first
-/// `PATH` entry that holds the binary as an executable. Windows appends the
-/// standard executable suffixes (`.exe` first; `.bat` / `.cmd` cover npm
-/// shims) when the bare name has no extension. Pure std -- no `which` crate
-/// dependency, consistent with the codebase's minimal-deps stance.
+/// `PATH` entry that holds the binary as an executable. Delegates to the
+/// shared pure core (`cli_tools::builtin::which_in`, extracted there for
+/// the builtin-CLI install detection, issue #675) so both scans resolve
+/// names with one rule set.
 fn which(name: &str) -> Option<PathBuf> {
     let path_env = std::env::var_os("PATH")?;
-    // On Windows, a name with no extension is matched against the standard
-    // executable suffixes; POSIX needs no suffix.
-    let candidates: Vec<String> = if cfg!(windows) && PathBuf::from(name).extension().is_none() {
-        [".exe", ".bat", ".cmd"]
-            .iter()
-            .map(|ext| format!("{name}{ext}"))
-            .collect()
-    } else {
-        vec![name.to_string()]
-    };
-    for dir in std::env::split_paths(&path_env) {
-        for candidate in &candidates {
-            let resolved = dir.join(candidate);
-            // is_file guards against PATH entries pointing at a non-file (a
-            // stale dir, a dangling symlink). Executability is enforced by the
-            // spawn itself (Command surfaces a clear error if the bit is
-            // missing); the scan only needs "the file exists on PATH".
-            if resolved.is_file() {
-                return Some(resolved);
-            }
-        }
-    }
-    None
+    crate::cli_tools::builtin::which_in(name, &path_env)
 }
 
 #[cfg(test)]

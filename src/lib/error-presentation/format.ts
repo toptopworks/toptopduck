@@ -188,6 +188,11 @@ function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string 
         id: "error.store.unknownAdapter",
         defaultMessage: "Unknown CLI adapter",
       });
+    case "InvalidCliTool":
+      return intl.formatMessage({
+        id: "error.store.invalidCliTool",
+        defaultMessage: "Invalid CLI tool registration",
+      });
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled StoreCommandError kind: ${JSON.stringify(unhandled)}`);
