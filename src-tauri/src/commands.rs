@@ -3316,6 +3316,48 @@ mod tests {
         assert_eq!(dangling.len(), 2);
     }
 
+    #[test]
+    fn warn_unknown_cli_names_consults_the_real_enabled_slice() {
+        // Pins the seam `warn_unknown_cli_names` reads: the dangling judgment
+        // must consult the ENABLED slice of a real `LiveProviderConfig`
+        // (`live.enabled_cli_tools()`), not the full registry -- swapping in
+        // `live.cli_tools()` (the MCP sibling's shape) would silently stop
+        // flagging disabled tools while every hand-built-input pin above stays
+        // green.
+        let cfg_dir = tempfile::tempdir().expect("config tempdir");
+        let live = LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore::new(),
+            cfg_dir.path().join("config.json"),
+        );
+        live.upsert_cli_tool(cli_tool("pandoc", true))
+            .expect("upsert 1");
+        live.upsert_cli_tool(cli_tool("office-cli", false))
+            .expect("upsert 2");
+
+        let skills = tempfile::tempdir().expect("skills tempdir");
+        let root = skills.path();
+        std::fs::create_dir_all(root.join("doc-writer")).unwrap();
+        std::fs::write(
+            root.join("doc-writer").join("SKILL.md"),
+            "---\nname: doc-writer\ndescription: Test skill.\nmetadata:\n  \
+             toptopduck_cli_tools: pandoc, office-cli\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // The exact reads `warn_unknown_cli_names` performs after a mount.
+        let frag = resolve_prompt_fragments(root, &["doc-writer".to_string()])
+            .into_iter()
+            .next()
+            .expect("fragment");
+        assert_eq!(frag.cli_tools.len(), 2, "frontmatter parsed both refs");
+        let dangling = dangling_cli_refs(&frag.cli_tools, &live.enabled_cli_tools());
+        assert_eq!(
+            dangling,
+            vec!["office-cli".to_string()],
+            "registered-but-disabled dangles through the real enabled slice"
+        );
+    }
+
     // --- default runtime startup resolution (issue #569, ADR-0098 D2/D3) ----
 
     /// A detected-fn keyed by adapter id: the pure-seam stand-in for the PATH

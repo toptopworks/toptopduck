@@ -35,7 +35,9 @@ pub enum Acquired {
 /// One registry skill as it crosses IPC (issue #362). The full declaration face
 /// (ADR-0086 Decision 1): the prompt fragment (`body`) + the optional MCP
 /// server references (`mcp_servers`, from the frontmatter extension key
-/// `metadata.toptopduck_mcp_servers`). `link_target` is the resolved symlink /
+/// `metadata.toptopduck_mcp_servers`) + the optional CLI tool references
+/// (`cli_tools`, from the frontmatter extension key
+/// `metadata.toptopduck_cli_tools`). `link_target` is the resolved symlink /
 /// junction target for `linked` skills (the "open source location" anchor);
 /// `null` for `local`. Option fields mirror the Rust `Option<String>` + bare
 /// serde convention (None serializes as JSON null, same shape as

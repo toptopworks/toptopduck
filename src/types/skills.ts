@@ -4,9 +4,10 @@
 // equals the directory name). `acquired` is loader-derived (linked = symlink /
 // junction onto an external source, local = real directory); the frontmatter
 // carries the prompt fragment (the body) + optional MCP server references
-// (the `metadata.toptopduck_mcp_servers` extension key). The settings page
-// edits local skills in full and shows linked skills read-only + "open source
-// location".
+// (the `metadata.toptopduck_mcp_servers` extension key) + optional CLI tool
+// references (the `metadata.toptopduck_cli_tools` extension key). The settings
+// page edits local skills in full and shows linked skills read-only + "open
+// source location".
 
 // Loader-derived link/real-directory posture. Crosses IPC as the bare
 // snake_case variant (mirrors the Rust `#[serde(rename_all = "snake_case")]`).

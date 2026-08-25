@@ -8,10 +8,11 @@
 //! `name` (kebab-case, <= 64 chars, equal to the directory name -- ADR-0086
 //! Decision 2); the loader derives `acquired` from the directory's filesystem
 //! nature (`linked` = symlink / junction onto an external source, `local` =
-//! real directory). v1 declares only two things per skill: the prompt fragment
+//! real directory). v1 declares three things per skill: the prompt fragment
 //! (the SKILL.md body) + optional MCP server references (the frontmatter
-//! extension key `metadata.toptopduck_mcp_servers`); `scripts/` execution is
-//! out of scope for v1 (ADR-0086 Decision 1).
+//! extension key `metadata.toptopduck_mcp_servers`) + optional CLI tool
+//! references (the frontmatter extension key `metadata.toptopduck_cli_tools`);
+//! `scripts/` execution is out of scope for v1 (ADR-0086 Decision 1).
 //!
 //! Submodules:
 //! - [`model`]: the wire types (`SkillEntry` / `SkillUpdate` / `Acquired`),
