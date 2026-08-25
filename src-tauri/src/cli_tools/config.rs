@@ -241,6 +241,25 @@ impl CliToolConfig {
                 p.name
             ));
         }
+        // Two file-channel parameters whose names fold to the same sanitized
+        // temp-path segment would share one temp file: the second write
+        // silently overwrites the first (sanitize_segment is not injective --
+        // `input.1` and `input_1` both fold to `input_1`). Refuse at
+        // registration; the render-side degrade twin catches hand edits.
+        let mut file_segments = std::collections::HashMap::new();
+        for p in self
+            .params
+            .iter()
+            .filter(|p| p.delivery == CliParamDelivery::File)
+        {
+            if let Some(first) = file_segments.insert(sanitize_segment(&p.name), p.name.as_str()) {
+                return Err(format!(
+                    "file-delivery parameters `{first}` and `{}` fold to the \
+                     same temp-file name; rename one",
+                    p.name
+                ));
+            }
+        }
         // Template/param-table consistency: every placeholder must name a
         // declared parameter (catches registration-time typos), a varargs
         // parameter must NOT appear in the template (it rides the tail), a
@@ -454,6 +473,19 @@ pub fn render_call(
             }
         } else {
             rendered.argv.push(element.clone());
+        }
+    }
+    // Validation refuses two file parameters that fold to the same sanitized
+    // segment; a hand-edited config that broke it degrades here rather than
+    // letting the second temp write silently overwrite the first value.
+    let mut file_paths = std::collections::HashMap::new();
+    for file in &rendered.files {
+        if let Some(first) = file_paths.insert(file.path.as_path(), file.param.as_str()) {
+            return Err(format!(
+                "file-delivery parameters `{first}` and `{}` render the same \
+                 temp file; rename one",
+                file.param
+            ));
         }
     }
     if let Some(varargs) = tool.params.iter().find(|p| p.varargs) {
@@ -1028,6 +1060,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_call_errors_when_file_params_fold_to_the_same_temp_file() {
+        // The render-side degrade twin of validate's collision refusal: a
+        // hand-edited config smuggled past the upsert boundary must refuse,
+        // not let the second temp write overwrite the first value.
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("input.1"), placeholder("input_1")];
+        t.params = vec![param("input.1"), param("input_1")];
+        t.params[0].delivery = CliParamDelivery::File;
+        t.params[1].delivery = CliParamDelivery::File;
+        let err = render_call(
+            &t,
+            &json!({"input.1": "a", "input_1": "b"}),
+            Path::new("/tmp"),
+            "tu_1",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("render the same temp file"),
+            "the degrade names both parameters: {err}"
+        );
+    }
+
     // --- delivery validation ---------------------------------------------------
 
     #[test]
@@ -1083,6 +1138,31 @@ mod tests {
                 "{delivery:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn validate_rejects_file_params_that_fold_to_the_same_temp_segment() {
+        // `input.1` and `input_1` sanitize to the same segment: both file
+        // channels would target one temp file, the second write silently
+        // overwriting the first -- refuse at registration.
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("input.1"), placeholder("input_1")];
+        t.params = vec![param("input.1"), param("input_1")];
+        t.params[0].delivery = CliParamDelivery::File;
+        t.params[1].delivery = CliParamDelivery::File;
+        let err = t.validate().unwrap_err();
+        assert!(
+            err.contains("fold to the same temp-file name"),
+            "the refusal names the collision: {err}"
+        );
+
+        // Distinct sanitized segments pass (argv delivery ignores the fold).
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("input"), placeholder("config")];
+        t.params = vec![param("input"), param("config")];
+        t.params[0].delivery = CliParamDelivery::File;
+        t.params[1].delivery = CliParamDelivery::File;
+        assert!(t.validate().is_ok());
     }
 
     // --- tool definitions ------------------------------------------------------

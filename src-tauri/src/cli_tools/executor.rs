@@ -123,24 +123,25 @@ fn execute_capped(
     // declared value is written to the child's stdin, then the pipe closes
     // (EOF) -- the close v1 gave every child, now preceded by the bytes. The
     // write rides its own thread: a child that never reads would block a
-    // pipe-sized write forever, and the wait loop must keep polling cancel
-    // (the thread's write breaks with EPIPE when the tree dies, so nothing
-    // outlives the call -- except the pathological grandchild that dups ONLY
-    // the stdin read end: with no pipe write-end of its own to break, the
-    // writer blocks past the call's return. The leak is one bounded thread +
-    // the value String; accepted rather than a join deadline the common path
-    // does not need).
-    match (child.stdin.take(), rendered.stdin) {
-        (Some(mut stdin), Some(value)) => {
-            thread::spawn(move || {
-                // A write failure (the child closed its end early) is not
-                // the call's failure -- many tools succeed without reading
-                // stdin; the call's outcome is the child's exit + streams.
-                let _ = stdin.write_all(value.as_bytes());
-            });
+    // pipe-sized write forever, and the wait loop must keep polling cancel.
+    // A write FAILURE is surfaced, not swallowed: a child that read part of
+    // the value and exited (possibly exit 0) leaves the rest undelivered,
+    // and the outcome carries an explicit marker -- the write-side twin of
+    // the read side's decorate doctrine. A child that never reads at all and
+    // succeeds is still a clean success: the bytes fit the pipe buffer, the
+    // write completed.
+    let stdin_writer = match (child.stdin.take(), rendered.stdin) {
+        (Some(mut stdin), Some(value)) => Some(thread::spawn(move || {
+            stdin
+                .write_all(value.as_bytes())
+                .err()
+                .map(|e| e.to_string())
+        })),
+        (maybe_stdin, _) => {
+            drop(maybe_stdin);
+            None
         }
-        (maybe_stdin, _) => drop(maybe_stdin),
-    }
+    };
     // Tree-kill guard: assigns the child to a kill-on-close job (Windows)
     // or records its process group (Unix). `None` degrades to killing the
     // direct child only -- the guarantee weakens, the call still resolves.
@@ -163,6 +164,12 @@ fn execute_capped(
             // Reap the reader threads so nothing leaks past the call (the
             // bounded reap: the tree is already down, stragglers detach).
             let _ = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
+            // The stdin writer breaks with EPIPE as the tree dies; whatever
+            // is still blocked past the bounds detaches (the outcome is
+            // already the cancellation error).
+            if let Some(writer) = stdin_writer {
+                let _ = wait_bounded(writer, guard.as_ref(), cancel);
+            }
             return error(format!(
                 "cli tool `{}` killed by round cancellation (status: {status:?})",
                 tool.name
@@ -174,11 +181,24 @@ fn execute_capped(
             Err(e) => {
                 let _ = child.kill();
                 let _ = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
+                if let Some(writer) = stdin_writer {
+                    let _ = wait_bounded(writer, guard.as_ref(), cancel);
+                }
                 return error(format!("wait on `{}` failed: {e}", tool.executable));
             }
         }
     };
     let (stdout, stderr) = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
+    // Once the child has exited, the writer resolves almost immediately
+    // (the pipe is either fully written or broken); the bounded ladder
+    // covers the pathological dup-only-stdin holder.
+    let stdin_error = stdin_writer
+        .and_then(|writer| wait_bounded(writer, guard.as_ref(), cancel))
+        .flatten();
+    let stdin_note = match &stdin_error {
+        Some(detail) => format!("\n[stdin delivery incomplete: {detail}]"),
+        None => String::new(),
+    };
     let stdout = decorate("stdout", &stdout, cap);
     let stderr = decorate("stderr", &stderr, cap);
     if status.success() {
@@ -190,6 +210,7 @@ fn execute_capped(
             content.push_str("\n[stderr]\n");
             content.push_str(&stderr);
         }
+        content.push_str(&stdin_note);
         ToolOutcome {
             result: ToolResult {
                 tool_use_id: call.id.clone(),
@@ -200,7 +221,7 @@ fn execute_capped(
         }
     } else {
         error(format!(
-            "`{}` exited with a non-zero status ({status})\n[stderr]\n{stderr}",
+            "`{}` exited with a non-zero status ({status})\n[stderr]\n{stderr}{stdin_note}",
             tool.executable
         ))
     }
@@ -319,52 +340,60 @@ fn decorate(stream: &str, read: &StreamRead, cap: usize) -> String {
     content
 }
 
-/// Reap the reader threads once the child is gone. A grandchild holding
-/// the pipe write-ends (the resident-child class ADR-0108 anticipates)
-/// would block a plain `join()` forever -- including on the cancel path,
-/// where the polling loop has already exited. Give the readers
-/// [`READER_GRACE`] to hit EOF on their own, then terminate the tree to
-/// force it (idempotent beside the cancel path's kill); whatever still has
-/// not finished after [`KILL_GRACE`] is detached -- dropping the handle --
-/// and the stream resolves with an explicit marker instead of its bytes. A
+/// Wait for one spawned helper thread with the bounded ladder: its own time
+/// within [`READER_GRACE`], then terminate the tree to force it (idempotent
+/// beside the cancel path's kill), then [`KILL_GRACE`], then detach --
+/// dropping the handle; the buffers the thread still owns are bounded (a
+/// reader by the cap it enforces, the stdin writer by the value String). A
 /// bounded wait replaces an unbounded one, never a hung turn.
-fn reap_readers(
-    stdout_thread: thread::JoinHandle<StreamRead>,
-    stderr_thread: thread::JoinHandle<StreamRead>,
+fn wait_bounded<T: Default>(
+    handle: thread::JoinHandle<T>,
     guard: Option<&tree::TreeGuard>,
     cancel: &CancelToken,
-) -> (StreamRead, StreamRead) {
-    let done = |out: &thread::JoinHandle<StreamRead>,
-                err: &thread::JoinHandle<StreamRead>|
-     -> bool { out.is_finished() && err.is_finished() };
+) -> Option<T> {
     // The cancel path already terminated the tree: no grace, straight to
     // the post-kill bound.
     let mut deadline = Instant::now() + READER_GRACE;
     if cancel.is_requested() {
         deadline = Instant::now();
     }
-    while !done(&stdout_thread, &stderr_thread) && Instant::now() < deadline {
+    while !handle.is_finished() && Instant::now() < deadline {
         thread::sleep(CANCEL_POLL_INTERVAL);
     }
-    if !done(&stdout_thread, &stderr_thread) {
+    if !handle.is_finished() {
         if let Some(guard) = guard {
             guard.kill_tree();
         }
         let bound = Instant::now() + KILL_GRACE;
-        while !done(&stdout_thread, &stderr_thread) && Instant::now() < bound {
+        while !handle.is_finished() && Instant::now() < bound {
             thread::sleep(CANCEL_POLL_INTERVAL);
         }
     }
-    let take = |handle: thread::JoinHandle<StreamRead>, stream: &str| {
-        if handle.is_finished() {
-            handle.join().unwrap_or_default()
-        } else {
-            // Dropping the handle detaches the thread; the read buffer it
-            // still owns is bounded by the cap it was enforcing.
-            StreamRead::detached(stream)
-        }
-    };
-    (take(stdout_thread, "stdout"), take(stderr_thread, "stderr"))
+    if handle.is_finished() {
+        Some(handle.join().unwrap_or_default())
+    } else {
+        None
+    }
+}
+
+/// Reap the reader threads once the child is gone. A grandchild holding
+/// the pipe write-ends (the resident-child class ADR-0108 anticipates)
+/// would block a plain `join()` forever -- including on the cancel path,
+/// where the polling loop has already exited. Each reader waits out the
+/// bounded ladder above; a detached one resolves with an explicit marker
+/// instead of its bytes.
+fn reap_readers(
+    stdout_thread: thread::JoinHandle<StreamRead>,
+    stderr_thread: thread::JoinHandle<StreamRead>,
+    guard: Option<&tree::TreeGuard>,
+    cancel: &CancelToken,
+) -> (StreamRead, StreamRead) {
+    (
+        wait_bounded(stdout_thread, guard, cancel)
+            .unwrap_or_else(|| StreamRead::detached("stdout")),
+        wait_bounded(stderr_thread, guard, cancel)
+            .unwrap_or_else(|| StreamRead::detached("stderr")),
+    )
 }
 
 /// Platform process-tree termination (ADR-0108 Decision 5). Windows:

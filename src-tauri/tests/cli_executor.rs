@@ -394,3 +394,56 @@ fn stdin_and_file_channels_combine_in_one_registration() {
     assert_eq!(outcome.result.content, "DATACODE");
     assert!(no_temp_files_left(&temp));
 }
+
+#[test]
+fn a_child_that_never_reads_stdin_still_succeeds_without_a_marker() {
+    // The never-reading child is the common tool shape (many CLIs succeed
+    // without touching stdin): the value fits the pipe buffer, the write
+    // completes while the child sleeps, and the call resolves clean -- no
+    // incomplete-delivery marker.
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool(
+        "stdin-tool",
+        &["--sleep", "500", "--exit", "0"],
+        vec![stdin_param("payload")],
+    );
+    let outcome = execute(
+        &tool,
+        &call(json!({"payload": "uninspected body"})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    assert!(
+        !outcome.result.content.contains("stdin delivery incomplete"),
+        "a completed write is not an incomplete delivery: {}",
+        outcome.result.content
+    );
+}
+
+#[test]
+fn a_broken_stdin_pipe_marks_the_delivery_incomplete() {
+    // A value larger than the pipe buffer, a child that exits without
+    // reading: the write breaks partway (EPIPE), and the outcome carries
+    // the explicit marker -- partial delivery never masquerades as complete
+    // (the write-side twin of the read side's decorate doctrine).
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool("stdin-tool", &["--exit", "0"], vec![stdin_param("payload")]);
+    let big = "x".repeat(1024 * 1024);
+    let outcome = execute(
+        &tool,
+        &call(json!({"payload": big})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(
+        !outcome.result.is_error,
+        "exit 0 stays a success: {}",
+        outcome.result.content
+    );
+    assert!(
+        outcome.result.content.contains("stdin delivery incomplete"),
+        "the marker names the partial delivery: {}",
+        outcome.result.content
+    );
+}
