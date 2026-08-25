@@ -1532,7 +1532,7 @@ impl Session {
                 // The enabled CLI registrations ride the same turn inputs
                 // the built-in loop reads (issue #673, ADR-0108 Decision 6):
                 // one registry, one execution engine, two callers.
-                cli: inputs.cli_tools.to_vec(),
+                cli: inputs.cli_tools,
             };
             let gateway_result = serve_connection(handle, ctx, &engine_done);
             (
@@ -1922,9 +1922,13 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// #673) appears in BOTH -- the gateway's `tools/call` dispatch record
 /// (authoritative, ADR-0076 audit) and the CLI's `session/update` tool-call
 /// notification. The gateway record wins for those (it ran the call, so its
-/// success flag + excerpt are the truth); the ACP pump's non-gateway entries
-/// (the CLI's own built-ins -- bash / edit / etc., which never touch the
-/// gateway) are appended. Promotions are gateway-only (the ACP engine leaves
+/// success flag + excerpt are the truth), one ACP duplicate dropped per
+/// gateway row; the ACP pump's non-gateway entries (the CLI's own built-ins
+/// -- bash / edit / etc., which never touch the gateway) are appended. A
+/// registration-named ACP row with no gateway counterpart is the CLI
+/// calling its own same-named tool and stays -- registration validation
+/// cannot see the external runtime's namespace, so a name match alone is
+/// not proof the gateway served the call. Promotions are gateway-only (the ACP engine leaves
 /// them empty by design, slice 9a); termination + `round_trips` are ACP-only
 /// (the gateway serves tools, it does not produce a turn termination).
 ///
@@ -1949,19 +1953,50 @@ fn merge_outcomes(
     // and a round the dedup leaves empty (no calls, no prose, no thinking)
     // drops -- empty stays empty. Row order keeps the gateway's rows first,
     // the same order the pre-grouping flat merge kept.
+    // Per-name served counts from the gateway's own rows: the dedup below
+    // drops at most as many ACP rows as the gateway actually recorded for
+    // each name. A registration name colliding with one of the external
+    // CLI's OWN tools (registration validation cannot see the runtime's
+    // namespace) must not erase the CLI's own call rows from the trace.
+    let mut gateway_served: HashMap<String, usize> = HashMap::new();
+    for entry in &gateway.trace {
+        *gateway_served.entry(entry.name.clone()).or_default() += 1;
+    }
     let mut rounds = Vec::new();
     if !gateway.trace.is_empty() {
         rounds.push(LoopRound::flat(gateway.trace));
     }
     for mut round in std::mem::take(&mut acp.trace) {
-        // A name the gateway SERVES (built-in table + this turn's enabled
-        // CLI registrations, issue #673) is the gateway's to report; the
-        // ACP notification for the same call is a duplicate. Registration
-        // validation refuses built-in names, so the two checks are
-        // disjoint.
+        // A name the gateway SERVES is the gateway's to report: a built-in
+        // name (issue #299 slice 9c -- the external CLI routes those
+        // through the bridge, so a same-named ACP row is the bridge's
+        // echo), or a CLI registration with an unclaimed gateway row
+        // (issue #673) -- dropped one per gateway row. A registration
+        // name with NO gateway counterpart is the external CLI calling
+        // its own same-named tool: the row is real work, so it stays
+        // (with a warn -- the audit surface never silently under-reports).
         round.calls.retain(|entry| {
-            builtin_metadata(&entry.name).is_none()
-                && !cli_tools.iter().any(|t| t.name == entry.name)
+            if builtin_metadata(&entry.name).is_some() {
+                return false;
+            }
+            if !cli_tools.iter().any(|t| t.name == entry.name) {
+                return true;
+            }
+            match gateway_served.get_mut(entry.name.as_str()) {
+                Some(left) if *left > 0 => {
+                    *left -= 1;
+                    false
+                }
+                _ => {
+                    log::warn!(
+                        "ACP tool-call row `{}` matches a CLI registration the \
+                         gateway did not serve this turn; keeping the CLI's own \
+                         row (likely an external-runtime tool of the same name)",
+                        entry.name
+                    );
+                    true
+                }
+            }
         });
         let emptied = round.calls.is_empty() && round.thinking.is_none() && round.text.is_none();
         if !emptied {
@@ -2206,16 +2241,12 @@ mod tests {
         );
     }
 
-    /// Issue #673: a registered CLI tool name is gateway-served too, so the
-    /// same one-call-one-row rule holds -- the gateway's dispatch record
-    /// wins and the ACP notification for the identical call drops (the
-    /// registration is never a builtin name, so this arm is disjoint from
-    /// the builtin dedup above).
-    #[test]
-    fn merge_outcomes_gateway_cli_registration_wins_over_acp_duplicate() {
-        use crate::cli_tools::config::CliToolConfig;
-        let registration = CliToolConfig {
-            name: "doc-convert".into(),
+    /// A minimal enabled registration for the merge tests -- the shape is
+    /// inert here (the merge matches on names only), like the gateway unit
+    /// tests' `cli_fixture`.
+    fn cli_registration(name: &str) -> crate::cli_tools::config::CliToolConfig {
+        crate::cli_tools::config::CliToolConfig {
+            name: name.into(),
             description: "convert".into(),
             executable: "/no/such/exe".into(),
             argv_template: Vec::new(),
@@ -2224,7 +2255,17 @@ mod tests {
             enabled: true,
             source: crate::cli_tools::config::CliToolSource::User,
             baseline: None,
-        };
+        }
+    }
+
+    /// Issue #673: a registered CLI tool name is gateway-served too, so the
+    /// same one-call-one-row rule holds -- the gateway's dispatch record
+    /// wins and the ACP notification for the identical call drops (the
+    /// registration is never a builtin name, so this arm is disjoint from
+    /// the builtin dedup above).
+    #[test]
+    fn merge_outcomes_gateway_cli_registration_wins_over_acp_duplicate() {
+        let registration = cli_registration("doc-convert");
         let gateway = gateway_outcome(vec![trace_entry("g1", "doc-convert", false)]);
         let acp = acp_outcome(vec![trace_entry("a1", "doc-convert", true)]);
         let merged = merge_outcomes(gateway, acp, &[registration]);
@@ -2233,6 +2274,52 @@ mod tests {
         assert!(
             !merged.trace[0].calls[0].success,
             "the gateway success flag wins"
+        );
+    }
+
+    /// Issue #673 review: a registration name the gateway did NOT serve --
+    /// the external CLI calling its own same-named tool (registration
+    /// validation cannot see the runtime's namespace, so the collision is
+    /// legal config) -- keeps its ACP row: a name match alone is not proof
+    /// the gateway served the call, and the audit surface never drops real
+    /// work on one.
+    #[test]
+    fn merge_outcomes_keeps_acp_row_when_no_gateway_counterpart_exists() {
+        let registration = cli_registration("bash");
+        let gateway = gateway_outcome(Vec::new());
+        let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
+        let merged = merge_outcomes(gateway, acp, &[registration]);
+        assert_eq!(merged.trace.len(), 1, "the CLI's own row survives");
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "a1");
+    }
+
+    /// The CLI-registration dedup is count-aware: two bridge calls to one
+    /// registration drop exactly two ACP duplicates (one per gateway row),
+    /// and a third same-named ACP row the gateway cannot account for
+    /// survives -- the rule consumes quota, it does not erase a name.
+    #[test]
+    fn merge_outcomes_cli_dedup_consumes_one_quota_per_gateway_row() {
+        let registration = cli_registration("doc-convert");
+        let gateway = gateway_outcome(vec![
+            trace_entry("g1", "doc-convert", true),
+            trace_entry("g2", "doc-convert", false),
+        ]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "doc-convert", true),
+            trace_entry("a2", "doc-convert", true),
+            trace_entry("a3", "doc-convert", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp, &[registration]);
+        // The gateway's flat round keeps both bridge rows; the ACP round
+        // keeps the one unaccounted row (its thinking/text absent, so the
+        // round survives on the call alone).
+        assert_eq!(merged.trace.len(), 2, "gateway round + surviving ACP round");
+        assert_eq!(merged.trace[0].calls.len(), 2);
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
+        assert_eq!(merged.trace[0].calls[1].tool_use_id, "g2");
+        assert_eq!(
+            merged.trace[1].calls[0].tool_use_id, "a3",
+            "the row past the gateway's count is the CLI's own"
         );
     }
 

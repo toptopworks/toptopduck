@@ -838,7 +838,7 @@ const ARGS_PREVIEW_MAX_CHARS: usize = 448;
 /// file-delivery values ride along as expandable attachments (ADR-0109
 /// Decision 8), captured NOW -- the temp file is deleted when the call
 /// ends, so the payload snapshot is the approver's only durable view.
-pub(crate) fn classify_cli_tool(
+fn classify_cli_tool(
     tool: &crate::cli_tools::config::CliToolConfig,
     input: &Value,
     temp_dir: &Path,
@@ -1901,6 +1901,203 @@ mod tests {
                 .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. })),
             "a gate-denied call must never emit ToolCallStarted"
         );
+    }
+
+    /// The built-in loop's own CLI dispatch arm (issue #673) -- the
+    /// registration driven through `execute_call` with a non-empty `cli`
+    /// slice, the path the gateway's bridge arm mirrors. A seeded trust key
+    /// (the single plane's payoff: one trust axis, two callers) skips the
+    /// card; the executor's structured spawn failure feeds back as a
+    /// tool-level error with the started/completed pair and one trace row.
+    #[test]
+    fn execute_call_dispatches_registered_cli_tool_on_the_built_in_path() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "cli-builtin",
+            vec![
+                Ok(call("doc-convert", json!({"value": "yes"}))),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = ApprovalState::new();
+        // The same key the gateway arm derives from the registration name
+        // bypasses the card on the built-in path too.
+        approval.seed_trust(&ToolKey::external(ToolKey::CLI_SERVER, "doc-convert"));
+        let sink = RecordingSink::default();
+        let registration = crate::cli_tools::config::CliToolConfig {
+            name: "doc-convert".into(),
+            description: "convert a document".into(),
+            executable: "/no/such/cli-fixture-exe".into(),
+            argv_template: vec!["--flag".into(), "{value}".into()],
+            params: vec![crate::cli_tools::config::CliToolParam {
+                name: "value".into(),
+                description: "a flag value".into(),
+                delivery: crate::cli_tools::config::CliParamDelivery::Argv,
+                varargs: false,
+            }],
+            env: Default::default(),
+            enabled: true,
+            source: crate::cli_tools::config::CliToolSource::User,
+            baseline: None,
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("cli-builtin"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            std::slice::from_ref(&registration),
+            &approval,
+            &sink,
+            |p| phases.lock().unwrap().push(p),
+        );
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(
+            phases.len(),
+            4,
+            "Thinking + started + completed + terminal Thinking"
+        );
+        assert_eq!(phases[0], TurnPhase::Thinking { attempt: 1 });
+        match &phases[1] {
+            TurnPhase::ToolCallStarted {
+                name,
+                operation_kind,
+                ..
+            } => {
+                assert_eq!(name, "doc-convert");
+                assert_eq!(*operation_kind, OperationKind::Execute);
+            }
+            other => panic!("expected ToolCallStarted, got {other:?}"),
+        }
+        match &phases[2] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert_eq!(view.name, "doc-convert");
+                assert!(!view.success, "the dangling executable is a spawn failure");
+                assert!(
+                    view.result_excerpt.contains("cli-fixture-exe"),
+                    "the failure names the executable: {}",
+                    view.result_excerpt
+                );
+            }
+            other => panic!("expected ToolCallCompleted, got {other:?}"),
+        }
+        assert_eq!(phases[3], TurnPhase::Thinking { attempt: 2 });
+        let cli_rows: Vec<_> = outcome
+            .trace
+            .iter()
+            .flat_map(|r| r.calls.iter())
+            .filter(|c| c.name == "doc-convert")
+            .collect();
+        assert_eq!(cli_rows.len(), 1, "one call -> one trace row");
+        assert!(!cli_rows[0].success);
+    }
+
+    /// The denial variant on the CLI arm: a registered tool the gate denies
+    /// completes WITHOUT started (the card flips to its resolved-deny row)
+    /// and never spawns -- the same ADR-0078 shape the external-classified
+    /// denial pins, holding for the CLI classification too.
+    #[test]
+    fn gate_denied_cli_tool_emits_only_completion_no_started() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "deny-cli",
+            vec![
+                Ok(call("doc-convert", json!({"value": "yes"}))),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let registration = crate::cli_tools::config::CliToolConfig {
+            name: "doc-convert".into(),
+            description: "convert a document".into(),
+            executable: "/no/such/cli-fixture-exe".into(),
+            argv_template: vec!["--flag".into(), "{value}".into()],
+            params: vec![crate::cli_tools::config::CliToolParam {
+                name: "value".into(),
+                description: "a flag value".into(),
+                delivery: crate::cli_tools::config::CliParamDelivery::Argv,
+                varargs: false,
+            }],
+            env: Default::default(),
+            enabled: true,
+            source: crate::cli_tools::config::CliToolSource::User,
+            baseline: None,
+        };
+
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let responder = std::thread::spawn(move || {
+            let request_id = poll_request_id(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted an approval request");
+            approval_c
+                .respond(request_id, ApprovalResponse::Deny)
+                .expect("deny ok");
+        });
+
+        let phases = std::sync::Mutex::new(Vec::new());
+        let outcome = AgentLoop::new(&provider, cancel).with_caps(24, None).run(
+            &request("deny-cli"),
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            std::slice::from_ref(&registration),
+            &approval,
+            &*sink,
+            |p| phases.lock().unwrap().push(p),
+        );
+        responder.join().expect("responder thread");
+
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(
+            phases.len(),
+            3,
+            "denied CLI call: Thinking + completion + Thinking"
+        );
+        match &phases[1] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert_eq!(view.name, "doc-convert");
+                assert!(!view.success);
+                assert_eq!(view.result_excerpt, "denied by approval gateway");
+            }
+            other => panic!("expected ToolCallCompleted for the denied CLI call, got {other:?}"),
+        }
+        assert!(
+            !phases
+                .iter()
+                .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. })),
+            "a gate-denied CLI call must never emit ToolCallStarted"
+        );
+        let cli_rows: Vec<_> = outcome
+            .trace
+            .iter()
+            .flat_map(|r| r.calls.iter())
+            .filter(|c| c.name == "doc-convert")
+            .collect();
+        assert_eq!(cli_rows.len(), 1, "the denial records one failure row");
+        assert!(!cli_rows[0].success);
     }
 
     /// A denied `mcp_invoke` (ADR-0105 Decision 4 + ADR-0078): the gate

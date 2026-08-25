@@ -36,7 +36,7 @@ use crate::cancel::CancelToken;
 use crate::mcp::aggregator::{self, McpAggregator};
 use crate::mcp::meta_tools;
 use crate::model::Promotion;
-use crate::provider::tool_calling::{ToolDefinition, ToolUse};
+use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::agent_loop::{
     classify_with_cli_tool, truncate_trace_excerpt, ResolvedClassification, TraceEntry,
     TRACE_EXCERPT_MAX,
@@ -101,12 +101,13 @@ pub struct GatewayCtx<'a> {
     /// drops it per turn. Empty when no servers are configured or the session
     /// wiring has not connected any yet.
     pub mcp: McpAggregator,
-    /// The enabled CLI registrations (issue #673, ADR-0108 Decision 6): the
-    /// same enabled slice the turn inputs hand the built-in loop, so the
-    /// bridge advertises + dispatches the single tool plane. Owned
-    /// (turn-local), like `mcp` -- a per-turn clone of small configs, never
-    /// a second read of the config store.
-    pub cli: Vec<crate::cli_tools::config::CliToolConfig>,
+    /// The enabled CLI registrations (issue #673, ADR-0108 Decision 6):
+    /// borrowed from the turn inputs -- the same slice the built-in loop
+    /// reads, so the plane the bridge advertises, classifies, and the trace
+    /// merge de-duplicates against is one object by construction. Turn-local
+    /// like `mcp` (the serve runs on the session thread), and never a second
+    /// read of the config store.
+    pub cli: &'a [crate::cli_tools::config::CliToolConfig],
 }
 
 /// The trace + promotions a serve collected from the bridge's tool calls
@@ -354,7 +355,7 @@ fn handle_method(
             // a per-tool flattened advertisement.
             let mut tools: Vec<Value> = builtin_table().iter().map(tool_to_mcp).collect();
             tools.extend(
-                crate::cli_tools::config::tool_definitions(&ctx.cli)
+                crate::cli_tools::config::tool_definitions(ctx.cli)
                     .iter()
                     .map(tool_to_mcp),
             );
@@ -449,7 +450,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         summary,
         file_attachments,
         cli_tool,
-    } = classify_with_cli_tool(&ctx.cli, call, ctx.deps.temp_path);
+    } = classify_with_cli_tool(ctx.cli, call, ctx.deps.temp_path);
     let gate_req = ApprovalRequest {
         key,
         operation_kind,
@@ -498,37 +499,15 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 // output-cap discipline a built-in-initiated call gets -- one
                 // execution engine, two callers. CLI tools never promote, so
                 // no side-effect channel rides here.
-                let outcome =
+                let executed =
                     crate::cli_tools::executor::execute(tool, call, ctx.deps.temp_path, ctx.cancel);
-                let is_error = outcome.result.is_error;
-                let excerpt = truncate_trace_excerpt(&outcome.result.content, TRACE_EXCERPT_MAX);
-                (
-                    Response::Result(json!({
-                        "content": [{"type": "text", "text": outcome.result.content}],
-                        "isError": is_error,
-                    })),
-                    is_error,
-                    excerpt,
-                )
+                result_envelope(executed.result)
             } else {
                 let dispatched = dispatch(call, &mut ctx.deps, ctx.cancel, ctx.materializer);
                 if let Some(promotion) = dispatched.promotion {
                     outcome.promotions.push(promotion);
                 }
-                let is_error = dispatched.result.is_error;
-                // Truncate via borrow BEFORE the move into the envelope -- a
-                // full-content clone would double peak memory per built-in
-                // call (issue #663 review); the trace-side re-truncation in
-                // the push below is idempotent on the truncated string.
-                let excerpt = truncate_trace_excerpt(&dispatched.result.content, TRACE_EXCERPT_MAX);
-                (
-                    Response::Result(json!({
-                        "content": [{"type": "text", "text": dispatched.result.content}],
-                        "isError": is_error,
-                    })),
-                    is_error,
-                    excerpt,
-                )
+                result_envelope(dispatched.result)
             };
             outcome.trace.push(TraceEntry {
                 tool_use_id: call.id.clone(),
@@ -593,6 +572,25 @@ fn resolution_failure(message: String) -> Response {
 /// the tool so the agent can self-correct (ADR-0077). Returns
 /// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
 /// returns the envelope.
+/// One dispatched call's [`ToolResult`] → (bridge envelope, is_error,
+/// excerpt): the shared tail of the CLI-spawn and builtin-dispatch arms.
+/// The excerpt truncates via borrow BEFORE the move into the envelope -- a
+/// full-content clone would double peak memory per call (issue #663
+/// review); the trace-side re-truncation in the caller's push is
+/// idempotent on the truncated string.
+fn result_envelope(result: ToolResult) -> (Response, bool, String) {
+    let is_error = result.is_error;
+    let excerpt = truncate_trace_excerpt(&result.content, TRACE_EXCERPT_MAX);
+    (
+        Response::Result(json!({
+            "content": [{"type": "text", "text": result.content}],
+            "isError": is_error,
+        })),
+        is_error,
+        excerpt,
+    )
+}
+
 fn external_call_outcome(
     name: &str,
     route_result: Result<Value, aggregator::RouteError>,
@@ -687,6 +685,8 @@ mod tests {
         approval: &'static ApprovalState,
         sink: &'static dyn ApprovalSink,
     ) -> GatewayCtx<'static> {
+        let cli: &'static [crate::cli_tools::config::CliToolConfig] =
+            Box::leak(cli.into_boxed_slice());
         let engine: &'static Engine = Box::leak(Box::new(Engine::new()));
         let ws: &'static mut WorkingSet = Box::leak(Box::new(WorkingSet::default()));
         let sources: &'static mut HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
@@ -1657,8 +1657,9 @@ mod tests {
     /// misreports.
     #[test]
     fn tools_list_direct_lists_cli_tools_after_builtins() {
-        let mut ctx = fresh_ctx();
-        ctx.cli.push(cli_fixture());
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
         let mut outcome = GatewayOutcome::default();
         let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
         let tools = match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
@@ -1680,7 +1681,7 @@ mod tests {
         );
         // Schema identity with the built-in runtime's table: the same
         // `tool_definitions` output, renamed to the MCP field.
-        let defs = crate::cli_tools::config::tool_definitions(&ctx.cli);
+        let defs = crate::cli_tools::config::tool_definitions(ctx.cli);
         assert_eq!(tools[pos]["description"], json!(defs[0].description));
         assert_eq!(tools[pos]["inputSchema"], defs[0].input_schema);
         // No registrations -> no CLI entries: the count is exactly the

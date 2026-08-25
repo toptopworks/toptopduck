@@ -201,6 +201,36 @@ fn external_cli_tool_call_routes_through_the_gateway() {
         }
         other => panic!("cli_gateway_tool_call must complete Textual, got {other:?}"),
     }
+    // One bridge call -> one persisted row: the fixture emits the ACP
+    // notification (`gw_cli_1`) for the same call the gateway served (`id=3`),
+    // and the merge de-duplicates them at the wiring level -- a wiring
+    // regression (an empty slice at the merge call site) would persist two
+    // rows for one call and fail this count.
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    let cli_rows: Vec<_> = last_turn
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .filter(|c| c.name == "cli-fixture-echo")
+        .collect();
+    assert_eq!(
+        cli_rows.len(),
+        1,
+        "one bridge-originated CLI call persists exactly one trace row"
+    );
+    assert!(
+        cli_rows[0].success,
+        "the gateway's served row is the winner"
+    );
 }
 
 /// Issue #646: an MCP request frame from the bridge that exceeds the
