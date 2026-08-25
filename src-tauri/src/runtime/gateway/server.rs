@@ -424,6 +424,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         key,
         operation_kind,
         summary: summary.clone(),
+        file_attachments: Vec::new(),
     };
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
         Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),

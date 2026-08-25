@@ -1017,6 +1017,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             approval_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });

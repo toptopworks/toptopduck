@@ -8,6 +8,13 @@ import { upsertCliTool } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { Switch } from "../ui/switch";
 import { PaneHeader } from "./settings-chrome";
@@ -238,7 +245,7 @@ export function CliToolForm({
           <p className="text-muted-foreground mb-2 text-xs">
             <FormattedMessage
               id="settings.cli.form.paramsHint"
-              defaultMessage="A '{'name'}' placeholder in the fixed arguments receives the parameter's value. The string[] toggle appends the values at the end of the command line instead (whole-binary wrapper)."
+              defaultMessage="A '{'name'}' placeholder in the fixed arguments receives the parameter's value (argv) or its temp-file path (file); a stdin parameter is written to the tool's standard input instead. The string[] toggle appends the values at the end of the command line (whole-binary wrapper)."
             />
           </p>
           {/* Index keys are safe here by construction: every input is fully
@@ -277,10 +284,55 @@ export function CliToolForm({
                   )}
                   onChange={(e) => patchParam(index, { description: e.target.value })}
                 />
+                {/* Delivery (issue #672, ADR-0108 Decision 4): how the value
+                 * reaches the child, declared per parameter. The varargs
+                 * block is an argv-tail construct, so its delivery locks to
+                 * argv when the toggle is on (the backend refuses the
+                 * combination -- this keeps the form honest up front). */}
+                <Select
+                  value={param.varargs ? "argv" : param.delivery}
+                  disabled={param.varargs}
+                  onValueChange={(delivery) =>
+                    patchParam(index, { delivery: delivery as CliToolParam["delivery"] })}
+                >
+                  <SelectTrigger
+                    className="cli-delivery h-8 w-36 shrink-0 text-xs"
+                    aria-label={intl.formatMessage(
+                      {
+                        id: "settings.cli.form.deliveryLabel",
+                        defaultMessage: "Value delivery (row {row})",
+                      },
+                      { row: index + 1 },
+                    )}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="argv">
+                      <FormattedMessage
+                        id="settings.cli.form.deliveryArgv"
+                        defaultMessage="Command line (argv)"
+                      />
+                    </SelectItem>
+                    <SelectItem value="file">
+                      <FormattedMessage
+                        id="settings.cli.form.deliveryFile"
+                        defaultMessage="Temp file (path on the command line)"
+                      />
+                    </SelectItem>
+                    <SelectItem value="stdin">
+                      <FormattedMessage
+                        id="settings.cli.form.deliveryStdin"
+                        defaultMessage="Standard input (stdin)"
+                      />
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
                 <label className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-xs">
                   <Switch
                     checked={param.varargs}
-                    onCheckedChange={(varargs) => patchParam(index, { varargs })}
+                    onCheckedChange={(varargs) =>
+                      patchParam(index, { varargs, ...(varargs ? { delivery: "argv" } : {}) })}
                     aria-label={intl.formatMessage(
                       { id: "settings.cli.form.varargsLabel", defaultMessage: "string[] (row {row})" },
                       { row: index + 1 },

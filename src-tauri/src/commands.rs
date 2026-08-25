@@ -2031,6 +2031,7 @@ impl ApprovalSink for TauriApprovalSink {
                 tool: body.tool.clone(),
                 operation_kind: body.operation_kind,
                 summary: body.summary.clone(),
+                file_attachments: body.file_attachments.clone(),
             },
         ) {
             log::warn!(

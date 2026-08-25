@@ -83,6 +83,24 @@ describe("useApprovalEvents", () => {
     expect(result.current.pendingApprovalSids.has(SID)).toBe(true);
   });
 
+  it("maps file_attachments from the request event onto the entry (issue #672)", async () => {
+    // The wire field is the only source of the pending card's expand-on-
+    // demand snapshot; a rename or a dropped mapping line would silently
+    // kill the feature (`?? []` downstream swallows undefined).
+    const { result } = renderHook(() => useApprovalEvents());
+    await waitFor(() => expect(approvalCbs.request).not.toBeNull());
+    act(() =>
+      approvalCbs.request!(
+        requestEvent({
+          file_attachments: [{ param: "code", content: "print(1)" }],
+        }),
+      ),
+    );
+    expect(result.current.approvalsBySession.get(SID)?.[0].fileAttachments).toEqual([
+      { param: "code", content: "print(1)" },
+    ]);
+  });
+
   it("flips the matching entry to RESOLVED in place on approval-resolved", async () => {
     const { result } = renderHook(() => useApprovalEvents());
     await waitFor(() => expect(approvalCbs.request).not.toBeNull());

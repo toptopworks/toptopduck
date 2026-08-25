@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { Check, Loader2, ShieldQuestion, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -176,11 +176,16 @@ export function LiveRow({
   onRespond: (requestId: string, response: ApprovalResponse) => void;
 }) {
   const intl = useIntl();
+  // The file-delivery expand (issue #672): collapsed by default, a
+  // deliberate low-frequency action (ADR-0109 Decision 8). Declared before
+  // the pending branch -- hooks cannot sit behind a conditional return.
+  const [filesOpen, setFilesOpen] = useState(false);
   if (row.approval !== null && row.approval.response === null) {
     // The in-flow approval card (ADR-0083): tool name + operation badge +
     // parameter summary + the three answers. The gateway suspends the turn on
     // this request; answering wakes it (respond_tool_approval).
     const { requestId } = row.approval;
+    const fileValues = row.approval.fileAttachments ?? [];
     return (
       <li className="approval-card rounded-md border border-border bg-accent/40 p-1.5 my-0.5 text-xs">
         <span className="flex items-center gap-1.5 min-w-0">
@@ -228,6 +233,40 @@ export function LiveRow({
             />
           </span>
         </span>
+        {fileValues.length > 0 && (
+          <>
+            <button
+              type="button"
+              className="approval-files-toggle mt-1 text-[0.68rem] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+              aria-expanded={filesOpen}
+              onClick={() => setFilesOpen((open) => !open)}
+            >
+              {filesOpen ? (
+                <FormattedMessage
+                  id="thread.approval.hideFiles"
+                  defaultMessage="Hide file values"
+                />
+              ) : (
+                <FormattedMessage
+                  id="thread.approval.viewFiles"
+                  defaultMessage="View file values ({count})"
+                  values={{ count: fileValues.length }}
+                />
+              )}
+            </button>
+            {filesOpen &&
+              fileValues.map((file) => (
+                <span key={file.param} className="approval-file mt-1 block">
+                  <span className="approval-file-param font-mono text-[0.68rem] text-muted-foreground">
+                    {file.param}
+                  </span>
+                  <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-[0.68rem] whitespace-pre-wrap break-all">
+                    {file.content}
+                  </pre>
+                </span>
+              ))}
+          </>
+        )}
       </li>
     );
   }

@@ -7,9 +7,9 @@
 // server env.
 
 // How one parameter's value reaches the child process, declared per
-// parameter at registration (ADR-0108 Decision 4). v1 implements "argv"
-// only; "file" / "stdin" land in #672 -- the field rides the wire now so the
-// persisted shape needs no migration when they do.
+// parameter at registration (ADR-0108 Decision 4): inline on the command
+// line (argv), through a temp file whose path rides the command line
+// (file), or through the child's stdin (stdin, at most one per entry).
 export type CliParamDelivery = "argv" | "file" | "stdin";
 
 // One parameter-table entry: name + description + delivery mode, plus the

@@ -38,6 +38,15 @@ export type OperationKind = "read" | "write" | "execute" | "network";
 // from (ADR-0077).
 export type ApprovalResponse = "allow_once" | "always_allow" | "deny";
 
+// One file-delivery value's content for the approval card (issue #672,
+// ADR-0109 Decision 8): the approver can expand the parameter's value on
+// the card. Captured at approval time -- the temp file is deleted when the
+// call ends, so this snapshot is the only durable view.
+export interface FileAttachment {
+  param: string;
+  content: string;
+}
+
 // An `approval-request` event (ADR-0083). The gateway emits this when an
 // external tool call under `per_call` mode hits the gate; the frontend
 // surfaces the in-flow card filtered by `session_id` (ADR-0056).
@@ -50,6 +59,10 @@ export interface ApprovalRequestPayload {
   // Short agent-readable parameter summary for the card body -- NOT the full
   // call arguments (those may be large or sensitive). The bridge summarizes.
   summary: string;
+  // File-delivery values for the card's expand-on-demand view (issue #672).
+  // Optional: the backend omits the field for calls without file-delivered
+  // parameters (serde skip_serializing_if empty).
+  file_attachments?: FileAttachment[];
 }
 
 // An `approval-resolved` event -- the frontend flips the pending card to its

@@ -103,6 +103,23 @@ describe("CliSection", () => {
     expect(screen.getByText(/1 parameters/)).toBeInTheDocument();
   });
 
+  it("offers the three delivery channels per parameter row (issue #672)", () => {
+    // The form declares delivery per parameter (argv / file / stdin,
+    // ADR-0108 Decision 4): the select rides every parameter row, defaulting
+    // to argv. Static-render only -- the option semantics are the backend
+    // validation's tests; here we pin the form surface exists per row.
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add parameter" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add parameter" }));
+    const deliveries = screen.getAllByRole("combobox", {
+      name: /Value delivery \(row \d\)/,
+    });
+    expect(deliveries).toHaveLength(2);
+  });
+
   it("syncs the returned full config after the enable toggle's upsert", async () => {
     const next = makeAppConfig([makeTool({ enabled: false })]);
     vi.mocked(upsertCliTool).mockResolvedValue(next);

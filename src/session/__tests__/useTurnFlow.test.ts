@@ -587,6 +587,19 @@ describe("useTurnFlow", () => {
       });
     });
 
+    it("carries the fileAttachments snapshot onto the approval card row (issue #672)", () => {
+      // The pending card is the snapshot's only surface: the approver
+      // expands it against a value whose temp file is deleted when the call
+      // ends, so the merge must not drop it on the way to the row.
+      const files = [{ param: "code", content: "print(1)" }];
+      const rows = mergeLiveTrace([], [approval({ fileAttachments: files })], 1);
+      expect(rows[0]?.approval).toMatchObject({
+        requestId: "req-1",
+        response: null,
+        fileAttachments: files,
+      });
+    });
+
     it("stamps a trailing approval row with the current round (issue #610)", () => {
       // The trailing card belongs to the round whose gate holds the turn:
       // the live round grouping reads the step, so a round-2 gate wait must

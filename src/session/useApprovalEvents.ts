@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { onApprovalRequest, onApprovalResolved, respondToolApproval } from "../api";
-import type { ApprovalResponse, OperationKind } from "../types/approval";
+import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
 import { log } from "../lib/log";
 
 // App-level ownership of the tiered-approval side channel (ADR-0083, issue
@@ -29,6 +29,10 @@ export interface ApprovalEntry {
   tool: string;
   operationKind: OperationKind;
   summary: string;
+  /** File-delivery values for the card's expand-on-demand view (issue #672):
+   * the approval-time snapshot of each file-delivered parameter. undefined
+   * for calls without them (the backend omits the field). */
+  fileAttachments?: FileAttachment[];
   status: { kind: "pending" } | { kind: "resolved"; response: ApprovalResponse };
 }
 
@@ -77,6 +81,7 @@ export function useApprovalEvents(): UseApprovalEvents {
           tool: ev.tool,
           operationKind: ev.operation_kind,
           summary: ev.summary,
+          fileAttachments: ev.file_attachments,
           status: { kind: "pending" },
         };
         const existing = prev.get(ev.session_id) ?? [];

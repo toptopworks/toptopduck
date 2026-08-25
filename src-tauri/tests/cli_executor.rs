@@ -238,3 +238,212 @@ fn round_cancel_kills_the_child_and_surfaces_a_tool_error() {
         "the sleeping child is killed, not waited out"
     );
 }
+
+// --- file / stdin delivery channels (issue #672, ADR-0108 Decision 4) -------
+
+/// A template-driven tool (the delivery tests need argv elements, unlike
+/// the varargs-only wrapper above): `--cat {code}` reads back what the
+/// executor wrote, `--stdin` echoes what it piped in.
+fn template_tool(name: &str, template: &[&str], params: Vec<CliToolParam>) -> CliToolConfig {
+    CliToolConfig {
+        name: name.to_string(),
+        description: "fixture tool".to_string(),
+        executable: exe().to_string(),
+        argv_template: template.iter().map(|s| s.to_string()).collect(),
+        params,
+        env: Default::default(),
+        enabled: true,
+        source: CliToolSource::User,
+        baseline: None,
+    }
+}
+
+fn file_param(name: &str) -> CliToolParam {
+    CliToolParam {
+        name: name.to_string(),
+        description: "file-delivered value".to_string(),
+        delivery: CliParamDelivery::File,
+        varargs: false,
+    }
+}
+
+fn stdin_param(name: &str) -> CliToolParam {
+    CliToolParam {
+        name: name.to_string(),
+        description: "stdin-delivered value".to_string(),
+        delivery: CliParamDelivery::Stdin,
+        varargs: false,
+    }
+}
+
+/// No `cli-*.tmp` remains in the work dir after the call (deleted on every
+/// exit path -- success, failure, cancel alike).
+fn no_temp_files_left(temp: &TempDir) -> bool {
+    std::fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .all(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| !(n.starts_with("cli-") && n.ends_with(".tmp")))
+                .unwrap_or(true)
+        })
+}
+
+#[test]
+fn file_delivery_writes_the_temp_file_and_the_argv_receives_the_path() {
+    // The child cats back the file the executor wrote for the `code`
+    // parameter: the call's value reaches the tool through the temp file,
+    // and the file is gone once the call resolves.
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool(
+        "code-runner",
+        &["--cat", "{code}"],
+        vec![file_param("code")],
+    );
+    let outcome = execute(
+        &tool,
+        &call(json!({"code": "print('hello')"})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    assert_eq!(outcome.result.content, "print('hello')");
+    assert!(
+        no_temp_files_left(&temp),
+        "the file-delivery temp file is deleted after the call"
+    );
+}
+
+#[test]
+fn file_delivery_temp_files_are_deleted_on_a_nonzero_exit() {
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool(
+        "code-runner",
+        &["--cat", "{code}", "--exit", "3"],
+        vec![file_param("code")],
+    );
+    let outcome = execute(
+        &tool,
+        &call(json!({"code": "x"})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(outcome.result.is_error);
+    assert!(
+        no_temp_files_left(&temp),
+        "a failing call deletes its temp file too"
+    );
+}
+
+#[test]
+fn file_delivery_temp_files_are_deleted_on_cancel() {
+    // A cancelled call never waits the child out, but its temp file must
+    // still not outlive the call (the RAII guard drops on the cancel
+    // return, not on the child's exit).
+    let temp = TempDir::new().unwrap();
+    let cancel = CancelToken::new();
+    cancel.request();
+    let tool = template_tool(
+        "code-runner",
+        &["--cat", "{code}", "--sleep", "10000"],
+        vec![file_param("code")],
+    );
+    let outcome = execute(&tool, &call(json!({"code": "x"})), temp.path(), &cancel);
+    assert!(outcome.result.is_error);
+    assert!(
+        no_temp_files_left(&temp),
+        "the cancel path cleans the temp file as well"
+    );
+}
+
+#[test]
+fn stdin_delivery_pipes_the_value_and_closes_stdin() {
+    // The child echoes stdin to EOF: the value arrives, and the pipe close
+    // (not a timeout) terminates its read -- the executor writes the single
+    // declared value then drops the pipe.
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool("stdin-tool", &["--stdin"], vec![stdin_param("payload")]);
+    let outcome = execute(
+        &tool,
+        &call(json!({"payload": "piped body"})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    assert_eq!(outcome.result.content, "piped body");
+}
+
+#[test]
+fn stdin_and_file_channels_combine_in_one_registration() {
+    // The interpreter shape end to end: a file-delivered code parameter
+    // plus a stdin-delivered input parameter in one call.
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool(
+        "interp",
+        &["--stdin", "--cat", "{code}"],
+        vec![file_param("code"), stdin_param("input")],
+    );
+    let outcome = execute(
+        &tool,
+        &call(json!({"code": "CODE", "input": "DATA"})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    assert_eq!(outcome.result.content, "DATACODE");
+    assert!(no_temp_files_left(&temp));
+}
+
+#[test]
+fn a_child_that_never_reads_stdin_still_succeeds_without_a_marker() {
+    // The never-reading child is the common tool shape (many CLIs succeed
+    // without touching stdin): the value fits the pipe buffer, the write
+    // completes while the child sleeps, and the call resolves clean -- no
+    // incomplete-delivery marker.
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool(
+        "stdin-tool",
+        &["--sleep", "500", "--exit", "0"],
+        vec![stdin_param("payload")],
+    );
+    let outcome = execute(
+        &tool,
+        &call(json!({"payload": "uninspected body"})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    assert!(
+        !outcome.result.content.contains("stdin delivery incomplete"),
+        "a completed write is not an incomplete delivery: {}",
+        outcome.result.content
+    );
+}
+
+#[test]
+fn a_broken_stdin_pipe_marks_the_delivery_incomplete() {
+    // A value larger than the pipe buffer, a child that exits without
+    // reading: the write breaks partway (EPIPE), and the outcome carries
+    // the explicit marker -- partial delivery never masquerades as complete
+    // (the write-side twin of the read side's decorate doctrine).
+    let temp = TempDir::new().unwrap();
+    let tool = template_tool("stdin-tool", &["--exit", "0"], vec![stdin_param("payload")]);
+    let big = "x".repeat(1024 * 1024);
+    let outcome = execute(
+        &tool,
+        &call(json!({"payload": big})),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    assert!(
+        !outcome.result.is_error,
+        "exit 0 stays a success: {}",
+        outcome.result.content
+    );
+    assert!(
+        outcome.result.content.contains("stdin delivery incomplete"),
+        "the marker names the partial delivery: {}",
+        outcome.result.content
+    );
+}

@@ -7,7 +7,7 @@ import { sessionKeys } from "./queryKeys";
 import type { ApprovalEntry } from "./useApprovalEvents";
 import type { UseViewedResult } from "./useViewedResult";
 import type { AppError } from "../types/error";
-import type { ApprovalResponse, OperationKind } from "../types/approval";
+import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
 import type { TurnPhase } from "../types/session";
 import type { ThreadEntry, ThinkingTrace, TraceEntry, TraceRound } from "../types/thread";
 
@@ -74,8 +74,14 @@ export interface LiveTraceRow {
   summary: string;
   /** The approval card's state when this call went through the gate:
    *  `response` null while PENDING (three live buttons), the user's answer
-   *  once resolved (badge). null for ungated built-in calls. */
-  approval: { requestId: string; response: ApprovalResponse | null } | null;
+   *  once resolved (badge). null for ungated built-in calls. The
+   *  fileAttachments snapshot (issue #672) rides the pending card; the card
+   *  is its only surface (the settled trace keeps the argv summary). */
+  approval: {
+    requestId: string;
+    response: ApprovalResponse | null;
+    fileAttachments?: FileAttachment[];
+  } | null;
   running: boolean;
   success: boolean | null;
   resultExcerpt: string;
@@ -151,6 +157,7 @@ export function mergeLiveTrace(
         approval: {
           requestId: match.requestId,
           response: match.status.kind === "resolved" ? match.status.response : null,
+          fileAttachments: match.fileAttachments,
         },
         running: call.running,
         success: call.success,
@@ -188,6 +195,7 @@ export function mergeLiveTrace(
       approval: {
         requestId: a.requestId,
         response: a.status.kind === "resolved" ? a.status.response : null,
+        fileAttachments: a.fileAttachments,
       },
       running: false,
       success: null,

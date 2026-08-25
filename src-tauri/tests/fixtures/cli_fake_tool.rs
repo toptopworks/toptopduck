@@ -16,8 +16,13 @@
 //   --orphan         spawn a grandchild that inherits this process's stdio
 //                    and outlives it (reader-reap tests: the held pipe ends
 //                    produce no EOF when this process exits)
+//   --stdin          read stdin to EOF and echo it verbatim (stdin-delivery
+//                    tests, issue #672)
+//   --cat FILE       print FILE's raw bytes to stdout (file-delivery tests,
+//                    issue #672; "no-file" when the path is unreadable)
 //   --exit N         exit with code N (default 0)
 
+use std::io::Read;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -65,6 +70,18 @@ fn main() {
                     .arg("--sleep")
                     .arg("30000")
                     .spawn();
+            }
+            "--stdin" => {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_to_string(&mut buf);
+                print!("{buf}");
+            }
+            "--cat" if i + 1 < args.len() => {
+                i += 1;
+                match std::fs::read(&args[i]) {
+                    Ok(bytes) => print!("{}", String::from_utf8_lossy(&bytes)),
+                    Err(e) => println!("no-file: {e}"),
+                }
             }
             "--exit" if i + 1 < args.len() => {
                 i += 1;

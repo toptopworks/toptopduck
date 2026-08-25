@@ -12,6 +12,7 @@
 //! marker) so the builtin-entry slice (#675/#676) is additive, not a migration.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -33,11 +34,13 @@ fn placeholder(param: &str) -> String {
 }
 
 /// How one parameter's value reaches the child (ADR-0108 Decision 4,
-/// per-parameter, declared at registration). v1 implements [`Self::Argv]
-/// only; `file` / `stdin` land in #672 -- the field exists so the persisted
-/// shape needs no migration when they do. A call against an unimplemented
-/// mode fails as a structured tool error at call time (honest degrade for a
-/// hand-edited config), never by silently falling back to another mode.
+/// per-parameter, declared at registration): inline on the command line
+/// ([`Self::Argv`]), through a temp file whose path rides the command line
+/// ([`Self::File`], at most bounded by the temp-dir lifetime), or through
+/// the child's stdin ([`Self::Stdin`], at most one parameter per entry).
+/// A call against a shape registration validation would refuse (a
+/// hand-edited config) fails as a structured tool error at call time, never
+/// by silently falling back to another mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CliParamDelivery {
@@ -213,11 +216,58 @@ impl CliToolConfig {
         if self.params.iter().filter(|p| p.varargs).count() > 1 {
             return Err("at most one parameter may be the string[] varargs".to_string());
         }
+        // At most one stdin parameter (issue #672, ADR-0108 Decision 4): the
+        // channel is a single pipe -- two writers would interleave.
+        if self
+            .params
+            .iter()
+            .filter(|p| p.delivery == CliParamDelivery::Stdin)
+            .count()
+            > 1
+        {
+            return Err("at most one parameter may use stdin delivery".to_string());
+        }
+        // The varargs block is an argv-tail construct (issue #672): file /
+        // stdin delivery for it has no meaning, so registration refuses the
+        // combination outright.
+        if let Some(p) = self
+            .params
+            .iter()
+            .find(|p| p.varargs && p.delivery != CliParamDelivery::Argv)
+        {
+            return Err(format!(
+                "the string[] parameter `{}` must use argv delivery (its \
+                 values append at the argv tail)",
+                p.name
+            ));
+        }
+        // Two file-channel parameters whose names fold to the same sanitized
+        // temp-path segment would share one temp file: the second write
+        // silently overwrites the first (sanitize_segment is not injective --
+        // `input.1` and `input_1` both fold to `input_1`). Refuse at
+        // registration; the render-side degrade twin catches hand edits.
+        let mut file_segments = std::collections::HashMap::new();
+        for p in self
+            .params
+            .iter()
+            .filter(|p| p.delivery == CliParamDelivery::File)
+        {
+            if let Some(first) = file_segments.insert(sanitize_segment(&p.name), p.name.as_str()) {
+                return Err(format!(
+                    "file-delivery parameters `{first}` and `{}` fold to the \
+                     same temp-file name; rename one",
+                    p.name
+                ));
+            }
+        }
         // Template/param-table consistency: every placeholder must name a
         // declared parameter (catches registration-time typos), a varargs
-        // parameter must NOT appear in the template (it rides the tail), and
-        // every non-varargs parameter must appear exactly once (an
-        // unreferenced argv parameter could never receive its value).
+        // parameter must NOT appear in the template (it rides the tail), a
+        // stdin parameter must NOT appear either (its value rides the pipe),
+        // and every other parameter must appear at least once (an
+        // unreferenced argv parameter could never receive its value; a
+        // repeated placeholder renders its value twice, which is the
+        // registration's own doing, not a hazard).
         let param = |name: &str| self.params.iter().find(|p| p.name == name);
         for element in &self.argv_template {
             if let Some(name) = element
@@ -236,12 +286,19 @@ impl CliToolConfig {
                              template; its values append at the argv tail"
                         ));
                     }
+                    Some(p) if p.delivery == CliParamDelivery::Stdin => {
+                        return Err(format!(
+                            "stdin parameter `{name}` must not appear in the argv \
+                             template; its value is written to the child's stdin"
+                        ));
+                    }
                     Some(_) => {}
                 }
             }
         }
         for p in &self.params {
             if !p.varargs
+                && p.delivery != CliParamDelivery::Stdin
                 && !self
                     .argv_template
                     .iter()
@@ -323,14 +380,46 @@ impl CliToolRegistry {
     }
 }
 
-/// Render the call's argv (ADR-0108 Decision 3/4): substitute whole-element
-/// `{param}` placeholders with the call's string values, pass other elements
-/// verbatim, then append the varargs block at the tail. Returns the argv
-/// AFTER the executable (the caller prepends it), or a structured error
-/// naming the first problem (missing parameter, non-string value, or an
-/// unimplemented delivery mode) -- the call-time degrade path for a
-/// hand-edited config.
-pub fn render_argv(tool: &CliToolConfig, input: &Value) -> Result<Vec<String>, String> {
+/// One `file`-channel value's destination: the parameter it carries, the
+/// value's bytes, and the deterministic temp path they are written to at
+/// execution -- the same path the approval card shows (issue #672,
+/// ADR-0108 Decision 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedFileValue {
+    pub param: String,
+    pub content: String,
+    pub path: PathBuf,
+}
+
+/// A fully rendered call (ADR-0108 Decision 4): the argv after the
+/// executable, the single stdin parameter's value, and the file-channel
+/// values' planned temp files. Pure -- writing the files is the executor's
+/// job, so the approval summary and the execution render the same argv from
+/// the same inputs.
+#[derive(Debug, Default)]
+pub struct RenderedCall {
+    pub argv: Vec<String>,
+    pub stdin: Option<String>,
+    pub files: Vec<RenderedFileValue>,
+}
+
+/// Render one call against its registration (ADR-0108 Decision 3/4):
+/// substitute whole-element `{param}` placeholders per the parameter's
+/// declared delivery -- argv values inline, file values as deterministic
+/// temp paths under `temp_dir` (issue #672) -- pass other elements verbatim,
+/// append the varargs block at the tail, and collect the stdin parameter's
+/// value out of band. `call_id` keys the temp-file names: the approval card
+/// (rendered pre-gate) and the execution (post-gate) share one (tool, param,
+/// call) triple, so the approver signs exactly the path the child receives.
+/// Returns a structured error naming the first problem (missing parameter,
+/// non-string value, or a delivery/template shape a hand-edited config broke
+/// -- the call-time degrade path).
+pub fn render_call(
+    tool: &CliToolConfig,
+    input: &Value,
+    temp_dir: &Path,
+    call_id: &str,
+) -> Result<RenderedCall, String> {
     let value = |name: &str| -> Result<String, String> {
         match input.get(name) {
             Some(Value::String(s)) => Ok(s.clone()),
@@ -341,7 +430,11 @@ pub fn render_argv(tool: &CliToolConfig, input: &Value) -> Result<Vec<String>, S
             )),
         }
     };
-    let mut argv = Vec::with_capacity(tool.argv_template.len());
+    let mut rendered = RenderedCall {
+        argv: Vec::with_capacity(tool.argv_template.len()),
+        stdin: None,
+        files: Vec::new(),
+    };
     for element in &tool.argv_template {
         if let Some(name) = element
             .strip_prefix('{')
@@ -357,28 +450,58 @@ pub fn render_argv(tool: &CliToolConfig, input: &Value) -> Result<Vec<String>, S
                     format!("argv template placeholder `{element}` names no declared parameter")
                 })?;
             match param.delivery {
-                CliParamDelivery::Argv => argv.push(value(name)?),
-                CliParamDelivery::File | CliParamDelivery::Stdin => {
+                CliParamDelivery::Argv => rendered.argv.push(value(name)?),
+                CliParamDelivery::File => {
+                    let content = value(name)?;
+                    let path = file_value_path(temp_dir, &tool.name, name, call_id);
+                    rendered.argv.push(path.display().to_string());
+                    rendered.files.push(RenderedFileValue {
+                        param: name.to_string(),
+                        content,
+                        path,
+                    });
+                }
+                // Validation refuses a stdin parameter in the template (its
+                // value rides the pipe, not the command line); a hand-edited
+                // config that broke it degrades here.
+                CliParamDelivery::Stdin => {
                     return Err(format!(
-                        "delivery mode `{}` for parameter `{name}` is not yet \
-                         supported (ADR-0108 Decision 4 lands it in a later slice)",
-                        match param.delivery {
-                            CliParamDelivery::File => "file",
-                            _ => "stdin",
-                        }
+                        "stdin parameter `{name}` must not appear in the argv \
+                         template; its value is written to the child's stdin"
                     ));
                 }
             }
         } else {
-            argv.push(element.clone());
+            rendered.argv.push(element.clone());
+        }
+    }
+    // Validation refuses two file parameters that fold to the same sanitized
+    // segment; a hand-edited config that broke it degrades here rather than
+    // letting the second temp write silently overwrite the first value.
+    let mut file_paths = std::collections::HashMap::new();
+    for file in &rendered.files {
+        if let Some(first) = file_paths.insert(file.path.as_path(), file.param.as_str()) {
+            return Err(format!(
+                "file-delivery parameters `{first}` and `{}` render the same \
+                 temp file; rename one",
+                file.param
+            ));
         }
     }
     if let Some(varargs) = tool.params.iter().find(|p| p.varargs) {
+        // Validation pins the varargs block to argv delivery (the tail is a
+        // command-line construct); a hand-edited config degrades here.
+        if varargs.delivery != CliParamDelivery::Argv {
+            return Err(format!(
+                "the string[] parameter `{}` must use argv delivery",
+                varargs.name
+            ));
+        }
         match input.get(&varargs.name) {
             Some(Value::Array(items)) => {
                 for item in items {
                     match item {
-                        Value::String(s) => argv.push(s.clone()),
+                        Value::String(s) => rendered.argv.push(s.clone()),
                         other => {
                             return Err(format!(
                                 "varargs parameter `{}` must be an array of \
@@ -403,7 +526,91 @@ pub fn render_argv(tool: &CliToolConfig, input: &Value) -> Result<Vec<String>, S
             }
         }
     }
-    Ok(argv)
+    // The stdin parameter rides the pipe, not the command line. Validation
+    // caps it at one; a hand-edited config with two degrades here instead of
+    // interleaving two writers into one pipe.
+    let mut stdin_params = tool
+        .params
+        .iter()
+        .filter(|p| p.delivery == CliParamDelivery::Stdin);
+    if let (Some(first), Some(second)) = (stdin_params.next(), stdin_params.next()) {
+        return Err(format!(
+            "at most one parameter may use stdin delivery (found `{}` and `{}`)",
+            first.name, second.name
+        ));
+    }
+    if let Some(p) = tool
+        .params
+        .iter()
+        .find(|p| p.delivery == CliParamDelivery::Stdin)
+    {
+        rendered.stdin = Some(value(&p.name)?);
+    }
+    // Validation requires every argv/file parameter to appear in the
+    // template; a hand-edited config can still smuggle an unreferenced one
+    // past the upsert boundary, and the loop above cannot notice (it only
+    // walks the template). Refuse here rather than silently dropping the
+    // value -- the same honest-degrade posture as the checks above.
+    for p in &tool.params {
+        if !p.varargs
+            && p.delivery != CliParamDelivery::Stdin
+            && !tool
+                .argv_template
+                .iter()
+                .any(|e| e == &placeholder(&p.name))
+        {
+            return Err(format!(
+                "parameter `{}` is declared but the argv template never \
+                 references it",
+                p.name
+            ));
+        }
+    }
+    Ok(rendered)
+}
+
+/// Deterministic path for one file-channel value:
+/// `cli-<tool>-<param>-<call>.tmp` under the session temp dir. The same
+/// (tool, param, call) triple renders the same path on the approval card and
+/// at execution, so a denied call leaves nothing behind (the file is only
+/// ever written when the call dispatches).
+fn file_value_path(temp_dir: &Path, tool: &str, param: &str, call_id: &str) -> PathBuf {
+    temp_dir.join(format!(
+        "cli-{}-{}-{}.tmp",
+        sanitize_segment(tool),
+        sanitize_segment(param),
+        sanitize_segment(call_id)
+    ))
+}
+
+/// Keep one path segment filesystem-safe AND bounded: the call id is
+/// model-emitted (untrusted) and a hand-edited param name escapes
+/// validation's charset/length guarantees, so anything outside
+/// `[A-Za-z0-9_-]` folds to `_` (which also neutralizes `.`/`..` traversal
+/// forms), an empty segment stays a literal placeholder rather than
+/// vanishing from the name, and the segment truncates to
+/// [`SEGMENT_MAX_LEN`] so a long id cannot push the temp path past the
+/// platform path limit (calls run sequentially within a turn, so two long
+/// ids sharing a 40-char prefix cannot collide concurrently).
+const SEGMENT_MAX_LEN: usize = 40;
+
+fn sanitize_segment(segment: &str) -> String {
+    let sanitized: String = segment
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(SEGMENT_MAX_LEN)
+        .collect();
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Build the direct-listed tool-table definitions (ADR-0108 Decision 6):
@@ -680,7 +887,7 @@ mod tests {
     // --- argv rendering --------------------------------------------------------
 
     #[test]
-    fn render_argv_substitutes_placeholders_and_verbatim_elements() {
+    fn render_call_substitutes_placeholders_and_verbatim_elements() {
         let mut t = tool("pandoc");
         t.argv_template = vec![
             "convert".to_string(),
@@ -690,42 +897,272 @@ mod tests {
         ];
         t.params = vec![param("input"), param("output")];
         let input = json!({"input": "in.docx", "output": "out.pdf"});
-        assert_eq!(
-            render_argv(&t, &input).unwrap(),
-            vec!["convert", "in.docx", "-o", "out.pdf"]
-        );
+        let rendered = render_call(&t, &input, Path::new("/tmp"), "tu_1").unwrap();
+        assert_eq!(rendered.argv, vec!["convert", "in.docx", "-o", "out.pdf"]);
+        assert!(rendered.stdin.is_none());
+        assert!(rendered.files.is_empty());
     }
 
     #[test]
-    fn render_argv_appends_varargs_at_the_tail() {
+    fn render_call_appends_varargs_at_the_tail() {
         let mut t = tool("officecli");
         t.argv_template = vec![placeholder("verb")];
         t.params = vec![param("verb"), varargs("args")];
         let input = json!({"verb": "run", "args": ["--verbose", "a.docx", "b.docx"]});
+        let rendered = render_call(&t, &input, Path::new("/tmp"), "tu_1").unwrap();
+        assert_eq!(rendered.argv, vec!["run", "--verbose", "a.docx", "b.docx"]);
+    }
+
+    #[test]
+    fn render_call_routes_file_values_through_deterministic_temp_paths() {
+        // The argv element is the temp path (not the value); the files plan
+        // carries the same path so the executor writes to what the approval
+        // card showed.
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("code")];
+        t.params = vec![param("code")];
+        t.params[0].delivery = CliParamDelivery::File;
+        let dir = Path::new("/session/tmp");
+        let rendered = render_call(&t, &json!({"code": "print(1)"}), dir, "tu_9").unwrap();
+        assert_eq!(rendered.files.len(), 1);
+        assert_eq!(rendered.files[0].param, "code");
+        assert_eq!(rendered.files[0].content, "print(1)");
+        let path = rendered.files[0].path.display().to_string();
+        assert_eq!(rendered.argv, vec![path.as_str()]);
+        assert!(
+            path.replace('\\', "/")
+                .ends_with("/cli-code-runner-code-tu_9.tmp"),
+            "the path names tool, param, and call: {path}"
+        );
+        assert!(rendered.stdin.is_none());
+    }
+
+    #[test]
+    fn render_call_temp_paths_are_stable_and_call_scoped() {
+        // Same (tool, param, call) -> same path (approval card and execution
+        // agree); a different call -> a different path (no cross-call reuse).
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("code")];
+        t.params = vec![param("code")];
+        t.params[0].delivery = CliParamDelivery::File;
+        let input = json!({"code": "x"});
+        let first = render_call(&t, &input, Path::new("/tmp"), "tu_1").unwrap();
+        let again = render_call(&t, &input, Path::new("/tmp"), "tu_1").unwrap();
+        let second = render_call(&t, &input, Path::new("/tmp"), "tu_2").unwrap();
+        assert_eq!(first.files[0].path, again.files[0].path);
+        assert_ne!(first.files[0].path, second.files[0].path);
+    }
+
+    #[test]
+    fn render_call_routes_the_stdin_parameter_out_of_band() {
+        let mut t = tool("stdin-tool");
+        t.argv_template = vec!["run".to_string()];
+        t.params = vec![param("payload")];
+        t.params[0].delivery = CliParamDelivery::Stdin;
+        let rendered =
+            render_call(&t, &json!({"payload": "body"}), Path::new("/tmp"), "tu_1").unwrap();
+        assert_eq!(rendered.argv, vec!["run"]);
+        assert_eq!(rendered.stdin.as_deref(), Some("body"));
+        assert!(rendered.files.is_empty());
+    }
+
+    #[test]
+    fn render_call_sanitizes_untrusted_path_segments() {
+        // The call id is model-emitted; a hand-edited param name can carry
+        // anything. Neither may escape the temp dir nor blow the path limit.
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("code")];
+        t.params[0].delivery = CliParamDelivery::File;
+        t.params[0].name = "../esc\\ape".to_string();
+        t.argv_template = vec![placeholder("../esc\\ape")];
+        let rendered =
+            render_call(&t, &json!({"../esc\\ape": "x"}), Path::new("/tmp"), "a/b").unwrap();
+        let name = rendered.files[0]
+            .path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         assert_eq!(
-            render_argv(&t, &input).unwrap(),
-            vec!["run", "--verbose", "a.docx", "b.docx"]
+            name, "cli-code-runner-___esc_ape-a_b.tmp",
+            "every unsafe char folds to `_`: {name}"
+        );
+
+        // An unbounded model-emitted call id truncates per segment, keeping
+        // the full path inside the platform limits.
+        let long_id = "tu_".to_string() + &"x".repeat(200);
+        let rendered = render_call(
+            &t,
+            &json!({"../esc\\ape": "x"}),
+            Path::new("/tmp"),
+            &long_id,
+        )
+        .unwrap();
+        assert!(
+            rendered.files[0]
+                .path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .len()
+                < 100,
+            "long segments truncate: {:?}",
+            rendered.files[0].path
         );
     }
 
     #[test]
-    fn render_argv_errors_on_missing_non_string_and_unimplemented_delivery() {
+    fn render_call_errors_on_missing_non_string_and_broken_shapes() {
         let t = tool("pandoc");
         assert!(
-            render_argv(&t, &json!({})).is_err(),
+            render_call(&t, &json!({}), Path::new("/tmp"), "tu_1").is_err(),
             "missing parameter errors"
         );
         assert!(
-            render_argv(&t, &json!({"input": 42})).is_err(),
+            render_call(&t, &json!({"input": 42}), Path::new("/tmp"), "tu_1").is_err(),
             "non-string value errors"
         );
 
+        // Hand-edited degrade paths: a stdin parameter smuggled into the
+        // template, and two stdin parameters past the single-pipe cap.
         let mut t = tool("pandoc");
-        t.params[0].delivery = CliParamDelivery::File;
+        t.argv_template = vec!["run".to_string(), placeholder("payload")];
+        t.params = vec![param("payload")];
+        t.params[0].delivery = CliParamDelivery::Stdin;
+        let err = render_call(&t, &json!({"payload": "x"}), Path::new("/tmp"), "tu_1").unwrap_err();
         assert!(
-            render_argv(&t, &json!({"input": "x"})).is_err(),
-            "unimplemented delivery mode errors honestly"
+            err.contains("must not appear in the argv template"),
+            "{err}"
         );
+
+        let mut t = tool("stdin-tool");
+        t.argv_template = vec!["run".to_string()];
+        t.params = vec![param("a"), param("b")];
+        t.params[0].delivery = CliParamDelivery::Stdin;
+        t.params[1].delivery = CliParamDelivery::Stdin;
+        let err =
+            render_call(&t, &json!({"a": "x", "b": "y"}), Path::new("/tmp"), "tu_1").unwrap_err();
+        assert!(err.contains("at most one"), "{err}");
+
+        // A hand-edited file parameter the template never references: the
+        // value is refused, not silently dropped (the read-side filter does
+        // not re-run full validation, so this shape can reach render).
+        let mut t = tool("code-runner");
+        t.argv_template = vec!["run".to_string()];
+        t.params = vec![param("code")];
+        t.params[0].delivery = CliParamDelivery::File;
+        let err = render_call(&t, &json!({"code": "x"}), Path::new("/tmp"), "tu_1").unwrap_err();
+        assert!(
+            err.contains("never references it"),
+            "an unreferenced parameter degrades honestly: {err}"
+        );
+    }
+
+    #[test]
+    fn render_call_errors_when_file_params_fold_to_the_same_temp_file() {
+        // The render-side degrade twin of validate's collision refusal: a
+        // hand-edited config smuggled past the upsert boundary must refuse,
+        // not let the second temp write overwrite the first value.
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("input.1"), placeholder("input_1")];
+        t.params = vec![param("input.1"), param("input_1")];
+        t.params[0].delivery = CliParamDelivery::File;
+        t.params[1].delivery = CliParamDelivery::File;
+        let err = render_call(
+            &t,
+            &json!({"input.1": "a", "input_1": "b"}),
+            Path::new("/tmp"),
+            "tu_1",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("render the same temp file"),
+            "the degrade names both parameters: {err}"
+        );
+    }
+
+    // --- delivery validation ---------------------------------------------------
+
+    #[test]
+    fn validate_accepts_file_and_stdin_delivery_shapes() {
+        // file stays in the template (the placeholder receives the temp
+        // path); stdin stays out of it (the value rides the pipe).
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("code")];
+        t.params = vec![param("code")];
+        t.params[0].delivery = CliParamDelivery::File;
+        assert!(t.validate().is_ok());
+
+        let mut t = tool("stdin-tool");
+        t.argv_template = vec!["run".to_string()];
+        t.params[0].delivery = CliParamDelivery::Stdin;
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_second_stdin_parameter() {
+        let mut t = tool("stdin-tool");
+        t.argv_template = vec!["run".to_string()];
+        t.params = vec![param("a"), param("b")];
+        t.params[0].delivery = CliParamDelivery::Stdin;
+        t.params[1].delivery = CliParamDelivery::Stdin;
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("at most one parameter may use stdin"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_stdin_parameter_in_the_argv_template() {
+        let mut t = tool("stdin-tool");
+        t.argv_template = vec![placeholder("payload")];
+        t.params = vec![param("payload")];
+        t.params[0].delivery = CliParamDelivery::Stdin;
+        let err = t.validate().unwrap_err();
+        assert!(
+            err.contains("must not appear in the argv template"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_non_argv_varargs_delivery() {
+        for delivery in [CliParamDelivery::File, CliParamDelivery::Stdin] {
+            let mut t = tool("officecli");
+            t.argv_template = vec![placeholder("verb")];
+            t.params = vec![param("verb"), varargs("args")];
+            t.params[1].delivery = delivery;
+            let err = t.validate().unwrap_err();
+            assert!(
+                err.contains("must use argv delivery"),
+                "{delivery:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_file_params_that_fold_to_the_same_temp_segment() {
+        // `input.1` and `input_1` sanitize to the same segment: both file
+        // channels would target one temp file, the second write silently
+        // overwriting the first -- refuse at registration.
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("input.1"), placeholder("input_1")];
+        t.params = vec![param("input.1"), param("input_1")];
+        t.params[0].delivery = CliParamDelivery::File;
+        t.params[1].delivery = CliParamDelivery::File;
+        let err = t.validate().unwrap_err();
+        assert!(
+            err.contains("fold to the same temp-file name"),
+            "the refusal names the collision: {err}"
+        );
+
+        // Distinct sanitized segments pass (argv delivery ignores the fold).
+        let mut t = tool("code-runner");
+        t.argv_template = vec![placeholder("input"), placeholder("config")];
+        t.params = vec![param("input"), param("config")];
+        t.params[0].delivery = CliParamDelivery::File;
+        t.params[1].delivery = CliParamDelivery::File;
+        assert!(t.validate().is_ok());
     }
 
     // --- tool definitions ------------------------------------------------------

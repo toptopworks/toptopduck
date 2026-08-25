@@ -15,13 +15,13 @@
 //! -- a Windows job object (kill-on-close) or a Unix process group kill --
 //! so grandchildren the tool spawned die with it.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::config::{render_argv, CliToolConfig};
+use super::config::{render_call, CliToolConfig, RenderedFileValue};
 use crate::cancel::CancelToken;
 use crate::provider::tool_calling::{ToolResult, ToolUse};
 use crate::tools::ToolOutcome;
@@ -73,18 +73,33 @@ fn execute_capped(
         },
         promotion: None,
     };
-    // Render the argv first (ADR-0108 Decision 4): a missing parameter, a
-    // mistyped value, or an unimplemented delivery mode is the call's own
-    // structured error -- the model self-corrects (ADR-0077).
-    let argv = match render_argv(tool, &call.input) {
-        Ok(argv) => argv,
+    // Render the call first (ADR-0108 Decision 4): a missing parameter, a
+    // mistyped value, or a delivery/template shape a hand-edited config broke
+    // is the call's own structured error -- the model self-corrects
+    // (ADR-0077).
+    let rendered = match render_call(tool, &call.input, session_temp_dir, &call.id) {
+        Ok(rendered) => rendered,
         Err(detail) => {
             return error(format!("invalid call to `{}`: {detail}", tool.name));
         }
     };
+    // Write the file-channel values (issue #672): each planned temp file is
+    // on disk BEFORE the spawn, so the child reads exactly what the approval
+    // card's path promised. The guard deletes them on every exit path --
+    // success, non-zero, cancel -- a temp file that outlived its call would
+    // pile up in the session's work dir.
+    let _temp_files = match TempFileGuard::write_all(&rendered.files) {
+        Ok(guard) => guard,
+        Err(e) => {
+            return error(format!(
+                "failed to write a file-delivery temp file for `{}`: {e}",
+                tool.name
+            ));
+        }
+    };
     let mut command = Command::new(&tool.executable);
     command
-        .args(&argv)
+        .args(&rendered.argv)
         .current_dir(session_temp_dir)
         .envs(&tool.env)
         .stdin(Stdio::piped())
@@ -104,10 +119,29 @@ fn execute_capped(
             ));
         }
     };
-    // v1 passes every value through argv (ADR-0108 Decision 4), so the
-    // child's stdin carries nothing: closing it immediately signals EOF to
-    // a well-behaved tool. (#672 opens the stdin delivery channel here.)
-    drop(child.stdin.take());
+    // The stdin channel (issue #672, ADR-0108 Decision 4): the single
+    // declared value is written to the child's stdin, then the pipe closes
+    // (EOF) -- the close v1 gave every child, now preceded by the bytes. The
+    // write rides its own thread: a child that never reads would block a
+    // pipe-sized write forever, and the wait loop must keep polling cancel.
+    // A write FAILURE is surfaced, not swallowed: a child that read part of
+    // the value and exited (possibly exit 0) leaves the rest undelivered,
+    // and the outcome carries an explicit marker -- the write-side twin of
+    // the read side's decorate doctrine. A child that never reads at all and
+    // succeeds is still a clean success: the bytes fit the pipe buffer, the
+    // write completed.
+    let stdin_writer = match (child.stdin.take(), rendered.stdin) {
+        (Some(mut stdin), Some(value)) => Some(thread::spawn(move || {
+            stdin
+                .write_all(value.as_bytes())
+                .err()
+                .map(|e| e.to_string())
+        })),
+        (maybe_stdin, _) => {
+            drop(maybe_stdin);
+            None
+        }
+    };
     // Tree-kill guard: assigns the child to a kill-on-close job (Windows)
     // or records its process group (Unix). `None` degrades to killing the
     // direct child only -- the guarantee weakens, the call still resolves.
@@ -130,6 +164,12 @@ fn execute_capped(
             // Reap the reader threads so nothing leaks past the call (the
             // bounded reap: the tree is already down, stragglers detach).
             let _ = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
+            // The stdin writer breaks with EPIPE as the tree dies; whatever
+            // is still blocked past the bounds detaches (the outcome is
+            // already the cancellation error).
+            if let Some(writer) = stdin_writer {
+                let _ = wait_bounded(writer, guard.as_ref(), cancel);
+            }
             return error(format!(
                 "cli tool `{}` killed by round cancellation (status: {status:?})",
                 tool.name
@@ -141,11 +181,24 @@ fn execute_capped(
             Err(e) => {
                 let _ = child.kill();
                 let _ = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
+                if let Some(writer) = stdin_writer {
+                    let _ = wait_bounded(writer, guard.as_ref(), cancel);
+                }
                 return error(format!("wait on `{}` failed: {e}", tool.executable));
             }
         }
     };
     let (stdout, stderr) = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
+    // Once the child has exited, the writer resolves almost immediately
+    // (the pipe is either fully written or broken); the bounded ladder
+    // covers the pathological dup-only-stdin holder.
+    let stdin_error = stdin_writer
+        .and_then(|writer| wait_bounded(writer, guard.as_ref(), cancel))
+        .flatten();
+    let stdin_note = match &stdin_error {
+        Some(detail) => format!("\n[stdin delivery incomplete: {detail}]"),
+        None => String::new(),
+    };
     let stdout = decorate("stdout", &stdout, cap);
     let stderr = decorate("stderr", &stderr, cap);
     if status.success() {
@@ -157,6 +210,7 @@ fn execute_capped(
             content.push_str("\n[stderr]\n");
             content.push_str(&stderr);
         }
+        content.push_str(&stdin_note);
         ToolOutcome {
             result: ToolResult {
                 tool_use_id: call.id.clone(),
@@ -167,9 +221,45 @@ fn execute_capped(
         }
     } else {
         error(format!(
-            "`{}` exited with a non-zero status ({status})\n[stderr]\n{stderr}",
+            "`{}` exited with a non-zero status ({status})\n[stderr]\n{stderr}{stdin_note}",
             tool.executable
         ))
+    }
+}
+
+/// RAII cleaner for the file-channel temp files (issue #672): writes them
+/// before the spawn, deletes them on drop -- which every return path of
+/// [`execute_capped`] passes through (success, non-zero exit, cancel,
+/// post-spawn errors). ADR-0108 Decision 4: the temp file is deleted when
+/// the call ends, succeeded or not.
+struct TempFileGuard(Vec<std::path::PathBuf>);
+
+impl TempFileGuard {
+    /// Write every planned value to its temp path. On a mid-batch failure
+    /// the files that already landed are cleaned first (their own guard
+    /// drop), then the refusal names the parameter that failed.
+    fn write_all(files: &[RenderedFileValue]) -> Result<Self, String> {
+        let mut written = Vec::with_capacity(files.len());
+        for file in files {
+            if let Err(e) = std::fs::write(&file.path, &file.content) {
+                drop(Self(written));
+                return Err(format!("parameter `{}`: {e}", file.param));
+            }
+            written.push(file.path.clone());
+        }
+        Ok(Self(written))
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        // Best-effort: a removal failure (an AV lock, a concurrent delete)
+        // must not mask the call's real outcome, and the session temp dir is
+        // discarded with the session anyway -- the guard bounds the common
+        // case, not the pathological one.
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -250,52 +340,60 @@ fn decorate(stream: &str, read: &StreamRead, cap: usize) -> String {
     content
 }
 
-/// Reap the reader threads once the child is gone. A grandchild holding
-/// the pipe write-ends (the resident-child class ADR-0108 anticipates)
-/// would block a plain `join()` forever -- including on the cancel path,
-/// where the polling loop has already exited. Give the readers
-/// [`READER_GRACE`] to hit EOF on their own, then terminate the tree to
-/// force it (idempotent beside the cancel path's kill); whatever still has
-/// not finished after [`KILL_GRACE`] is detached -- dropping the handle --
-/// and the stream resolves with an explicit marker instead of its bytes. A
+/// Wait for one spawned helper thread with the bounded ladder: its own time
+/// within [`READER_GRACE`], then terminate the tree to force it (idempotent
+/// beside the cancel path's kill), then [`KILL_GRACE`], then detach --
+/// dropping the handle; the buffers the thread still owns are bounded (a
+/// reader by the cap it enforces, the stdin writer by the value String). A
 /// bounded wait replaces an unbounded one, never a hung turn.
-fn reap_readers(
-    stdout_thread: thread::JoinHandle<StreamRead>,
-    stderr_thread: thread::JoinHandle<StreamRead>,
+fn wait_bounded<T: Default>(
+    handle: thread::JoinHandle<T>,
     guard: Option<&tree::TreeGuard>,
     cancel: &CancelToken,
-) -> (StreamRead, StreamRead) {
-    let done = |out: &thread::JoinHandle<StreamRead>,
-                err: &thread::JoinHandle<StreamRead>|
-     -> bool { out.is_finished() && err.is_finished() };
+) -> Option<T> {
     // The cancel path already terminated the tree: no grace, straight to
     // the post-kill bound.
     let mut deadline = Instant::now() + READER_GRACE;
     if cancel.is_requested() {
         deadline = Instant::now();
     }
-    while !done(&stdout_thread, &stderr_thread) && Instant::now() < deadline {
+    while !handle.is_finished() && Instant::now() < deadline {
         thread::sleep(CANCEL_POLL_INTERVAL);
     }
-    if !done(&stdout_thread, &stderr_thread) {
+    if !handle.is_finished() {
         if let Some(guard) = guard {
             guard.kill_tree();
         }
         let bound = Instant::now() + KILL_GRACE;
-        while !done(&stdout_thread, &stderr_thread) && Instant::now() < bound {
+        while !handle.is_finished() && Instant::now() < bound {
             thread::sleep(CANCEL_POLL_INTERVAL);
         }
     }
-    let take = |handle: thread::JoinHandle<StreamRead>, stream: &str| {
-        if handle.is_finished() {
-            handle.join().unwrap_or_default()
-        } else {
-            // Dropping the handle detaches the thread; the read buffer it
-            // still owns is bounded by the cap it was enforcing.
-            StreamRead::detached(stream)
-        }
-    };
-    (take(stdout_thread, "stdout"), take(stderr_thread, "stderr"))
+    if handle.is_finished() {
+        Some(handle.join().unwrap_or_default())
+    } else {
+        None
+    }
+}
+
+/// Reap the reader threads once the child is gone. A grandchild holding
+/// the pipe write-ends (the resident-child class ADR-0108 anticipates)
+/// would block a plain `join()` forever -- including on the cancel path,
+/// where the polling loop has already exited. Each reader waits out the
+/// bounded ladder above; a detached one resolves with an explicit marker
+/// instead of its bytes.
+fn reap_readers(
+    stdout_thread: thread::JoinHandle<StreamRead>,
+    stderr_thread: thread::JoinHandle<StreamRead>,
+    guard: Option<&tree::TreeGuard>,
+    cancel: &CancelToken,
+) -> (StreamRead, StreamRead) {
+    (
+        wait_bounded(stdout_thread, guard, cancel)
+            .unwrap_or_else(|| StreamRead::detached("stdout")),
+        wait_bounded(stderr_thread, guard, cancel)
+            .unwrap_or_else(|| StreamRead::detached("stderr")),
+    )
 }
 
 /// Platform process-tree termination (ADR-0108 Decision 5). Windows:
