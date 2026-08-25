@@ -646,14 +646,18 @@ fn execute_call(
     // badge is Execute, and the summary renders the full argv the approval
     // card shows (the approver signs exactly what will run).
     let cli_tool = cli.iter().find(|t| t.name == call.name);
-    let (key, operation_kind, summary) = match cli_tool {
-        Some(tool) => classify_cli_tool(tool, &call.input),
-        None => classify_call(call),
+    let (key, operation_kind, summary, file_attachments) = match cli_tool {
+        Some(tool) => classify_cli_tool(tool, &call.input, deps.temp_path, &call.id),
+        None => {
+            let (key, operation_kind, summary) = classify_call(call);
+            (key, operation_kind, summary, Vec::new())
+        }
     };
     let gate_req = ApprovalRequest {
         key,
         operation_kind,
         summary: summary.clone(),
+        file_attachments,
     };
     // ADR-0080: every tool call passes the gate before dispatch. Built-in tools
     // classify Allow (zero approval); external tools would suspend here.
@@ -828,34 +832,57 @@ const ARGS_PREVIEW_MAX_CHARS: usize = 448;
 /// The approval-gateway classification for a registered CLI tool call
 /// (ADR-0108 Decision 7): the trust key anchors on the registration name
 /// under the reserved `CLI` server, the badge is Execute, and the summary
-/// is the card's full-argv rendering.
+/// is the card's full-argv rendering. `temp_dir` + `call_id` drive the same
+/// deterministic temp paths the execution later renders (issue #672), so
+/// the argv the approver signs is exactly the one that runs; the
+/// file-delivery values ride along as expandable attachments (ADR-0109
+/// Decision 8), captured NOW -- the temp file is deleted when the call
+/// ends, so the payload snapshot is the approver's only durable view.
 fn classify_cli_tool(
     tool: &crate::cli_tools::config::CliToolConfig,
     input: &Value,
-) -> (ToolKey, OperationKind, String) {
+    temp_dir: &Path,
+    call_id: &str,
+) -> (
+    ToolKey,
+    OperationKind,
+    String,
+    Vec<crate::approval::FileAttachment>,
+) {
+    let summary_and_files = |rendered: crate::cli_tools::config::RenderedCall| {
+        let mut argv = Vec::with_capacity(rendered.argv.len() + 1);
+        argv.push(tool.executable.clone());
+        argv.extend(rendered.argv.iter().cloned());
+        let attachments = rendered
+            .files
+            .into_iter()
+            .map(|f| crate::approval::FileAttachment {
+                param: f.param,
+                content: f.content,
+            })
+            .collect();
+        (
+            crate::approval::truncate_summary(&argv.join(" "), ARGS_PREVIEW_MAX_CHARS),
+            attachments,
+        )
+    };
+    let (summary, file_attachments) =
+        match crate::cli_tools::config::render_call(tool, input, temp_dir, call_id) {
+            Ok(rendered) => summary_and_files(rendered),
+            // Rendering can fail on a mis-shaped call (a missing parameter);
+            // the summary then degrades to naming the failure honestly
+            // rather than showing an argv that is NOT what would run.
+            Err(detail) => (
+                format!("cli tool `{}` argv unavailable: {detail}", tool.name),
+                Vec::new(),
+            ),
+        };
     (
         ToolKey::external(ToolKey::CLI_SERVER, tool.name.clone()),
         OperationKind::Execute,
-        cli_call_summary(tool, input),
+        summary,
+        file_attachments,
     )
-}
-
-/// The approval-card summary for a registered CLI tool call: the complete
-/// argv that will run (the executable plus the rendered template), joined
-/// and capped by the existing summary bounds. Rendering can fail on a
-/// mis-shaped call (a missing parameter); the summary then degrades to
-/// naming the failure honestly rather than showing an argv that is NOT
-/// what would run.
-fn cli_call_summary(tool: &crate::cli_tools::config::CliToolConfig, input: &Value) -> String {
-    match crate::cli_tools::config::render_argv(tool, input) {
-        Ok(mut parts) => {
-            let mut argv = Vec::with_capacity(parts.len() + 1);
-            argv.push(tool.executable.clone());
-            argv.append(&mut parts);
-            crate::approval::truncate_summary(&argv.join(" "), ARGS_PREVIEW_MAX_CHARS)
-        }
-        Err(detail) => format!("cli tool `{}` argv unavailable: {detail}", tool.name),
-    }
 }
 
 pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
@@ -1276,14 +1303,59 @@ mod tests {
             source: Default::default(),
             baseline: None,
         };
-        let (key, kind, summary) =
-            classify_cli_tool(&tool, &serde_json::json!({"output": "out.pdf"}));
+        let (key, kind, summary, attachments) = classify_cli_tool(
+            &tool,
+            &serde_json::json!({"output": "out.pdf"}),
+            std::path::Path::new("/tmp"),
+            "tu_1",
+        );
         assert_eq!(key.server, ToolKey::CLI_SERVER);
         assert_eq!(key.tool, "pandoc");
         assert_eq!(kind, OperationKind::Execute);
         // ADR-0108 Decision 7: the card renders the complete argv that will
         // run -- the executable plus the rendered template.
         assert_eq!(summary, "/bin/pandoc -o out.pdf");
+        assert!(attachments.is_empty(), "no file delivery, no attachments");
+    }
+
+    #[test]
+    fn a_file_delivery_cli_call_carries_its_value_as_an_approval_attachment() {
+        // Issue #672, ADR-0109 Decision 8: the argv shows the deterministic
+        // temp path (captured before any file exists -- a denial leaves
+        // nothing on disk), and the value itself rides the request as the
+        // approver's expandable snapshot.
+        use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+        let tool = CliToolConfig {
+            name: "code-runner".into(),
+            description: "runs code".into(),
+            executable: "/bin/py".into(),
+            argv_template: vec!["{code}".into()],
+            params: vec![CliToolParam {
+                name: "code".into(),
+                description: "source".into(),
+                delivery: CliParamDelivery::File,
+                varargs: false,
+            }],
+            env: Default::default(),
+            enabled: true,
+            source: Default::default(),
+            baseline: None,
+        };
+        let (_, _, summary, attachments) = classify_cli_tool(
+            &tool,
+            &serde_json::json!({"code": "print(1)"}),
+            std::path::Path::new("/session/tmp"),
+            "tu_7",
+        );
+        assert!(
+            summary
+                .replace('\\', "/")
+                .ends_with("/cli-code-runner-code-tu_7.tmp"),
+            "the argv carries the temp path, not the value: {summary}"
+        );
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].param, "code");
+        assert_eq!(attachments[0].content, "print(1)");
     }
 
     #[test]
@@ -1305,7 +1377,12 @@ mod tests {
             source: Default::default(),
             baseline: None,
         };
-        let (_, _, summary) = classify_cli_tool(&tool, &serde_json::json!({}));
+        let (_, _, summary, _) = classify_cli_tool(
+            &tool,
+            &serde_json::json!({}),
+            std::path::Path::new("/tmp"),
+            "tu_1",
+        );
         assert!(
             summary.contains("argv unavailable"),
             "a missing parameter names the failure: {summary}"

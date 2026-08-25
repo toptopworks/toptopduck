@@ -1301,6 +1301,9 @@ fn decide_permission(
         // the summary and tool field stay consistent and we avoid recomputing
         // the title-fallback expression (review M3).
         summary: crate::approval::truncate_summary(&key.tool, crate::approval::SUMMARY_MAX_CHARS),
+        // ACP permission requests carry no file-delivery values (issue #672
+        // is the registered-CLI card's channel); the field rides empty.
+        file_attachments: Vec::new(),
     };
     if allowed {
         // The policy auto-allows; pick the first allow_* option.

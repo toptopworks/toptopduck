@@ -14,3 +14,4 @@ Thumbs.db
 
 # Tool reports (issue #96)
 jscpd-report/
+*.stackdump

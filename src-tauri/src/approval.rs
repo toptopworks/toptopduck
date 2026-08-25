@@ -299,7 +299,21 @@ pub struct ApprovalRequestBody {
     /// defense -- it bounds the broadcast surface, it does not sanitize
     /// content.
     pub summary: String,
+    /// File-delivery values for the card's expand-on-demand view (issue
+    /// #672): each entry carries the parameter name and its content as
+    /// captured at approval time. Empty for calls without file-delivered
+    /// parameters -- the field omits from the wire rather than riding along
+    /// as `[]` on every card.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub file_attachments: Vec<FileAttachment>,
 }
+
+/// Hard cap on each file attachment's content in `char`s (issue #672). The
+/// attachments ride the same global `app.emit` broadcast as the summary
+/// (ADR-0056 multi-pane), so each content is bounded the same way -- 4 KiB
+/// covers a realistic interpreter-script value while keeping one payload
+/// from flooding every pane.
+pub const FILE_ATTACHMENT_MAX_CHARS: usize = 4 * 1024;
 
 /// Hard cap on [`ApprovalRequestBody::summary`] length in `char`s (issue
 /// #312). The summary is globally broadcast via `app.emit` (ADR-0056 multi-
@@ -339,6 +353,10 @@ pub struct ApprovalRequestPayload {
     pub tool: String,
     pub operation_kind: OperationKind,
     pub summary: String,
+    /// File-delivery values for the card's expand-on-demand view (issue
+    /// #672); omitted when empty (calls without file-delivered parameters).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub file_attachments: Vec<FileAttachment>,
 }
 
 /// Full `approval-resolved` event payload -- the frontend uses this to flip a
@@ -384,12 +402,25 @@ pub enum GateOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GateCancelled;
 
+/// One file-delivery value's content for the approval card (issue #672,
+/// ADR-0109 Decision 8): the approver can expand the parameter's value on
+/// the card. Captured at approval time -- the temp file is deleted when the
+/// call ends, so the payload snapshot is the only durable view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileAttachment {
+    pub param: String,
+    pub content: String,
+}
+
 /// The gateway-facing request summary: what the agent loop hands the gate.
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
     pub key: ToolKey,
     pub operation_kind: OperationKind,
     pub summary: String,
+    /// File-delivery values for the card's expand-on-demand view; empty for
+    /// every call shape without file-delivered parameters (built-ins, MCP).
+    pub file_attachments: Vec<FileAttachment>,
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +588,17 @@ impl ApprovalState {
             tool: request.key.tool.clone(),
             operation_kind: request.operation_kind,
             summary: truncate_summary(&request.summary, SUMMARY_MAX_CHARS),
+            // The expand-on-demand contents ride the same broadcast as the
+            // summary, so each is capped the same way (issue #672) -- the
+            // truncation is visible via the ellipsis, never a silent cut.
+            file_attachments: request
+                .file_attachments
+                .iter()
+                .map(|a| FileAttachment {
+                    param: a.param.clone(),
+                    content: truncate_summary(&a.content, FILE_ATTACHMENT_MAX_CHARS),
+                })
+                .collect(),
         };
 
         // Clear any stale interrupt latch from a prior cancel BEFORE installing
@@ -900,6 +942,7 @@ mod tests {
             key: ToolKey::builtin("explore"),
             operation_kind: OperationKind::Read,
             summary: "SELECT 1".into(),
+            file_attachments: Vec::new(),
         };
         let outcome = state.gate(req, &sink, &cancel).expect("builtin allowed");
         assert_eq!(outcome, GateOutcome::Allow);
@@ -918,6 +961,7 @@ mod tests {
             key,
             operation_kind: OperationKind::Network,
             summary: "GET /x".into(),
+            file_attachments: Vec::new(),
         };
         let outcome = state.gate(req, &sink, &cancel).expect("trusted allowed");
         assert_eq!(outcome, GateOutcome::Allow);
@@ -934,6 +978,7 @@ mod tests {
             key: ToolKey::external("acme", "fetch"),
             operation_kind: OperationKind::Network,
             summary: "GET /x".into(),
+            file_attachments: Vec::new(),
         };
         let outcome = state.gate(req, &sink, &cancel).expect("no-confirm allowed");
         assert_eq!(outcome, GateOutcome::Allow);
@@ -958,6 +1003,7 @@ mod tests {
                 key: key_c,
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             (
                 state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
@@ -984,6 +1030,63 @@ mod tests {
     }
 
     #[test]
+    fn gate_caps_and_passes_through_file_attachments() {
+        // Issue #672: the expand-on-demand contents ride the same broadcast
+        // as the summary, so the gate caps each content at the attachment
+        // cap with the visible ellipsis -- never an unbounded payload on the
+        // wire -- and passes the (param, content) pairs through untouched
+        // otherwise.
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
+                operation_kind: OperationKind::Execute,
+                summary: "run".into(),
+                file_attachments: vec![
+                    FileAttachment {
+                        param: "code".into(),
+                        content: "x".repeat(FILE_ATTACHMENT_MAX_CHARS + 100),
+                    },
+                    FileAttachment {
+                        param: "notes".into(),
+                        content: "short".into(),
+                    },
+                ],
+            };
+            (
+                state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
+                sink_c,
+            )
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        handle.join().expect("gate thread").0.expect("allow");
+
+        let body = sink.last_request().expect("card body recorded");
+        assert_eq!(body.file_attachments.len(), 2);
+        assert_eq!(body.file_attachments[0].param, "code");
+        assert_eq!(
+            body.file_attachments[0].content.chars().count(),
+            FILE_ATTACHMENT_MAX_CHARS,
+            "an over-cap content truncates to exactly the cap"
+        );
+        assert!(
+            body.file_attachments[0].content.ends_with("..."),
+            "the cut is visible (the ellipsis), never silent"
+        );
+        assert_eq!(body.file_attachments[1].content, "short");
+    }
+
+    #[test]
     fn gate_always_allow_escalates_trust() {
         let state = Arc::new(ApprovalState::new());
         let cancel = Arc::new(CancelToken::new());
@@ -999,6 +1102,7 @@ mod tests {
                 key: key_c,
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1021,6 +1125,7 @@ mod tests {
             key,
             operation_kind: OperationKind::Network,
             summary: "GET /y".into(),
+            file_attachments: Vec::new(),
         };
         let outcome2 = state.gate(req, &sink2, &cancel2).expect("trusted now");
         assert_eq!(outcome2, GateOutcome::Allow);
@@ -1041,6 +1146,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1070,6 +1176,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1111,6 +1218,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_arc_c, &cancel_c)
         });
@@ -1132,6 +1240,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1195,6 +1304,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             a_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1207,6 +1317,7 @@ mod tests {
             key: ToolKey::external("other", "fetch"),
             operation_kind: OperationKind::Network,
             summary: "GET /y".into(),
+            file_attachments: Vec::new(),
         };
         let b_cancel = CancelToken::new();
         let b_sink = RecordingSink::default();
@@ -1246,6 +1357,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1290,6 +1402,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1458,6 +1571,7 @@ mod tests {
                 key: ToolKey::external("acme", "fetch"),
                 operation_kind: OperationKind::Network,
                 summary: "S".repeat(1000),
+                file_attachments: Vec::new(),
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });

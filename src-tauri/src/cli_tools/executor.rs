@@ -15,13 +15,13 @@
 //! -- a Windows job object (kill-on-close) or a Unix process group kill --
 //! so grandchildren the tool spawned die with it.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::config::{render_argv, CliToolConfig};
+use super::config::{render_call, CliToolConfig, RenderedFileValue};
 use crate::cancel::CancelToken;
 use crate::provider::tool_calling::{ToolResult, ToolUse};
 use crate::tools::ToolOutcome;
@@ -73,18 +73,33 @@ fn execute_capped(
         },
         promotion: None,
     };
-    // Render the argv first (ADR-0108 Decision 4): a missing parameter, a
-    // mistyped value, or an unimplemented delivery mode is the call's own
-    // structured error -- the model self-corrects (ADR-0077).
-    let argv = match render_argv(tool, &call.input) {
-        Ok(argv) => argv,
+    // Render the call first (ADR-0108 Decision 4): a missing parameter, a
+    // mistyped value, or a delivery/template shape a hand-edited config broke
+    // is the call's own structured error -- the model self-corrects
+    // (ADR-0077).
+    let rendered = match render_call(tool, &call.input, session_temp_dir, &call.id) {
+        Ok(rendered) => rendered,
         Err(detail) => {
             return error(format!("invalid call to `{}`: {detail}", tool.name));
         }
     };
+    // Write the file-channel values (issue #672): each planned temp file is
+    // on disk BEFORE the spawn, so the child reads exactly what the approval
+    // card's path promised. The guard deletes them on every exit path --
+    // success, non-zero, cancel -- a temp file that outlived its call would
+    // pile up in the session's work dir.
+    let _temp_files = match TempFileGuard::write_all(&rendered.files) {
+        Ok(guard) => guard,
+        Err(e) => {
+            return error(format!(
+                "failed to write a file-delivery temp file for `{}`: {e}",
+                tool.name
+            ));
+        }
+    };
     let mut command = Command::new(&tool.executable);
     command
-        .args(&argv)
+        .args(&rendered.argv)
         .current_dir(session_temp_dir)
         .envs(&tool.env)
         .stdin(Stdio::piped())
@@ -104,10 +119,28 @@ fn execute_capped(
             ));
         }
     };
-    // v1 passes every value through argv (ADR-0108 Decision 4), so the
-    // child's stdin carries nothing: closing it immediately signals EOF to
-    // a well-behaved tool. (#672 opens the stdin delivery channel here.)
-    drop(child.stdin.take());
+    // The stdin channel (issue #672, ADR-0108 Decision 4): the single
+    // declared value is written to the child's stdin, then the pipe closes
+    // (EOF) -- the close v1 gave every child, now preceded by the bytes. The
+    // write rides its own thread: a child that never reads would block a
+    // pipe-sized write forever, and the wait loop must keep polling cancel
+    // (the thread's write breaks with EPIPE when the tree dies, so nothing
+    // outlives the call -- except the pathological grandchild that dups ONLY
+    // the stdin read end: with no pipe write-end of its own to break, the
+    // writer blocks past the call's return. The leak is one bounded thread +
+    // the value String; accepted rather than a join deadline the common path
+    // does not need).
+    match (child.stdin.take(), rendered.stdin) {
+        (Some(mut stdin), Some(value)) => {
+            thread::spawn(move || {
+                // A write failure (the child closed its end early) is not
+                // the call's failure -- many tools succeed without reading
+                // stdin; the call's outcome is the child's exit + streams.
+                let _ = stdin.write_all(value.as_bytes());
+            });
+        }
+        (maybe_stdin, _) => drop(maybe_stdin),
+    }
     // Tree-kill guard: assigns the child to a kill-on-close job (Windows)
     // or records its process group (Unix). `None` degrades to killing the
     // direct child only -- the guarantee weakens, the call still resolves.
@@ -170,6 +203,42 @@ fn execute_capped(
             "`{}` exited with a non-zero status ({status})\n[stderr]\n{stderr}",
             tool.executable
         ))
+    }
+}
+
+/// RAII cleaner for the file-channel temp files (issue #672): writes them
+/// before the spawn, deletes them on drop -- which every return path of
+/// [`execute_capped`] passes through (success, non-zero exit, cancel,
+/// post-spawn errors). ADR-0108 Decision 4: the temp file is deleted when
+/// the call ends, succeeded or not.
+struct TempFileGuard(Vec<std::path::PathBuf>);
+
+impl TempFileGuard {
+    /// Write every planned value to its temp path. On a mid-batch failure
+    /// the files that already landed are cleaned first (their own guard
+    /// drop), then the refusal names the parameter that failed.
+    fn write_all(files: &[RenderedFileValue]) -> Result<Self, String> {
+        let mut written = Vec::with_capacity(files.len());
+        for file in files {
+            if let Err(e) = std::fs::write(&file.path, &file.content) {
+                drop(Self(written));
+                return Err(format!("parameter `{}`: {e}", file.param));
+            }
+            written.push(file.path.clone());
+        }
+        Ok(Self(written))
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        // Best-effort: a removal failure (an AV lock, a concurrent delete)
+        // must not mask the call's real outcome, and the session temp dir is
+        // discarded with the session anyway -- the guard bounds the common
+        // case, not the pathological one.
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
