@@ -675,6 +675,65 @@ fn play_scenario(
             notify(out, agent_message("done via gateway"));
             respond_prompt(out, &id, StopReason::Success);
         }
+        // Issue #673 (ADR-0108 Decision 6): a registered CLI tool must be
+        // advertised on the bridge's `tools/list` (single tool plane) and a
+        // bridge-originated `tools/call` must route through the gateway into
+        // the same spawn engine + approval gate a built-in-initiated call
+        // uses. The registration name is fixed by the wiring test
+        // ("cli-fixture-echo"); asserting the advertisement HERE makes a
+        // split plane fail loudly at the source rather than as a confusing
+        // downstream "unknown tool".
+        "cli_gateway_tool_call" => {
+            bridge_write(&mcp_request(
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
+            ));
+            let _ = bridge_read();
+            bridge_write(&mcp_request(2, "tools/list", serde_json::json!({})));
+            let listed = bridge_read().expect("tools/list response");
+            let names: Vec<&str> = listed["result"]["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .map(|t| t["name"].as_str().expect("named entry"))
+                .collect();
+            assert!(
+                names.contains(&"cli-fixture-echo"),
+                "the registered CLI tool must be advertised on the bridge surface: {names:?}"
+            );
+            bridge_write(&mcp_request(
+                3,
+                "tools/call",
+                serde_json::json!({
+                    "name": "cli-fixture-echo",
+                    "arguments": {"args": ["hello", "from", "bridge"]}
+                }),
+            ));
+            let called = bridge_read().expect("tools/call response");
+            assert_eq!(
+                called["result"]["isError"],
+                serde_json::json!(false),
+                "the CLI call succeeds through the gateway: {called}"
+            );
+            assert!(
+                called["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("hello"),
+                "the child's stdout rides the tool result: {called}"
+            );
+            notify(
+                out,
+                tool_call_start("gw_cli_1", "cli-fixture-echo", ToolKind::Execute),
+            );
+            notify(
+                out,
+                tool_call_finish("gw_cli_1", "cli-fixture-echo", "echoed"),
+            );
+            notify(out, agent_message("done via cli gateway"));
+            respond_prompt(out, &id, StopReason::Success);
+        }
         // Issue #646: same chain as gateway_tool_call, but the tools/call
         // frame exceeds the gateway's per-line byte cap. The gateway fails the
         // read and tears the connection down -- no id=2 response ever exists

@@ -1529,6 +1529,10 @@ impl Session {
                 sink,
                 cancel: &self.cancel,
                 mcp,
+                // The enabled CLI registrations ride the same turn inputs
+                // the built-in loop reads (issue #673, ADR-0108 Decision 6):
+                // one registry, one execution engine, two callers.
+                cli: inputs.cli_tools.to_vec(),
             };
             let gateway_result = serve_connection(handle, ctx, &engine_done);
             (
@@ -1560,7 +1564,7 @@ impl Session {
         if let Some(discovered) = acp_outcome.discovered_runtime.clone() {
             self.set_last_discovered_runtime(discovered);
         }
-        let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
+        let mut merged = merge_outcomes(gateway_outcome, acp_outcome, inputs.cli_tools);
         let trace = std::mem::take(&mut merged.trace);
         (turn_outcome_from_loop(merged), trace)
     }
@@ -1913,16 +1917,16 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// outcome into one [`LoopOutcome`] (issue #299 slice 9c, ADR-0085 +
 /// ADR-0078).
 ///
-/// The trace is de-duplicated across the two sources: a gateway-routed tool
-/// (one of the built-in DuckDB set) appears in BOTH -- the gateway's
-/// `tools/call` dispatch record (authoritative, ADR-0076 audit) and the CLI's
-/// `session/update` tool-call notification. The gateway record wins for those
-/// (it ran the SQL, so its success flag + excerpt are the truth); the ACP
-/// pump's non-gateway entries (the CLI's own built-ins -- bash / edit / etc.,
-/// which never touch the gateway) are appended. Promotions are gateway-only
-/// (the ACP engine leaves them empty by design, slice 9a); termination +
-/// `round_trips` are ACP-only (the gateway serves tools, it does not produce
-/// a turn termination).
+/// The trace is de-duplicated across the two sources: a gateway-served tool
+/// (one of the built-in DuckDB set, or an enabled CLI registration -- issue
+/// #673) appears in BOTH -- the gateway's `tools/call` dispatch record
+/// (authoritative, ADR-0076 audit) and the CLI's `session/update` tool-call
+/// notification. The gateway record wins for those (it ran the call, so its
+/// success flag + excerpt are the truth); the ACP pump's non-gateway entries
+/// (the CLI's own built-ins -- bash / edit / etc., which never touch the
+/// gateway) are appended. Promotions are gateway-only (the ACP engine leaves
+/// them empty by design, slice 9a); termination + `round_trips` are ACP-only
+/// (the gateway serves tools, it does not produce a turn termination).
 ///
 /// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may prefix MCP tool names
 /// (e.g. `mcp__<server>__explore`) in its `session/update` notifications, in
@@ -1931,12 +1935,16 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// drives a fake CLI that emits unprefixed names; real-CLI naming is verified
 /// in the manual E2E checklist, and a normalization layer lands as a
 /// follow-up if the E2E shows a prefix.
-fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
+fn merge_outcomes(
+    gateway: GatewayOutcome,
+    mut acp: LoopOutcome,
+    cli_tools: &[crate::cli_tools::config::CliToolConfig],
+) -> LoopOutcome {
     acp.promotions = gateway.promotions;
     // ADR-0103 (issues #608 + #611): the gateway's flat rows form a LEADING
     // round (it serves tools; it offers no prose/thinking slots), and the
     // CLI's per-round grouping survives the merge -- each ACP round keeps
-    // its thinking + prose + calls. The gateway-routed names drop from the
+    // its thinking + prose + calls. The gateway-served names drop from the
     // ACP rounds' calls (the gateway's own rows are the truth for those),
     // and a round the dedup leaves empty (no calls, no prose, no thinking)
     // drops -- empty stays empty. Row order keeps the gateway's rows first,
@@ -1946,9 +1954,15 @@ fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome 
         rounds.push(LoopRound::flat(gateway.trace));
     }
     for mut round in std::mem::take(&mut acp.trace) {
-        round
-            .calls
-            .retain(|entry| builtin_metadata(&entry.name).is_none());
+        // A name the gateway SERVES (built-in table + this turn's enabled
+        // CLI registrations, issue #673) is the gateway's to report; the
+        // ACP notification for the same call is a duplicate. Registration
+        // validation refuses built-in names, so the two checks are
+        // disjoint.
+        round.calls.retain(|entry| {
+            builtin_metadata(&entry.name).is_none()
+                && !cli_tools.iter().any(|t| t.name == entry.name)
+        });
         let emptied = round.calls.is_empty() && round.thinking.is_none() && round.text.is_none();
         if !emptied {
             rounds.push(round);
@@ -2183,11 +2197,41 @@ mod tests {
     fn merge_outcomes_gateway_builtin_wins_over_acp_duplicate() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "explore", false)]);
-        let merged = merge_outcomes(gateway, acp);
+        let merged = merge_outcomes(gateway, acp, &[]);
         assert_eq!(merged.trace.len(), 1, "the ACP duplicate is dropped");
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
         assert!(
             merged.trace[0].calls[0].success,
+            "the gateway success flag wins"
+        );
+    }
+
+    /// Issue #673: a registered CLI tool name is gateway-served too, so the
+    /// same one-call-one-row rule holds -- the gateway's dispatch record
+    /// wins and the ACP notification for the identical call drops (the
+    /// registration is never a builtin name, so this arm is disjoint from
+    /// the builtin dedup above).
+    #[test]
+    fn merge_outcomes_gateway_cli_registration_wins_over_acp_duplicate() {
+        use crate::cli_tools::config::CliToolConfig;
+        let registration = CliToolConfig {
+            name: "doc-convert".into(),
+            description: "convert".into(),
+            executable: "/no/such/exe".into(),
+            argv_template: Vec::new(),
+            params: Vec::new(),
+            env: Default::default(),
+            enabled: true,
+            source: crate::cli_tools::config::CliToolSource::User,
+            baseline: None,
+        };
+        let gateway = gateway_outcome(vec![trace_entry("g1", "doc-convert", false)]);
+        let acp = acp_outcome(vec![trace_entry("a1", "doc-convert", true)]);
+        let merged = merge_outcomes(gateway, acp, &[registration]);
+        assert_eq!(merged.trace.len(), 1, "the ACP duplicate is dropped");
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
+        assert!(
+            !merged.trace[0].calls[0].success,
             "the gateway success flag wins"
         );
     }
@@ -2199,7 +2243,7 @@ mod tests {
     fn merge_outcomes_acp_non_builtin_appended() {
         let gateway = gateway_outcome(Vec::new());
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
-        let merged = merge_outcomes(gateway, acp);
+        let merged = merge_outcomes(gateway, acp, &[]);
         assert_eq!(merged.trace.len(), 1);
         assert_eq!(merged.trace[0].calls[0].name, "bash");
     }
@@ -2212,7 +2256,7 @@ mod tests {
     fn merge_outcomes_gateway_builtin_plus_acp_non_builtin() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
-        let merged = merge_outcomes(gateway, acp);
+        let merged = merge_outcomes(gateway, acp, &[]);
         assert_eq!(merged.trace.len(), 2, "gateway leading round + CLI round");
         assert_eq!(merged.trace[0].calls[0].name, "explore");
         assert_eq!(merged.trace[1].calls[0].name, "bash");
@@ -2247,7 +2291,7 @@ mod tests {
                 },
             ],
         };
-        let merged = merge_outcomes(gateway, acp);
+        let merged = merge_outcomes(gateway, acp, &[]);
         assert_eq!(merged.trace.len(), 2, "leading round + the one ACP round");
         let leading = &merged.trace[0];
         assert!(leading.thinking.is_none() && leading.text.is_none());
@@ -2274,7 +2318,7 @@ mod tests {
             trace: Vec::new(),
             round_trips: 3,
         };
-        let merged = merge_outcomes(gateway, acp);
+        let merged = merge_outcomes(gateway, acp, &[]);
         assert_eq!(merged.termination, Termination::Text("done".into()));
         assert_eq!(merged.round_trips, 3);
     }
@@ -2288,7 +2332,7 @@ mod tests {
     fn merge_outcomes_promotions_single_source_gateway() {
         let gateway = gateway_outcome(Vec::new());
         let acp = acp_outcome(Vec::new());
-        let merged = merge_outcomes(gateway, acp);
+        let merged = merge_outcomes(gateway, acp, &[]);
         assert!(merged.promotions.is_empty());
     }
 

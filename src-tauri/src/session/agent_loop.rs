@@ -644,15 +644,15 @@ fn execute_call(
     // A registered CLI tool classifies under its own reserved server
     // (ADR-0108 Decision 7): the trust key is the registration name, the
     // badge is Execute, and the summary renders the full argv the approval
-    // card shows (the approver signs exactly what will run).
-    let cli_tool = cli.iter().find(|t| t.name == call.name);
-    let (key, operation_kind, summary, file_attachments) = match cli_tool {
-        Some(tool) => classify_cli_tool(tool, &call.input, deps.temp_path, &call.id),
-        None => {
-            let (key, operation_kind, summary) = classify_call(call);
-            (key, operation_kind, summary, Vec::new())
-        }
-    };
+    // card shows (the approver signs exactly what will run). The shared
+    // helper keeps this identical to the gateway's bridge-originated arm.
+    let ResolvedClassification {
+        key,
+        operation_kind,
+        summary,
+        file_attachments,
+        cli_tool,
+    } = classify_with_cli_tool(cli, call, deps.temp_path);
     let gate_req = ApprovalRequest {
         key,
         operation_kind,
@@ -838,7 +838,7 @@ const ARGS_PREVIEW_MAX_CHARS: usize = 448;
 /// file-delivery values ride along as expandable attachments (ADR-0109
 /// Decision 8), captured NOW -- the temp file is deleted when the call
 /// ends, so the payload snapshot is the approver's only durable view.
-fn classify_cli_tool(
+pub(crate) fn classify_cli_tool(
     tool: &crate::cli_tools::config::CliToolConfig,
     input: &Value,
     temp_dir: &Path,
@@ -883,6 +883,59 @@ fn classify_cli_tool(
         summary,
         file_attachments,
     )
+}
+
+/// One call's classification resolved against the enabled CLI registrations
+/// (issue #673): the gate-facing fields plus the matched registration for the
+/// dispatch arm. Shared by the built-in loop's `execute_call` and the
+/// gateway's `handle_tools_call` so the two callers cannot drift on the
+/// trust key (ADR-0108 Decision 7) -- a drift here would split the single
+/// tool plane's trust axis.
+pub(crate) struct ResolvedClassification<'a> {
+    pub key: ToolKey,
+    pub operation_kind: OperationKind,
+    pub summary: String,
+    pub file_attachments: Vec<crate::approval::FileAttachment>,
+    /// The registration the call's name matched, for the dispatch arm;
+    /// `None` when the name is not a registered CLI tool.
+    pub cli_tool: Option<&'a crate::cli_tools::config::CliToolConfig>,
+}
+
+/// Classify one call with the CLI-registration lookup folded in: a
+/// registered name classifies under its own reserved server (`classify_cli_tool`,
+/// ADR-0108 Decision 7 -- the approver signs exactly what will run); anything
+/// else falls through to the shared builtin/external classification with no
+/// file attachments. Registration validation refuses builtin / meta /
+/// namespaced names, so the two arms are disjoint.
+pub(crate) fn classify_with_cli_tool<'a>(
+    cli: &'a [crate::cli_tools::config::CliToolConfig],
+    call: &ToolUse,
+    temp_dir: &Path,
+) -> ResolvedClassification<'a> {
+    let cli_tool = cli.iter().find(|t| t.name == call.name);
+    match cli_tool {
+        Some(tool) => {
+            let (key, operation_kind, summary, file_attachments) =
+                classify_cli_tool(tool, &call.input, temp_dir, &call.id);
+            ResolvedClassification {
+                key,
+                operation_kind,
+                summary,
+                file_attachments,
+                cli_tool: Some(tool),
+            }
+        }
+        None => {
+            let (key, operation_kind, summary) = classify_call(call);
+            ResolvedClassification {
+                key,
+                operation_kind,
+                summary,
+                file_attachments: Vec::new(),
+                cli_tool: None,
+            }
+        }
+    }
 }
 
 pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {

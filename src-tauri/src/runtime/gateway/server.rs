@@ -9,14 +9,17 @@
 //! bridge descriptor before the bridge connects) while [`serve_connection`]
 //! blocks for the bridge connection's lifetime.
 //!
-//! `tools/list` advertises the built-in DuckDB tool table plus, when external
-//! servers connected this turn, the fixed meta-tool discovery trio
-//! (`mcp_list_servers` / `mcp_search_tools` / `mcp_invoke`, ADR-0105) --
-//! external tools surface by handle through discovery, not one-by-one.
-//! `tools/call` routes through the approval gate + [`crate::tools::dispatch`],
-//! mirroring the built-in agent loop's `execute_call` -- built-in tools
-//! classify `Allow` (zero approval, ADR-0080 Decision 1), unknown names fall
-//! through to the external arm and surface the gate's pending card.
+//! `tools/list` advertises the built-in DuckDB tool table, the enabled CLI
+//! registrations direct-listed with the same names + schemas the built-in
+//! runtime's table carries (issue #673, ADR-0108 Decision 6 single tool
+//! plane), plus, when external servers connected this turn, the fixed
+//! meta-tool discovery trio (`mcp_list_servers` / `mcp_search_tools` /
+//! `mcp_invoke`, ADR-0105) -- external tools surface by handle through
+//! discovery, not one-by-one. `tools/call` routes through the approval gate +
+//! [`crate::tools::dispatch`] or the shared CLI spawn engine, mirroring the
+//! built-in agent loop's `execute_call` -- built-in tools classify `Allow`
+//! (zero approval, ADR-0080 Decision 1), unknown names fall through to the
+//! external arm and surface the gate's pending card.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -35,7 +38,8 @@ use crate::mcp::meta_tools;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 use crate::session::agent_loop::{
-    classify_call, truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX,
+    classify_with_cli_tool, truncate_trace_excerpt, ResolvedClassification, TraceEntry,
+    TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::tools::{builtin_table, dispatch};
@@ -97,6 +101,12 @@ pub struct GatewayCtx<'a> {
     /// drops it per turn. Empty when no servers are configured or the session
     /// wiring has not connected any yet.
     pub mcp: McpAggregator,
+    /// The enabled CLI registrations (issue #673, ADR-0108 Decision 6): the
+    /// same enabled slice the turn inputs hand the built-in loop, so the
+    /// bridge advertises + dispatches the single tool plane. Owned
+    /// (turn-local), like `mcp` -- a per-turn clone of small configs, never
+    /// a second read of the config store.
+    pub cli: Vec<crate::cli_tools::config::CliToolConfig>,
 }
 
 /// The trace + promotions a serve collected from the bridge's tool calls
@@ -335,11 +345,19 @@ fn handle_method(
             }
         })),
         "tools/list" => {
-            // Built-in DuckDB tools stay direct-listed; the external surface
-            // is the fixed meta-tool trio (ADR-0105), attached only when a
-            // server connected this turn. The bridge / LLM never sees a
-            // per-tool flattened advertisement.
+            // Built-in DuckDB tools stay direct-listed; the enabled CLI
+            // registrations are direct-listed the same way (issue #673,
+            // ADR-0108 Decision 6 -- the bridge surface mirrors the built-in
+            // runtime's table, names + schemas verbatim); the external MCP
+            // surface is the fixed meta-tool trio (ADR-0105), attached only
+            // when a server connected this turn. The bridge / LLM never sees
+            // a per-tool flattened advertisement.
             let mut tools: Vec<Value> = builtin_table().iter().map(tool_to_mcp).collect();
+            tools.extend(
+                crate::cli_tools::config::tool_definitions(&ctx.cli)
+                    .iter()
+                    .map(tool_to_mcp),
+            );
             tools.extend(ctx.mcp.meta_tool_definitions().iter().map(tool_to_mcp));
             Response::Result(json!({ "tools": tools }))
         }
@@ -419,12 +437,24 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     };
     // The gate consumes the RESOLVED identity (ADR-0105 Decision 4), so an
     // approval card names the backend server + handle, never "mcp_invoke".
-    let (key, operation_kind, summary) = classify_call(call);
+    // A registered CLI tool classifies under its own reserved server
+    // (issue #673, ADR-0108 Decision 7) -- the trust key is the registration
+    // name, the badge is Execute, and the summary renders the full argv +
+    // file values the approval card shows, identically to a
+    // built-in-loop-initiated call. The shared helper keeps the trust key
+    // and card identical to `execute_call`'s (one trust axis, two callers).
+    let ResolvedClassification {
+        key,
+        operation_kind,
+        summary,
+        file_attachments,
+        cli_tool,
+    } = classify_with_cli_tool(&ctx.cli, call, ctx.deps.temp_path);
     let gate_req = ApprovalRequest {
         key,
         operation_kind,
         summary: summary.clone(),
-        file_attachments: Vec::new(),
+        file_attachments,
     };
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
         Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
@@ -444,12 +474,14 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         }
         Ok(GateOutcome::Allow) => {
             // Route by name shape (ADR-0076 gateway routing + ADR-0105
-            // Decision 4): a namespaced name (an `mcp_invoke` fall-through)
-            // routes to the external server and the server's envelope is
-            // relayed VERBATIM via [`external_call_outcome`]; anything else
-            // is a built-in dispatch whose promotion rides the side-effect
-            // channel. Either way exactly one trace row lands, naming the
-            // call's final identity.
+            // Decision 4 + ADR-0108 Decision 6): a namespaced name (an
+            // `mcp_invoke` fall-through) routes to the external server and
+            // the server's envelope is relayed VERBATIM via
+            // [`external_call_outcome`]; a registered CLI tool's name routes
+            // to the shared spawn engine; anything else is a built-in
+            // dispatch whose promotion rides the side-effect channel. Either
+            // way exactly one trace row lands, naming the call's final
+            // identity.
             // NOTE: the namespaced check here re-reads `call.name` rather
             // than hoisting one `is_external` above the trio match -- the
             // `mcp_invoke` fall-through REPLACES the name with the resolved
@@ -460,6 +492,24 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 let route_result = ctx.mcp.route(&call.name, &call.input);
                 let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
                 (Response::Result(envelope), is_error, excerpt)
+            } else if let Some(tool) = cli_tool {
+                // The registered-CLI dispatch arm (issue #673, ADR-0108
+                // Decision 6): the same spawn engine, cwd, cancel, and
+                // output-cap discipline a built-in-initiated call gets -- one
+                // execution engine, two callers. CLI tools never promote, so
+                // no side-effect channel rides here.
+                let outcome =
+                    crate::cli_tools::executor::execute(tool, call, ctx.deps.temp_path, ctx.cancel);
+                let is_error = outcome.result.is_error;
+                let excerpt = truncate_trace_excerpt(&outcome.result.content, TRACE_EXCERPT_MAX);
+                (
+                    Response::Result(json!({
+                        "content": [{"type": "text", "text": outcome.result.content}],
+                        "isError": is_error,
+                    })),
+                    is_error,
+                    excerpt,
+                )
             } else {
                 let dispatched = dispatch(call, &mut ctx.deps, ctx.cancel, ctx.materializer);
                 if let Some(promotion) = dispatched.promotion {
@@ -623,6 +673,20 @@ mod tests {
     /// reuses the same helper: its ctx moves into `serve_connection` and the
     /// process exits before the leak matters.
     fn fresh_ctx() -> GatewayCtx<'static> {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
+        gate_ctx(Vec::new(), approval, sink)
+    }
+
+    /// The CLI-registration test variant of [`fresh_ctx`]: a caller-chosen
+    /// registry + gate. The gate-driven cases need a reachable `ApprovalState`
+    /// (to seed trust) and a sink the assertions can read, which the all-leak
+    /// defaults of `fresh_ctx` hide.
+    fn gate_ctx(
+        cli: Vec<crate::cli_tools::config::CliToolConfig>,
+        approval: &'static ApprovalState,
+        sink: &'static dyn ApprovalSink,
+    ) -> GatewayCtx<'static> {
         let engine: &'static Engine = Box::leak(Box::new(Engine::new()));
         let ws: &'static mut WorkingSet = Box::leak(Box::new(WorkingSet::default()));
         let sources: &'static mut HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
@@ -630,8 +694,6 @@ mod tests {
             Box::leak(Box::new(HashMap::new()));
         let fake: &'static mut FakeMaterializer =
             Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
         let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
         let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
         GatewayCtx {
@@ -641,6 +703,7 @@ mod tests {
             sink,
             cancel,
             mcp: McpAggregator::default(),
+            cli,
         }
     }
 
@@ -1507,6 +1570,327 @@ mod tests {
         assert_eq!(
             outcome.trace[0].tool_use_id, "req-abc",
             "string id must not carry stray quotes"
+        );
+    }
+
+    // --- registered CLI tools on the bridge surface (issue #673) ---------
+
+    /// An approval sink that drives the gate from inside `emit_request`:
+    /// records the emitted card body, then answers it immediately. The gate
+    /// installs the pending slot BEFORE calling the sink and holds no locks
+    /// across the call, so `respond` here is the same store-then-notify the
+    /// `respond_tool_approval` command does -- no deadlock, no lost wake-up.
+    struct AnsweringSink {
+        state: &'static ApprovalState,
+        answer: ApprovalResponse,
+        seen: std::sync::Mutex<Vec<ApprovalRequestBody>>,
+    }
+
+    impl AnsweringSink {
+        fn new(state: &'static ApprovalState, answer: ApprovalResponse) -> Self {
+            Self {
+                state,
+                answer,
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn cards(&self) -> std::sync::MutexGuard<'_, Vec<ApprovalRequestBody>> {
+            self.seen.lock().expect("cards lock")
+        }
+    }
+
+    impl ApprovalSink for AnsweringSink {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            self.cards().push(body.clone());
+            let id: uuid::Uuid = body.request_id.parse().expect("request_id is a uuid");
+            self.state.respond(id, self.answer).expect("respond");
+        }
+
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+
+    /// A registered tool with one argv parameter + one file parameter, pointed
+    /// at an executable that does not exist: the classify path never needs
+    /// the binary (the card is rendered before any spawn), and the execute
+    /// path's structured spawn failure is exactly what the routing pins
+    /// assert -- the executor's own tests cover the running-binary contract.
+    fn cli_fixture() -> crate::cli_tools::config::CliToolConfig {
+        use crate::cli_tools::config::{
+            CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
+        };
+        CliToolConfig {
+            name: "doc-convert".into(),
+            description: "convert a document".into(),
+            executable: "/no/such/cli-fixture-exe".into(),
+            argv_template: vec![
+                "--flag".into(),
+                "{value}".into(),
+                "--doc".into(),
+                "{doc}".into(),
+            ],
+            params: vec![
+                CliToolParam {
+                    name: "value".into(),
+                    description: "a flag value".into(),
+                    delivery: CliParamDelivery::Argv,
+                    varargs: false,
+                },
+                CliToolParam {
+                    name: "doc".into(),
+                    description: "the document body".into(),
+                    delivery: CliParamDelivery::File,
+                    varargs: false,
+                },
+            ],
+            env: Default::default(),
+            enabled: true,
+            source: CliToolSource::User,
+            baseline: None,
+        }
+    }
+
+    /// `tools/list` direct-lists the enabled registrations after the built-in
+    /// table, carrying the same name + schema the built-in runtime's table
+    /// does (the single tool plane, ADR-0108 Decision 6). With no
+    /// registrations the surface is unchanged -- a machine without any never
+    /// misreports.
+    #[test]
+    fn tools_list_direct_lists_cli_tools_after_builtins() {
+        let mut ctx = fresh_ctx();
+        ctx.cli.push(cli_fixture());
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"});
+        let tools = match handle_method("tools/list", &msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => v["tools"].as_array().expect("tools array").clone(),
+            _ => panic!("tools/list must return Result"),
+        };
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().expect("named entry"))
+            .collect();
+        let pos = names
+            .iter()
+            .position(|n| *n == "doc-convert")
+            .expect("the registered CLI tool is advertised on the bridge surface");
+        let last_builtin = builtin_table().len() - 1;
+        assert!(
+            pos > last_builtin,
+            "CLI entries ride after the built-in table: {names:?}"
+        );
+        // Schema identity with the built-in runtime's table: the same
+        // `tool_definitions` output, renamed to the MCP field.
+        let defs = crate::cli_tools::config::tool_definitions(&ctx.cli);
+        assert_eq!(tools[pos]["description"], json!(defs[0].description));
+        assert_eq!(tools[pos]["inputSchema"], defs[0].input_schema);
+        // No registrations -> no CLI entries: the count is exactly the
+        // built-in table (the trio is not mounted in this fixture).
+        let mut bare = fresh_ctx();
+        let bare_tools = match handle_method("tools/list", &msg, &mut bare, &mut outcome) {
+            Response::Result(v) => v["tools"].as_array().expect("tools array").clone(),
+            _ => panic!("tools/list must return Result"),
+        };
+        assert_eq!(
+            bare_tools.len(),
+            builtin_table().len(),
+            "an empty registry leaves the surface unchanged"
+        );
+    }
+
+    /// A bridge-originated call naming a registered CLI tool gates under the
+    /// CLI trust key with the Execute badge, and the card carries the full
+    /// argv + the file-delivered value -- the approver signs exactly what
+    /// will run, identically to a built-in-initiated call (ADR-0108
+    /// Decisions 7/8). The sink allows once; the executor's structured spawn
+    /// failure (a nonexistent executable) comes back as the call's own
+    /// `isError` envelope with one trace row.
+    #[test]
+    fn handle_tools_call_cli_tool_gates_then_dispatches_with_trace() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::AllowOnce,
+        )));
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "doc-convert",
+                "arguments": {"value": "yes", "doc": "hello body"}
+            }
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(
+                    v["isError"], true,
+                    "a nonexistent executable is a tool-level error, not a JSON-RPC error"
+                );
+                let text = v["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    text.contains("cli-fixture-exe"),
+                    "the spawn failure names the executable: {text}"
+                );
+            }
+            Response::Error(code, m) => panic!("CLI call must be a tool result, got {code}: {m}"),
+            Response::None => panic!("CLI call must return a result"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one call -> one trace row");
+        let row = &outcome.trace[0];
+        assert_eq!(row.name, "doc-convert");
+        assert_eq!(row.tool_use_id, "9");
+        assert_eq!(row.operation_kind, OperationKind::Execute);
+        assert!(!row.success, "the spawn failure is recorded as failure");
+        // The card the approver saw: CLI trust key, Execute badge, full argv,
+        // and the file value expandable on the card.
+        let cards = sink.cards();
+        assert_eq!(cards.len(), 1, "exactly one approval card");
+        let body = &cards[0];
+        assert_eq!(body.server, ToolKey::CLI_SERVER);
+        assert_eq!(body.tool, "doc-convert");
+        assert_eq!(body.operation_kind, OperationKind::Execute);
+        assert!(
+            body.summary.contains("--flag")
+                && body.summary.contains("yes")
+                && body.summary.contains("--doc"),
+            "summary renders the full argv: {}",
+            body.summary
+        );
+        assert_eq!(body.file_attachments.len(), 1);
+        assert_eq!(body.file_attachments[0].param, "doc");
+        assert_eq!(body.file_attachments[0].content, "hello body");
+    }
+
+    /// A denial is the call's own `isError` envelope + one trace row naming
+    /// the denial -- the same self-correctable tool-level failure the
+    /// built-in loop feeds its model (ADR-0077), never a JSON-RPC error and
+    /// never a spawn.
+    #[test]
+    fn handle_tools_call_cli_tool_denial_is_tool_level_error() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::Deny,
+        )));
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "doc-convert",
+                "arguments": {"value": "yes", "doc": "hello body"}
+            }
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true);
+                let text = v["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    text.contains("denied by the approval gateway"),
+                    "denial surfaces as the tool result: {text}"
+                );
+            }
+            _ => panic!("denial must return a tool result, not an error"),
+        }
+        assert_eq!(outcome.trace.len(), 1);
+        let row = &outcome.trace[0];
+        assert!(!row.success);
+        assert_eq!(row.name, "doc-convert");
+        assert_eq!(row.result_excerpt, "denied by approval gateway");
+    }
+
+    /// Session trust is per `ToolKey`, not per caller: a key seeded by a
+    /// prior always-allow bypasses the card for a bridge-originated call too
+    /// -- the single plane's payoff (one trust axis, two callers).
+    #[test]
+    fn handle_tools_call_cli_tool_trust_key_bypasses_the_card() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        approval.seed_trust(&ToolKey::external(ToolKey::CLI_SERVER, "doc-convert"));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::Deny,
+        )));
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "doc-convert",
+                "arguments": {"value": "yes", "doc": "hello body"}
+            }
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                // Trusted, so the call DISPATCHED -- the failure is the
+                // spawn's, not a denial.
+                let text = v["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    !text.contains("denied"),
+                    "a trusted key dispatches without a card: {text}"
+                );
+            }
+            _ => panic!("trusted CLI call must return a tool result"),
+        }
+        assert!(
+            sink.cards().is_empty(),
+            "a trusted key never surfaces a card"
+        );
+        assert_eq!(outcome.trace.len(), 1);
+    }
+
+    /// A cancel arriving while the gate is suspended on a CLI card ends the
+    /// call as a JSON-RPC error (the bridge must never hang on a reply) and
+    /// records no trace row -- the turn-level cancel path owns the outcome.
+    /// The waker thread plays the role of `fire_cancel`'s
+    /// `interrupt_pending`, the same wake the real cancel path uses.
+    #[test]
+    fn handle_tools_call_cli_tool_cancel_ends_as_jsonrpc_error() {
+        struct ParkingSink(std::sync::Mutex<Vec<ApprovalRequestBody>>);
+        impl ApprovalSink for ParkingSink {
+            fn emit_request(&self, body: &ApprovalRequestBody) {
+                self.0.lock().expect("cards lock").push(body.clone());
+            }
+            fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+        }
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static ParkingSink = Box::leak(Box::new(ParkingSink(Default::default())));
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let waker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            approval.interrupt_pending();
+        });
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "doc-convert",
+                "arguments": {"value": "yes", "doc": "hello body"}
+            }
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Error(code, m) => {
+                assert_eq!(code, -32000);
+                assert!(m.contains("cancelled"), "names the cancel: {m}");
+            }
+            _ => panic!("a cancelled gate must surface a JSON-RPC error"),
+        }
+        waker.join().expect("waker thread panicked");
+        assert!(
+            outcome.trace.is_empty(),
+            "a cancelled call records no trace row"
+        );
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            1,
+            "the card did surface first"
         );
     }
 
