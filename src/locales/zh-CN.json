@@ -377,6 +377,8 @@
   "settings.skills.drawerEditTitle": "编辑技能 {name}",
   "settings.skills.empty": "暂无技能。点击「新建」创建一个。",
   "settings.skills.fieldBody": "正文",
+  "settings.skills.fieldCliTools": "引用的 CLI 工具",
+  "settings.skills.fieldCliToolsEmpty": "尚未注册任何 CLI 工具。",
   "settings.skills.fieldCompatibility": "兼容性",
   "settings.skills.fieldLicense": "许可证",
   "settings.skills.fieldMcpServers": "引用的 MCP server",

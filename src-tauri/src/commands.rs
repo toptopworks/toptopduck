@@ -3136,7 +3136,8 @@ fn build_skill_source_candidates(
 /// configured registry -- an id that is not configured is warned + skipped
 /// (it contributes nothing to the effective MCP set; the mount itself
 /// succeeds because the skill's prompt fragment is independent of its MCP
-/// declarations).
+/// declarations). Issue #674: the declared CLI tool names get the same
+/// post-mount warn, against the EFFECTIVE (enabled) CLI set.
 #[tauri::command]
 pub fn mount_skill(
     store: State<'_, Arc<SessionStore>>,
@@ -3154,8 +3155,10 @@ pub fn mount_skill(
     // Issue #369 AC#5: warn for declared MCP server ids not in the global
     // registry. The mount already succeeded (the skill is live for prompt
     // injection); the unknown ids are simply skipped in the effective set.
+    // Issue #674: same shape for the declared CLI tool names.
     drop(s);
     warn_unknown_mcp_ids(&live, &skills_root.0, &name);
+    warn_unknown_cli_names(&live, &skills_root.0, &name);
     Ok(())
 }
 
@@ -3222,11 +3225,138 @@ fn warn_unknown_mcp_ids(live: &LiveProviderConfig, root: &Path, skill_name: &str
     }
 }
 
+/// The declared CLI tool names that are NOT live in the effective CLI set
+/// (issue #674): a name dangles when it is unregistered OR
+/// registered-but-disabled. Unlike the MCP sibling check (which consults the
+/// full registry, so a disabled server is not flagged), this is checked
+/// against the ENABLED slice on purpose: ADR-0106 disabled = dormant = no
+/// tool-table entry, so a disabled registration is exactly as absent from
+/// the model's tool surface as an unregistered name, and the reference warn
+/// must cover both states (CONTEXT "技能": the referent must be configured
+/// AND enabled to be usable; the reference itself never flips either).
+fn dangling_cli_refs(
+    referenced: &[String],
+    tools: &[crate::cli_tools::config::CliToolConfig],
+) -> Vec<String> {
+    let effective: HashSet<&str> = tools
+        .iter()
+        .filter(|tool| tool.enabled)
+        .map(|tool| tool.name.as_str())
+        .collect();
+    referenced
+        .iter()
+        .filter(|name| !effective.contains(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Warn for CLI tool names declared by a skill that are neither registered
+/// nor enabled (issue #674) -- the `warn_unknown_mcp_ids` sibling. Called
+/// after a successful mount; the mount itself is not affected (declarative
+/// metadata only -- a reference never configures or enables anything). An
+/// unreadable or missing `SKILL.md` contributes no warning.
+fn warn_unknown_cli_names(live: &LiveProviderConfig, root: &Path, skill_name: &str) {
+    let fragments = resolve_prompt_fragments(root, &[skill_name.to_string()]);
+    let Some(frag) = fragments.into_iter().next() else {
+        return;
+    };
+    if frag.cli_tools.is_empty() {
+        return;
+    }
+    let effective = live.enabled_cli_tools();
+    for name in dangling_cli_refs(&frag.cli_tools, &effective) {
+        log::warn!(
+            target: "toptopduck::cli_tools",
+            "skill `{skill_name}` references CLI tool `{name}` which is not \
+             registered or enabled -- the tool stays absent (register/enable \
+             it in Settings to make it available)",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session_store::UNKNOWN_SESSION;
     use crate::CancelToken;
+
+    // --- skill CLI tool references (issue #674, ADR-0108 Decision 7) -------
+
+    /// A minimal CliToolConfig for the dangling-reference tests: only `name`
+    /// and `enabled` matter to [`dangling_cli_refs`].
+    fn cli_tool(name: &str, enabled: bool) -> crate::cli_tools::config::CliToolConfig {
+        crate::cli_tools::config::CliToolConfig {
+            name: name.to_string(),
+            description: "does a thing".to_string(),
+            executable: "/bin/tool".to_string(),
+            argv_template: Vec::new(),
+            params: Vec::new(),
+            env: Default::default(),
+            enabled,
+            source: Default::default(),
+            baseline: None,
+        }
+    }
+
+    #[test]
+    fn dangling_cli_refs_flags_missing_and_disabled_but_not_enabled() {
+        let tools = vec![cli_tool("pandoc", true), cli_tool("office-cli", false)];
+        let referenced = vec![
+            "pandoc".to_string(),
+            "office-cli".to_string(),
+            "ghost-tool".to_string(),
+        ];
+        let dangling = dangling_cli_refs(&referenced, &tools);
+        // Enabled: live on the tool surface -- not dangling.
+        assert!(!dangling.contains(&"pandoc".to_string()));
+        // Registered but disabled: dormant (ADR-0106) -- dangles exactly like
+        // the unregistered name; both states must warn (issue #674 AC).
+        assert!(dangling.contains(&"office-cli".to_string()));
+        assert!(dangling.contains(&"ghost-tool".to_string()));
+        assert_eq!(dangling.len(), 2);
+    }
+
+    #[test]
+    fn warn_unknown_cli_names_consults_the_real_enabled_slice() {
+        // Pins the seam `warn_unknown_cli_names` reads: the dangling judgment
+        // must consult the ENABLED slice of a real `LiveProviderConfig`
+        // (`live.enabled_cli_tools()`), not the full registry -- swapping in
+        // `live.cli_tools()` (the MCP sibling's shape) would silently stop
+        // flagging disabled tools while every hand-built-input pin above stays
+        // green.
+        let cfg_dir = tempfile::tempdir().expect("config tempdir");
+        let live = LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore::new(),
+            cfg_dir.path().join("config.json"),
+        );
+        live.upsert_cli_tool(cli_tool("pandoc", true))
+            .expect("upsert 1");
+        live.upsert_cli_tool(cli_tool("office-cli", false))
+            .expect("upsert 2");
+
+        let skills = tempfile::tempdir().expect("skills tempdir");
+        let root = skills.path();
+        std::fs::create_dir_all(root.join("doc-writer")).unwrap();
+        std::fs::write(
+            root.join("doc-writer").join("SKILL.md"),
+            "---\nname: doc-writer\ndescription: Test skill.\nmetadata:\n  \
+             toptopduck_cli_tools: pandoc, office-cli\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // The exact reads `warn_unknown_cli_names` performs after a mount.
+        let frag = resolve_prompt_fragments(root, &["doc-writer".to_string()])
+            .into_iter()
+            .next()
+            .expect("fragment");
+        assert_eq!(frag.cli_tools.len(), 2, "frontmatter parsed both refs");
+        let dangling = dangling_cli_refs(&frag.cli_tools, &live.enabled_cli_tools());
+        assert_eq!(
+            dangling,
+            vec!["office-cli".to_string()],
+            "registered-but-disabled dangles through the real enabled slice"
+        );
+    }
 
     // --- default runtime startup resolution (issue #569, ADR-0098 D2/D3) ----
 

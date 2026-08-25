@@ -21,9 +21,16 @@ pub struct ParsedSkillMd {
 }
 
 /// The extension key under `metadata` that carries the referenced MCP server
-/// ids (ADR-0086 Decision 1: the ONLY toptopduck extension key, comma-separated
-/// ids). Everything else in the frontmatter is spec-native.
+/// ids (ADR-0086 Decision 1, comma-separated ids). Everything else in the
+/// frontmatter is spec-native.
 pub const MCP_SERVERS_KEY: &str = "toptopduck_mcp_servers";
+
+/// The extension key under `metadata` that carries the referenced CLI tool
+/// registration names (ADR-0108 Decision 7, comma-separated names). The exact
+/// sibling of [`MCP_SERVERS_KEY`]: same comma-list shape, same degrade
+/// posture, same declarative-metadata semantics (a reference never
+/// configures or enables anything).
+pub const CLI_TOOLS_KEY: &str = "toptopduck_cli_tools";
 
 fn key(name: &str) -> Value {
     Value::String(name.to_string())
@@ -83,14 +90,16 @@ pub fn get_string(map: &Mapping, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The referenced MCP server ids: `metadata.toptopduck_mcp_servers` as a
-/// comma-separated string, split + trimmed, empties dropped. Absent / mistyped
-/// anywhere along the path degrades to an empty list.
-pub fn mcp_servers(map: &Mapping) -> Vec<String> {
+/// The ids under `metadata.<ext_key>` as a comma-separated string, split +
+/// trimmed, empties dropped. Absent / mistyped anywhere along the path
+/// degrades to an empty list. Shared by both extension keys
+/// ([`MCP_SERVERS_KEY`], [`CLI_TOOLS_KEY`]) so their parse semantics stay
+/// bit-identical by construction.
+fn metadata_refs(map: &Mapping, ext_key: &str) -> Vec<String> {
     let Some(Value::Mapping(metadata)) = map.get(key("metadata")) else {
         return Vec::new();
     };
-    let Some(Value::String(list)) = metadata.get(key(MCP_SERVERS_KEY)) else {
+    let Some(Value::String(list)) = metadata.get(key(ext_key)) else {
         return Vec::new();
     };
     list.split(',')
@@ -100,20 +109,17 @@ pub fn mcp_servers(map: &Mapping) -> Vec<String> {
         .collect()
 }
 
-/// Parse a raw YAML frontmatter string and extract the MCP server ids (issue
-/// #369). Degrades to an empty list on any parse failure -- a malformed
-/// frontmatter contributes no MCP servers, mirroring the degrade-everywhere
-/// posture of [`mcp_servers`].
-pub fn mcp_servers_from_yaml(yaml: &str) -> Vec<String> {
-    let Ok(Value::Mapping(mapping)) = serde_yaml::from_str(yaml) else {
-        log::warn!(
-            target: "skills",
-            "unparseable frontmatter YAML -- MCP server declarations contribute \
-             nothing (the skill body is still injected if the fence is valid)",
-        );
-        return Vec::new();
-    };
-    mcp_servers(&mapping)
+/// The referenced MCP server ids: `metadata.toptopduck_mcp_servers` (issue
+/// #369). See [`metadata_refs`] for the degrade posture.
+pub fn mcp_servers(map: &Mapping) -> Vec<String> {
+    metadata_refs(map, MCP_SERVERS_KEY)
+}
+
+/// The referenced CLI tool registration names:
+/// `metadata.toptopduck_cli_tools` (issue #674, ADR-0108 Decision 7). The
+/// exact sibling of [`mcp_servers`].
+pub fn cli_tools(map: &Mapping) -> Vec<String> {
+    metadata_refs(map, CLI_TOOLS_KEY)
 }
 
 /// Set a top-level string field, or REMOVE the key when the value is None /
@@ -130,18 +136,19 @@ pub fn set_string_or_remove(map: &mut Mapping, field: &str, value: Option<&str>)
     }
 }
 
-/// Write `metadata.toptopduck_mcp_servers` from an id list. An empty list
-/// removes the extension key (and the `metadata` mapping itself when it becomes
-/// empty), so a skill with no MCP references carries no toptopduck trace --
+/// Write `metadata.<ext_key>` from a reference list. An empty list removes
+/// the extension key (and the `metadata` mapping itself when it becomes
+/// empty), so a skill with no references carries no toptopduck trace --
 /// portability to other agents stays clean (ADR-0086 Why 1.1). Other keys a
-/// future extension may park under `metadata` are left intact.
-pub fn set_mcp_servers(map: &mut Mapping, ids: &[String]) {
+/// future extension may park under `metadata` are left intact. Shared by both
+/// extension keys so their cleanup semantics stay bit-identical.
+fn set_metadata_refs(map: &mut Mapping, ext_key: &str, ids: &[String]) {
     let mut metadata = match map.get(key("metadata")) {
         Some(Value::Mapping(existing)) => existing.clone(),
         _ => Mapping::new(),
     };
     if ids.is_empty() {
-        metadata.remove(key(MCP_SERVERS_KEY));
+        metadata.remove(key(ext_key));
         if metadata.is_empty() {
             map.remove(key("metadata"));
         } else {
@@ -157,11 +164,23 @@ pub fn set_mcp_servers(map: &mut Mapping, ids: &[String]) {
         .join(", ");
     if joined.is_empty() {
         // Every id was blank -- same shape as the empty-list path.
-        set_mcp_servers(map, &[]);
+        set_metadata_refs(map, ext_key, &[]);
         return;
     }
-    metadata.insert(key(MCP_SERVERS_KEY), Value::String(joined));
+    metadata.insert(key(ext_key), Value::String(joined));
     map.insert(key("metadata"), Value::Mapping(metadata));
+}
+
+/// Write `metadata.toptopduck_mcp_servers` from an id list. See
+/// [`set_metadata_refs`] for the cleanup semantics.
+pub fn set_mcp_servers(map: &mut Mapping, ids: &[String]) {
+    set_metadata_refs(map, MCP_SERVERS_KEY, ids);
+}
+
+/// Write `metadata.toptopduck_cli_tools` from a name list (issue #674,
+/// ADR-0108 Decision 7). The exact sibling of [`set_mcp_servers`].
+pub fn set_cli_tools(map: &mut Mapping, names: &[String]) {
+    set_metadata_refs(map, CLI_TOOLS_KEY, names);
 }
 
 /// Render the on-disk SKILL.md: the `---` fenced YAML frontmatter + the
@@ -292,6 +311,78 @@ mod tests {
             metadata.get(key("other_tool")).and_then(Value::as_str),
             Some("keep-me")
         );
+    }
+
+    #[test]
+    fn cli_tools_parses_comma_list_and_degrades() {
+        let raw = "---\nname: s\ndescription: d\nmetadata:\n  toptopduck_cli_tools: \"pandoc, pdftotext , ,office-cli\"\n---\nbody\n";
+        let parsed = parse_skill_md(raw).unwrap();
+        assert_eq!(
+            cli_tools(&parsed.frontmatter),
+            vec![
+                "pandoc".to_string(),
+                "pdftotext".to_string(),
+                "office-cli".to_string()
+            ]
+        );
+
+        // Same degrade ladder as the MCP sibling: absent metadata, mistyped
+        // key, non-mapping metadata -- all empty, never a listing failure.
+        let plain = parse_skill_md("---\nname: s\ndescription: d\n---\nbody\n").unwrap();
+        assert!(cli_tools(&plain.frontmatter).is_empty());
+        let mistyped = parse_skill_md(
+            "---\nname: s\ndescription: d\nmetadata:\n  toptopduck_cli_tools: [1, 2]\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(cli_tools(&mistyped.frontmatter).is_empty());
+    }
+
+    #[test]
+    fn both_extension_keys_parse_independently() {
+        // One skill declaring both keys: each parses its own list, neither
+        // feeds the other (issue #674 AC).
+        let raw = "---\nname: s\ndescription: d\nmetadata:\n  toptopduck_mcp_servers: github-mcp\n  toptopduck_cli_tools: pandoc, office-cli\n---\nbody\n";
+        let parsed = parse_skill_md(raw).unwrap();
+        assert_eq!(
+            mcp_servers(&parsed.frontmatter),
+            vec!["github-mcp".to_string()]
+        );
+        assert_eq!(
+            cli_tools(&parsed.frontmatter),
+            vec!["pandoc".to_string(), "office-cli".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_cli_tools_round_trips_and_cleans_up() {
+        let parsed = parse_skill_md(sample()).unwrap();
+        let mut map = parsed.frontmatter;
+
+        set_cli_tools(&mut map, &["pandoc".into(), "office-cli".into()]);
+        assert_eq!(
+            cli_tools(&map),
+            vec!["pandoc".to_string(), "office-cli".to_string()]
+        );
+
+        // Emptying removes the CLI key AND the now-empty metadata mapping.
+        set_cli_tools(&mut map, &[]);
+        assert!(cli_tools(&map).is_empty());
+        assert!(map.get(key("metadata")).is_none());
+
+        // Emptying the CLI key leaves a live MCP key (and vice versa): the
+        // cleanup only removes the mapping when BOTH are gone.
+        set_mcp_servers(&mut map, &["github-mcp".into()]);
+        set_cli_tools(&mut map, &["pandoc".into()]);
+        set_cli_tools(&mut map, &[]);
+        assert_eq!(
+            mcp_servers(&map),
+            vec!["github-mcp".to_string()],
+            "clearing the CLI key must not touch the MCP key"
+        );
+        let Value::Mapping(metadata) = map.get(key("metadata")).unwrap() else {
+            panic!("metadata mapping must survive while the MCP key lives")
+        };
+        assert!(metadata.get(key(CLI_TOOLS_KEY)).is_none());
     }
 
     #[test]

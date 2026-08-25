@@ -35,6 +35,7 @@ function skill(name: string): SkillEntry {
     license: null,
     compatibility: null,
     mcp_servers: [],
+    cli_tools: [],
     body: "",
     link_target: null,
     content_hash: "ab".repeat(32),

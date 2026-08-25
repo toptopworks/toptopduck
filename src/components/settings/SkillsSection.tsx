@@ -65,6 +65,7 @@ type DrawerDraft = {
   license: string;
   compatibility: string;
   mcpServers: string[];
+  cliTools: string[];
   body: string;
   acquired: SkillAcquired;
   linkTarget: string | null;
@@ -85,7 +86,13 @@ function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
   return filter === "all" || skill.acquired === filter;
 }
 
-export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[] }) {
+export function SkillsSection({
+  configuredMcpIds,
+  configuredCliIds,
+}: {
+  configuredMcpIds: string[];
+  configuredCliIds: string[];
+}) {
   const intl = useIntl();
   const queryClient = useQueryClient();
 
@@ -196,6 +203,7 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
         license: "",
         compatibility: "",
         mcpServers: [],
+        cliTools: [],
         body: "",
         acquired: "local",
         linkTarget: null,
@@ -211,6 +219,7 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
         license: skill.license ?? "",
         compatibility: skill.compatibility ?? "",
         mcpServers: skill.mcp_servers,
+        cliTools: skill.cli_tools,
         body: skill.body,
         acquired: skill.acquired,
         linkTarget: skill.link_target,
@@ -354,6 +363,7 @@ export function SkillsSection({ configuredMcpIds }: { configuredMcpIds: string[]
           key={drawerDraft.currentName}
           draft={drawerDraft}
           configuredMcpIds={configuredMcpIds}
+          configuredCliIds={configuredCliIds}
           saving={saving}
           onCancel={() => setDrawer({ mode: "closed" })}
           onCreate={(name, description) => createMutation.mutate({ name, description })}
@@ -479,6 +489,7 @@ function SkillRow({ skill, onOpen, onDelete }: SkillRowProps) {
 type SkillDrawerProps = {
   draft: DrawerDraft;
   configuredMcpIds: string[];
+  configuredCliIds: string[];
   saving: boolean;
   onCancel: () => void;
   onCreate: (name: string, description: string) => void;
@@ -489,6 +500,7 @@ type SkillDrawerProps = {
 function SkillDrawer({
   draft,
   configuredMcpIds,
+  configuredCliIds,
   saving,
   onCancel,
   onCreate,
@@ -505,6 +517,7 @@ function SkillDrawer({
   const [license, setLicense] = useState(draft.license);
   const [compatibility, setCompatibility] = useState(draft.compatibility);
   const [mcpServers, setMcpServers] = useState<string[]>(draft.mcpServers);
+  const [cliTools, setCliTools] = useState<string[]>(draft.cliTools);
   const [body, setBody] = useState(draft.body);
   // No effect syncs draft -> local state: the parent keys this drawer by the
   // skill name, so switching skills (or opening create) REMOUNTS it and the
@@ -521,9 +534,23 @@ function SkillDrawer({
     return [...merged];
   }, [configuredMcpIds, mcpServers]);
 
+  // The cli multi-select mirrors the mcp one: every registered tool plus any
+  // stale name the skill still references (issue #674).
+  const cliOptions = useMemo(() => {
+    const merged = new Set<string>(configuredCliIds);
+    cliTools.forEach((name) => merged.add(name));
+    return [...merged];
+  }, [configuredCliIds, cliTools]);
+
   function toggleMcp(id: string) {
     setMcpServers((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }
+
+  function toggleCli(name: string) {
+    setCliTools((prev) =>
+      prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name],
     );
   }
 
@@ -538,6 +565,7 @@ function SkillDrawer({
       license: license.trim() === "" ? null : license.trim(),
       compatibility: compatibility.trim() === "" ? null : compatibility.trim(),
       mcp_servers: mcpServers,
+      cli_tools: cliTools,
       body,
     });
   }
@@ -677,6 +705,40 @@ function SkillDrawer({
                           onChange={() => toggleMcp(id)}
                         />
                         {id}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-1.5">
+                <span className="text-sm font-medium">
+                  <FormattedMessage
+                    id="settings.skills.fieldCliTools"
+                    defaultMessage="CLI tool references"
+                  />
+                </span>
+                {cliOptions.length === 0 ? (
+                  <p className="text-muted-foreground text-xs">
+                    <FormattedMessage
+                      id="settings.skills.fieldCliToolsEmpty"
+                      defaultMessage="No CLI tools registered."
+                    />
+                  </p>
+                ) : (
+                  <div className="grid gap-1">
+                    {cliOptions.map((name) => (
+                      <label
+                        key={name}
+                        className="flex items-center gap-1.5 text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={cliTools.includes(name)}
+                          disabled={readOnly}
+                          onChange={() => toggleCli(name)}
+                        />
+                        {name}
                       </label>
                     ))}
                   </div>

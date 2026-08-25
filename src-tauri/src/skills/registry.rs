@@ -251,6 +251,7 @@ pub fn update_skill(
             update.compatibility.as_deref(),
         );
         frontmatter::set_mcp_servers(&mut fm, &update.mcp_servers);
+        frontmatter::set_cli_tools(&mut fm, &update.cli_tools);
         let content = frontmatter::render_skill_md(&fm, &update.body)?;
         write_skill_md(&work_dir, &content)?;
         load_skill(&work_dir)
@@ -386,6 +387,7 @@ pub(crate) fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
         license: frontmatter::get_string(fm, "license"),
         compatibility: frontmatter::get_string(fm, "compatibility"),
         mcp_servers: frontmatter::mcp_servers(fm),
+        cli_tools: frontmatter::cli_tools(fm),
         body: parsed.body,
         link_target,
         content_hash: sha256_hex(&bytes),
@@ -467,6 +469,7 @@ mod tests {
             license: None,
             compatibility: None,
             mcp_servers: Vec::new(),
+            cli_tools: Vec::new(),
             body: "Updated body.\n".into(),
         }
     }
@@ -715,6 +718,7 @@ mod tests {
         let listed = list_skills(&root).skills;
         assert_eq!(listed.len(), 1);
         assert!(listed[0].mcp_servers.is_empty());
+        assert!(listed[0].cli_tools.is_empty());
     }
 
     #[test]
@@ -768,6 +772,7 @@ mod tests {
         payload.license = Some("Apache-2.0".into());
         payload.compatibility = Some("requires network".into());
         payload.mcp_servers = vec!["github-mcp".into(), "fs-server".into()];
+        payload.cli_tools = vec!["pandoc".into(), "office-cli".into()];
         let entry = update_skill(root, "keeper", payload).unwrap();
 
         assert_eq!(entry.description, "Updated description.");
@@ -776,6 +781,11 @@ mod tests {
         assert_eq!(
             entry.mcp_servers,
             vec!["github-mcp".to_string(), "fs-server".to_string()]
+        );
+        assert_eq!(
+            entry.cli_tools,
+            vec!["pandoc".to_string(), "office-cli".to_string()],
+            "the CLI extension key must round-trip through an edit (issue #674)"
         );
         assert_eq!(entry.body, "Updated body.\n");
         // The field this app does not surface survives verbatim.

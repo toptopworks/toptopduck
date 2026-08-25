@@ -159,7 +159,10 @@ function SectionContent({
       );
     case "skills":
       return (
-        <SkillsSection configuredMcpIds={appConfig.mcp_servers.servers.map((s) => s.id)} />
+        <SkillsSection
+          configuredMcpIds={appConfig.mcp_servers.servers.map((s) => s.id)}
+          configuredCliIds={appConfig.cli_tools.tools.map((t) => t.name)}
+        />
       );
     case "runtime":
       return (

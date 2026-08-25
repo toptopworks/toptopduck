@@ -201,6 +201,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
         license: null,
         compatibility: null,
         mcp_servers: [],
+        cli_tools: [],
         body: "Body.\n",
         link_target: "/home/u/.claude/skills/alpha",
         content_hash: "abc",
