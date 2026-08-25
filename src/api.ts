@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { AppConfig, DefaultRuntime, ModelPosture } from "./types/app-config";
+import type { CliToolConfig } from "./types/cli-tool";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
@@ -449,6 +450,23 @@ export async function getSessionsDir(): Promise<string> {
 // the server in subsequent secret calls.
 export async function upsertMcpServer(server: McpServerConfig): Promise<McpServerConfig> {
   return invoke<McpServerConfig>("upsert_mcp_server", { server });
+}
+
+// --- Registered CLI tools (issue #671, ADR-0108/0109) -----------------------
+
+// Upsert one CLI tool registration. The backend validates (kebab-case name,
+// reserved-name collisions, argv-template/param-table consistency) then
+// read-modify-writes the app-config registry. Returns the updated FULL
+// app-config (ADR-0109 Decision 9 -- the frontend syncs its snapshot from
+// the return value, no re-fetch).
+export async function upsertCliTool(tool: CliToolConfig): Promise<AppConfig> {
+  return invoke<AppConfig>("upsert_cli_tool", { tool });
+}
+
+// Remove one CLI tool registration by name (idempotent). Returns the updated
+// full app-config.
+export async function removeCliTool(name: string): Promise<AppConfig> {
+  return invoke<AppConfig>("remove_cli_tool", { name });
 }
 
 // Store one MCP server secret in the OS keychain under mcp-<id>-<env_key>

@@ -7,6 +7,7 @@
 // Window geometry is owned by tauri_plugin_window_state (issue #268), not
 // app-config.
 
+import type { CliToolRegistry } from "./cli-tool";
 import type { McpServerRegistry } from "./mcp";
 import type { ProviderConfig } from "./provider";
 
@@ -118,6 +119,12 @@ export interface AppConfig {
   // fills an empty registry for a pre-#301 file, but serialization ALWAYS
   // carries the field, so the wire shape is non-optional here too.
   mcp_servers: McpServerRegistry;
+  // User-registered CLI tools (issue #671, ADR-0108/0109): the second
+  // external tool source's registry, living next to the MCP registry.
+  // serde(default) fills an empty registry for a pre-#671 file, but
+  // serialization ALWAYS carries the field, so the wire shape is
+  // non-optional here too.
+  cli_tools: CliToolRegistry;
   // Managed sessions directory override (issue #452, ADR-0089 Decision 2).
   // null = runtime-computed default (<Documents>/toptopduck/sessions/).
   // serde(default) fills null for a pre-#452 file.

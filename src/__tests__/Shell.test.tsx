@@ -925,6 +925,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     // chain, ADR-0106; config enablement replaced it.)
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
+      cli_tools: { tools: [] },
       mcp_servers: { servers: [mcpServer("srv")] },
     });
     vi.mocked(listSkills).mockResolvedValue({
@@ -1541,6 +1542,7 @@ function baseAppConfig(
     export: { last_dir: null, default_format: "csv" },
     tunables: { window_turns: 6, far_window: 12 },
     shell: { ...shell, sidebar_grouping: "flat" },
+    cli_tools: { tools: [] },
     mcp_servers: { servers: [] },
     sessions_dir: null,
     default_runtime: { kind: "built_in" },
@@ -2306,6 +2308,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // but no MCP trigger chip exists anywhere in the bar.
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
+      cli_tools: { tools: [] },
       mcp_servers: { servers: [mcpServer("srv")] },
     });
     render(<App />);

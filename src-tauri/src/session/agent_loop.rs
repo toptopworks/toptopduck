@@ -142,6 +142,7 @@ impl<'p> AgentLoop<'p> {
         deps: &mut TurnDeps,
         materializer: &mut dyn Materializer,
         mcp: &mut McpAggregator,
+        cli: &[crate::cli_tools::config::CliToolConfig],
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
         mut on_phase: impl FnMut(TurnPhase),
@@ -319,6 +320,7 @@ impl<'p> AgentLoop<'p> {
                                 deps,
                                 materializer,
                                 mcp,
+                                cli,
                                 &gate,
                                 &mut outputs,
                                 &mut on_phase,
@@ -602,11 +604,17 @@ struct GateCtx<'a> {
 /// is NOT a turn failure -- it routes back to the model as a `ToolResult` with
 /// `is_error = true` so the agent can self-correct (ADR-0077). Only a
 /// gate-cancel ends the turn.
+// 8 params mirrors run_external_turn's documented exception: each is a
+// distinct dispatch collaborator (call, deps, materializer, mcp, cli, gate,
+// outputs, on_phase) and bundling any two would blur ownership for callers
+// that thread them separately.
+#[allow(clippy::too_many_arguments)]
 fn execute_call(
     call: &ToolUse,
     deps: &mut TurnDeps,
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
+    cli: &[crate::cli_tools::config::CliToolConfig],
     gate: &GateCtx<'_>,
     outputs: &mut CallOutputs,
     on_phase: &mut impl FnMut(TurnPhase),
@@ -633,7 +641,15 @@ fn execute_call(
         }
         meta_tools::MetaDispatch::Fallthrough(call) => call,
     };
-    let (key, operation_kind, summary) = classify_call(call);
+    // A registered CLI tool classifies under its own reserved server
+    // (ADR-0108 Decision 7): the trust key is the registration name, the
+    // badge is Execute, and the summary renders the full argv the approval
+    // card shows (the approver signs exactly what will run).
+    let cli_tool = cli.iter().find(|t| t.name == call.name);
+    let (key, operation_kind, summary) = match cli_tool {
+        Some(tool) => classify_cli_tool(tool, &call.input),
+        None => classify_call(call),
+    };
     let gate_req = ApprovalRequest {
         key,
         operation_kind,
@@ -697,6 +713,11 @@ fn execute_call(
     let outcome = if aggregator::is_namespaced(&call.name) {
         let tool_output_dir = deps.temp_path.join(super::TOOL_OUTPUT_DIR_NAME);
         route_external_call(call, mcp, &tool_output_dir)
+    } else if let Some(tool) = cli_tool {
+        // The registered-CLI dispatch arm (issue #671, ADR-0108 Decision 3):
+        // direct argv spawn, cwd = the session's work temp dir, cancel = the
+        // turn's shared token (process-tree termination on round cancel).
+        crate::cli_tools::executor::execute(tool, call, deps.temp_path, gate.cancel)
     } else {
         tools::dispatch(call, deps, gate.cancel, materializer)
     };
@@ -803,6 +824,39 @@ fn meta_failure(call: &ToolUse, message: &str) -> ToolResult {
 /// the card instead of degrading to a bare JSON fragment the approver cannot
 /// read.
 const ARGS_PREVIEW_MAX_CHARS: usize = 448;
+
+/// The approval-gateway classification for a registered CLI tool call
+/// (ADR-0108 Decision 7): the trust key anchors on the registration name
+/// under the reserved `CLI` server, the badge is Execute, and the summary
+/// is the card's full-argv rendering.
+fn classify_cli_tool(
+    tool: &crate::cli_tools::config::CliToolConfig,
+    input: &Value,
+) -> (ToolKey, OperationKind, String) {
+    (
+        ToolKey::external(ToolKey::CLI_SERVER, tool.name.clone()),
+        OperationKind::Execute,
+        cli_call_summary(tool, input),
+    )
+}
+
+/// The approval-card summary for a registered CLI tool call: the complete
+/// argv that will run (the executable plus the rendered template), joined
+/// and capped by the existing summary bounds. Rendering can fail on a
+/// mis-shaped call (a missing parameter); the summary then degrades to
+/// naming the failure honestly rather than showing an argv that is NOT
+/// what would run.
+fn cli_call_summary(tool: &crate::cli_tools::config::CliToolConfig, input: &Value) -> String {
+    match crate::cli_tools::config::render_argv(tool, input) {
+        Ok(mut parts) => {
+            let mut argv = Vec::with_capacity(parts.len() + 1);
+            argv.push(tool.executable.clone());
+            argv.append(&mut parts);
+            crate::approval::truncate_summary(&argv.join(" "), ARGS_PREVIEW_MAX_CHARS)
+        }
+        Err(detail) => format!("cli tool `{}` argv unavailable: {detail}", tool.name),
+    }
+}
 
 pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) {
     match definitions::builtin_metadata(&call.name) {
@@ -1204,6 +1258,61 @@ mod tests {
     /// self-corrects from (ADR-0077) -- not a turn failure. The error names
     /// the slug so the model gets actionable feedback.
     #[test]
+    fn a_registered_cli_tool_classifies_under_the_cli_server_with_execute_badge() {
+        use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+        let tool = CliToolConfig {
+            name: "pandoc".into(),
+            description: "convert".into(),
+            executable: "/bin/pandoc".into(),
+            argv_template: vec!["-o".into(), "{output}".into()],
+            params: vec![CliToolParam {
+                name: "output".into(),
+                description: "target".into(),
+                delivery: CliParamDelivery::Argv,
+                varargs: false,
+            }],
+            env: Default::default(),
+            enabled: true,
+            source: Default::default(),
+            baseline: None,
+        };
+        let (key, kind, summary) =
+            classify_cli_tool(&tool, &serde_json::json!({"output": "out.pdf"}));
+        assert_eq!(key.server, ToolKey::CLI_SERVER);
+        assert_eq!(key.tool, "pandoc");
+        assert_eq!(kind, OperationKind::Execute);
+        // ADR-0108 Decision 7: the card renders the complete argv that will
+        // run -- the executable plus the rendered template.
+        assert_eq!(summary, "/bin/pandoc -o out.pdf");
+    }
+
+    #[test]
+    fn cli_summary_degrades_honestly_when_the_argv_cannot_render() {
+        use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+        let tool = CliToolConfig {
+            name: "pandoc".into(),
+            description: "convert".into(),
+            executable: "/bin/pandoc".into(),
+            argv_template: vec!["{output}".into()],
+            params: vec![CliToolParam {
+                name: "output".into(),
+                description: "target".into(),
+                delivery: CliParamDelivery::Argv,
+                varargs: false,
+            }],
+            env: Default::default(),
+            enabled: true,
+            source: Default::default(),
+            baseline: None,
+        };
+        let (_, _, summary) = classify_cli_tool(&tool, &serde_json::json!({}));
+        assert!(
+            summary.contains("argv unavailable"),
+            "a missing parameter names the failure: {summary}"
+        );
+    }
+
+    #[test]
     fn route_external_call_surfaces_an_unknown_slug_as_a_tool_error() {
         let mut mcp = McpAggregator::empty();
         let dir = TempDir::new().unwrap();
@@ -1527,6 +1636,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &sink,
             |p| phases.lock().unwrap().push(p),
@@ -1627,6 +1737,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &*sink,
             {
@@ -1713,6 +1824,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut mcp,
+            &[],
             &approval,
             &*sink,
             {
@@ -1782,6 +1894,7 @@ mod tests {
                 &mut d,
                 &mut RealMaterializer,
                 &mut McpAggregator::empty(),
+                &[],
                 &approval,
                 &sink,
                 |_| {},
@@ -1859,6 +1972,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &sink,
             |p| phases.lock().unwrap().push(p),
@@ -1966,6 +2080,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &sink,
             |p| phases.lock().unwrap().push(p),
@@ -2093,6 +2208,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &sink,
             |p| phases.lock().unwrap().push(p),
@@ -2166,6 +2282,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &sink,
             |_| {},
@@ -2634,6 +2751,7 @@ mod tests {
                 &mut d,
                 &mut RealMaterializer,
                 &mut McpAggregator::empty(),
+                &[],
                 &approval,
                 &sink,
                 |_| {},
@@ -2974,6 +3092,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut mcp,
+            &[],
             &approval,
             &sink,
             |_| {},
@@ -3232,6 +3351,7 @@ mod tests {
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &sink,
             |_| {},
@@ -3287,6 +3407,7 @@ mod tests {
             &mut d,
             &mut materializer,
             &mut McpAggregator::empty(),
+            &[],
             &approval,
             &sink,
             |_| {},

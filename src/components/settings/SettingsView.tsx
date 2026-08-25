@@ -3,7 +3,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 import {
   ArrowLeft,
   Brain,
-  Cable,
+  Cable, Terminal,
   Database,
   Puzzle,
   Settings,
@@ -30,6 +30,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { EngineSection } from "./EngineSection";
 import { GeneralSection } from "./GeneralSection";
+import { CliSection } from "./CliSection";
 import { McpSection } from "./McpSection";
 import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
@@ -85,6 +86,8 @@ function SectionIcon({ section }: { section: SettingsSection }) {
       return <ShieldCheck className="size-4 shrink-0" aria-hidden />;
     case "mcp":
       return <Cable className="size-4 shrink-0" aria-hidden />;
+    case "cli-tools":
+      return <Terminal className="size-4 shrink-0" aria-hidden />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
@@ -109,6 +112,10 @@ function SectionLabel({ section }: { section: SettingsSection }) {
       return <FormattedMessage id="settings.nav.privacy" defaultMessage="Privacy" />;
     case "mcp":
       return <FormattedMessage id="settings.nav.mcp" defaultMessage="MCP Servers" />;
+    case "cli-tools":
+      return (
+        <FormattedMessage id="settings.nav.cliTools" defaultMessage="CLI Tools" />
+      );
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
@@ -170,6 +177,8 @@ function SectionContent({
       return <PrivacySection />;
     case "mcp":
       return <McpSection appConfig={appConfig} onCommit={onCommit} />;
+    case "cli-tools":
+      return <CliSection appConfig={appConfig} onCommit={onCommit} />;
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);

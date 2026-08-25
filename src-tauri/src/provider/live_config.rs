@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::app_config::{self, AppConfig, DefaultRuntime, LocalePreference, ModelPosture};
+use crate::cli_tools::config::CliToolConfig;
 use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::model::{ProfileId, Protocol};
 use crate::provider::keychain::{KeychainStore, ProviderConfigSource};
@@ -58,6 +59,18 @@ pub enum ActiveKeyError {
     /// detail (locked / service down / permission revoked / corrupt entry).
     #[error("{0}")]
     Keychain(String),
+}
+
+/// Why a CLI-tool registry write failed (issue #671): an invalid entry
+/// (validation detail, user-correctable) or an app-config write fault.
+/// Separate variants because the command layer maps them to different
+/// [`crate::commands::StoreCommandError`] members.
+#[derive(Debug, thiserror::Error)]
+pub enum CliToolWriteError {
+    #[error("invalid CLI tool registration: {0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Write(#[from] app_config::WriteError),
 }
 
 impl LiveProviderConfig {
@@ -245,6 +258,52 @@ impl LiveProviderConfig {
         let stored = cfg.mcp_servers.upsert(server);
         self.store_inner(cfg)?;
         Ok(stored)
+    }
+
+    /// Upsert one CLI tool registration (issue #671, ADR-0108 Decision 2 +
+    /// ADR-0109 Decision 9): validate, then read-modify-write under the same
+    /// write_lock as every registry write. Returns the updated FULL config
+    /// (the ADR-0109 Decision 9 frontend-sync contract -- unlike
+    /// `upsert_mcp_server`, which predates it and returns the entry).
+    pub fn upsert_cli_tool(&self, tool: CliToolConfig) -> Result<AppConfig, CliToolWriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write().map_err(CliToolWriteError::Write)?;
+        cfg.cli_tools
+            .upsert(tool)
+            .map_err(CliToolWriteError::Invalid)?;
+        self.store_inner(cfg).map_err(CliToolWriteError::Write)
+    }
+
+    /// Remove one CLI tool registration by name (idempotent: removing a name
+    /// that is not registered still returns the config). Returns the updated
+    /// full config (ADR-0109 Decision 9).
+    pub fn remove_cli_tool(&self, name: &str) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write()?;
+        cfg.cli_tools.remove(name);
+        self.store_inner(cfg)
+    }
+
+    /// Read-only snapshot of the configured CLI registry: every entry,
+    /// enabled or not (the settings list renders the disabled rows too).
+    pub fn cli_tools(&self) -> Vec<CliToolConfig> {
+        self.load().cli_tools.tools.clone()
+    }
+
+    /// The effective CLI tool set (ADR-0106 single axis): the entries whose
+    /// config-level `enabled` flag is on. Disabled means dormant -- no
+    /// tool-table entry, no spawn. `ask` feeds exactly this slice.
+    pub fn enabled_cli_tools(&self) -> Vec<CliToolConfig> {
+        self.cli_tools()
+            .into_iter()
+            .filter(|tool| tool.enabled)
+            .collect()
     }
 
     /// Store one MCP server secret in the OS keychain under
@@ -617,6 +676,77 @@ mod tests {
         let path = dir.path().join("config.json");
         let live = LiveProviderConfig::new(KeychainStore::new(), path);
         (dir, live)
+    }
+
+    /// A minimal valid CLI registration for the RMW tests (issue #671).
+    fn cli_tool(name: &str) -> CliToolConfig {
+        CliToolConfig {
+            name: name.to_string(),
+            description: "convert documents".to_string(),
+            executable: "pandoc".to_string(),
+            argv_template: vec!["{input}".to_string()],
+            params: vec![crate::cli_tools::config::CliToolParam {
+                name: "input".to_string(),
+                description: "source file".to_string(),
+                delivery: crate::cli_tools::config::CliParamDelivery::Argv,
+                varargs: false,
+            }],
+            env: BTreeMap::new(),
+            enabled: true,
+            source: crate::cli_tools::config::CliToolSource::User,
+            baseline: None,
+        }
+    }
+
+    #[test]
+    fn upsert_cli_tool_validates_persists_and_returns_the_full_config() {
+        let (_dir, live) = live();
+        let cfg = live.upsert_cli_tool(cli_tool("pandoc")).expect("upsert");
+        assert_eq!(
+            cfg.cli_tools.tools.len(),
+            1,
+            "returned config carries the entry"
+        );
+        assert_eq!(cfg.cli_tools.tools[0].name, "pandoc");
+        // The write landed on disk: a fresh snapshot reads it back.
+        assert_eq!(live.cli_tools().len(), 1);
+
+        // An invalid entry never touches the registry (ADR-0108 Decision 2).
+        let mut reserved = cli_tool("explore");
+        reserved.name = "explore".to_string();
+        assert!(matches!(
+            live.upsert_cli_tool(reserved),
+            Err(CliToolWriteError::Invalid(_))
+        ));
+        assert_eq!(live.cli_tools().len(), 1);
+    }
+
+    #[test]
+    fn enabled_cli_tools_filters_the_single_enable_axis() {
+        let (_dir, live) = live();
+        let mut disabled = cli_tool("pandoc");
+        disabled.enabled = false;
+        live.upsert_cli_tool(cli_tool("officecli"))
+            .expect("upsert 1");
+        live.upsert_cli_tool(disabled).expect("upsert 2");
+        let enabled = live.enabled_cli_tools();
+        let names: Vec<&str> = enabled.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["officecli"],
+            "disabled means dormant (ADR-0106)"
+        );
+    }
+
+    #[test]
+    fn remove_cli_tool_persists_and_is_idempotent() {
+        let (_dir, live) = live();
+        live.upsert_cli_tool(cli_tool("pandoc")).expect("upsert");
+        let cfg = live.remove_cli_tool("pandoc").expect("remove");
+        assert!(cfg.cli_tools.tools.is_empty());
+        assert!(live.cli_tools().is_empty());
+        // Removing an unregistered name still succeeds (idempotent).
+        assert!(live.remove_cli_tool("pandoc").is_ok());
     }
 
     /// An app-config with one active anthropic profile -- the pre-0098 stored

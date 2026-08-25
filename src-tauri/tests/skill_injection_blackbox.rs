@@ -89,6 +89,7 @@ fn mounted_skill_body_in_prompt_and_provenance() {
             mcp_servers: &[],
             keychain: &KeychainStore::new(),
             skills: &fragments,
+            cli_tools: &[],
         },
     );
     // The scripted text reply lands as a textual outcome.

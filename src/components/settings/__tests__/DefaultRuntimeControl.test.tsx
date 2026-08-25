@@ -52,6 +52,7 @@ const updatedConfig: AppConfig = {
   export: { last_dir: null, default_format: "csv" },
   tunables: { window_turns: 5, far_window: 20 },
   shell: { sidebar_collapsed: false, sidebar_grouping: "time" },
+  cli_tools: { tools: [] },
   mcp_servers: { servers: [] },
   sessions_dir: null,
   default_runtime: { kind: "built_in" },

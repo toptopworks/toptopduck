@@ -131,6 +131,12 @@ pub enum StoreCommandError {
     /// the technical-details fold.
     #[error("unknown adapter id: {0}")]
     UnknownAdapter(String),
+    /// A `upsert_cli_tool` call failed entry validation (issue #671,
+    /// ADR-0108 Decision 2: name shape / reserved-name collision / template
+    /// inconsistency). User-correctable: the registry was never touched.
+    /// Carries the validation detail.
+    #[error("{0}")]
+    InvalidCliTool(String),
 }
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
@@ -699,10 +705,12 @@ pub async fn ask(
         // and the turn.
         let mounted = s.mounted_skills();
         let skill_fragments = resolve_prompt_fragments(&skills_root, &mounted);
+        let cli_tools = live.enabled_cli_tools();
         let inputs = TurnInputs {
             mcp_servers: &mcp_servers,
             keychain: live.keychain(),
             skills: &skill_fragments,
+            cli_tools: &cli_tools,
         };
         let outcome = s.ask_with_phase(
             &question,
@@ -943,6 +951,37 @@ pub fn upsert_mcp_server(
     server: McpServerConfig,
 ) -> Result<McpServerConfig, StoreCommandError> {
     live.upsert_mcp_server(server)
+        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
+}
+
+/// Upsert one CLI tool registration (issue #671, ADR-0108). Validates the
+/// entry (kebab-case name, reserved-name collisions, template/param-table
+/// consistency) then read-modify-writes the app-config registry. Returns the
+/// updated FULL app-config so the frontend syncs its snapshot without a
+/// re-fetch (ADR-0109 Decision 9).
+#[tauri::command]
+pub fn upsert_cli_tool(
+    live: State<'_, LiveProviderConfig>,
+    tool: crate::cli_tools::config::CliToolConfig,
+) -> Result<AppConfig, StoreCommandError> {
+    live.upsert_cli_tool(tool).map_err(|e| match e {
+        crate::provider::live_config::CliToolWriteError::Invalid(detail) => {
+            StoreCommandError::InvalidCliTool(detail)
+        }
+        crate::provider::live_config::CliToolWriteError::Write(e) => {
+            StoreCommandError::ConfigWriteFailure(e.to_string())
+        }
+    })
+}
+
+/// Remove one CLI tool registration by name (issue #671). Idempotent.
+/// Returns the updated FULL app-config (ADR-0109 Decision 9).
+#[tauri::command]
+pub fn remove_cli_tool(
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+) -> Result<AppConfig, StoreCommandError> {
+    live.remove_cli_tool(&name)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
 

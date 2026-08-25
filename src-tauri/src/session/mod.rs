@@ -682,6 +682,11 @@ pub struct TurnInputs<'a> {
     /// fragment's body rides the system prompt; its `content_hash` snapshots
     /// into the turn's provenance for resume-time drift detection.
     pub skills: &'a [SkillPromptFragment],
+    /// The effective CLI tool registrations for this turn (the config-level
+    /// enabled slice, ADR-0106 single axis -- issue #671, ADR-0108). The
+    /// turn direct-lists them into the tool table and dispatches their
+    /// calls to the spawn engine.
+    pub cli_tools: &'a [crate::cli_tools::config::CliToolConfig],
 }
 
 impl<'a> TurnInputs<'a> {
@@ -694,6 +699,7 @@ impl<'a> TurnInputs<'a> {
             mcp_servers: &[],
             keychain,
             skills: &[],
+            cli_tools: &[],
         }
     }
 }
@@ -1287,6 +1293,12 @@ impl Session {
                     );
                     mcp.connect_all(inputs.mcp_servers, inputs.keychain);
                     request.tools.extend(mcp.meta_tool_definitions());
+                    // ADR-0108 Decision 6: the enabled CLI registrations are
+                    // DIRECT-LISTED into the tool table (never via the
+                    // discovery trio -- that surface stays MCP-only).
+                    request
+                        .tools
+                        .extend(crate::cli_tools::config::tool_definitions(inputs.cli_tools));
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
@@ -1302,6 +1314,7 @@ impl Session {
                             &mut deps,
                             &mut *self.materializer,
                             &mut mcp,
+                            inputs.cli_tools,
                             approval,
                             sink,
                             on_phase,

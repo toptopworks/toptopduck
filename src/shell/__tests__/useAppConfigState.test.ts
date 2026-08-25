@@ -56,6 +56,7 @@ function baseAppConfig(shell: Pick<AppConfig["shell"], "sidebar_collapsed">): Ap
     // stay focused on the collapse prefs they actually exercise. Grouping-specific
     // tests build their own AppConfig literal with the mode under test.
     shell: { ...shell, sidebar_grouping: "flat" },
+    cli_tools: { tools: [] },
     mcp_servers: { servers: [] },
     sessions_dir: null,
     default_runtime: { kind: "built_in" },

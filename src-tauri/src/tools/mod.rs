@@ -75,7 +75,7 @@ pub(super) struct ToolPayload {
 /// bridge can return the same shape against (ADR-0076), not a built-in-only
 /// type.
 #[derive(Debug)]
-pub(crate) struct ToolOutcome {
+pub struct ToolOutcome {
     /// The model-facing result (success payload or error string). Unchanged in
     /// shape from the pre-refactor `ToolResult`.
     pub result: ToolResult,

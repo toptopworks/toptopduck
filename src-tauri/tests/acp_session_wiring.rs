@@ -203,6 +203,7 @@ fn external_turn_with_skill_records_provenance() {
             mcp_servers: &[],
             keychain: &keychain,
             skills: &fragments,
+            cli_tools: &[],
         },
     );
     std::env::set_var("PATH", old_path);

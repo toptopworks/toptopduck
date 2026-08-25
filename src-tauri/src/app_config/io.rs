@@ -460,6 +460,21 @@ mod tests {
     }
 
     #[test]
+    fn read_refuses_a_cli_tool_env_with_a_secret_named_key() {
+        // The CLI registry's env is non-secret by the same rule (issue #671,
+        // ADR-0108): the recursive raw-JSON scan catches a smuggled
+        // secret-named key under cli_tools.tools[].env and honest-degrades
+        // to defaults, exactly as it does for mcp_servers.servers[].env.
+        let (_dir, path) = temp("config.json");
+        let smuggled = format!(
+            "{{\"format_version\":{v},\"cli_tools\":{{\"tools\":[{{\"name\":\"pandoc\",\"description\":\"d\",\"executable\":\"pandoc\",\"env\":{{\"API_KEY\":\"sk-leak\"}}}}]}}}}",
+            v = APP_CONFIG_FORMAT_VERSION
+        );
+        fs::write(&path, &smuggled).expect("write");
+        assert_eq!(read_at(&path), AppConfig::defaults());
+    }
+
+    #[test]
     fn read_keeps_an_mcp_server_with_non_secret_env() {
         // The complement of the smuggle test: an MCP server carrying a
         // NON-secret env value (`LOG_LEVEL=info` -- no secret-name match) reads
