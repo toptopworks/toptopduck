@@ -4,8 +4,9 @@
 //! tools::dispatch chain in CI. The fake-CLI's `gateway_tool_call` scenario
 //! spawns the real bridge binary (its path injected via the `session/new` MCP
 //! descriptor); the bridge connects back to the per-turn gateway, which serves
-//! the MCP subset and routes `tools/call` (explore) through `tools::dispatch`
-//! against the session's live DuckDB connection. Real CLI E2E is
+//! the MCP subset and routes `tools/call` (explore, or a registered CLI tool
+//! via `cli_gateway_tool_call` -- issue #673) through `tools::dispatch` or the
+//! shared spawn engine against the session's live resources. Real CLI E2E is
 //! manual (the #299 AC, not in CI); #300 covers the other ACP CLIs against the
 //! same engine. The trace-merge dedup is unit-tested at the merge function;
 //! these tests pin the WIRING -- the scoped-thread serve, the bridge
@@ -13,8 +14,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
+use toptopduck_lib::cli_tools::config::{
+    CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
+};
 use toptopduck_lib::model::SkillProvenance;
 use toptopduck_lib::persistence::recipe::{RecipeEntry, RuntimeKind};
 use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
@@ -120,6 +125,112 @@ fn external_gateway_tool_call_drives_dispatch() {
         }
         other => panic!("gateway_tool_call must complete Textual, got {other:?}"),
     }
+}
+
+/// Issue #673 (ADR-0108 Decision 6): a registered CLI tool is advertised on
+/// the bridge's `tools/list` (asserted fixture-side) and a bridge-originated
+/// call routes through the per-turn gateway into the same approval gate +
+/// spawn engine a built-in-initiated call uses -- the single tool plane. The
+/// answering sink allows the card once, pinning that the bridge-originated
+/// call really does gate (CLI registrations classify as external tools,
+/// ADR-0108 Decision 8) rather than bypassing the card.
+#[test]
+fn external_cli_tool_call_routes_through_the_gateway() {
+    let (mut session, old_path, _guard) = external_session("cli_gateway_tool_call");
+    // The registration: the cli-fake-tool fixture under the exact name the
+    // fixture's scenario addresses.
+    let tool = CliToolConfig {
+        name: "cli-fixture-echo".into(),
+        description: "echo fixture".into(),
+        executable: env!("CARGO_BIN_EXE_cli-fake-tool").into(),
+        argv_template: Vec::new(),
+        params: vec![CliToolParam {
+            name: "args".into(),
+            description: "tail args".into(),
+            delivery: CliParamDelivery::Argv,
+            varargs: true,
+        }],
+        env: Default::default(),
+        enabled: true,
+        source: CliToolSource::User,
+        baseline: None,
+    };
+    let keychain = KeychainStore::new();
+    let inputs = TurnInputs {
+        mcp_servers: &[],
+        keychain: &keychain,
+        skills: &[],
+        cli_tools: std::slice::from_ref(&tool),
+    };
+    // An approval sink that answers allow-once from inside emit_request: the
+    // gate installs the pending slot before calling the sink and holds no
+    // locks across it, so respond() here is the same store-then-notify the
+    // IPC command does.
+    struct AnsweringSink<'a> {
+        state: &'a ApprovalState,
+        cards: std::sync::atomic::AtomicUsize,
+    }
+    impl ApprovalSink for AnsweringSink<'_> {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            self.cards.fetch_add(1, Ordering::SeqCst);
+            let id: uuid::Uuid = body.request_id.parse().expect("uuid");
+            self.state
+                .respond(id, ApprovalResponse::AllowOnce)
+                .expect("respond");
+        }
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+    let approval = ApprovalState::new();
+    let sink = AnsweringSink {
+        state: &approval,
+        cards: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let outcome = session.ask_with_phase("run the cli tool", &approval, &sink, |_| {}, &inputs);
+    std::env::set_var("PATH", old_path);
+    assert_eq!(
+        sink.cards.load(Ordering::SeqCst),
+        1,
+        "the bridge-originated CLI call surfaced exactly one approval card"
+    );
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                body.contains("done via cli gateway"),
+                "agent message round-tripped through the pump: got {body:?}"
+            );
+        }
+        other => panic!("cli_gateway_tool_call must complete Textual, got {other:?}"),
+    }
+    // One bridge call -> one persisted row: the fixture emits the ACP
+    // notification (`gw_cli_1`) for the same call the gateway served (`id=3`),
+    // and the merge de-duplicates them at the wiring level -- a wiring
+    // regression (an empty slice at the merge call site) would persist two
+    // rows for one call and fail this count.
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    let cli_rows: Vec<_> = last_turn
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .filter(|c| c.name == "cli-fixture-echo")
+        .collect();
+    assert_eq!(
+        cli_rows.len(),
+        1,
+        "one bridge-originated CLI call persists exactly one trace row"
+    );
+    assert!(
+        cli_rows[0].success,
+        "the gateway's served row is the winner"
+    );
 }
 
 /// Issue #646: an MCP request frame from the bridge that exceeds the

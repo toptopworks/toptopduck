@@ -2,10 +2,12 @@
 //!
 //! The gateway is the app-side aggregation point an external CLI's bridge
 //! connects back to over localhost TCP. It advertises the built-in DuckDB tool
-//! table (`tools/list`) and routes every `tools/call` through the approval
-//! gate + [`crate::tools::dispatch`] -- the same path the built-in agent loop
-//! takes, so approval, audit, and materialization are enforced identically for
-//! both runtimes (ADR-0076 single enforcement point).
+//! table plus the enabled CLI registrations (`tools/list`, one tool plane --
+//! issue #673, ADR-0108 Decision 6) and routes every `tools/call` through the
+//! approval gate into [`crate::tools::dispatch`] or the shared CLI spawn
+//! engine -- the same path the built-in agent loop takes, so approval, audit,
+//! and materialization are enforced identically for both runtimes
+//! (ADR-0076 single enforcement point).
 //!
 //! Two submodules, each one ADR-0085 concern:
 //! - [`framing`]: newline-delimited JSON-RPC read/write (MCP stdio framing).
