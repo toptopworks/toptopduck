@@ -139,6 +139,24 @@ pub enum StoreCommandError {
     InvalidCliTool(String),
 }
 
+/// The CLI-tool registry's typed error folds into the command lane once:
+/// the validation refusal maps to [`StoreCommandError::InvalidCliTool`],
+/// the app-config fault to [`StoreCommandError::ConfigWriteFailure`]
+/// (every CLI command shares this; the single `From` keeps the four call
+/// sites from drifting apart).
+impl From<crate::provider::live_config::CliToolWriteError> for StoreCommandError {
+    fn from(e: crate::provider::live_config::CliToolWriteError) -> Self {
+        match e {
+            crate::provider::live_config::CliToolWriteError::Invalid(detail) => {
+                StoreCommandError::InvalidCliTool(detail)
+            }
+            crate::provider::live_config::CliToolWriteError::Write(e) => {
+                StoreCommandError::ConfigWriteFailure(e.to_string())
+            }
+        }
+    }
+}
+
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
 /// per-session by ADR-0056). `open_duck(session_id, ...)` rebuilds that one
 /// session's contents off-thread; a concurrent mutating command targeting the
@@ -964,25 +982,36 @@ pub fn upsert_cli_tool(
     live: State<'_, LiveProviderConfig>,
     tool: crate::cli_tools::config::CliToolConfig,
 ) -> Result<AppConfig, StoreCommandError> {
-    live.upsert_cli_tool(tool).map_err(|e| match e {
-        crate::provider::live_config::CliToolWriteError::Invalid(detail) => {
-            StoreCommandError::InvalidCliTool(detail)
-        }
-        crate::provider::live_config::CliToolWriteError::Write(e) => {
-            StoreCommandError::ConfigWriteFailure(e.to_string())
-        }
-    })
+    live.upsert_cli_tool(tool).map_err(StoreCommandError::from)
 }
 
 /// Remove one CLI tool registration by name (issue #671). Idempotent.
-/// Returns the updated FULL app-config (ADR-0109 Decision 9).
+/// A BUILTIN entry is refused (ADR-0109 Decision 2, issue #676 -- disabling
+/// is the single shutdown axis); the refusal surfaces through the
+/// InvalidCliTool lane. Returns the updated FULL app-config (ADR-0109
+/// Decision 9).
 #[tauri::command]
 pub fn remove_cli_tool(
     live: State<'_, LiveProviderConfig>,
     name: String,
 ) -> Result<AppConfig, StoreCommandError> {
-    live.remove_cli_tool(&name)
-        .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
+    live.remove_cli_tool(&name).map_err(StoreCommandError::from)
+}
+
+/// Restore one builtin CLI registration to the shipped definition (issue
+/// #676, ADR-0109 Decision 2): the four tracked fields are rewritten, the
+/// entry returns to FOLLOWING (upgrades follow the baseline again), and the
+/// machine-local `executable` + `enabled` state stay. Refusals (a user
+/// entry, an unregistered or unknown name) surface through the
+/// InvalidCliTool lane. Returns the updated FULL app-config (ADR-0109
+/// Decision 9).
+#[tauri::command]
+pub fn restore_builtin_cli_tool(
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+) -> Result<AppConfig, StoreCommandError> {
+    live.restore_builtin_cli_tool(&name)
+        .map_err(StoreCommandError::from)
 }
 
 /// The manual rescan (issue #675): detect the shipped builtin definitions'
@@ -995,14 +1024,8 @@ pub fn remove_cli_tool(
 pub fn rescan_builtin_cli_tools(
     live: State<'_, LiveProviderConfig>,
 ) -> Result<crate::cli_tools::builtin::BuiltinScanResult, StoreCommandError> {
-    live.scan_and_register(None).map_err(|e| match e {
-        crate::provider::live_config::CliToolWriteError::Invalid(detail) => {
-            StoreCommandError::InvalidCliTool(detail)
-        }
-        crate::provider::live_config::CliToolWriteError::Write(e) => {
-            StoreCommandError::ConfigWriteFailure(e.to_string())
-        }
-    })
+    live.scan_and_register(None)
+        .map_err(StoreCommandError::from)
 }
 
 /// Store one MCP server secret in the OS keychain under `mcp-<id>-<env_key>`

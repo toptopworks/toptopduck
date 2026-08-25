@@ -265,12 +265,26 @@ impl LiveProviderConfig {
     /// write_lock as every registry write. Returns the updated FULL config
     /// (the ADR-0109 Decision 9 frontend-sync contract -- unlike
     /// `upsert_mcp_server`, which predates it and returns the entry).
-    pub fn upsert_cli_tool(&self, tool: CliToolConfig) -> Result<AppConfig, CliToolWriteError> {
+    pub fn upsert_cli_tool(&self, mut tool: CliToolConfig) -> Result<AppConfig, CliToolWriteError> {
         let _guard = self
             .write_lock
             .lock()
             .expect("app-config write_lock poisoned");
         let mut cfg = self.load_for_write().map_err(CliToolWriteError::Write)?;
+        // The backend is the baseline authority on BOTH sides (issue #676,
+        // ADR-0109 Decision 2): a builtin entry's posture is recomputed
+        // under the write lock from the tracked-field diff, and a user
+        // entry never carries one -- whatever a hand-rolled IPC call
+        // submitted, the marker is meaningless off the baseline.
+        if tool.source == CliToolSource::Builtin {
+            let posture = crate::cli_tools::builtin::baseline_after_edit(
+                cfg.cli_tools.get(&tool.name),
+                &tool,
+            );
+            tool.baseline = Some(posture);
+        } else {
+            tool.baseline = None;
+        }
         cfg.cli_tools
             .upsert(tool)
             .map_err(CliToolWriteError::Invalid)?;
@@ -279,15 +293,61 @@ impl LiveProviderConfig {
 
     /// Remove one CLI tool registration by name (idempotent: removing a name
     /// that is not registered still returns the config). Returns the updated
-    /// full config (ADR-0109 Decision 9).
-    pub fn remove_cli_tool(&self, name: &str) -> Result<AppConfig, app_config::WriteError> {
+    /// full config (ADR-0109 Decision 9). A BUILTIN entry is refused
+    /// (ADR-0109 Decision 2, issue #676): deletion would need suppression
+    /// tracking to stop the next scan from resurrecting the entry --
+    /// disabling is the single shutdown axis. The refusal is by the ENTRY's
+    /// source, not the name: a user entry owning a builtin name (the
+    /// conflict posture) stays removable -- disposing of it is how the
+    /// builtin entry gets to register.
+    pub fn remove_cli_tool(&self, name: &str) -> Result<AppConfig, CliToolWriteError> {
         let _guard = self
             .write_lock
             .lock()
             .expect("app-config write_lock poisoned");
-        let mut cfg = self.load_for_write()?;
+        let mut cfg = self.load_for_write().map_err(CliToolWriteError::Write)?;
+        if cfg
+            .cli_tools
+            .get(name)
+            .is_some_and(|t| t.source == CliToolSource::Builtin)
+        {
+            return Err(CliToolWriteError::Invalid(format!(
+                "`{name}` is a built-in CLI tool; disable it instead of deleting"
+            )));
+        }
         cfg.cli_tools.remove(name);
-        self.store_inner(cfg)
+        self.store_inner(cfg).map_err(CliToolWriteError::Write)
+    }
+
+    /// Restore one builtin entry's definition body to the shipped baseline
+    /// (ADR-0109 Decision 2, issue #676): the four tracked fields are
+    /// rewritten and the entry returns to `Following` (future upgrades
+    /// follow the baseline again); the machine-local `executable` and the
+    /// `enabled` intent axis are untouched. Returns the updated full config
+    /// (ADR-0109 Decision 9).
+    pub fn restore_builtin_cli_tool(&self, name: &str) -> Result<AppConfig, CliToolWriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write().map_err(CliToolWriteError::Write)?;
+        let Some(def) = crate::cli_tools::builtin::find_definition(name) else {
+            return Err(CliToolWriteError::Invalid(format!(
+                "`{name}` is not a built-in CLI tool"
+            )));
+        };
+        let Some(tool) = cfg.cli_tools.tools.iter_mut().find(|t| t.name == name) else {
+            return Err(CliToolWriteError::Invalid(format!(
+                "`{name}` is not registered"
+            )));
+        };
+        if tool.source != CliToolSource::Builtin {
+            return Err(CliToolWriteError::Invalid(format!(
+                "`{name}` is not a built-in CLI tool registration"
+            )));
+        }
+        def.apply_baseline(tool);
+        self.store_inner(cfg).map_err(CliToolWriteError::Write)
     }
 
     /// The builtin-entry scan: detect the shipped definitions' executables
@@ -316,12 +376,21 @@ impl LiveProviderConfig {
             &cfg.cli_tools,
             resolve,
         );
-        let config = if to_register.is_empty() {
-            // Nothing to persist: every shipped definition is dormant or
-            // already registered. Skip the rewrite so startup and pane
-            // mounts do not churn the config file (normalize + atomic
-            // write) -- and a fresh install with no hits keeps the lazily
-            // materialized no-config state.
+        // Baseline reconciliation rides the same write (issue #676,
+        // ADR-0109 Decision 2): a FOLLOWING entry drifted from the shipped
+        // definition upgrades silently; EDITED entries are preserved. The
+        // two plans are disjoint by construction -- the scan only plans
+        // names with no entry, the reconciler only touches existing ones.
+        let upgraded = crate::cli_tools::builtin::reconcile_baselines(
+            crate::cli_tools::builtin::BUILTIN_DEFINITIONS,
+            &mut cfg.cli_tools,
+        );
+        let config = if to_register.is_empty() && upgraded.is_empty() {
+            // Nothing to persist: every shipped definition is dormant,
+            // already registered, and in agreement with its baseline. Skip
+            // the rewrite so startup and pane mounts do not churn the
+            // config file (normalize + atomic write) -- and a fresh install
+            // with no hits keeps the lazily materialized no-config state.
             cfg
         } else {
             for tool in to_register {
@@ -331,6 +400,12 @@ impl LiveProviderConfig {
             }
             self.store_inner(cfg).map_err(CliToolWriteError::Write)?
         };
+        for name in upgraded {
+            log::info!(
+                target: "toptopduck::cli_tools",
+                "builtin CLI entry `{name}` upgraded to the shipped definition (unedited)"
+            );
+        }
         Ok(crate::cli_tools::builtin::BuiltinScanResult { config, scan })
     }
 
@@ -1094,6 +1169,234 @@ mod tests {
             "no builtin registration alongside the user entry"
         );
         assert_eq!(tools[0].source, CliToolSource::User);
+    }
+
+    // --- baseline tracking (issue #676) --------------------------------------
+
+    #[test]
+    fn scan_and_register_upgrades_a_drifted_following_entry_and_preserves_an_edited_one() {
+        // Baseline reconciliation: a FOLLOWING entry whose tracked fields
+        // drifted from the shipped definition -- the app version moved the
+        // baseline -- upgrades silently, keeping its machine-local
+        // executable and enable state; an EDITED entry is preserved
+        // verbatim, the app never overwrites a user edit.
+        let (_dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        let mut drifted = cli_tool("pandoc");
+        drifted.name = "pandoc".to_string();
+        drifted.source = CliToolSource::Builtin;
+        drifted.baseline = Some(CliBaselineState::Following);
+        drifted.description = "an older shipped description".to_string();
+        drifted.executable = "custom-resolution".to_string();
+        drifted.enabled = false;
+        let mut edited = cli_tool("python");
+        edited.source = CliToolSource::Builtin;
+        edited.baseline = Some(CliBaselineState::Edited);
+        edited.description = "user's own description".to_string();
+        cfg.cli_tools.tools = vec![drifted, edited];
+        std::fs::write(live.path(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        // An empty PATH: nothing registers (both entries exist), but the
+        // reconciliation still has work to do.
+        let empty_dir = tempfile::tempdir().expect("tempdir");
+        let path_env = std::env::join_paths([empty_dir.path()]).expect("join");
+        live.scan_and_register(Some(path_env)).expect("scan");
+
+        let tools = live.cli_tools();
+        let pandoc = tools.iter().find(|t| t.name == "pandoc").expect("entry");
+        let def = crate::cli_tools::builtin::find_definition("pandoc").expect("definition");
+        assert!(
+            def.baseline_matches(pandoc),
+            "upgraded back onto the baseline"
+        );
+        assert_eq!(
+            pandoc.executable, "custom-resolution",
+            "machine-local, kept"
+        );
+        assert!(!pandoc.enabled, "the intent axis is kept");
+        assert_eq!(pandoc.baseline, Some(CliBaselineState::Following));
+        let python = tools.iter().find(|t| t.name == "python").expect("entry");
+        assert_eq!(
+            python.description, "user's own description",
+            "never overwritten"
+        );
+        assert_eq!(python.baseline, Some(CliBaselineState::Edited));
+    }
+
+    #[test]
+    fn scan_and_register_skips_the_write_when_nothing_upgrades_or_registers() {
+        // No registration AND no upgrade: the second scan leaves the file
+        // byte-identical (the store skip -- pane mounts must not churn the
+        // config file).
+        let (_dir, live) = live();
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        live.scan_and_register(Some(path_env.clone()))
+            .expect("scan 1");
+        let after_first = std::fs::read_to_string(live.path()).expect("file");
+        // The registered entry matches the shipped baseline: nothing to do.
+        live.scan_and_register(Some(path_env)).expect("scan 2");
+        let after_second = std::fs::read_to_string(live.path()).expect("file");
+        assert_eq!(
+            after_first, after_second,
+            "nothing to register or upgrade: the file must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn upsert_cli_tool_computes_the_builtin_baseline_from_the_tracked_diff() {
+        // The edit signal (issue #676): only a tracked-field change flips a
+        // builtin entry to EDITED -- the enable toggle and the executable
+        // relocation keep the posture, and EDITED is one-way (editing back
+        // to the shipped values stays EDITED; the explicit restore is the
+        // way back). User entries stay baseline-free.
+        let (_dir, live) = live();
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        live.scan_and_register(Some(path_env)).expect("scan");
+        let registered = live.cli_tools().remove(0);
+
+        // The enable toggle (the row switch path: same body, one field).
+        let mut toggled = registered.clone();
+        toggled.enabled = false;
+        live.upsert_cli_tool(toggled).expect("toggle");
+        assert_eq!(
+            live.cli_tools()[0].baseline,
+            Some(CliBaselineState::Following)
+        );
+
+        // An executable relocation is machine-local, not an edit.
+        let mut relocated = live.cli_tools().remove(0);
+        relocated.executable = "/custom/pandoc".to_string();
+        live.upsert_cli_tool(relocated).expect("relocate");
+        assert_eq!(
+            live.cli_tools()[0].baseline,
+            Some(CliBaselineState::Following)
+        );
+
+        // A tracked-field edit flips to EDITED...
+        let mut edited = live.cli_tools().remove(0);
+        edited.description = "custom".to_string();
+        live.upsert_cli_tool(edited).expect("edit");
+        assert_eq!(live.cli_tools()[0].baseline, Some(CliBaselineState::Edited));
+
+        // ...and stays EDITED even when a later save changes nothing (an
+        // unchanged body is not an edit-back; the one-way rule and the
+        // explicit restore are pinned at the unit layer).
+        let unchanged = live.cli_tools().remove(0);
+        live.upsert_cli_tool(unchanged).expect("no-op save");
+        assert_eq!(live.cli_tools()[0].baseline, Some(CliBaselineState::Edited));
+
+        // User entries stay baseline-free regardless of edits.
+        live.upsert_cli_tool(cli_tool("my-pandoc"))
+            .expect("user entry");
+        let user = live
+            .cli_tools()
+            .into_iter()
+            .find(|t| t.name == "my-pandoc")
+            .expect("user");
+        assert_eq!(user.baseline, None);
+    }
+
+    #[test]
+    fn upsert_cli_tool_strips_a_submitted_baseline_off_user_entries() {
+        // The read-side twin of the posture authority: a hand-rolled IPC
+        // submission cannot persist a baseline onto a user entry -- the
+        // marker is meaningless off the baseline.
+        let (_dir, live) = live();
+        let mut forged = cli_tool("my-pandoc");
+        forged.baseline = Some(CliBaselineState::Edited);
+        live.upsert_cli_tool(forged).expect("upsert");
+        assert_eq!(live.cli_tools()[0].baseline, None);
+    }
+
+    #[test]
+    fn remove_cli_tool_refuses_a_builtin_entry_but_not_a_name_owning_user_entry() {
+        // Undeletable by the ENTRY's source (ADR-0109 Decision 2): the
+        // builtin registration survives removal; a user entry owning the
+        // builtin name (the conflict posture) stays removable -- disposing
+        // of it is how the builtin entry gets to register.
+        let (_dir, live) = live();
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        live.scan_and_register(Some(path_env)).expect("scan");
+        assert!(matches!(
+            live.remove_cli_tool("pandoc"),
+            Err(CliToolWriteError::Invalid(_))
+        ));
+        assert_eq!(live.cli_tools().len(), 1, "the builtin entry survives");
+
+        let mut cfg = AppConfig::defaults();
+        cfg.cli_tools.tools = vec![cli_tool("pandoc")];
+        std::fs::write(live.path(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        live.remove_cli_tool("pandoc")
+            .expect("user entry removable");
+    }
+
+    #[test]
+    fn restore_builtin_cli_tool_rewrites_the_tracked_fields_only() {
+        // The explicit restore (ADR-0109 Decision 2): the four tracked
+        // fields return to the shipped definition, the posture returns to
+        // FOLLOWING, and the machine-local executable + enable state are
+        // untouched -- after which the entry upgrades with the baseline
+        // again.
+        let (_dir, live) = live();
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        live.scan_and_register(Some(path_env.clone()))
+            .expect("scan");
+        let mut edited = live.cli_tools().remove(0);
+        edited.description = "custom".to_string();
+        edited.executable = "/custom/pandoc".to_string();
+        edited.enabled = false;
+        live.upsert_cli_tool(edited).expect("edit");
+
+        let cfg = live.restore_builtin_cli_tool("pandoc").expect("restore");
+        let tool = cfg
+            .cli_tools
+            .tools
+            .iter()
+            .find(|t| t.name == "pandoc")
+            .expect("entry");
+        let def = crate::cli_tools::builtin::find_definition("pandoc").expect("definition");
+        assert!(def.baseline_matches(tool), "back on the baseline");
+        assert_eq!(tool.baseline, Some(CliBaselineState::Following));
+        assert_eq!(
+            tool.executable, "/custom/pandoc",
+            "machine-local, untouched"
+        );
+        assert!(!tool.enabled, "the intent axis is untouched");
+        // Persisted, not just the returned view.
+        assert_eq!(
+            live.cli_tools()[0].baseline,
+            Some(CliBaselineState::Following)
+        );
+
+        // Re-following: a FOLLOWING entry that drifts again upgrades on the
+        // next scan (the restore put the entry back on the baseline).
+        let mut cfg2 = AppConfig::defaults();
+        let mut drifted = live.cli_tools().remove(0);
+        drifted.description = "drifted again".to_string();
+        cfg2.cli_tools.tools = vec![drifted];
+        std::fs::write(live.path(), serde_json::to_string(&cfg2).unwrap()).unwrap();
+        live.scan_and_register(Some(path_env)).expect("rescan");
+        assert!(def.baseline_matches(&live.cli_tools()[0]));
+    }
+
+    #[test]
+    fn restore_builtin_cli_tool_refuses_non_builtin_targets() {
+        // A registered user entry and an unregistered builtin name are both
+        // refusals (structured, through the same Invalid lane as every
+        // other registration-shape rejection).
+        let (_dir, live) = live();
+        live.upsert_cli_tool(cli_tool("my-pandoc")).expect("upsert");
+        assert!(matches!(
+            live.restore_builtin_cli_tool("my-pandoc"),
+            Err(CliToolWriteError::Invalid(_))
+        ));
+        assert!(matches!(
+            live.restore_builtin_cli_tool("pandoc"),
+            Err(CliToolWriteError::Invalid(_))
+        ));
     }
 
     /// An app-config with one active anthropic profile -- the pre-0098 stored

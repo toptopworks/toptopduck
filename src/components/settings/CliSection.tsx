@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Pencil, Plus, RefreshCw, Terminal, Trash2 } from "lucide-react";
+import { Pencil, Plus, RefreshCw, RotateCcw, Terminal, Trash2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 import type { AppConfig } from "../../types/app-config";
 import type { BuiltinScanEntry, CliToolConfig } from "../../types/cli-tool";
-import { upsertCliTool, removeCliTool, rescanBuiltinCliTools } from "../../api";
+import {
+  removeCliTool,
+  rescanBuiltinCliTools,
+  restoreBuiltinCliTool,
+  upsertCliTool,
+} from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { cn } from "../../lib/utils";
 import {
@@ -41,6 +46,13 @@ import { CliToolForm } from "./CliToolForm";
 
 type DeleteTarget = { name: string };
 
+/** The gated row actions (the delete and the restore both overwrite user
+ * state irreversibly, so both route through the shared confirmation
+ * dialog before their IPC lands). */
+type ConfirmTarget =
+  | ({ kind: "delete" } & DeleteTarget)
+  | { kind: "restore"; name: string };
+
 export function CliSection({
   appConfig,
   onCliToolsChanged,
@@ -53,8 +65,8 @@ export function CliSection({
     tool: CliToolConfig;
     isEdit: boolean;
   } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const [togglingName, setTogglingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -140,17 +152,25 @@ export function CliSection({
     setFormTarget(null);
   }
 
-  async function handleConfirmDelete() {
-    if (!deleteTarget) return;
-    setDeleting(true);
+  /** The shared confirmation lane for the gated row actions (issue #676
+   * folded the restore in beside the delete): the command already
+   * persisted and returned the updated full config -- sync and close. */
+  async function handleConfirm() {
+    if (!confirmTarget) return;
+    setConfirmBusy(true);
     setError(null);
+    const kind = confirmTarget.kind;
+    const name = confirmTarget.name;
     await runCommit(async () => {
-      const next = await removeCliTool(deleteTarget.name);
+      const next =
+        kind === "delete"
+          ? await removeCliTool(name)
+          : await restoreBuiltinCliTool(name);
       onCliToolsChanged(next);
       return null;
     });
-    setDeleting(false);
-    setDeleteTarget(null);
+    setConfirmBusy(false);
+    setConfirmTarget(null);
   }
 
   // --- Form view ----------------------------------------------------------
@@ -250,7 +270,20 @@ export function CliSection({
               toggling={togglingName === tool.name}
               onToggleEnabled={(next) => void handleToggleEnabled(tool, next)}
               onEdit={() => setFormTarget({ tool, isEdit: true })}
-              onDelete={() => setDeleteTarget({ name: tool.name })}
+              // A builtin entry is undeletable (ADR-0109 Decision 2):
+              // no delete entry point, disabling is the single shutdown
+              // axis. The restore shows only on an EDITED builtin row --
+              // FOLLOWING rows already agree with the baseline.
+              onDelete={
+                tool.source === "builtin"
+                  ? undefined
+                  : () => setConfirmTarget({ kind: "delete", name: tool.name })
+              }
+              onRestore={
+                tool.source === "builtin" && tool.baseline === "edited"
+                  ? () => setConfirmTarget({ kind: "restore", name: tool.name })
+                  : undefined
+              }
             />
           ))
         )}
@@ -282,57 +315,87 @@ export function CliSection({
         <p className="settings-error mt-3 text-destructive text-sm">{error}</p>
       )}
 
-      {deleteTarget && (
+      {confirmTarget && (
         <AlertDialog
           defaultOpen
           onOpenChange={(open) => {
-            if (!open && !deleting) setDeleteTarget(null);
+            if (!open && !confirmBusy) setConfirmTarget(null);
           }}
         >
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>
-                <FormattedMessage
-                  id="settings.cli.confirmDeleteTitle"
-                  defaultMessage="Delete CLI tool {name}?"
-                  values={{ name: deleteTarget.name }}
-                />
+                {confirmTarget.kind === "delete" ? (
+                  <FormattedMessage
+                    id="settings.cli.confirmDeleteTitle"
+                    defaultMessage="Delete CLI tool {name}?"
+                    values={{ name: confirmTarget.name }}
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.cli.confirmRestoreTitle"
+                    defaultMessage="Restore built-in definition for {name}?"
+                    values={{ name: confirmTarget.name }}
+                  />
+                )}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                <FormattedMessage
-                  id="settings.cli.confirmDeleteBody"
-                  defaultMessage="This permanently removes the registration {name}. This cannot be undone."
-                  values={{ name: deleteTarget.name }}
-                />
+                {confirmTarget.kind === "delete" ? (
+                  <FormattedMessage
+                    id="settings.cli.confirmDeleteBody"
+                    defaultMessage="This permanently removes the registration {name}. This cannot be undone."
+                    values={{ name: confirmTarget.name }}
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.cli.confirmRestoreBody"
+                    defaultMessage="This discards your edits to {name} and returns it to the definition shipped with the app. This cannot be undone."
+                    values={{ name: confirmTarget.name }}
+                  />
+                )}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel disabled={deleting}>
+              <AlertDialogCancel disabled={confirmBusy}>
                 <FormattedMessage
                   id="settings.cli.confirmDeleteCancel"
                   defaultMessage="Cancel"
                 />
               </AlertDialogCancel>
               <AlertDialogAction
-                className="bg-destructive text-white hover:bg-destructive/90"
-                disabled={deleting}
+                className={cn(
+                  confirmTarget.kind === "delete" &&
+                  "bg-destructive text-white hover:bg-destructive/90",
+                )}
+                disabled={confirmBusy}
                 onClick={(e) => {
-                  // Prevent Radix AlertDialog auto-close so the deleting
-                  // state can render while the IPC runs (the MCP pane's
-                  // pattern).
+                  // Prevent Radix AlertDialog auto-close so the busy state
+                  // can render while the IPC runs (the MCP pane's pattern).
                   e.preventDefault();
-                  void handleConfirmDelete();
+                  void handleConfirm();
                 }}
               >
-                {deleting ? (
-                  <FormattedMessage
-                    id="settings.cli.deleting"
-                    defaultMessage="Deleting…"
-                  />
-                ) : (
+                {confirmBusy ? (
+                  confirmTarget.kind === "delete" ? (
+                    <FormattedMessage
+                      id="settings.cli.deleting"
+                      defaultMessage="Deleting…"
+                    />
+                  ) : (
+                    <FormattedMessage
+                      id="settings.cli.restoring"
+                      defaultMessage="Restoring…"
+                    />
+                  )
+                ) : confirmTarget.kind === "delete" ? (
                   <FormattedMessage
                     id="common.delete"
                     defaultMessage="Delete"
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="common.restore"
+                    defaultMessage="Restore"
                   />
                 )}
               </AlertDialogAction>
@@ -418,6 +481,7 @@ function CliToolRow({
   onToggleEnabled,
   onEdit,
   onDelete,
+  onRestore,
 }: {
   tool: CliToolConfig;
   /** The row's enable-toggle write is in flight: the switch and the row's
@@ -426,7 +490,13 @@ function CliToolRow({
   toggling: boolean;
   onToggleEnabled: (enabled: boolean) => void;
   onEdit: () => void;
-  onDelete: () => void;
+  /** Undefined on builtin rows: the entry is undeletable (ADR-0109
+   *  Decision 2) -- disabling is the single shutdown axis, so no delete
+   *  entry point renders. */
+  onDelete?: () => void;
+  /** Present only on an EDITED builtin row: the explicit restore action
+   *  (ADR-0109 Decision 2) -- the only way back onto the baseline. */
+  onRestore?: () => void;
 }) {
   const intl = useIntl();
   return (
@@ -543,30 +613,62 @@ function CliToolRow({
           </TooltipContent>
         </Tooltip>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="text-muted-foreground hover:text-destructive h-7 w-7 p-0"
-              disabled={toggling}
-              aria-label={intl.formatMessage(
-                {
-                  id: "settings.cli.deleteLabel",
-                  defaultMessage: "Delete tool {name}",
-                },
-                { name: tool.name },
-              )}
-              onClick={onDelete}
-            >
-              <Trash2 className="size-4" aria-hidden />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-            <FormattedMessage id="common.delete" defaultMessage="Delete" />
-          </TooltipContent>
-        </Tooltip>
+        {onRestore && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground h-7 w-7 p-0"
+                disabled={toggling}
+                aria-label={intl.formatMessage(
+                  {
+                    id: "settings.cli.restoreLabel",
+                    defaultMessage: "Restore built-in definition for tool {name}",
+                  },
+                  { name: tool.name },
+                )}
+                onClick={onRestore}
+              >
+                <RotateCcw className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+              <FormattedMessage
+                id="settings.cli.restoreTooltip"
+                defaultMessage="Restore built-in definition"
+              />
+            </TooltipContent>
+          </Tooltip>
+        )}
+
+        {onDelete && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground hover:text-destructive h-7 w-7 p-0"
+                disabled={toggling}
+                aria-label={intl.formatMessage(
+                  {
+                    id: "settings.cli.deleteLabel",
+                    defaultMessage: "Delete tool {name}",
+                  },
+                  { name: tool.name },
+                )}
+                onClick={onDelete}
+              >
+                <Trash2 className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+              <FormattedMessage id="common.delete" defaultMessage="Delete" />
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </div>
   );

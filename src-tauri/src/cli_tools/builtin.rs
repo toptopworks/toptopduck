@@ -55,26 +55,57 @@ impl BuiltinCliDefinition {
     /// `source = Builtin`, `baseline = Following` (ADR-0109 Decisions 1/2),
     /// enabled by default (ADR-0106 fourth write-entry class).
     fn to_config(&self, executable: &str) -> CliToolConfig {
-        CliToolConfig {
+        let mut tool = CliToolConfig {
             name: self.name.to_string(),
-            description: self.description.to_string(),
+            description: String::new(),
             executable: executable.to_string(),
-            argv_template: self.argv_template.iter().map(|s| s.to_string()).collect(),
-            params: self
-                .params
-                .iter()
-                .map(|p| CliToolParam {
-                    name: p.name.to_string(),
-                    description: p.description.to_string(),
-                    delivery: p.delivery,
-                    varargs: p.varargs,
-                })
-                .collect(),
+            argv_template: Vec::new(),
+            params: Vec::new(),
             env: Default::default(),
             enabled: true,
             source: CliToolSource::Builtin,
-            baseline: Some(CliBaselineState::Following),
-        }
+            baseline: None,
+        };
+        self.apply_baseline(&mut tool);
+        tool
+    }
+
+    /// Whether the entry's baseline-tracked fields (ADR-0109 Decision 2,
+    /// issue #676) agree with this shipped definition: `description`,
+    /// `argv_template`, `params`, `env`. Single source: the entry is
+    /// compared against this definition's own materialization
+    /// ([`tracked_fields_equal`]); the entry's `executable` rides along
+    /// untouched because it is not a tracked field, so any value compares
+    /// equal. The definition side of `env` is always empty (v1 ships no
+    /// literal env), so any entry env reads as an edit. `executable` (the
+    /// machine-resolved candidate), `enabled` (the ADR-0106 intent axis),
+    /// and `name` (locked identity) are outside the baseline on purpose:
+    /// the first drifts with the machine, the second is the user's
+    /// authority, the third cannot drift.
+    pub(crate) fn baseline_matches(&self, tool: &CliToolConfig) -> bool {
+        tracked_fields_equal(tool, &self.to_config(&tool.executable))
+    }
+
+    /// Rewrite the baseline-tracked fields with the shipped definition and
+    /// return the entry to `Following` (ADR-0109 Decision 2, issue #676) --
+    /// the shared body of the silent upgrade and the explicit restore.
+    /// `name`, `executable`, `enabled`, and `source` are untouched: identity,
+    /// machine-local, and intent are not curation.
+    pub(crate) fn apply_baseline(&self, tool: &mut CliToolConfig) {
+        tool.description = self.description.to_string();
+        tool.argv_template = self.argv_template.iter().map(|s| s.to_string()).collect();
+        tool.params = self
+            .params
+            .iter()
+            .map(|p| CliToolParam {
+                name: p.name.to_string(),
+                description: p.description.to_string(),
+                delivery: p.delivery,
+                varargs: p.varargs,
+            })
+            .collect();
+        tool.env = Default::default();
+        tool.baseline = Some(CliBaselineState::Following);
     }
 }
 
@@ -144,7 +175,14 @@ pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
 /// Decision 7): static full-set membership, independent of what this
 /// machine happens to have installed.
 pub(crate) fn is_builtin_name(name: &str) -> bool {
-    BUILTIN_DEFINITIONS.iter().any(|d| d.name == name)
+    find_definition(name).is_some()
+}
+
+/// Find the shipped definition a builtin name belongs to. `None` means the
+/// name is not in the curated set (which `has_legal_shape` already refuses
+/// for `source = Builtin` -- the lookup's `None` arm is defensive).
+pub(crate) fn find_definition(name: &str) -> Option<&'static BuiltinCliDefinition> {
+    BUILTIN_DEFINITIONS.iter().find(|d| d.name == name)
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +329,82 @@ pub(crate) fn scan(
         });
     }
     (entries, to_register)
+}
+
+// ---------------------------------------------------------------------------
+// Baseline reconciliation (issue #676, ADR-0109 Decision 2)
+
+/// Reconcile every FOLLOWING builtin entry against the shipped definitions:
+/// a drifted entry -- the app version moved the baseline, or a hand-edit
+/// never flipped the marker -- is silently upgraded (tracked fields
+/// rewritten, `Following` kept); an EDITED entry is preserved verbatim, the
+/// app never overwrites a user edit. Returns the upgraded names (one
+/// upgrade log line each); empty means the registry already agrees with the
+/// baseline.
+pub(crate) fn reconcile_baselines(
+    defs: &'static [BuiltinCliDefinition],
+    registry: &mut CliToolRegistry,
+) -> Vec<String> {
+    let mut upgraded = Vec::new();
+    for def in defs {
+        // Only a FOLLOWING builtin entry is reconciliation material: a user
+        // entry owning the name is the conflict posture (untouchable), an
+        // EDITED builtin entry opted out of the baseline, and an entry that
+        // is absent is the scan's business, not the reconciler's.
+        let Some(tool) = registry.tools.iter_mut().find(|t| t.name == def.name) else {
+            continue;
+        };
+        if tool.source != CliToolSource::Builtin
+            || tool.baseline != Some(CliBaselineState::Following)
+        {
+            continue;
+        }
+        if !def.baseline_matches(tool) {
+            def.apply_baseline(tool);
+            upgraded.push(def.name.to_string());
+        }
+    }
+    upgraded
+}
+
+/// The baseline posture an upsert should persist for a BUILTIN entry
+/// (issue #676): against an existing builtin entry the signal is the four
+/// tracked fields -- unchanged keeps the old posture (an enable toggle or an
+/// executable relocation is not an edit), changed flips to `Edited`. With no
+/// existing builtin entry (the defensive direct-upsert path; registration
+/// normally happens only through the scan) the posture is simply agreement
+/// with the shipped definition. `Edited` is one-way: editing back to the
+/// shipped values stays `Edited` -- the explicit restore is the only way
+/// back onto the baseline.
+pub(crate) fn baseline_after_edit(
+    old: Option<&CliToolConfig>,
+    new: &CliToolConfig,
+) -> CliBaselineState {
+    match old {
+        Some(old) if old.source == CliToolSource::Builtin => {
+            if tracked_fields_equal(old, new) {
+                old.baseline.unwrap_or(CliBaselineState::Following)
+            } else {
+                CliBaselineState::Edited
+            }
+        }
+        _ => match find_definition(&new.name) {
+            Some(def) if def.baseline_matches(new) => CliBaselineState::Following,
+            _ => CliBaselineState::Edited,
+        },
+    }
+}
+
+/// The four baseline-tracked fields compared between two entries (the
+/// upsert edit signal). `executable`, `enabled`, and `name` are not
+/// tracked: the resolved executable is machine-local, the enable flag is
+/// the user's intent axis, and `name` is the locked identity the upsert is
+/// already keyed on.
+fn tracked_fields_equal(a: &CliToolConfig, b: &CliToolConfig) -> bool {
+    a.description == b.description
+        && a.argv_template == b.argv_template
+        && a.params == b.params
+        && a.env == b.env
 }
 
 // ---------------------------------------------------------------------------
@@ -547,5 +661,162 @@ mod tests {
         assert!(is_builtin_name("python"));
         assert!(is_builtin_name("office-cli"));
         assert!(!is_builtin_name("my-own-tool"));
+    }
+
+    // --- baseline (issue #676) ----------------------------------------------
+
+    /// The python definition (the second representative -- reconciliation
+    /// tests need two entries to upgrade/preserve side by side).
+    fn python() -> &'static BuiltinCliDefinition {
+        &BUILTIN_DEFINITIONS[1]
+    }
+
+    #[test]
+    fn baseline_matches_a_fresh_materialization_and_ignores_untracked_fields() {
+        // The untracked fields never read as an edit: the resolved
+        // executable is machine-local, the enable flag is the ADR-0106
+        // intent axis, and the name is locked identity.
+        let def = pandoc();
+        let mut tool = def.to_config("pandoc");
+        assert!(def.baseline_matches(&tool));
+        tool.executable = "/custom/bin/pandoc".into();
+        tool.enabled = false;
+        assert!(def.baseline_matches(&tool));
+    }
+
+    #[test]
+    fn baseline_drifts_on_any_tracked_field_alone() {
+        let def = pandoc();
+        let mut edited_desc = def.to_config("pandoc");
+        edited_desc.description = "custom description".into();
+        assert!(!def.baseline_matches(&edited_desc));
+        let mut edited_argv = def.to_config("pandoc");
+        edited_argv.argv_template = vec!["{input}".to_string()];
+        assert!(!def.baseline_matches(&edited_argv));
+        let mut edited_params = def.to_config("pandoc");
+        edited_params.params[0].description = "custom".into();
+        assert!(!def.baseline_matches(&edited_params));
+        // The definition side of env is always empty, so ANY entry env is a
+        // tracked-field edit.
+        let mut edited_env = def.to_config("pandoc");
+        edited_env.env.insert("LANG".to_string(), "C".to_string());
+        assert!(!def.baseline_matches(&edited_env));
+    }
+
+    #[test]
+    fn apply_baseline_rewrites_the_tracked_fields_only() {
+        let def = pandoc();
+        let mut tool = def.to_config("pandoc");
+        tool.description = "custom".into();
+        tool.env.insert("LANG".to_string(), "C".to_string());
+        tool.executable = "custom-pandoc".into();
+        tool.enabled = false;
+        tool.baseline = Some(CliBaselineState::Edited);
+        def.apply_baseline(&mut tool);
+        assert!(def.baseline_matches(&tool));
+        assert_eq!(tool.baseline, Some(CliBaselineState::Following));
+        assert_eq!(tool.executable, "custom-pandoc", "machine-local, untouched");
+        assert!(!tool.enabled, "the intent axis is untouched");
+        assert_eq!(tool.name, "pandoc");
+        assert_eq!(tool.source, CliToolSource::Builtin);
+    }
+
+    #[test]
+    fn reconcile_upgrades_a_drifted_following_entry_and_preserves_an_edited_one() {
+        let mut drifted = pandoc().to_config("pandoc");
+        drifted.description = "an older shipped description".into();
+        drifted.executable = "custom-resolution".into();
+        drifted.enabled = false;
+        let mut edited = python().to_config("python3");
+        edited.description = "user's own description".into();
+        edited.baseline = Some(CliBaselineState::Edited);
+        let mut registry = registry_with(vec![drifted, edited]);
+        let upgraded = reconcile_baselines(BUILTIN_DEFINITIONS, &mut registry);
+        assert_eq!(upgraded, vec!["pandoc".to_string()]);
+        let upgraded_tool = registry.get("pandoc").expect("entry");
+        assert!(
+            pandoc().baseline_matches(upgraded_tool),
+            "the tracked fields are back on the shipped definition"
+        );
+        assert_eq!(
+            upgraded_tool.executable, "custom-resolution",
+            "the machine-local value survives the upgrade"
+        );
+        assert!(
+            !upgraded_tool.enabled,
+            "the intent axis survives the upgrade"
+        );
+        // EDITED is preserved verbatim -- the app never overwrites a user
+        // edit.
+        let edited_tool = registry.get("python").expect("entry");
+        assert_eq!(edited_tool.description, "user's own description");
+        assert_eq!(edited_tool.baseline, Some(CliBaselineState::Edited));
+    }
+
+    #[test]
+    fn reconcile_leaves_matching_entries_and_the_registry_alone() {
+        // A matching FOLLOWING entry and a dormant-absent definition both
+        // produce an empty plan: nothing upgrades, nothing writes.
+        let fresh = pandoc().to_config("pandoc");
+        let mut registry = registry_with(vec![fresh]);
+        assert!(reconcile_baselines(BUILTIN_DEFINITIONS, &mut registry).is_empty());
+        assert!(registry.get("python").is_none());
+    }
+
+    #[test]
+    fn baseline_after_edit_keeps_the_posture_for_untracked_changes() {
+        // The enable toggle and the executable relocation paths (the row
+        // switch and a custom interpreter path) are not edits.
+        let old = pandoc().to_config("pandoc");
+        let mut toggled = old.clone();
+        toggled.enabled = false;
+        assert_eq!(
+            baseline_after_edit(Some(&old), &toggled),
+            CliBaselineState::Following
+        );
+        let mut relocated = old.clone();
+        relocated.executable = "/custom/pandoc".into();
+        assert_eq!(
+            baseline_after_edit(Some(&old), &relocated),
+            CliBaselineState::Following
+        );
+        // A tracked-field change flips to EDITED.
+        let mut edited = old.clone();
+        edited.description = "custom".into();
+        assert_eq!(
+            baseline_after_edit(Some(&old), &edited),
+            CliBaselineState::Edited
+        );
+    }
+
+    #[test]
+    fn baseline_after_edit_is_one_way_for_edited_entries() {
+        // Editing back to the shipped values stays EDITED: the explicit
+        // restore is the only way back onto the baseline.
+        let mut edited = pandoc().to_config("pandoc");
+        edited.description = "custom".into();
+        edited.baseline = Some(CliBaselineState::Edited);
+        let reverted = pandoc().to_config("pandoc");
+        assert_eq!(
+            baseline_after_edit(Some(&edited), &reverted),
+            CliBaselineState::Edited
+        );
+    }
+
+    #[test]
+    fn baseline_after_edit_fresh_entries_follow_agreement_with_the_definition() {
+        // The defensive direct-upsert path (no existing builtin entry): the
+        // posture is simply whether the body matches the shipped definition.
+        let fresh = pandoc().to_config("pandoc");
+        assert_eq!(
+            baseline_after_edit(None, &fresh),
+            CliBaselineState::Following
+        );
+        let mut drifted = pandoc().to_config("pandoc");
+        drifted.description = "custom".into();
+        assert_eq!(
+            baseline_after_edit(None, &drifted),
+            CliBaselineState::Edited
+        );
     }
 }
