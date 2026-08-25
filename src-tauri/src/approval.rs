@@ -73,6 +73,14 @@ impl ToolKey {
     /// matches this sentinel). This must never equal [`Self::BUILTIN_SERVER`].
     pub const RESERVED_SPOOF_SERVER: &'static str = "_builtin_spoof_";
 
+    /// Reserved server name for registered CLI tools (ADR-0108 Decision 7,
+    /// issue #671). The trust key is the registration name (the `tool` half),
+    /// so "always allow" is per registered tool. Deliberately UPPERCASE:
+    /// MCP server slugs are produced by `slugify`, whose alphabet is
+    /// lowercase-only -- no MCP server can ever produce this exact name, so
+    /// an MCP trust entry can never collide with a CLI tool's.
+    pub const CLI_SERVER: &'static str = "CLI";
+
     /// A built-in tool key (explore / materialize / describe / sample).
     pub fn builtin(tool: impl Into<String>) -> Self {
         Self {

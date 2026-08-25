@@ -13,6 +13,7 @@ export type SettingsSection =
   | "runtime"
   | "skills"
   | "mcp"
+  | "cli-tools"
   | "database-engine"
   | "privacy";
 
@@ -26,6 +27,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "runtime",
   "skills",
   "mcp",
+  "cli-tools",
   "database-engine",
   "privacy",
 ];

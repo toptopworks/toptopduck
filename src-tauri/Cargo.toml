@@ -231,9 +231,31 @@ toml = "0.9"
 # process from owning its own SessionStore (ADR-0056) and racing on the
 # app-config atomic write (ADR-0038); window-state persists the main window's
 # position/size/maximized across launches.
+# CLI fake-tool fixture (issue #671, ADR-0108): a minimal non-interactive
+# binary the cli_tools executor's unit tests spawn in place of a real
+# registered tool (the acp-fake-cli precedent). See the fixture source for
+# the flag protocol.
+[[bin]]
+name = "cli-fake-tool"
+path = "tests/fixtures/cli_fake_tool.rs"
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
+
+# CLI tool executor platform support (issue #671, ADR-0108 Decision 5):
+# Windows terminates a tool's process tree via a kill-on-close job object;
+# Unix puts the child in its own process group and killpg's it on cancel.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

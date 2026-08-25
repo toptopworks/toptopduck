@@ -18,6 +18,7 @@ pub mod app_config;
 pub mod approval;
 pub(crate) mod bounded_line;
 pub mod cancel;
+pub mod cli_tools;
 pub mod commands;
 pub mod fs_acl;
 pub mod guardrail;
@@ -393,6 +394,8 @@ pub fn run() {
             commands::get_app_config,
             commands::set_app_config,
             commands::upsert_mcp_server,
+            commands::upsert_cli_tool,
+            commands::remove_cli_tool,
             commands::set_mcp_server_secret,
             commands::clear_mcp_server_secret,
             commands::probe_mcp_server,

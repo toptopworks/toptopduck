@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cli_tools::config::CliToolRegistry;
 use crate::guardrail::{DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT};
 use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
@@ -304,6 +305,14 @@ pub struct AppConfig {
     /// (ADR-0029/0036 -- see [`McpServerRegistry`]).
     #[serde(default)]
     pub mcp_servers: McpServerRegistry,
+    /// User-registered CLI tools (issue #671, ADR-0108/0109): the second
+    /// external tool source's registry, living next to the MCP registry
+    /// (ADR-0109 Decision 9). Forward-compat: a pre-#671 file has no
+    /// `cli_tools` key, so serde(default) fills an empty registry rather
+    /// than rejecting the whole document. All values are non-secret (the
+    /// read-time secret-name scan backstops hand-edits, as for MCP env).
+    #[serde(default)]
+    pub cli_tools: CliToolRegistry,
     /// Managed sessions directory override (issue #452, ADR-0089 Decision 2).
     /// None = runtime-computed default (`<Documents>/toptopduck/sessions/`).
     /// Some(path) = user-chosen directory. Forward-compat: a pre-#452 file has
@@ -347,6 +356,7 @@ impl AppConfig {
             tunables: Tunables::default(),
             shell: ShellPrefs::default(),
             mcp_servers: McpServerRegistry::default(),
+            cli_tools: CliToolRegistry::default(),
             sessions_dir: None,
             default_runtime: DefaultRuntime::default(),
             last_model_postures: BTreeMap::new(),
@@ -413,6 +423,9 @@ impl AppConfig {
         // surfaces a connection fault for any malformed entry at spawn time
         // rather than the config layer guessing validity.
         self.mcp_servers.normalize();
+        // Same invariant class for the CLI registry: unique names, first
+        // occurrence wins (the MCP registry's honest-degrade precedent).
+        self.cli_tools.normalize();
         // Trim whitespace on the sessions_dir override; an all-whitespace
         // value collapses to None so the runtime falls back to the default
         // rather than resolving a whitespace-named directory (issue #452).
