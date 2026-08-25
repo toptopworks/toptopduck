@@ -60,6 +60,7 @@ function SettingsViewHarness({
   onReplaceAppConfig,
   onSessionsDirChanged,
   onDefaultRuntimeChanged,
+  onCliToolsChanged,
   onClose,
   initialSection,
 }: {
@@ -68,6 +69,7 @@ function SettingsViewHarness({
   onReplaceAppConfig: (cfg: AppConfig) => void;
   onSessionsDirChanged: (cfg: AppConfig) => void;
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
+  onCliToolsChanged: (cfg: AppConfig) => void;
   onClose: () => void;
   initialSection: SettingsSection;
 }) {
@@ -82,6 +84,7 @@ function SettingsViewHarness({
       onReplaceAppConfig={onReplaceAppConfig}
       onSessionsDirChanged={onSessionsDirChanged}
       onDefaultRuntimeChanged={onDefaultRuntimeChanged}
+      onCliToolsChanged={onCliToolsChanged}
       onClose={onClose}
     />
   );
@@ -169,6 +172,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     onReplaceAppConfig = vi.fn(),
     onSessionsDirChanged = vi.fn(),
     onDefaultRuntimeChanged = vi.fn(),
+    onCliToolsChanged = vi.fn(),
     onClose = vi.fn(),
     initialSection = "general",
   }: {
@@ -177,6 +181,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     onReplaceAppConfig?: (cfg: AppConfig) => void;
     onSessionsDirChanged?: (cfg: AppConfig) => void;
     onDefaultRuntimeChanged?: (cfg: AppConfig) => void;
+    onCliToolsChanged?: (cfg: AppConfig) => void;
     onClose?: () => void;
     initialSection?: SettingsSection;
   } = {}) {
@@ -187,6 +192,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
         onReplaceAppConfig={onReplaceAppConfig}
         onSessionsDirChanged={onSessionsDirChanged ?? (() => undefined)}
         onDefaultRuntimeChanged={onDefaultRuntimeChanged}
+        onCliToolsChanged={onCliToolsChanged}
         onClose={onClose}
         initialSection={initialSection}
       />,

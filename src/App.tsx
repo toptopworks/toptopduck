@@ -256,6 +256,17 @@ export default function App() {
     [replaceAppConfig],
   );
 
+  // CLI registry change callback (issue #671): the upsert/remove IPCs are
+  // backend RMW commands that already persisted + returned the updated
+  // config; sync local state only -- no second disk write (contrast the
+  // onCommit read-modify-write path the other panes use).
+  const handleCliToolsChanged = useCallback(
+    (cfg: AppConfig) => {
+      replaceAppConfig(cfg);
+    },
+    [replaceAppConfig],
+  );
+
   // The tiered-approval side channel (ADR-0083, issue #297) is owned here at
   // the shell root: ONE listener pair feeds the per-session entry map that
   // BOTH the SessionPane of a suspended turn (in-flow approval cards) and the
@@ -977,6 +988,7 @@ export default function App() {
                     onReplaceAppConfig={replaceAppConfig}
                     onSessionsDirChanged={handleSessionsDirChanged}
                     onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
+                    onCliToolsChanged={handleCliToolsChanged}
                     onClose={() => {
                       setSettingsView({ open: false });
                       setLiveSettingsSection("general");

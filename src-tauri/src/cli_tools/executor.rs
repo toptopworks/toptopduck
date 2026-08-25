@@ -19,7 +19,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::config::{render_argv, CliToolConfig};
 use crate::cancel::CancelToken;
@@ -35,6 +35,16 @@ const OUTPUT_CAP_BYTES: usize = 8 * 1024 * 1024;
 /// How often the wait loop polls the cancel token between child exits (the
 /// approval gate's poll precedent -- a safety interval, not the mechanism).
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Grace period the reader threads get to hit EOF on their own after the
+/// child exits, before the tree is terminated to force it (a grandchild
+/// holding the pipe write-ends -- the resident-child class ADR-0108
+/// anticipates -- would otherwise block them forever).
+const READER_GRACE: Duration = Duration::from_secs(2);
+
+/// Bound after the forced tree termination before an unfinished reader is
+/// detached: a kill-resistant straggler must not hang the turn.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Execute one CLI tool call (the `execute_call` dispatch arm's entry).
 /// `session_temp_dir` is the cwd; `cancel` is the turn's shared token.
@@ -117,9 +127,9 @@ fn execute_capped(
             }
             let _ = child.kill();
             let status = child.wait();
-            // Reap the reader threads so nothing leaks past the call.
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
+            // Reap the reader threads so nothing leaks past the call (the
+            // bounded reap: the tree is already down, stragglers detach).
+            let _ = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
             return error(format!(
                 "cli tool `{}` killed by round cancellation (status: {status:?})",
                 tool.name
@@ -130,16 +140,14 @@ fn execute_capped(
             Ok(None) => thread::sleep(CANCEL_POLL_INTERVAL),
             Err(e) => {
                 let _ = child.kill();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
+                let _ = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
                 return error(format!("wait on `{}` failed: {e}", tool.executable));
             }
         }
     };
-    let (stdout, stdout_truncated) = stdout_thread.join().unwrap_or_default();
-    let (stderr, stderr_truncated) = stderr_thread.join().unwrap_or_default();
-    let stdout = decorate("stdout", &stdout, stdout_truncated, cap);
-    let stderr = decorate("stderr", &stderr, stderr_truncated, cap);
+    let (stdout, stderr) = reap_readers(stdout_thread, stderr_thread, guard.as_ref(), cancel);
+    let stdout = decorate("stdout", &stdout, cap);
+    let stderr = decorate("stderr", &stderr, cap);
     if status.success() {
         // ADR-0108 Decision 5: exit 0 = success, result = stdout; a
         // non-empty stderr rides along under a marker (some tools log to
@@ -165,19 +173,52 @@ fn execute_capped(
     }
 }
 
-/// Read one stream to EOF, storing at most `cap` bytes. Returns the stored
-/// bytes (UTF-8 lossy) and whether MORE than `cap` bytes arrived (the
-/// explicit truncation marker's trigger).
-fn read_capped<R: Read>(mut reader: Option<R>, cap: usize) -> (String, bool) {
+/// One output stream's read result: the stored bytes (UTF-8 lossy), the
+/// over-cap flag (Decision 5's explicit truncation marker), and a
+/// failure/detach note -- a partial stream always carries a marker, never
+/// a silent gap.
+#[derive(Default)]
+struct StreamRead {
+    content: String,
+    truncated: bool,
+    error: Option<String>,
+}
+
+impl StreamRead {
+    /// The detached-reader result: the stream never reached EOF even after
+    /// tree termination, so its bytes are lost -- say so instead of hanging
+    /// the turn on them.
+    fn detached(stream: &str) -> Self {
+        Self {
+            content: String::new(),
+            truncated: false,
+            error: Some(format!(
+                "{stream} never reached EOF after tree termination; output lost"
+            )),
+        }
+    }
+}
+
+/// Read one stream to EOF, storing at most `cap` bytes. A mid-pipe read
+/// failure is NOT EOF: what arrived is kept and the failure rides along
+/// (the caller marks it) -- a partial stream never masquerades as a
+/// complete one (ADR-0108 Decision 5's visible-never-silent, extended from
+/// over-cap to read errors).
+fn read_capped<R: Read>(mut reader: Option<R>, cap: usize) -> StreamRead {
     let Some(reader) = reader.as_mut() else {
-        return (String::new(), false);
+        return StreamRead::default();
     };
     let mut stored = Vec::new();
     let mut total = 0usize;
+    let mut error = None;
     let mut chunk = [0u8; 64 * 1024];
     loop {
         match reader.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(e) => {
+                error = Some(format!("read error: {e}"));
+                break;
+            }
             Ok(n) => {
                 total += n;
                 if stored.len() < cap {
@@ -187,17 +228,74 @@ fn read_capped<R: Read>(mut reader: Option<R>, cap: usize) -> (String, bool) {
             }
         }
     }
-    (String::from_utf8_lossy(&stored).into_owned(), total > cap)
+    StreamRead {
+        content: String::from_utf8_lossy(&stored).into_owned(),
+        truncated: total > cap,
+        error,
+    }
 }
 
-/// Append the explicit truncation marker when a stream overran the cap
-/// (ADR-0108 Decision 5: over-cap is visible, never silent).
-fn decorate(stream: &str, content: &str, truncated: bool, cap: usize) -> String {
-    if truncated {
-        format!("{content}\n[{stream} truncated: exceeded the {cap}-byte cap]")
-    } else {
-        content.to_string()
+/// Append the explicit visibility markers (ADR-0108 Decision 5: over-cap
+/// and read failures are visible, never silent).
+fn decorate(stream: &str, read: &StreamRead, cap: usize) -> String {
+    let mut content = read.content.clone();
+    if read.truncated {
+        content.push_str(&format!(
+            "\n[{stream} truncated: exceeded the {cap}-byte cap]"
+        ));
     }
+    if let Some(detail) = &read.error {
+        content.push_str(&format!("\n[{stream} {detail}]"));
+    }
+    content
+}
+
+/// Reap the reader threads once the child is gone. A grandchild holding
+/// the pipe write-ends (the resident-child class ADR-0108 anticipates)
+/// would block a plain `join()` forever -- including on the cancel path,
+/// where the polling loop has already exited. Give the readers
+/// [`READER_GRACE`] to hit EOF on their own, then terminate the tree to
+/// force it (idempotent beside the cancel path's kill); whatever still has
+/// not finished after [`KILL_GRACE`] is detached -- dropping the handle --
+/// and the stream resolves with an explicit marker instead of its bytes. A
+/// bounded wait replaces an unbounded one, never a hung turn.
+fn reap_readers(
+    stdout_thread: thread::JoinHandle<StreamRead>,
+    stderr_thread: thread::JoinHandle<StreamRead>,
+    guard: Option<&tree::TreeGuard>,
+    cancel: &CancelToken,
+) -> (StreamRead, StreamRead) {
+    let done = |out: &thread::JoinHandle<StreamRead>,
+                err: &thread::JoinHandle<StreamRead>|
+     -> bool { out.is_finished() && err.is_finished() };
+    // The cancel path already terminated the tree: no grace, straight to
+    // the post-kill bound.
+    let mut deadline = Instant::now() + READER_GRACE;
+    if cancel.is_requested() {
+        deadline = Instant::now();
+    }
+    while !done(&stdout_thread, &stderr_thread) && Instant::now() < deadline {
+        thread::sleep(CANCEL_POLL_INTERVAL);
+    }
+    if !done(&stdout_thread, &stderr_thread) {
+        if let Some(guard) = guard {
+            guard.kill_tree();
+        }
+        let bound = Instant::now() + KILL_GRACE;
+        while !done(&stdout_thread, &stderr_thread) && Instant::now() < bound {
+            thread::sleep(CANCEL_POLL_INTERVAL);
+        }
+    }
+    let take = |handle: thread::JoinHandle<StreamRead>, stream: &str| {
+        if handle.is_finished() {
+            handle.join().unwrap_or_default()
+        } else {
+            // Dropping the handle detaches the thread; the read buffer it
+            // still owns is bounded by the cap it was enforcing.
+            StreamRead::detached(stream)
+        }
+    };
+    (take(stdout_thread, "stdout"), take(stderr_thread, "stderr"))
 }
 
 /// Platform process-tree termination (ADR-0108 Decision 5). Windows:
@@ -324,5 +422,55 @@ mod tree {
                 windows_sys::Win32::Foundation::CloseHandle(self.job);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reader that yields "abc" once, then fails: the mid-pipe failure
+    /// class a broken pipe produces.
+    struct FailingReader {
+        emitted: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.emitted {
+                self.emitted = true;
+                buf[..3].copy_from_slice(b"abc");
+                return Ok(3);
+            }
+            Err(std::io::Error::other("broken pipe"))
+        }
+    }
+
+    #[test]
+    fn read_capped_marks_a_mid_stream_read_error_instead_of_eof() {
+        let read = read_capped(Some(FailingReader { emitted: false }), 1024);
+        assert_eq!(
+            read.content, "abc",
+            "what arrived before the failure is kept"
+        );
+        assert!(!read.truncated);
+        assert!(
+            read.error
+                .as_deref()
+                .is_some_and(|e| e.contains("broken pipe")),
+            "the failure is carried, not swallowed: {:?}",
+            read.error
+        );
+        let decorated = decorate("stdout", &read, 1024);
+        assert!(
+            decorated.contains("[stdout read error:"),
+            "the marker names the stream and the failure: {decorated}"
+        );
+    }
+
+    #[test]
+    fn a_clean_eof_stream_decorates_to_itself() {
+        let read = read_capped(Some(std::io::empty()), 1024);
+        assert_eq!(decorate("stdout", &read, 1024), "");
     }
 }

@@ -299,10 +299,46 @@ impl LiveProviderConfig {
     /// The effective CLI tool set (ADR-0106 single axis): the entries whose
     /// config-level `enabled` flag is on. Disabled means dormant -- no
     /// tool-table entry, no spawn. `ask` feeds exactly this slice.
+    ///
+    /// This is also the read-side honest-degrade point for the name
+    /// invariants: the tool table and the dispatch arm both consume this
+    /// slice, and a hand-edited file -- the threat model the secret-name
+    /// scan and the write-path `normalize` dedupe already defend against --
+    /// can carry a reserved or duplicate name past the upsert boundary.
+    /// Such an entry is dropped here (keep-first on duplicates, the
+    /// `McpServerRegistry::normalize` precedent, logged not silent) so the
+    /// provider request never sees a duplicate tool name and no builtin is
+    /// shadowed.
     pub fn enabled_cli_tools(&self) -> Vec<CliToolConfig> {
+        let mut seen = std::collections::HashSet::new();
         self.cli_tools()
             .into_iter()
             .filter(|tool| tool.enabled)
+            .filter(|tool| {
+                if crate::cli_tools::config::is_reserved_name(&tool.name) {
+                    log::warn!(
+                        "cli tool `{}` in the config file uses a reserved \
+                         name; it is excluded from the tool surface (rename \
+                         or remove it)",
+                        tool.name
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .filter(|tool| {
+                if !seen.insert(tool.name.clone()) {
+                    log::warn!(
+                        "duplicate cli tool name `{}` in the config file; \
+                         keeping the first occurrence only",
+                        tool.name
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
             .collect()
     }
 
@@ -735,6 +771,35 @@ mod tests {
             names,
             vec!["officecli"],
             "disabled means dormant (ADR-0106)"
+        );
+    }
+
+    #[test]
+    fn enabled_cli_tools_excludes_reserved_and_duplicate_names_from_a_drifted_file() {
+        // A hand-edited file bypasses upsert's validate(): a reserved name
+        // would shadow a builtin in the dispatch order and duplicate names
+        // would put two tools of one name into the provider request (which
+        // providers reject outright). The read-side filter keeps the
+        // agent-facing slice well-formed regardless of what the file says.
+        let (dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        let mut reserved = cli_tool("pandoc");
+        reserved.name = "explore".to_string();
+        let mut dup = cli_tool("pandoc");
+        dup.executable = "other-bin".to_string();
+        cfg.cli_tools.tools = vec![cli_tool("pandoc"), reserved, dup];
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, serde_json::to_string(&cfg).unwrap()).unwrap();
+        let enabled = live.enabled_cli_tools();
+        let names: Vec<&str> = enabled.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["pandoc"],
+            "the reserved name is dropped and the duplicate keeps the first occurrence"
+        );
+        assert_eq!(
+            enabled[0].executable, "pandoc",
+            "keep-FIRST on duplicates (normalize's precedent)"
         );
     }
 

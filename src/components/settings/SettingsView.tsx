@@ -132,6 +132,7 @@ function SectionContent({
   onCommit,
   onSessionsDirChanged,
   onDefaultRuntimeChanged,
+  onCliToolsChanged,
   onIpcBusy,
   initialEditProfileId,
   profilesControlsRef,
@@ -141,6 +142,7 @@ function SectionContent({
   onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
   onSessionsDirChanged: (cfg: AppConfig) => void;
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
+  onCliToolsChanged: (cfg: AppConfig) => void;
   onIpcBusy: IpcBusyReporter;
   initialEditProfileId?: string;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
@@ -178,7 +180,9 @@ function SectionContent({
     case "mcp":
       return <McpSection appConfig={appConfig} onCommit={onCommit} />;
     case "cli-tools":
-      return <CliSection appConfig={appConfig} onCommit={onCommit} />;
+      return (
+        <CliSection appConfig={appConfig} onCliToolsChanged={onCliToolsChanged} />
+      );
     default: {
       const _exhaustive: never = section;
       throw new Error(`Unknown settings section: ${String(_exhaustive)}`);
@@ -192,6 +196,7 @@ export function SettingsView({
   onReplaceAppConfig,
   onSessionsDirChanged,
   onDefaultRuntimeChanged,
+  onCliToolsChanged,
   onClose,
   section,
   onSectionChange,
@@ -220,6 +225,11 @@ export function SettingsView({
   // this is the state-only sync (no sidebar re-scan -- a machine-level
   // runtime preference does not move session files).
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
+  // Replace local appConfig state WITHOUT an IPC write (issue #671). The
+  // CLI registry's upsert/remove IPCs already persisted under the backend
+  // write lock + returned the updated config; a second full write from a
+  // snapshot that read nothing could clobber concurrent config writes.
+  onCliToolsChanged: (cfg: AppConfig) => void;
   // Called to exit back to the workspace (rail-top back, the gear, or ESC).
   onClose: () => void;
   // The live settings section is controlled by the shell (issue #288): the
@@ -317,6 +327,15 @@ export function SettingsView({
     latestRef.current = cfg;
     onDefaultRuntimeChanged(cfg);
   }, [onDefaultRuntimeChanged]);
+
+  // CLI-registry IPCs (upsert/remove, issue #671) also bypass
+  // commitWithRevert (dedicated RMW commands that already persisted and
+  // returned the updated config). Same latestRef sync for the same I-1 race
+  // reason -- no second disk write.
+  const handleCliToolsChanged = useCallback((cfg: AppConfig) => {
+    latestRef.current = cfg;
+    onCliToolsChanged(cfg);
+  }, [onCliToolsChanged]);
 
   // The Profiles pane's close-contract controls (flush / addDirty / discardAdd /
   // busy / dialogOpen); null when the pane is not mounted.
@@ -477,6 +496,7 @@ export function SettingsView({
             onCommit={commitWithRevert}
             onSessionsDirChanged={handleSessionsDirChanged}
             onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
+            onCliToolsChanged={handleCliToolsChanged}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
             profilesControlsRef={profilesControlsRef}

@@ -121,7 +121,7 @@ export function CliToolForm({
         description={(
           <FormattedMessage
             id="settings.cli.form.description"
-            defaultMessage="A registered tool runs as a direct command line (never a shell): the executable plus fixed arguments, with {param} placeholders filled from the parameter table."
+            defaultMessage="A registered tool runs as a direct command line (never a shell): the executable plus fixed arguments, with '{'param'}' placeholders filled from the parameter table."
           />
         )}
         action={(
@@ -238,7 +238,7 @@ export function CliToolForm({
           <p className="text-muted-foreground mb-2 text-xs">
             <FormattedMessage
               id="settings.cli.form.paramsHint"
-              defaultMessage="A {name} placeholder in the fixed arguments receives the parameter's value. The string[] toggle appends the values at the end of the command line instead (whole-binary wrapper)."
+              defaultMessage="A '{'name'}' placeholder in the fixed arguments receives the parameter's value. The string[] toggle appends the values at the end of the command line instead (whole-binary wrapper)."
             />
           </p>
           {/* Index keys are safe here by construction: every input is fully

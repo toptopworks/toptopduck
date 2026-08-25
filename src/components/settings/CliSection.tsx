@@ -34,18 +34,19 @@ import { CliToolForm } from "./CliToolForm";
 // the add/edit form -- minus the probe / import surfaces (v1 CLI has
 // neither: registration never blocks on the executable resolving, and there
 // is no external config to import). Every write goes through the backend
-// read-modify-write commands, which return the updated FULL app-config
-// (ADR-0109 Decision 9), so the commit is a whole-snapshot replace -- no
-// per-row mirror list to keep in sync.
+// read-modify-write commands, which already persisted and return the
+// updated FULL app-config (ADR-0109 Decision 9) -- so each write syncs
+// shell state ONLY (the setDefaultRuntime state-only-sync precedent), never
+// a second disk write over a snapshot that read nothing.
 
 type DeleteTarget = { name: string };
 
 export function CliSection({
   appConfig,
-  onCommit,
+  onCliToolsChanged,
 }: {
   appConfig: AppConfig;
-  onCommit: (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
+  onCliToolsChanged: (cfg: AppConfig) => void;
 }) {
   const intl = useIntl();
   const [formTarget, setFormTarget] = useState<{
@@ -76,22 +77,24 @@ export function CliSection({
   }
 
   /** The row-level enable toggle (ADR-0106 single axis): one-field upsert
-   *  over the same command the form uses. The returned full config commits
-   *  wholesale -- the registry order is the backend's truth. */
+   *  over the same command the form uses. The returned full config syncs
+   *  shell state wholesale -- the registry order is the backend's truth. */
   async function handleToggleEnabled(tool: CliToolConfig, enabled: boolean) {
     setTogglingName(tool.name);
     setError(null);
     await runCommit(async () => {
       const next = await upsertCliTool({ ...tool, enabled });
-      return onCommit(() => next);
+      onCliToolsChanged(next);
+      return null;
     });
     setTogglingName(null);
   }
 
-  /** Called by the form after the upsert lands. The command already returned
-   *  the updated full config; commit it and return to the list. */
-  async function handleFormSaved(next: AppConfig) {
-    await runCommit(() => onCommit(() => next));
+  /** Called by the form after ITS upsert lands: the command already
+   *  persisted and returned the updated full config -- sync state and
+   *  return to the list (no second write). */
+  function handleFormSaved(next: AppConfig) {
+    onCliToolsChanged(next);
     setFormTarget(null);
   }
 
@@ -101,7 +104,8 @@ export function CliSection({
     setError(null);
     await runCommit(async () => {
       const next = await removeCliTool(deleteTarget.name);
-      return onCommit(() => next);
+      onCliToolsChanged(next);
+      return null;
     });
     setDeleting(false);
     setDeleteTarget(null);
@@ -114,7 +118,7 @@ export function CliSection({
         key={formTarget.tool.name || "new"}
         initialTool={formTarget.tool}
         isEdit={formTarget.isEdit}
-        onSaved={(next) => void handleFormSaved(next)}
+        onSaved={handleFormSaved}
         onCancel={() => setFormTarget(null)}
       />
     );

@@ -181,6 +181,20 @@ impl CliToolConfig {
         if self.executable.trim().is_empty() {
             return Err("executable must not be empty".to_string());
         }
+        // Env values are non-secret by construction (the `McpServerConfig.env`
+        // posture, ADR-0029): refuse here exactly what the read-time
+        // secret-name scan would reject the entire config file for -- a
+        // secret-named key written through registration would degrade every
+        // setting to defaults on the next load.
+        for key in self.env.keys() {
+            if crate::app_config::io::is_secret_name(key) {
+                return Err(format!(
+                    "env key `{key}` looks secret-named; store secrets \
+                     outside the registration (the config file refuses \
+                     secret-named keys)"
+                ));
+            }
+        }
         // Parameter names must be distinct, non-empty identifiers; they are
         // JSON object keys in the tool schema and placeholder keys in the
         // template, so the kebab rule is not required -- only uniqueness and
@@ -249,8 +263,10 @@ impl CliToolConfig {
 /// handle prefix, or a meta-tool name. Checks the live tables (not literal
 /// copies) so a future built-in / meta tool extends the reservation for
 /// free. The builtin-CLI-entry-name class (ADR-0109 Decision 7) joins here
-/// when those entries exist (#675).
-fn is_reserved_name(name: &str) -> bool {
+/// when those entries exist (#675). Also the read-side filter's authority:
+/// `enabled_cli_tools` drops a reserved-named entry a hand-edited file
+/// smuggled past the upsert boundary.
+pub(crate) fn is_reserved_name(name: &str) -> bool {
     name.starts_with("mcp__")
         || crate::tools::definitions::builtin_metadata(name).is_some()
         || name == crate::mcp::meta_tools::META_LIST_SERVERS
@@ -514,6 +530,26 @@ mod tests {
         let mut t = tool("pandoc");
         t.executable = String::new();
         assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn validate_refuses_a_secret_named_env_key() {
+        // The registration-time twin of the config read-time scan: a
+        // secret-named key accepted here would take the whole file down to
+        // defaults on the next load.
+        let mut t = tool("pandoc");
+        t.env
+            .insert("MY_API_KEY".to_string(), "sk-test".to_string());
+        let err = t.validate().unwrap_err();
+        assert!(
+            err.contains("MY_API_KEY"),
+            "the refusal names the key: {err}"
+        );
+        // A benign key passes: the refusal is shape-based, not a blanket ban.
+        let mut t = tool("pandoc");
+        t.env
+            .insert("PANDOC_MODE".to_string(), "strict".to_string());
+        assert!(t.validate().is_ok());
     }
 
     #[test]

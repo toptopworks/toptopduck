@@ -13,6 +13,9 @@
 //   --stderr TEXT    print TEXT to stderr
 //   --flood N        print N bytes of 'x' to stdout
 //   --sleep MS       sleep MS milliseconds before exiting (cancel tests)
+//   --orphan         spawn a grandchild that inherits this process's stdio
+//                    and outlives it (reader-reap tests: the held pipe ends
+//                    produce no EOF when this process exits)
 //   --exit N         exit with code N (default 0)
 
 use std::thread::sleep;
@@ -51,6 +54,17 @@ fn main() {
                 i += 1;
                 let ms: u64 = args[i].parse().unwrap_or(0);
                 sleep(Duration::from_millis(ms));
+            }
+            "--orphan" => {
+                // The resident-child class ADR-0108 anticipates: the
+                // grandchild inherits stdout (the executor's pipe) and
+                // sleeps long past this process's exit, so the pipe's write
+                // end stays open with no parent to close it.
+                let exe = std::env::current_exe().expect("fixture exe");
+                let _ = std::process::Command::new(exe)
+                    .arg("--sleep")
+                    .arg("30000")
+                    .spawn();
             }
             "--exit" if i + 1 < args.len() => {
                 i += 1;

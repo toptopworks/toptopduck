@@ -184,6 +184,33 @@ fn registered_env_overlays_the_inherited_environment() {
 }
 
 #[test]
+fn a_lingering_grandchild_cannot_hang_the_call() {
+    // The fixture spawns a grandchild that inherits stdout and outlives it:
+    // the parent's exit alone produces no EOF, and a plain reader join
+    // would block forever (the cancel path included). The call must still
+    // resolve -- grace, then tree termination forcing EOF -- with the
+    // parent's output intact and no loss marker.
+    let started = std::time::Instant::now();
+    let outcome = run(&tool("fake"), json!({"args": ["--orphan", "parent-done"]}));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the held pipe forces a bounded reap, not a hang"
+    );
+    assert!(!outcome.result.is_error);
+    assert!(
+        outcome.result.content.contains("parent-done"),
+        "the parent's own output survives: {}",
+        outcome.result.content
+    );
+    assert!(
+        !outcome.result.content.contains("read error")
+            && !outcome.result.content.contains("never reached EOF"),
+        "the grandchild died with the tree, so the read completed cleanly: {}",
+        outcome.result.content
+    );
+}
+
+#[test]
 fn round_cancel_kills_the_child_and_surfaces_a_tool_error() {
     let temp = TempDir::new().unwrap();
     let cancel = CancelToken::new();

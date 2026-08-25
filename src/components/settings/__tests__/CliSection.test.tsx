@@ -78,27 +78,24 @@ describe("CliSection", () => {
   });
 
   it("renders the empty state when nothing is registered", () => {
-    const commits: AppConfig[] = [];
+    const onCliToolsChanged = vi.fn();
     renderWithProviders(
       <CliSection
         appConfig={makeAppConfig([])}
-        onCommit={(mutate) => {
-          commits.push(mutate(makeAppConfig([])));
-          return Promise.resolve(null);
-        }}
+        onCliToolsChanged={onCliToolsChanged}
       />,
     );
     expect(
       screen.getByText("No CLI tools registered yet. Click New to register one."),
     ).toBeInTheDocument();
-    expect(commits).toHaveLength(0);
+    expect(onCliToolsChanged).not.toHaveBeenCalled();
   });
 
   it("renders one row per registered tool with its executable", () => {
     renderWithProviders(
       <CliSection
         appConfig={makeAppConfig([makeTool()])}
-        onCommit={() => Promise.resolve(null)}
+        onCliToolsChanged={vi.fn()}
       />,
     );
     expect(screen.getByTestId("cli-tool-row-pandoc")).toBeInTheDocument();
@@ -106,17 +103,14 @@ describe("CliSection", () => {
     expect(screen.getByText(/1 parameters/)).toBeInTheDocument();
   });
 
-  it("commits the returned full config after the enable toggle's upsert", async () => {
+  it("syncs the returned full config after the enable toggle's upsert", async () => {
     const next = makeAppConfig([makeTool({ enabled: false })]);
     vi.mocked(upsertCliTool).mockResolvedValue(next);
-    let committed: AppConfig | null = null;
+    const onCliToolsChanged = vi.fn();
     renderWithProviders(
       <CliSection
         appConfig={makeAppConfig([makeTool()])}
-        onCommit={(mutate) => {
-          committed = mutate(makeAppConfig([]));
-          return Promise.resolve(null);
-        }}
+        onCliToolsChanged={onCliToolsChanged}
       />,
     );
     fireEvent.click(screen.getByRole("switch"));
@@ -125,24 +119,29 @@ describe("CliSection", () => {
         expect.objectContaining({ name: "pandoc", enabled: false }),
       );
     });
-    // The ADR-0109 Decision 9 contract: the command returned the full
-    // config and the commit is a whole-snapshot replace.
-    expect(committed).toBe(next);
+    // The ADR-0109 Decision 9 contract: the command already persisted and
+    // returned the full config -- the sync is a whole-snapshot state
+    // replace (reference equality), with no second disk write.
+    expect(onCliToolsChanged).toHaveBeenCalledWith(next);
+    expect(onCliToolsChanged.mock.calls[0][0]).toBe(next);
   });
 
   it("routes through remove after the delete confirmation", async () => {
     const next = makeAppConfig([]);
     vi.mocked(removeCliTool).mockResolvedValue(next);
+    const onCliToolsChanged = vi.fn();
     renderWithProviders(
       <CliSection
         appConfig={makeAppConfig([makeTool()])}
-        onCommit={() => Promise.resolve(null)}
+        onCliToolsChanged={onCliToolsChanged}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Delete tool pandoc" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() => {
       expect(removeCliTool).toHaveBeenCalledWith("pandoc");
+      // The removal's returned full config syncs state the same way.
+      expect(onCliToolsChanged).toHaveBeenCalledWith(next);
     });
   });
 });
