@@ -13,7 +13,7 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::Value;
 
-use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
+use crate::bounded_line::{BoundedLineReader, LineRead, LINE_MAX_BYTES};
 
 /// Read one newline-delimited JSON-RPC message. Returns `None` at clean EOF
 /// (peer closed); returns `Err` on an invalid line.
@@ -35,28 +35,58 @@ use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 /// visible turn end, not a parked read.) The cap is the same
 /// [`LINE_MAX_BYTES`] the ACP readers enforce: one untrusted-input invariant
 /// across every face.
+///
+/// Line state is call-local (issue #649): a partial line is discarded when a
+/// read error propagates. That is correct for callers whose reads cannot
+/// time out (the MCP client); the gateway serve loop, which retries on read
+/// timeouts, reads through [`FrameReader`] so the partial frame survives the
+/// retry.
 pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
-    loop {
-        match read_line_bounded(reader, LINE_MAX_BYTES)? {
-            LineRead::Eof => return Ok(None),
-            LineRead::Overlong => {
-                log::warn!(
-                    target: "toptopduck::gateway",
-                    "frame line exceeded {LINE_MAX_BYTES} bytes, failing the connection"
-                );
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("frame line exceeded {LINE_MAX_BYTES} bytes"),
-                ));
-            }
-            LineRead::Line(line) => {
-                let trimmed = line.trim_end_matches(['\r', '\n']);
-                if trimmed.is_empty() {
-                    continue;
+    FrameReader::new(reader).read_message()
+}
+
+/// The stateful [`read_message`] (issue #649): the partial frame stays with
+/// the reader, so a caller that retries after a read timeout (`TimedOut` /
+/// `WouldBlock`) resumes the same frame instead of re-framing the tail as a
+/// new line -- a peer pausing mid-frame longer than the read timeout still
+/// completes the frame.
+pub struct FrameReader<R: BufRead> {
+    lines: BoundedLineReader<R>,
+}
+
+impl<R: BufRead> FrameReader<R> {
+    /// Wrap an already-connected reader.
+    pub fn new(reader: R) -> Self {
+        Self {
+            lines: BoundedLineReader::new(reader),
+        }
+    }
+
+    /// Same contract as [`read_message`]; a read timeout propagates as `Err`
+    /// with the partial frame retained -- call again to resume it.
+    pub fn read_message(&mut self) -> io::Result<Option<Value>> {
+        loop {
+            match self.lines.read_line_bounded(LINE_MAX_BYTES)? {
+                LineRead::Eof => return Ok(None),
+                LineRead::Overlong => {
+                    log::warn!(
+                        target: "toptopduck::gateway",
+                        "frame line exceeded {LINE_MAX_BYTES} bytes, failing the connection"
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("frame line exceeded {LINE_MAX_BYTES} bytes"),
+                    ));
                 }
-                return serde_json::from_str(trimmed)
-                    .map(Some)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                LineRead::Line(line) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    return serde_json::from_str(trimmed)
+                        .map(Some)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                }
             }
         }
     }
@@ -152,5 +182,80 @@ mod tests {
             .expect("read the tail line")
             .expect("a message");
         assert_eq!(msg["id"], 9);
+    }
+
+    /// A reader whose playback is split by a read timeout: it yields
+    /// `first`, then one `TimedOut` error, then `second`, then EOF (issue
+    /// #649 fixture).
+    struct SplitByTimeout {
+        first: Vec<u8>,
+        second: Vec<u8>,
+        phase: u8, // 0: first chunk, 1: fail next, 2: second chunk, 3: EOF
+    }
+
+    impl SplitByTimeout {
+        fn new(first: &str, second: &str) -> Self {
+            Self {
+                first: first.into(),
+                second: second.into(),
+                phase: 0,
+            }
+        }
+    }
+
+    impl std::io::Read for SplitByTimeout {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+
+    impl std::io::BufRead for SplitByTimeout {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            match self.phase {
+                0 => Ok(&self.first),
+                1 => {
+                    self.phase = 2;
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "scripted timeout"))
+                }
+                2 => Ok(&self.second),
+                _ => Ok(&[]),
+            }
+        }
+
+        fn consume(&mut self, n: usize) {
+            let (chunk, next) = match self.phase {
+                0 => (&mut self.first, 1),
+                2 => (&mut self.second, 3),
+                _ => return,
+            };
+            let n = n.min(chunk.len());
+            chunk.drain(..n);
+            if chunk.is_empty() {
+                self.phase = next;
+            }
+        }
+    }
+
+    /// Issue #649: a read timeout splitting a frame does not re-frame -- the
+    /// FrameReader keeps the partial line, and the retried `read_message`
+    /// completes the same frame. (The stateless entry starts a fresh line
+    /// and would have parsed the tail as a new -- malformed -- frame.)
+    #[test]
+    fn frame_reader_resumes_frame_across_read_timeout() {
+        let mut r = FrameReader::new(SplitByTimeout::new(
+            "{\"jsonrpc\":\"2.0\",\"id\":",
+            "5,\"method\":\"tools/list\"}\n",
+        ));
+        let err = r.read_message().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let msg = r.read_message().expect("resume").expect("a message");
+        assert_eq!(msg["id"], 5);
+        assert_eq!(msg["method"], "tools/list");
+        // State resets after the completed line: EOF reads as EOF.
+        assert!(r.read_message().expect("eof").is_none());
     }
 }

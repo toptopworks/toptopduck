@@ -135,14 +135,10 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// The accepted stream's read timeout. The serve loop checks cancel after each
 /// read returns, so a blocking read would not notice cancel mid-message; this
 /// bounds the cancel latency in the read loop to the same order as the accept
-/// poll. A `TimedOut` / `WouldBlock` is retried. Since the bounded reader
-/// replaced `read_line` (issue #643) a timeout mid-line is not a resumable
-/// pause: bytes already pulled past the `BufReader` are lost, and the retry
-/// resumes at the stream's current position -- a frame split by a pause longer
-/// than this timeout is re-framed from that point. Both real senders (the
-/// bridge proxy, streaming fixtures) write frames continuously, so the window
-/// is theoretical; the byte cap itself still holds for any single unbroken
-/// read.
+/// poll. A `TimedOut` / `WouldBlock` is retried; the frame reader holds the
+/// partial line across retries (issue #649), so a sender pausing mid-frame
+/// for longer than this still completes the frame -- the pause only delays
+/// the loop-top cancel / engine-done checks, it never re-frames.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Accept one bridge connection, verify its token, and drive the MCP subset
@@ -193,6 +189,11 @@ pub fn serve_connection(
     let mut writer = writer;
 
     verify_bridge(&mut reader, &mut writer, &token)?;
+    // The frame reader owns the stream for the serve loop's lifetime so the
+    // partial frame survives read-timeout retries (issue #649): each retried
+    // read resumes the same line instead of re-framing from the stream's
+    // mid-line position.
+    let mut frames = framing::FrameReader::new(reader);
 
     let mut outcome = GatewayOutcome::default();
     loop {
@@ -209,15 +210,15 @@ pub fn serve_connection(
         if engine_done.load(Ordering::SeqCst) {
             return Ok(outcome);
         }
-        let msg = match framing::read_message(&mut reader) {
+        let msg = match frames.read_message() {
             Ok(Some(m)) => m,
             Ok(None) => {
                 return Ok(outcome);
             } // bridge closed
             // Read timeout (READ_TIMEOUT): retry so the loop-top cancel check
-            // fires. A partial line already pulled past the BufReader is lost
-            // on this path (see READ_TIMEOUT's doc) -- the retried read
-            // resumes at the stream's current position, mid-line.
+            // fires. The partial line stays buffered in the frame reader --
+            // the retried read resumes the same line; no bytes pulled past
+            // the BufReader are lost.
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
@@ -1306,6 +1307,125 @@ mod tests {
 
         let err = serve_connection(handle, ctx, &AtomicBool::new(false))
             .expect_err("an over-long request frame must fail the serve");
+        client.join().expect("client thread panicked");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains(&LINE_MAX_BYTES.to_string()),
+            "the error names the cap: {err}"
+        );
+    }
+
+    /// Issue #649: a sender that pauses mid-frame for longer than
+    /// READ_TIMEOUT still completes the frame. Before the resumable frame
+    /// reader the retried read re-framed from the stream's mid-line
+    /// position, so this exchange failed as a protocol error (the tail
+    /// parsed as a malformed fresh line) instead of serving the request.
+    /// The follow-up frame pins that the line state resets cleanly after a
+    /// resumed line.
+    #[test]
+    fn serve_connection_completes_frame_split_by_read_timeouts() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let token = handle.token.clone();
+
+        let client = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut r = std::io::BufReader::new(s.try_clone().expect("clone"));
+            s.write_all(format!("BRIDGE_AUTH {token}\n").as_bytes())
+                .expect("auth write");
+            let mut line = String::new();
+            r.read_line(&mut line).expect("ok line");
+            assert_eq!(line, "BRIDGE_OK\n");
+            // Regression guard on the response reads: a reverted serve would
+            // leave this client parked -- the timeout turns that into a
+            // diagnostic failure (same rationale as the over-long test).
+            s.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            // Half an initialize frame, a pause longer than READ_TIMEOUT
+            // (100ms) so the serve's read times out mid-line at least twice,
+            // then the frame's tail + terminator.
+            let frame = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
+            let wire = serde_json::to_string(&frame).expect("serialize");
+            let wire = wire.as_bytes();
+            let split = wire.len() / 2;
+            s.write_all(&wire[..split]).expect("send frame head");
+            thread::sleep(Duration::from_millis(300));
+            s.write_all(&wire[split..]).expect("send frame tail");
+            s.write_all(b"\n").expect("send terminator");
+            let init = framing::read_message(&mut r)
+                .expect("read init")
+                .expect("resp");
+            assert_eq!(init["id"], 1);
+            assert_eq!(init["result"]["serverInfo"]["name"], "toptopduck-gateway");
+            // A normal follow-up frame: the line state reset after the
+            // resumed line.
+            framing::write_message(
+                &mut s,
+                &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            )
+            .expect("send list");
+            let list = framing::read_message(&mut r)
+                .expect("read list")
+                .expect("resp");
+            assert_eq!(list["id"], 2);
+            // `s` drops here -> gateway read EOF -> serve_connection returns.
+        });
+
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+        client.join().expect("client thread panicked");
+        assert!(
+            outcome.trace.is_empty(),
+            "init + tools/list do not touch the trace"
+        );
+    }
+
+    /// Issue #649: the over-long cause survives a mid-frame pause. The
+    /// frame's head lands under the cap, the stall trips read timeouts
+    /// mid-line, then the tail pushes the line past [`LINE_MAX_BYTES`] --
+    /// the resumed accumulation must still fail with the cap-named
+    /// `InvalidData`, never accept the tail as a fresh small line.
+    #[test]
+    fn serve_connection_fails_overlong_frame_split_across_timeouts() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let token = handle.token.clone();
+
+        let client = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut r = std::io::BufReader::new(s.try_clone().expect("clone"));
+            s.write_all(format!("BRIDGE_AUTH {token}\n").as_bytes())
+                .expect("auth write");
+            let mut line = String::new();
+            r.read_line(&mut line).expect("ok line");
+            assert_eq!(line, "BRIDGE_OK\n");
+            // Head under the cap, a stall longer than READ_TIMEOUT, then the
+            // tail that pushes the line past the cap (newline-terminated so
+            // the drain settles).
+            let half = LINE_MAX_BYTES / 2;
+            s.write_all(&vec![b'x'; half]).expect("send head half");
+            thread::sleep(Duration::from_millis(300));
+            let mut tail = vec![b'x'; half + 1];
+            tail.push(b'\n');
+            s.write_all(&tail).expect("send over-long tail");
+            // The gateway tears the connection down (same shape as the
+            // unsplit over-long test): EOF or reset, never a response.
+            s.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set tail read timeout");
+            let mut tail_line = String::new();
+            match r.read_line(&mut tail_line) {
+                // Clean EOF: the teardown arrived with zero response bytes.
+                Ok(0) => {}
+                Ok(n) => panic!("connection closed without a response, got {n} bytes"),
+                // A reset teardown surfaces as an error -- still no response.
+                Err(e) if e.kind() != io::ErrorKind::TimedOut => {}
+                Err(e) => panic!("no teardown in 5s -- over-long cause lost to the stall: {e}"),
+            }
+        });
+
+        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+            .expect_err("an over-long frame split by a stall must still fail the serve");
         client.join().expect("client thread panicked");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(
