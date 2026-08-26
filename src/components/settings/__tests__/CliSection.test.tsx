@@ -5,7 +5,12 @@ import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 
 import { CliSection } from "../CliSection";
-import { removeCliTool, rescanBuiltinCliTools, upsertCliTool } from "../../../api";
+import {
+  removeCliTool,
+  rescanBuiltinCliTools,
+  restoreBuiltinCliTool,
+  upsertCliTool,
+} from "../../../api";
 import { blankCliTool } from "../../../types/cli-tool";
 import type { BuiltinScanEntry } from "../../../types/cli-tool";
 import type { AppConfig } from "../../../types/app-config";
@@ -15,6 +20,7 @@ import type { AppConfig } from "../../../types/app-config";
 vi.mock("../../../api", () => ({
   upsertCliTool: vi.fn(),
   removeCliTool: vi.fn(),
+  restoreBuiltinCliTool: vi.fn(),
   rescanBuiltinCliTools: vi.fn(),
 }));
 
@@ -301,5 +307,136 @@ describe("CliSection builtin panel (issue #675)", () => {
     const disabledRow = screen.getByTestId("cli-tool-row-my-tool");
     expect(disabledRow).toHaveTextContent("Disabled");
     expect(disabledRow).not.toHaveTextContent("Built-in");
+  });
+});
+
+describe("CliSection baseline lifecycle (issue #676)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
+      config: makeAppConfig([]),
+      scan: [],
+    });
+  });
+
+  it("gates the row actions by source and baseline", () => {
+    // A builtin row has no delete entry point (undeletable -- disabling is
+    // the single shutdown axis) and no restore while it still follows the
+    // baseline; a user row keeps the delete.
+    const builtin = makeTool({
+      name: "pandoc",
+      source: "builtin",
+      baseline: "following",
+    });
+    const user = makeTool({ name: "my-pandoc" });
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([builtin, user])}
+        onCliToolsChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Delete tool pandoc" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Restore built-in definition for tool pandoc",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Delete tool my-pandoc" }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes through restore after the confirmation on an edited builtin row", async () => {
+    const edited = makeTool({
+      name: "pandoc",
+      source: "builtin",
+      baseline: "edited",
+    });
+    const next = makeAppConfig([
+      makeTool({ name: "pandoc", source: "builtin", baseline: "following" }),
+    ]);
+    // A deferred restore: the busy state is pinned while the IPC is in
+    // flight (not just after it resolves).
+    let resolveRestore: (value: AppConfig) => void = () => {};
+    vi.mocked(restoreBuiltinCliTool).mockImplementation(
+      () =>
+        new Promise<AppConfig>((resolve) => {
+          resolveRestore = resolve;
+        }),
+    );
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([edited])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    // An EDITED builtin row is still undeletable: the restore is its only
+    // row action (the gating matrix's fourth cell).
+    expect(
+      screen.queryByRole("button", { name: "Delete tool pandoc" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Restore built-in definition for tool pandoc",
+      }),
+    );
+    // The confirmation gate (the overwrite is irreversible): the restore
+    // button exists only because the dialog opened.
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    // In flight: Radix auto-close is prevented, the busy label renders,
+    // and both dialog buttons stay disabled until the IPC settles.
+    expect(screen.getByText("Restoring…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    resolveRestore(next);
+    await waitFor(() => {
+      expect(restoreBuiltinCliTool).toHaveBeenCalledWith("pandoc");
+      // The ADR-0109 Decision 9 contract: the command already persisted and
+      // returned the full config -- the sync is a whole-snapshot replace.
+      expect(onCliToolsChanged).toHaveBeenCalledWith(next);
+    });
+    // Settled: the confirmation dialog closes.
+    expect(
+      screen.queryByText("Restore built-in definition for pandoc?"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a rejected restore and keeps the edited row", async () => {
+    // The confirm lane's error half: the IPC rejection renders through the
+    // pane error lane (runCommit's catch), the dialog closes, and the row
+    // keeps its edited state -- no partial sync.
+    const edited = makeTool({
+      name: "pandoc",
+      source: "builtin",
+      baseline: "edited",
+    });
+    vi.mocked(restoreBuiltinCliTool).mockRejectedValue(new Error("ipc down"));
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([edited])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Restore built-in definition for tool pandoc",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(await screen.findByText("ipc down")).toBeInTheDocument();
+    // No partial sync: the only onCliToolsChanged call is the mount
+    // rescan's sync (the empty registry), never a snapshot after a restore
+    // that did not land -- and the row still offers the restore (the
+    // edited body is intact for a retry).
+    expect(restoreBuiltinCliTool).toHaveBeenCalledTimes(1);
+    expect(onCliToolsChanged).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", {
+        name: "Restore built-in definition for tool pandoc",
+      }),
+    ).toBeInTheDocument();
   });
 });

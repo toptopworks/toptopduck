@@ -476,8 +476,8 @@ export function fmtError(e: unknown, intl: IntlShape): string {
 // `data` -- SessionError::Engine, ResumeError::Engine / SourceMissing / Replay
 // / AlreadyOpen, the nested DuckLoadError io/parse/migration detail, or a
 // SaveError's io/serde/rename detail / AlreadyOpen path, or a StoreCommandError's
-// io/keychain/config-write detail -- and null for every variant whose message
-// is already self-contained (so the fold is omitted).
+// io/keychain/config-write/invalid-cli-tool detail -- and null for every
+// variant whose message is already self-contained (so the fold is omitted).
 // fmtError keeps this detail OUT of the primary message; ADR-0029 holds -- the
 // Rust side is audited to keep secrets out of these payloads (the resume /
 // save paths are keychain-free) -- so the raw detail is safe to surface.
@@ -494,16 +494,19 @@ export function errorDetail(e: unknown): string | null {
     return e.data;
   }
   if (isStoreCommandError(e)) {
-    // The three failure variants carry the English technical detail for the
-    // fold; OpenConflict / BlankName / NoActiveProfile are self-contained (the
-    // message already names the refusal). DestinationExists carries the path
-    // and UnknownAdapter the offending adapter id for the fold.
+    // The failure variants carry the English technical detail for the fold;
+    // OpenConflict / BlankName / NoActiveProfile are self-contained (the
+    // message already names the refusal). DestinationExists carries the path,
+    // UnknownAdapter the offending adapter id, and InvalidCliTool the backend
+    // refusal detail -- the tool name and its remedy ("disable it instead of
+    // deleting"), which the generic message cannot carry.
     if (
       e.kind === "DestinationExists" ||
       e.kind === "IoFailure" ||
       e.kind === "KeychainFailure" ||
       e.kind === "ConfigWriteFailure" ||
-      e.kind === "UnknownAdapter"
+      e.kind === "UnknownAdapter" ||
+      e.kind === "InvalidCliTool"
     ) {
       return e.data;
     }

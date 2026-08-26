@@ -463,10 +463,19 @@ export async function upsertCliTool(tool: CliToolConfig): Promise<AppConfig> {
   return invoke<AppConfig>("upsert_cli_tool", { tool });
 }
 
-// Remove one CLI tool registration by name (idempotent). Returns the updated
+// Remove one CLI tool registration by name (idempotent; a builtin entry is
+// refused -- disabling is the single shutdown axis). Returns the updated
 // full app-config.
 export async function removeCliTool(name: string): Promise<AppConfig> {
   return invoke<AppConfig>("remove_cli_tool", { name });
+}
+
+// Restore one builtin CLI registration to the shipped definition (issue
+// #676, ADR-0109 Decision 2): the tracked fields return to the baseline and
+// the entry follows it again; the executable and enable state stay. Returns
+// the updated full app-config.
+export async function restoreBuiltinCliTool(name: string): Promise<AppConfig> {
+  return invoke<AppConfig>("restore_builtin_cli_tool", { name });
 }
 
 // The manual rescan (issue #675): detect the shipped builtin definitions'

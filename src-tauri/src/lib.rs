@@ -408,6 +408,7 @@ pub fn run() {
             commands::upsert_mcp_server,
             commands::upsert_cli_tool,
             commands::remove_cli_tool,
+            commands::restore_builtin_cli_tool,
             commands::rescan_builtin_cli_tools,
             commands::set_mcp_server_secret,
             commands::clear_mcp_server_secret,
