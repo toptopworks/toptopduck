@@ -17,7 +17,7 @@ use std::sync::Arc;
 use yoagent::types::{AgentEvent, AgentMessage, Content, Message};
 
 use crate::model::{ThinkingTrace, TurnPhase};
-use crate::session::agent_loop::{LoopRound, TraceEntry};
+use crate::session::agent_loop::{push_call, LoopRound};
 
 use super::adapter::{emit_phase, PhaseSink, SharedTurnState};
 
@@ -31,9 +31,13 @@ pub(crate) struct EventFold {
     /// (steer-only detections land as annotation rounds instead).
     pub(crate) loop_abort: Option<String>,
     /// Count of streamed assistant replies -- the upstream `round_trips`
-    /// analogue (one per `generate_tool_turn` in the built-in loop). A turn
-    /// that dies before the stream starts (no `MessageStart`) is not
-    /// counted -- documented divergence, `round_trips` is a loop diagnostic.
+    /// analogue (one per `generate_tool_turn` in the built-in loop), with
+    /// one documented divergence: an upstream retry after a mid-stream
+    /// failure starts a fresh stream and emits another `MessageStart`, so a
+    /// turn that retried N times counts N round-trips where the built-in
+    /// loop counts one -- `round_trips` is a loop diagnostic, not a
+    /// wire-equivalence claim. A turn that dies before the stream starts
+    /// (no `MessageStart`) is not counted.
     pub(crate) round_trips: u32,
     /// The run's full produced message list (from `AgentEnd`): the raw
     /// material the runner's termination derivation reads.
@@ -204,14 +208,4 @@ fn text_of(content: &[Content]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("");
     (!text.is_empty()).then_some(text)
-}
-
-/// Append one call entry to the open round -- the fold-side twin of the
-/// built-in loop's `push_call`, including its structural fallback (a call
-/// with no open round folds into a fresh flat round so no entry is dropped).
-fn push_call(rounds: &mut Vec<LoopRound>, entry: TraceEntry) {
-    match rounds.last_mut() {
-        Some(round) => round.calls.push(entry),
-        None => rounds.push(LoopRound::flat(vec![entry])),
-    }
 }

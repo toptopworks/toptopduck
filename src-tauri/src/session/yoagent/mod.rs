@@ -38,7 +38,6 @@ mod model_config;
 #[cfg(test)]
 mod tests;
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -58,14 +57,27 @@ use crate::mcp::aggregator::McpAggregator;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::{ThinkingBlock, ToolTurnMessage, ToolTurnRequest};
 use crate::session::agent_loop::{
-    dispatch_gated_call, panic_to_transient, rollback_ghost_result, GateCtx, LoopOutcome,
-    Termination, DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK,
+    dispatch_gated_call, panic_to_transient, retain_landed_rounds, spawn_wall_clock_watchdog,
+    DispatchAbort, GateCtx, LoopOutcome, Termination, DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 
 use adapter::{DispatchOutcome, DispatchRequest, GatewayToolAdapter, PhaseSink, SharedTurnState};
 use fold::EventFold;
 use model_config::{thinking_level_for, ResolvedYoagentModel};
+
+/// Upstream limit/error wording the terminal classification matches against.
+/// These are NOT exported constants on the yoagent side -- the limits render
+/// through `check_limits`' stop-marker text (context.rs) and the auth fault
+/// through `ProviderError::Auth`'s Display template (provider/traits.rs) --
+/// so each prefix is pinned here with its source, and the offline tests pin
+/// the mapping itself (a wording drift under the `"0.18"` minor gate turns
+/// the pinned classification red instead of silently degrading every auth
+/// failure into a retryable `Transient`). A mismatch degrades to the honest
+/// `Transient` fallbacks in `derive_reply_termination`.
+const MAX_TURNS_PREFIX: &str = "Max turns"; // check_limits, yoagent context.rs
+const MAX_DURATION_PREFIX: &str = "Max duration"; // check_limits, yoagent context.rs
+const AUTH_ERROR_PREFIX: &str = "Auth error"; // ProviderError::Auth Display
 
 /// The per-turn yoagent runner -- the layer's mirror of
 /// [`crate::session::agent_loop::AgentLoop`]. Built per turn (cheap): the
@@ -149,30 +161,17 @@ impl YoagentLoop {
                     }
                 });
             }
-            // Wall-clock watchdog (ADR-0081), verbatim the AgentLoop shape:
-            // a DETACHED thread (the same choice `AgentLoop::run` makes --
-            // sleeping out the full timeout inside the scope would hold the
-            // join; the alive flag invalidates a late fire) that fires the
-            // app token on expiry. The watcher above maps it up, and the
-            // termination derivation below lands the turn as Cancelled (the
-            // ADR-0021 timeout -> cancel mapping).
+            // Wall-clock watchdog (ADR-0081): the shared shape (the built-in
+            // loop's own helper). The watcher above maps the fired token up,
+            // and the termination derivation below lands the turn as
+            // Cancelled (the ADR-0021 timeout -> cancel mapping).
             if let Some(timeout) = self.wall_clock {
-                let alive = guard.watchdog_alive();
-                let token = Arc::clone(&cancel);
-                thread::spawn(move || {
-                    thread::sleep(timeout);
-                    // Parity with the built-in watchdog's guard (the issue
-                    // #321 posture): a panicking request() must not silently
-                    // eat the detached thread -- log it.
-                    if alive.load(Ordering::SeqCst)
-                        && catch_unwind(AssertUnwindSafe(|| token.request())).is_err()
-                    {
-                        log::error!(
-                            target: "toptopduck::yoagent",
-                            "wall-clock watchdog panicked firing cancel; timeout path may be impaired"
-                        );
-                    }
-                });
+                spawn_wall_clock_watchdog(
+                    guard.watchdog_alive(),
+                    Arc::clone(&cancel),
+                    timeout,
+                    "toptopduck::yoagent",
+                );
             }
             // The driver: one scoped thread owning a dedicated single-thread
             // runtime. The dispatch server below outlives it -- its request
@@ -226,28 +225,53 @@ impl YoagentLoop {
             // deadlock the join below.
             drop(req_tx);
             // The dispatch server: THIS thread, so the session's non-Sync
-            // collaborators never cross threads. Issue #321 guard verbatim
-            // the built-in loop's: a dispatch panic rolls back any ghost
-            // `result_N` and fails the turn honestly.
+            // collaborators never cross threads. The issue #321 guard lives
+            // inside the shared `dispatch_gated_call` core (snapshot + ghost
+            // rollback + honest Transient), so a dispatch panic surfaces here
+            // as a pre-derived `DispatchAbort::Panic`.
             let gate = GateCtx {
                 approval,
                 sink,
                 cancel: &cancel,
             };
             for DispatchRequest { call, resp } in req_rx {
-                let prev_next = deps.working_set.next_result_number();
+                // Mid-batch stop check -- the per-call cancel check the
+                // built-in loop's batch loop makes (`run`'s
+                // `if cancel.is_requested() { break }`), mirrored here:
+                // upstream's executor checks neither cancel nor steering
+                // BETWEEN the calls of one batch, so once the turn is over
+                // (a user cancel, a gate cancel, or a dispatch panic) the
+                // remaining queued calls must be answered, not run. The
+                // GateCancelled answer routes the adapter onto its cancel
+                // path (fires the upstream token, feeds an error result
+                // back) so the executor stops at the next loop-top without
+                // anything dispatching for real -- the built-in loop's
+                // break-on-cancel semantics.
+                let turn_over = cancel.is_requested()
+                    || state.gate_cancelled.load(Ordering::SeqCst)
+                    || state
+                        .aborted
+                        .lock()
+                        .expect("aborted lock poisoned")
+                        .is_some();
+                if turn_over {
+                    let _ = resp.send(DispatchOutcome::GateCancelled);
+                    continue;
+                }
                 let phases = Arc::clone(&phases);
-                let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                    let mut forward = |phase: TurnPhase| adapter::emit_phase(&phases, phase);
-                    dispatch_gated_call(&call, deps, materializer, mcp, cli, &gate, &mut forward)
-                })) {
-                    Err(payload) => {
-                        rollback_ghost_result(deps, prev_next);
-                        let site = format!("tool dispatch `{}`", call.name);
-                        DispatchOutcome::Aborted(panic_to_transient(&site, &*payload))
-                    }
-                    Ok(Err(_gate_cancelled)) => DispatchOutcome::GateCancelled,
-                    Ok(Ok((result, entry, promotion))) => DispatchOutcome::Done {
+                let mut forward = |phase: TurnPhase| adapter::emit_phase(&phases, phase);
+                let outcome = match dispatch_gated_call(
+                    &call,
+                    deps,
+                    materializer,
+                    mcp,
+                    cli,
+                    &gate,
+                    &mut forward,
+                ) {
+                    Err(DispatchAbort::Gate) => DispatchOutcome::GateCancelled,
+                    Err(DispatchAbort::Panic(termination)) => DispatchOutcome::Aborted(termination),
+                    Ok((result, entry, promotion)) => DispatchOutcome::Done {
                         result,
                         entry,
                         promotion,
@@ -406,9 +430,7 @@ fn finish(
     state: &Arc<SharedTurnState>,
     termination: Termination,
 ) -> LoopOutcome {
-    fold.rounds.retain(|round| {
-        round.thinking.is_some() || round.text.is_some() || !round.calls.is_empty()
-    });
+    retain_landed_rounds(&mut fold.rounds);
     LoopOutcome {
         termination,
         promotions: std::mem::take(
@@ -440,12 +462,12 @@ fn derive_reply_termination(fold: &EventFold, step_cap: u32) -> Termination {
         .rev()
         .find_map(stop_marker_reason)
     {
-        if reason.starts_with("Max turns") {
+        if reason.starts_with(MAX_TURNS_PREFIX) {
             // The cap, not the turns taken: the wiring seam renders "did
             // not converge in N steps" off the configured cap.
             return Termination::StepCap(step_cap);
         }
-        if reason.starts_with("Max duration") {
+        if reason.starts_with(MAX_DURATION_PREFIX) {
             return Termination::Cancelled;
         }
         return Termination::Transient(format!("execution limit: {reason}"));
@@ -477,7 +499,7 @@ fn derive_reply_termination(fold: &EventFold, step_cap: u32) -> Termination {
         let detail = error_message
             .clone()
             .unwrap_or_else(|| "provider stream failed without a diagnostic".to_string());
-        return if detail.starts_with("Auth error") {
+        return if detail.starts_with(AUTH_ERROR_PREFIX) {
             Termination::NotWired
         } else {
             Termination::Transient(detail)

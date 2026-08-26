@@ -19,13 +19,17 @@ use yoagent::types::{Content, Message, StopReason, Usage};
 
 use crate::approval::{ApprovalResponse, ApprovalSink, ApprovalState};
 use crate::cancel::CancelToken;
+use crate::guardrail::ExecError;
+use crate::ingest::schema::quote_ident;
 use crate::mcp::aggregator::McpAggregator;
 use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
 use crate::model::{DatasetDescriptor, TurnPhase};
-use crate::provider::tool_calling::{ToolDefinition, ToolTurnMessage, ToolTurnRequest, ToolUse};
+use crate::provider::tool_calling::{
+    ThinkingBlock, ToolDefinition, ToolResult, ToolTurnMessage, ToolTurnRequest, ToolUse,
+};
 use crate::session::agent_loop::{LoopOutcome, Termination};
 use crate::session::engine::AdminEngine;
-use crate::session::materializer::RealMaterializer;
+use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
 use crate::session::yoagent::model_config::{resolve_yoagent_model, ResolvedYoagentModel};
 use crate::session::yoagent::YoagentLoop;
 use crate::tools::builtin_table;
@@ -38,16 +42,28 @@ use tempfile::TempDir;
 
 /// A scripted offline provider (issue #668 AC: no network, no key). Pops one
 /// full assistant message per stream call -- the multi-turn trajectory the
-/// run exercises. Optional hooks drive the cancel and wall-clock paths:
-/// `fire_cancel_on` fires the app token mid-stream (the user-cancel path),
-/// and `stream_delay` parks each turn long enough for the watchdog to fire.
-/// Every received `StreamConfig`'s message list is captured, so the
-/// full-window feed is pinnable.
+/// run exercises. Optional hooks drive the cancel, wall-clock, and terminal
+/// fault paths: `fire_cancel_on` fires the app token mid-stream (the
+/// user-cancel path), `stream_delay` parks each turn long enough for the
+/// watchdog to fire, and `fail_with` raises a provider-level error on the
+/// given turn (auth / api, the terminal fault classification). Every
+/// received `StreamConfig`'s message list is captured, so the full-window
+/// feed is pinnable.
 struct ScriptedProvider {
     script: Mutex<VecDeque<Message>>,
     fire_cancel_on: Option<(usize, Arc<CancelToken>)>,
+    fail_with: Option<(usize, FailKind)>,
     stream_delay: Option<Duration>,
     seen_windows: Mutex<Vec<Vec<Message>>>,
+}
+
+/// Which provider-level fault to raise (built into a `ProviderError` at fire
+/// time -- the upstream type is not `Clone`, so the slot carries only the
+/// payload).
+#[derive(Clone)]
+enum FailKind {
+    Auth(String),
+    Api(String),
 }
 
 impl ScriptedProvider {
@@ -55,6 +71,7 @@ impl ScriptedProvider {
         Self {
             script: Mutex::new(script.into()),
             fire_cancel_on: None,
+            fail_with: None,
             stream_delay: None,
             seen_windows: Mutex::new(Vec::new()),
         }
@@ -62,6 +79,11 @@ impl ScriptedProvider {
 
     fn with_cancel_on(mut self, turn: usize, token: Arc<CancelToken>) -> Self {
         self.fire_cancel_on = Some((turn, token));
+        self
+    }
+
+    fn with_failure_on(mut self, turn: usize, kind: FailKind) -> Self {
+        self.fail_with = Some((turn, kind));
         self
     }
 
@@ -100,6 +122,14 @@ impl StreamProvider for ScriptedProvider {
             }
         }
         let turn_index = self.seen_windows.lock().expect("lock").len();
+        if let Some((fire_at, kind)) = &self.fail_with {
+            if *fire_at == turn_index {
+                return Err(match kind {
+                    FailKind::Auth(detail) => ProviderError::Auth(detail.clone()),
+                    FailKind::Api(detail) => ProviderError::Api(detail.clone()),
+                });
+            }
+        }
         if let Some((fire_at, token)) = &self.fire_cancel_on {
             if *fire_at == turn_index {
                 token.request();
@@ -294,6 +324,31 @@ impl Harness {
         cancel: Arc<CancelToken>,
         cli: &[crate::cli_tools::config::CliToolConfig],
     ) -> LoopOutcome {
+        self.run_with_parts(
+            request,
+            loop_,
+            approval,
+            sink,
+            cancel,
+            cli,
+            &mut RealMaterializer,
+        )
+    }
+
+    /// The full run with an injectable materializer: the dispatch-panic pin
+    /// drives the #321 fixture (register-then-panic) through the shared
+    /// core's sunk guard.
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_parts(
+        &mut self,
+        request: &ToolTurnRequest,
+        loop_: YoagentLoop,
+        approval: &ApprovalState,
+        sink: &dyn ApprovalSink,
+        cancel: Arc<CancelToken>,
+        cli: &[crate::cli_tools::config::CliToolConfig],
+        materializer: &mut dyn Materializer,
+    ) -> LoopOutcome {
         let mut deps = inert_deps_with_temp(
             &self.engine,
             &mut self.ws,
@@ -301,13 +356,12 @@ impl Harness {
             self.temp.path(),
             &mut self.refs,
         );
-        let mut materializer = RealMaterializer;
         let mut mcp = McpAggregator::empty();
         let phases = Arc::clone(&self.phases);
         loop_.run(
             request,
             &mut deps,
-            &mut materializer,
+            materializer,
             &mut mcp,
             cli,
             approval,
@@ -315,6 +369,46 @@ impl Harness {
             cancel,
             move |phase| phases.lock().unwrap().push(phase),
         )
+    }
+}
+
+/// The #321 dispatch-panic fixture, mirroring the built-in loop's own:
+/// registers the result then panics in the return window, so the ghost
+/// rollback has a physical table to DROP.
+struct GhostThenPanicMaterializer;
+impl Materializer for GhostThenPanicMaterializer {
+    fn try_materialize(
+        &self,
+        _sql: &str,
+        _cancel: &CancelToken,
+        result_name: String,
+        deps: &mut TurnDeps,
+    ) -> Result<DatasetDescriptor, ExecError> {
+        // Create the physical table first (mirrors RealMaterializer's
+        // install_result step) so the ghost rollback exercises the DROP
+        // TABLE success path.
+        let create_sql = format!(
+            "CREATE TABLE {} AS SELECT 1 AS x",
+            quote_ident(&result_name)
+        );
+        deps.engine
+            .conn()
+            .execute_batch(&create_sql)
+            .expect("fixture CREATE TABLE");
+        let descriptor = DatasetDescriptor {
+            reference_name: result_name.clone(),
+            display_name: result_name,
+            source_path: String::new(),
+            columns: Vec::new(),
+            row_count: 0,
+            sample: Vec::new(),
+            fingerprint: String::new(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: DatasetPrivacy::default(),
+            stale: None,
+        };
+        deps.working_set.register_result(descriptor);
+        panic!("simulated post-register panic in tool dispatch")
     }
 }
 
@@ -387,6 +481,55 @@ fn multi_step_success_groups_rounds_and_promotes() {
     assert_eq!(outcome.round_trips, 3);
 }
 
+/// Multi-call batch (ADR-0103 round grouping + ADR-0022 monotonic
+/// `result_N`, the equivalence this layer exists to uphold): one assistant
+/// reply carrying TWO calls folds into ONE round with both entries in
+/// dispatch order, and the promotions land in dispatch order with the
+/// materializer's monotonic names.
+#[test]
+fn multi_call_batch_groups_into_one_round_in_dispatch_order() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        thinking_and_batch(
+            "",
+            Some("two at once."),
+            vec![
+                call("tu_1", "materialize", json!({"sql": "SELECT 1 AS a"})),
+                call("tu_2", "materialize", json!({"sql": "SELECT 2 AS b"})),
+            ],
+        ),
+        text_reply("both materialized."),
+    ]));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request("two calls"),
+        offline_loop(Arc::clone(&provider)),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("both materialized.".into())
+    );
+    assert_eq!(outcome.trace.len(), 1, "one round per batch, not per call");
+    let round = &outcome.trace[0];
+    assert_eq!(round.calls.len(), 2);
+    assert_eq!(round.calls[0].tool_use_id, "tu_1");
+    assert_eq!(round.calls[1].tool_use_id, "tu_2");
+    assert!(round.calls.iter().all(|c| c.success));
+    assert_eq!(
+        outcome.promotions.len(),
+        2,
+        "both promotions land, in dispatch order"
+    );
+    assert_eq!(outcome.promotions[0].dataset.reference_name, "result_2");
+    assert_eq!(outcome.promotions[1].dataset.reference_name, "result_3");
+    assert_eq!(outcome.round_trips, 2);
+}
+
 /// Self-correction (ADR-0077): a tool-level error routes back to the model
 /// -- the failed entry records success: false with the bounded error
 /// excerpt, the turn does NOT fail, and the corrected call succeeds.
@@ -400,7 +543,16 @@ fn tool_error_routes_back_for_self_correction() {
             None,
             vec![call("tu_1", "describe", json!({"reference_name": "ghost"}))],
         ),
-        text_reply("no such dataset, answered from what I have."),
+        thinking_and_batch(
+            "",
+            None,
+            vec![call(
+                "tu_2",
+                "describe",
+                json!({"reference_name": "result_1"}),
+            )],
+        ),
+        text_reply("no such dataset first; the registered one described."),
     ]));
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
@@ -412,14 +564,21 @@ fn tool_error_routes_back_for_self_correction() {
         Arc::new(CancelToken::new()),
     );
     assert!(matches!(outcome.termination, Termination::Text(_)));
-    assert_eq!(outcome.trace.len(), 1);
-    let entry = &outcome.trace[0].calls[0];
-    assert_eq!(entry.name, "describe");
-    assert!(!entry.success, "unknown dataset is a tool error");
+    assert_eq!(outcome.trace.len(), 2, "error round + corrected round");
+    let failed = &outcome.trace[0].calls[0];
+    assert_eq!(failed.name, "describe");
+    assert!(!failed.success, "unknown dataset is a tool error");
     assert!(
-        entry.result_excerpt.contains("ghost"),
+        failed.result_excerpt.contains("ghost"),
         "error excerpt names the dataset: {}",
-        entry.result_excerpt
+        failed.result_excerpt
+    );
+    let corrected = &outcome.trace[1].calls[0];
+    assert_eq!(corrected.tool_use_id, "tu_2");
+    assert!(
+        corrected.success,
+        "the corrected call succeeds: {}",
+        corrected.result_excerpt
     );
 }
 
@@ -527,6 +686,108 @@ fn user_cancel_wins_over_the_reply() {
     assert_eq!(outcome.termination, Termination::Cancelled);
 }
 
+/// Mid-batch cancel stops the batch (the per-call check pin): the token
+/// fires during the batch's own stream, upstream's executor checks neither
+/// cancel nor steering BETWEEN one batch's calls, so the dispatch server's
+/// loop-top guard is what keeps the queued calls from dispatching for real
+/// -- the built-in loop's break-on-cancel semantics, mirrored. A regression
+/// that drops the guard runs both explores (trace entries + `result_N`
+/// churn the built-in loop would never produce) and fails this pin.
+#[test]
+fn mid_batch_cancel_stops_dispatching_the_rest() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let cancel = Arc::new(CancelToken::new());
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            thinking_and_batch(
+                "",
+                None,
+                vec![
+                    call("tu_1", "explore", json!({"sql": "SELECT 1"})),
+                    call("tu_2", "explore", json!({"sql": "SELECT 2"})),
+                ],
+            ),
+            text_reply("never reached"),
+        ])
+        .with_cancel_on(1, Arc::clone(&cancel)),
+    );
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request("cancel mid batch"),
+        offline_loop(Arc::clone(&provider)).with_caps(24, None),
+        &approval,
+        &sink,
+        cancel,
+    );
+    assert_eq!(outcome.termination, Termination::Cancelled);
+    assert!(
+        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        "nothing in the batch dispatches after the cancel: {:?}",
+        outcome.trace
+    );
+    assert!(outcome.promotions.is_empty());
+}
+
+/// Terminal auth fault (ADR-0044): the upstream `Auth error` prefix maps to
+/// `NotWired` -- the configure-key signal, not a retryable failure. Pinned
+/// offline so a prefix typo or an upstream Display rewording under the 0.18
+/// minor gate turns this red instead of silently degrading every auth
+/// failure into a `Transient`.
+#[test]
+fn auth_error_lands_not_wired() {
+    let mut h = Harness::new();
+    let provider = Arc::new(
+        ScriptedProvider::new(Vec::new())
+            .with_failure_on(1, FailKind::Auth("invalid api key".into())),
+    );
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request("auth check"),
+        offline_loop(Arc::clone(&provider)),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::NotWired,
+        "auth faults are wiring failures, not retryable"
+    );
+}
+
+/// Terminal non-auth fault: everything the upstream surfaces after its
+/// backoff exhausted (api / overflow / other) is an honest `Transient`
+/// carrying the upstream diagnostic verbatim.
+#[test]
+fn api_error_lands_transient() {
+    let mut h = Harness::new();
+    let provider = Arc::new(
+        ScriptedProvider::new(Vec::new()).with_failure_on(1, FailKind::Api("500 upstream".into())),
+    );
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request("api check"),
+        offline_loop(Arc::clone(&provider)),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+    );
+    let Termination::Transient(detail) = outcome.termination else {
+        panic!(
+            "api fault is an honest transient, got {:?}",
+            outcome.termination
+        );
+    };
+    assert!(
+        detail.contains("API error") && detail.contains("500 upstream"),
+        "the upstream diagnostic rides verbatim: {detail}"
+    );
+}
+
 /// Gate denial (ADR-0078/0080): a registered CLI tool the approver denies
 /// records success: false with the denial excerpt, never dispatches (no
 /// child process spawns), and the denial routes back to the model for
@@ -600,6 +861,84 @@ fn gate_denial_records_failure_and_routes_back() {
     assert_eq!(entry.name, "pandoc");
     assert!(!entry.success);
     assert_eq!(entry.result_excerpt, "denied by approval gateway");
+    // The live rail mirrors the built-in loop's denial shape: the row
+    // COMPLETES in place (the resolved deny) and never STARTS -- a
+    // regression that hoists `started` above the gate would double the
+    // suspended card with a running row.
+    let phases = h.phases.lock().unwrap().clone();
+    assert!(
+        !phases.iter().any(|p| matches!(
+            p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "pandoc"
+        )),
+        "a denied call never starts"
+    );
+    assert!(
+        phases.iter().any(
+            |p| matches!(p, TurnPhase::ToolCallCompleted(v) if v.name == "pandoc" && !v.success)
+        ),
+        "the denial completes the row in place"
+    );
+}
+
+/// Dispatch panic (issue #321, guard sunk into the shared core): a panic
+/// mid-materialize lands an honest `Transient` naming the dispatch site and
+/// carrying the panic message, rolls the ghost `result_N` back (the
+/// working_set <-> history invariant, ADR-0084), and -- the batch stop --
+/// the queued second call never dispatches.
+#[test]
+fn dispatch_panic_aborts_the_batch_and_rolls_back_ghost_result() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        thinking_and_batch(
+            "",
+            None,
+            vec![
+                call("tu_1", "materialize", json!({"sql": "SELECT 1 AS x"})),
+                call("tu_2", "explore", json!({"sql": "SELECT 1"})),
+            ],
+        ),
+        text_reply("unreachable"),
+    ]));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run_with_parts(
+        &h.request("panic mid batch"),
+        offline_loop(Arc::clone(&provider)).with_caps(24, None),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+        &[],
+        &mut GhostThenPanicMaterializer,
+    );
+    match &outcome.termination {
+        Termination::Transient(detail) => {
+            assert!(
+                detail.contains("tool dispatch"),
+                "detail names the panic step: {detail}"
+            );
+            assert!(
+                detail.contains("simulated post-register panic"),
+                "detail carries the panic message: {detail}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
+    assert!(
+        !h.ws.is_result("result_2"),
+        "ghost result_2 unregistered from the working set"
+    );
+    assert_eq!(
+        h.ws.next_result_number(),
+        2,
+        "ghost rolled back; the next materialize reuses result_2"
+    );
+    assert!(
+        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        "the queued second call never dispatches: {:?}",
+        outcome.trace
+    );
 }
 
 /// External routing (ADR-0105): an un-denied namespaced call routes to the
@@ -754,6 +1093,8 @@ fn upstream_builtin_tools_are_not_registered() {
                 .any(|c| matches!(c, Content::Text { text } if text.contains("bash"))),
             "the error names the tool"
         );
+    } else {
+        panic!("expected a tool result in the window: {window:?}");
     }
 }
 
@@ -792,6 +1133,107 @@ fn the_full_window_rides_verbatim() {
     // The system prompt rides the config's own field, not the messages.
     // (Asserted implicitly: the run answered; here we pin the shape.)
     assert!(matches!(window[0], Message::User { .. }));
+}
+
+/// History re-feed (`convert_messages`, the seam #669's wiring will feed
+/// the full session history through): thinking blocks ride verbatim WITH
+/// their signatures (tool-use continuity, issue #614), a redacted block
+/// degrades to plain thinking text (no signature -- the upstream vocabulary
+/// has no redacted variant), a tool result's `tool_name` is recovered from
+/// the preceding assistant turn's tool-call ids, and the batch's assistant
+/// message lands `ToolUse`-stopped while a plain reply lands `Stop`.
+#[test]
+fn convert_messages_rides_history_verbatim() {
+    use crate::session::yoagent::convert_messages;
+    let converted = convert_messages(&[
+        ToolTurnMessage::user("earlier question"),
+        ToolTurnMessage::Assistant {
+            text: Some("looking.".into()),
+            tool_calls: vec![call("tu_hist_1", "explore", json!({"sql": "SELECT 1"}))],
+            thinking: vec![
+                ThinkingBlock::Thinking {
+                    thinking: "readable reasoning".into(),
+                    signature: "sig-original".into(),
+                },
+                ThinkingBlock::Redacted {
+                    data: "opaque-payload".into(),
+                },
+            ],
+        },
+        ToolTurnMessage::tool_result(ToolResult {
+            tool_use_id: "tu_hist_1".into(),
+            content: "1 row".into(),
+            is_error: false,
+        }),
+        ToolTurnMessage::Assistant {
+            text: Some("final answer.".into()),
+            tool_calls: Vec::new(),
+            thinking: Vec::new(),
+        },
+    ]);
+    let Some(Message::Assistant {
+        content,
+        stop_reason,
+        ..
+    }) = converted[1].as_llm()
+    else {
+        panic!("history assistant rides as an LLM assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::ToolUse);
+    let thinking_blocks: Vec<&Content> = content
+        .iter()
+        .filter(|c| matches!(c, Content::Thinking { .. }))
+        .collect();
+    assert_eq!(
+        thinking_blocks.len(),
+        2,
+        "both thinking blocks ride: {content:?}"
+    );
+    let Content::Thinking {
+        thinking,
+        signature,
+        ..
+    } = thinking_blocks[0]
+    else {
+        unreachable!("filtered to Thinking above");
+    };
+    assert_eq!(thinking, "readable reasoning");
+    assert_eq!(
+        signature.as_deref(),
+        Some("sig-original"),
+        "the signature rides verbatim (issue #614)"
+    );
+    let Content::Thinking {
+        thinking,
+        signature,
+        ..
+    } = thinking_blocks[1]
+    else {
+        unreachable!("filtered to Thinking above");
+    };
+    assert_eq!(thinking, "opaque-payload");
+    assert!(
+        signature.is_none(),
+        "a redacted block degrades to plain thinking, no signature"
+    );
+    // tool_name recovery: the app's ToolResult does not carry it; the
+    // conversion resolves it from the preceding call id.
+    let Some(Message::ToolResult {
+        tool_name,
+        tool_call_id,
+        is_error,
+        ..
+    }) = converted[2].as_llm()
+    else {
+        panic!("tool result rides as an LLM tool-result message");
+    };
+    assert_eq!(tool_call_id, "tu_hist_1");
+    assert_eq!(tool_name, "explore", "recovered from the call id map");
+    assert!(!is_error);
+    let Some(Message::Assistant { stop_reason, .. }) = converted[3].as_llm() else {
+        panic!("the plain reply rides as an LLM assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::Stop);
 }
 
 /// Live phase rail order (ADR-0059/0103): thinking wait per stream, the
