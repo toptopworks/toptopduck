@@ -212,6 +212,7 @@ pub fn create_session(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
+    skills_root: State<'_, SkillsRoot>,
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
@@ -262,6 +263,13 @@ pub fn create_session(
         // persists it (ADR-0100 Decision 1; see the helper's doc).
         apply_startup_posture(&handle, &posture)?;
         let mut s = handle.session_lock()?;
+        // Auto-include (issue #677, ADR-0109 Decision 6): the builtin skills
+        // whose companion CLI entries are detected + enabled seed the folded
+        // active set's INITIAL state -- no Mount event, no timeline entry,
+        // nothing persisted (the recipe stays event-only).
+        let auto_skills =
+            crate::skills::builtin::auto_included_names(&live.cli_tools(), &skills_root.0);
+        s.seed_initial_skills(auto_skills);
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
@@ -1023,8 +1031,9 @@ pub fn restore_builtin_cli_tool(
 #[tauri::command]
 pub fn rescan_builtin_cli_tools(
     live: State<'_, LiveProviderConfig>,
+    skills_root: State<'_, SkillsRoot>,
 ) -> Result<crate::cli_tools::builtin::BuiltinScanResult, StoreCommandError> {
-    live.scan_and_register(None)
+    live.scan_and_register(None, &skills_root.0)
         .map_err(StoreCommandError::from)
 }
 
@@ -1838,6 +1847,7 @@ pub async fn open_duck(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
+    skills_root: State<'_, SkillsRoot>,
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
@@ -1886,6 +1896,12 @@ pub async fn open_duck(
     // recipe whose header carries no `last_runtime` (the ADR-0098 Decision 2
     // semantics, unchanged for old files).
     let startup = startup_runtime_choice(live.inner());
+    // Auto-include recomputed at resume (issue #677, ADR-0109 Decision 6):
+    // a tool disabled since the session last ran drops its skill from the
+    // initial set; the recipe's own Mount/Unmount events still fold over
+    // the initial set, so an explicit in-session unmount keeps winning.
+    let auto_skills =
+        crate::skills::builtin::auto_included_names(&live.cli_tools(), &skills_root.0);
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,
@@ -1952,6 +1968,7 @@ pub async fn open_duck(
         let stale_duck = s.duck_path().map(|p| p.to_path_buf());
         let stale_was_empty = s.is_timeline_empty();
         *s = new_session;
+        s.seed_initial_skills(auto_skills.clone());
         // Release the session lock before filesystem cleanup.
         drop(s);
         // The resumed postures in one batch: the security-plane resets
@@ -3025,8 +3042,15 @@ fn record_last_model_posture(
 /// spec-valid `skills` list keeps its sorted semantics. A never-created
 /// registry lists empty. Read-only -- cannot refuse.
 #[tauri::command]
-pub fn list_skills(root: State<'_, SkillsRoot>) -> SkillListing {
-    crate::skills::registry::list_skills(&root.0)
+pub fn list_skills(
+    root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
+) -> SkillListing {
+    // The builtin mark comes from the app-config side table so a
+    // materialized builtin skill reads `acquired: builtin` while a user's
+    // pre-existing same-named skill keeps its own source (issue #677).
+    let mark = crate::skills::BuiltinSkillMark::from_config(&live.load());
+    crate::skills::registry::list_skills(&root.0, &mark)
 }
 
 /// Mint a new `local` skill (issue #362): `<root>/<name>/SKILL.md` with the
@@ -3049,18 +3073,40 @@ pub fn create_skill(
 #[tauri::command]
 pub fn update_skill(
     root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
     name: String,
     update: SkillUpdate,
 ) -> Result<SkillEntry, SkillError> {
-    crate::skills::registry::update_skill(&root.0, &name, update)
+    let mark = crate::skills::BuiltinSkillMark::from_config(&live.load());
+    crate::skills::registry::update_skill(&root.0, &mark, &name, update)
 }
 
 /// Delete a skill from the registry (issue #362). A `local` skill's directory
 /// is removed with all its contents; a `linked` skill's LINK is removed
 /// without touching the external source directory.
 #[tauri::command]
-pub fn delete_skill(root: State<'_, SkillsRoot>, name: String) -> Result<(), SkillError> {
-    crate::skills::registry::delete_skill(&root.0, &name)
+pub fn delete_skill(
+    root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+) -> Result<(), SkillError> {
+    let mark = crate::skills::BuiltinSkillMark::from_config(&live.load());
+    crate::skills::registry::delete_skill(&root.0, &mark, &name)
+}
+
+/// Restore one builtin skill's SKILL.md to the shipped baseline (issue #677,
+/// ADR-0109 Decision 5): the file is rewritten at the CURRENT locale and the
+/// side table re-recorded (future version upgrades follow again). Refuses
+/// anything that is not a materialized builtin skill. Returns the updated
+/// full config (the ADR-0109 Decision 9 sync contract -- commit wholesale,
+/// no re-fetch).
+#[tauri::command]
+pub fn restore_builtin_skill(
+    live: State<'_, LiveProviderConfig>,
+    skills_root: State<'_, SkillsRoot>,
+    name: String,
+) -> Result<crate::app_config::AppConfig, SkillError> {
+    live.restore_builtin_skill(&skills_root.0, &name)
 }
 
 /// Discover external skill sources for the import dialog (issue #367,
@@ -3084,11 +3130,12 @@ pub fn list_skill_sources(
     // that lands between this call and the subsequent `import_skills` is
     // reflected (import re-checks at commit too -- the snapshot is for the
     // dialog's PREVIEW only, never an authority).
-    let existing: std::collections::HashSet<String> = crate::skills::registry::list_skills(&root.0)
-        .skills
-        .iter()
-        .map(|s| s.name.clone())
-        .collect();
+    let existing: std::collections::HashSet<String> =
+        crate::skills::registry::list_skills(&root.0, &Default::default())
+            .skills
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
     let candidates = build_skill_source_candidates(&app, &custom_paths);
     discover_skill_sources(&candidates, &existing)
 }

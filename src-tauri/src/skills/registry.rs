@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
+use super::builtin::BuiltinSkillMark;
 use super::frontmatter;
 use super::model::{
     validate_body, validate_description, validate_skill_name, Acquired, SkillEntry, SkillError,
@@ -46,7 +47,7 @@ const TMP_SUFFIX: &str = ".tmp";
 /// A directory entry the OS itself could not read (concurrent modification,
 /// entry-level permission) is also pushed to `ignored` rather than silently
 /// dropped by `flatten()`.
-pub fn list_skills(root: &Path) -> SkillListing {
+pub fn list_skills(root: &Path, mark: &BuiltinSkillMark) -> SkillListing {
     let mut skills = Vec::new();
     let mut ignored = Vec::new();
     let mut root_error = None;
@@ -65,7 +66,7 @@ pub fn list_skills(root: &Path) -> SkillListing {
                         if !is_dir {
                             continue;
                         }
-                        match load_skill(&path) {
+                        match load_skill(&path, mark) {
                             Ok(skill) => skills.push(skill),
                             Err(e) => {
                                 log::warn!(
@@ -138,9 +139,14 @@ pub fn list_skills(root: &Path) -> SkillListing {
 
 /// Mint a new `local` skill: `<root>/<name>/SKILL.md` with the given
 /// description + the skeleton body. The registry root is created lazily on
-/// first mint. Returns the entry read back from disk.
+/// first mint. Refuses a name in the builtin reserved set (issue #677) --
+/// statically, independent of what is materialized. Returns the entry read
+/// back from disk.
 pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillEntry, SkillError> {
     validate_skill_name(name)?;
+    if super::builtin::is_reserved_skill_name(name) {
+        return Err(SkillError::ReservedSkillName(name.to_string()));
+    }
     validate_description(description)?;
     fs::create_dir_all(root).map_err(|e| fs_err("create skills root", root, e))?;
     let dir = root.join(name);
@@ -161,7 +167,9 @@ pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillE
         let _ = fs::remove_dir_all(&dir);
         return Err(e);
     }
-    load_skill(&dir)
+    // The reserved-set refusal above keeps a freshly minted name out of the
+    // builtin namespace, so the read-back cannot be a builtin skill.
+    load_skill(&dir, &BuiltinSkillMark::default())
 }
 
 /// RAII guard for an in-flight rename in [`update_skill`]: if still armed on
@@ -200,15 +208,27 @@ impl Drop for RenameGuard {
 /// mapping, see `frontmatter::set_*`).
 pub fn update_skill(
     root: &Path,
+    mark: &BuiltinSkillMark,
     name: &str,
     update: SkillUpdate,
 ) -> Result<SkillEntry, SkillError> {
     let dir = existing_skill_dir(root, name)?;
-    let current = load_skill(&dir)?;
+    let current = load_skill(&dir, mark)?;
     if current.acquired == Acquired::Linked {
         return Err(SkillError::ReadOnly(name.to_string()));
     }
+    // A MATERIALIZED builtin skill keeps its name (issue #677): the name is
+    // the locked identity the skill's CLI reference and the auto-include
+    // pairing anchor on. Every other field is editable.
+    if current.acquired == Acquired::Builtin && update.name != name {
+        return Err(SkillError::BuiltinNameLocked(name.to_string()));
+    }
     validate_skill_name(&update.name)?;
+    // Any rename INTO the builtin reserved set is refused statically
+    // (issue #677) -- same full-set membership the create path checks.
+    if update.name != name && super::builtin::is_reserved_skill_name(&update.name) {
+        return Err(SkillError::ReservedSkillName(update.name.clone()));
+    }
     validate_description(&update.description)?;
     validate_body(&update.body)?;
 
@@ -254,7 +274,7 @@ pub fn update_skill(
         frontmatter::set_cli_tools(&mut fm, &update.cli_tools);
         let content = frontmatter::render_skill_md(&fm, &update.body)?;
         write_skill_md(&work_dir, &content)?;
-        load_skill(&work_dir)
+        load_skill(&work_dir, mark)
     })();
     match result {
         Ok(entry) => {
@@ -281,9 +301,12 @@ pub fn update_skill(
 
 /// Delete one skill from the registry. For a `local` skill this removes the
 /// directory and everything in it; for a `linked` skill it removes the LINK
-/// ONLY (the external source directory is never touched). A name outside the
-/// spec, or one with no directory, is `NoSuchSkill`.
-pub fn delete_skill(root: &Path, name: &str) -> Result<(), SkillError> {
+/// ONLY (the external source directory is never touched). A MATERIALIZED
+/// builtin skill is refused (issue #677: builtin skills are undeletable --
+/// they re-materialize on the next scan; the single shutdown axis is
+/// disabling the companion CLI entry). A name outside the spec, or one with
+/// no directory, is `NoSuchSkill`.
+pub fn delete_skill(root: &Path, mark: &BuiltinSkillMark, name: &str) -> Result<(), SkillError> {
     // A non-spec name cannot address a registry skill -- and validating keeps
     // the path join traversal-safe (the name is IPC-supplied).
     if !super::model::is_valid_skill_name(name) {
@@ -294,6 +317,9 @@ pub fn delete_skill(root: &Path, name: &str) -> Result<(), SkillError> {
         Ok(m) => m,
         Err(_) => return Err(SkillError::NoSuchSkill(name.to_string())),
     };
+    if mark.contains(name) {
+        return Err(SkillError::BuiltinUndeletable(name.to_string()));
+    }
     if is_linked(&meta) {
         // Remove the reparse point / link itself. Windows: RemoveDirectoryW
         // deletes a junction / directory-symlink without following it. Unix:
@@ -329,8 +355,11 @@ fn existing_skill_dir(root: &Path, name: &str) -> Result<PathBuf, SkillError> {
     Ok(dir)
 }
 
-/// Load + validate one skill directory into its wire entry.
-pub(crate) fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
+/// Load + validate one skill directory into its wire entry. `mark` carries
+/// the materialized-builtin names (the side-table keys) so a materialized
+/// skill's `acquired` reads `Builtin` while a user's pre-existing same-named
+/// skill keeps its own source (issue #677).
+pub(crate) fn load_skill(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillEntry, SkillError> {
     let dir_name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -373,11 +402,12 @@ pub(crate) fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
     let is_link = fs::symlink_metadata(dir)
         .map(|m| is_linked(&m))
         .unwrap_or(false);
-    let acquired = if is_link {
+    let fs_acquired = if is_link {
         Acquired::Linked
     } else {
         Acquired::Local
     };
+    let acquired = mark.acquired(&dir_name, fs_acquired);
     let link_target = if is_link { link_target_of(dir) } else { None };
 
     Ok(SkillEntry {
@@ -409,7 +439,8 @@ fn link_target_of(dir: &Path) -> Option<String> {
 
 /// Atomic SKILL.md write: temp file in the same directory + rename, so a
 /// crash mid-write leaves either the old complete file or the new one.
-fn write_skill_md(dir: &Path, content: &str) -> Result<(), SkillError> {
+/// Shared by the edit paths and the builtin materializer (issue #677).
+pub(crate) fn write_skill_md(dir: &Path, content: &str) -> Result<(), SkillError> {
     let target = dir.join(SKILL_MD);
     let tmp = dir.join(format!("{SKILL_MD}{TMP_SUFFIX}"));
     fs::write(&tmp, content).map_err(|e| fs_err("write SKILL.md temp file", &tmp, e))?;
@@ -521,7 +552,7 @@ mod tests {
     fn list_empty_when_root_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("skills");
-        let listing = list_skills(&missing);
+        let listing = list_skills(&missing, &Default::default());
         assert!(listing.skills.is_empty());
         assert!(listing.ignored.is_empty());
         // NotFound is the legitimate "never-created registry" state -- no
@@ -541,7 +572,7 @@ mod tests {
         let not_a_dir = tmp.path().join("not-a-dir.txt");
         fs::write(&not_a_dir, "x").unwrap();
 
-        let listing = list_skills(&not_a_dir);
+        let listing = list_skills(&not_a_dir, &Default::default());
         assert!(listing.skills.is_empty());
         assert!(listing.ignored.is_empty());
         let root_error = listing
@@ -571,7 +602,7 @@ mod tests {
         )
         .unwrap();
 
-        let listing = list_skills(root);
+        let listing = list_skills(root, &Default::default());
         let names: Vec<_> = listing.skills.iter().map(|s| s.name.clone()).collect();
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
         // Plain files never enter the directory scan, so only the two real
@@ -602,7 +633,7 @@ mod tests {
         .unwrap();
         fs::create_dir(root.join("no-skill-md")).unwrap();
 
-        let listing = list_skills(root);
+        let listing = list_skills(root, &Default::default());
         let by_dir: std::collections::HashMap<&str, &str> = listing
             .ignored
             .iter()
@@ -629,7 +660,7 @@ mod tests {
     fn list_derives_local_for_real_directories() {
         let tmp = tempfile::tempdir().unwrap();
         put_skill(tmp.path(), "mine", "", "Body.\n");
-        let entry = &list_skills(tmp.path()).skills[0];
+        let entry = &list_skills(tmp.path(), &Default::default()).skills[0];
         assert_eq!(entry.acquired, Acquired::Local);
         assert_eq!(entry.link_target, None);
         assert_eq!(entry.description, "Test skill mine.");
@@ -643,7 +674,7 @@ mod tests {
             eprintln!("skipping: platform refused symlink creation");
             return;
         };
-        let skills = list_skills(&registry).skills;
+        let skills = list_skills(&registry, &Default::default()).skills;
         let linked = skills.iter().find(|s| s.name == "external-skill").unwrap();
         assert_eq!(linked.acquired, Acquired::Linked);
         assert!(linked.link_target.is_some());
@@ -684,7 +715,7 @@ mod tests {
             return;
         }
 
-        let skills = list_skills(&registry).skills;
+        let skills = list_skills(&registry, &Default::default()).skills;
         let linked = skills
             .iter()
             .find(|s| s.name == "external-skill")
@@ -695,7 +726,8 @@ mod tests {
             "junction misclassified as Local"
         );
 
-        delete_skill(&registry, "external-skill").expect("delete linked skill");
+        delete_skill(&registry, &Default::default(), "external-skill")
+            .expect("delete linked skill");
         assert!(
             source_dir.join("marker").exists(),
             "junction delete followed into the external source"
@@ -715,7 +747,7 @@ mod tests {
         // The minted file is on disk + spec-valid (list reads it back).
         let raw = fs::read_to_string(root.join("pdf-tools").join(SKILL_MD)).unwrap();
         assert!(raw.starts_with("---\nname: pdf-tools\n"));
-        let listed = list_skills(&root).skills;
+        let listed = list_skills(&root, &Default::default()).skills;
         assert_eq!(listed.len(), 1);
         assert!(listed[0].mcp_servers.is_empty());
         assert!(listed[0].cli_tools.is_empty());
@@ -731,7 +763,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let dir = put_skill(root, "sql-coach", "", "Body text.\n");
-        let entry = load_skill(&dir).expect("load_skill succeeds");
+        let entry = load_skill(&dir, &Default::default()).expect("load_skill succeeds");
         let bytes = fs::read(dir.join(SKILL_MD)).expect("read SKILL.md bytes");
         assert_eq!(entry.content_hash, sha256_hex(&bytes));
         assert_eq!(entry.content_hash.len(), 64);
@@ -773,7 +805,7 @@ mod tests {
         payload.compatibility = Some("requires network".into());
         payload.mcp_servers = vec!["github-mcp".into(), "fs-server".into()];
         payload.cli_tools = vec!["pandoc".into(), "office-cli".into()];
-        let entry = update_skill(root, "keeper", payload).unwrap();
+        let entry = update_skill(root, &Default::default(), "keeper", payload).unwrap();
 
         assert_eq!(entry.description, "Updated description.");
         assert_eq!(entry.license.as_deref(), Some("Apache-2.0"));
@@ -801,7 +833,13 @@ mod tests {
         let root = tmp.path();
         put_skill(root, "clearer", "\nlicense: MIT", "Body.\n");
         // None license -> the key disappears from the frontmatter.
-        let entry = update_skill(root, "clearer", update_payload("clearer")).unwrap();
+        let entry = update_skill(
+            root,
+            &Default::default(),
+            "clearer",
+            update_payload("clearer"),
+        )
+        .unwrap();
         assert_eq!(entry.license, None);
         let raw = fs::read_to_string(root.join("clearer").join(SKILL_MD)).unwrap();
         assert!(!raw.contains("license:"), "cleared key must be gone: {raw}");
@@ -814,7 +852,7 @@ mod tests {
         put_skill(root, "old-name", "", "Body.\n");
         let mut payload = update_payload("new-name");
         payload.body = "Renamed body.\n".into();
-        let entry = update_skill(root, "old-name", payload).unwrap();
+        let entry = update_skill(root, &Default::default(), "old-name", payload).unwrap();
         assert_eq!(entry.name, "new-name");
         assert!(!root.join("old-name").exists());
         let raw = fs::read_to_string(root.join("new-name").join(SKILL_MD)).unwrap();
@@ -829,7 +867,7 @@ mod tests {
         put_skill(root, "source-skill", "", "Body.\n");
         put_skill(root, "occupied", "", "Body.\n");
         let payload = update_payload("occupied");
-        let err = update_skill(root, "source-skill", payload).unwrap_err();
+        let err = update_skill(root, &Default::default(), "source-skill", payload).unwrap_err();
         assert_eq!(err, SkillError::NameTaken("occupied".into()));
         assert!(root.join("source-skill").exists(), "original must survive");
     }
@@ -875,12 +913,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         assert!(matches!(
-            update_skill(root, "ghost", update_payload("ghost")),
+            update_skill(root, &Default::default(), "ghost", update_payload("ghost")),
             Err(SkillError::NoSuchSkill(_))
         ));
         // A non-spec addressing name cannot exist in the registry.
         assert!(matches!(
-            update_skill(root, "../escape", update_payload("x")),
+            update_skill(root, &Default::default(), "../escape", update_payload("x")),
             Err(SkillError::NoSuchSkill(_))
         ));
 
@@ -890,6 +928,7 @@ mod tests {
         };
         let err = update_skill(
             &registry,
+            &Default::default(),
             "external-skill",
             update_payload("external-skill"),
         )
@@ -907,7 +946,7 @@ mod tests {
         put_skill(root, "valid-target", "", "Body.\n");
         let bad_name = update_payload("Bad_Name");
         assert!(matches!(
-            update_skill(root, "valid-target", bad_name),
+            update_skill(root, &Default::default(), "valid-target", bad_name),
             Err(SkillError::InvalidName(_))
         ));
         let blank_body = SkillUpdate {
@@ -915,7 +954,7 @@ mod tests {
             ..update_payload("valid-target")
         };
         assert!(matches!(
-            update_skill(root, "valid-target", blank_body),
+            update_skill(root, &Default::default(), "valid-target", blank_body),
             Err(SkillError::InvalidSkill(_))
         ));
     }
@@ -926,15 +965,15 @@ mod tests {
         let root = tmp.path();
         let dir = put_skill(root, "doomed", "", "Body.\n");
         fs::write(dir.join("extra-asset.txt"), "x").unwrap();
-        delete_skill(root, "doomed").unwrap();
+        delete_skill(root, &Default::default(), "doomed").unwrap();
         assert!(!dir.exists());
         assert!(matches!(
-            delete_skill(root, "doomed"),
+            delete_skill(root, &Default::default(), "doomed"),
             Err(SkillError::NoSuchSkill(_))
         ));
         // A non-spec name is NoSuchSkill (and keeps the join traversal-safe).
         assert!(matches!(
-            delete_skill(root, "../escape"),
+            delete_skill(root, &Default::default(), "../escape"),
             Err(SkillError::NoSuchSkill(_))
         ));
     }
@@ -950,9 +989,107 @@ mod tests {
         let link = registry.join("external-skill");
         let source_dir = root.join("outside").join("external-skill");
 
-        delete_skill(&registry, "external-skill").unwrap();
+        delete_skill(&registry, &Default::default(), "external-skill").unwrap();
         assert!(!link.exists(), "the link must be gone");
         assert!(source_dir.exists(), "the external source must survive");
         assert!(source_dir.join(SKILL_MD).exists());
+    }
+
+    // --- builtin guards (issue #677) ---------------------------------------
+
+    #[test]
+    fn create_skill_refuses_a_reserved_builtin_name() {
+        let root = tempfile::tempdir().expect("root");
+        assert_eq!(
+            create_skill(root.path(), "pandoc", "mine").unwrap_err(),
+            SkillError::ReservedSkillName("pandoc".to_string())
+        );
+        // Nothing landed on disk.
+        assert!(!root.path().join("pandoc").exists());
+    }
+
+    #[test]
+    fn update_skill_locks_a_builtin_name_but_edits_the_body() {
+        let root = tempfile::tempdir().expect("root");
+        // A materialized pandoc: file on disk + the mark carrying the name.
+        let def = super::super::builtin::find_skill_definition("pandoc").unwrap();
+        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
+        let content = def.render("en-US").expect("render");
+        std::fs::write(root.path().join("pandoc/SKILL.md"), &content).expect("write");
+        let mark = BuiltinSkillMark::of(&["pandoc"]);
+
+        // The rename is refused with the dedicated variant.
+        let mut rename = update_payload("pandoc");
+        rename.name = "my-pandoc".to_string();
+        assert_eq!(
+            update_skill(root.path(), &mark, "pandoc", rename).unwrap_err(),
+            SkillError::BuiltinNameLocked("pandoc".to_string())
+        );
+
+        // A body edit goes through and the read-back keeps the Builtin mark.
+        let mut edit = update_payload("pandoc");
+        edit.description = "Edited description.".to_string();
+        edit.body = "Edited body.\n".to_string();
+        let entry = update_skill(root.path(), &mark, "pandoc", edit).expect("edit");
+        assert_eq!(entry.acquired, Acquired::Builtin);
+        assert_eq!(entry.description, "Edited description.");
+    }
+
+    #[test]
+    fn update_skill_refuses_renaming_a_user_skill_onto_a_reserved_name() {
+        let root = tempfile::tempdir().expect("root");
+        create_skill(root.path(), "my-tool", "desc").expect("create");
+        let mut rename = update_payload("my-tool");
+        rename.name = "office-cli".to_string();
+        assert_eq!(
+            update_skill(root.path(), &Default::default(), "my-tool", rename).unwrap_err(),
+            SkillError::ReservedSkillName("office-cli".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_skill_refuses_a_builtin_and_allows_the_same_unmarked_name() {
+        let root = tempfile::tempdir().expect("root");
+        // The reverse-conflict window: a user skill named pandoc with NO
+        // record deletes normally.
+        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
+        std::fs::write(
+            root.path().join("pandoc/SKILL.md"),
+            "---\nname: pandoc\ndescription: owned\n---\nBody.\n",
+        )
+        .expect("write");
+        delete_skill(root.path(), &Default::default(), "pandoc").expect("user skill deletes");
+
+        // The materialized posture: the mark carries the name -> refused.
+        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
+        std::fs::write(
+            root.path().join("pandoc/SKILL.md"),
+            "---\nname: pandoc\ndescription: owned\n---\nBody.\n",
+        )
+        .expect("write");
+        let mark = BuiltinSkillMark::of(&["pandoc"]);
+        assert_eq!(
+            delete_skill(root.path(), &mark, "pandoc").unwrap_err(),
+            SkillError::BuiltinUndeletable("pandoc".to_string())
+        );
+    }
+
+    #[test]
+    fn list_skills_marks_materialized_names_as_builtin() {
+        let root = tempfile::tempdir().expect("root");
+        create_skill(root.path(), "my-tool", "desc").expect("create");
+        let def = super::super::builtin::find_skill_definition("python").unwrap();
+        std::fs::create_dir_all(root.path().join("python")).expect("mkdir");
+        std::fs::write(
+            root.path().join("python/SKILL.md"),
+            def.render("en-US").unwrap(),
+        )
+        .expect("write");
+        let mark = BuiltinSkillMark::of(&["python"]);
+        let skills = list_skills(root.path(), &mark).skills;
+        let mine = skills.iter().find(|s| s.name == "my-tool").expect("mine");
+        assert_eq!(mine.acquired, Acquired::Local);
+        let builtin = skills.iter().find(|s| s.name == "python").expect("builtin");
+        assert_eq!(builtin.acquired, Acquired::Builtin);
     }
 }

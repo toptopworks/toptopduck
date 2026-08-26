@@ -478,6 +478,14 @@ export async function restoreBuiltinCliTool(name: string): Promise<AppConfig> {
   return invoke<AppConfig>("restore_builtin_cli_tool", { name });
 }
 
+// Restore one builtin skill's SKILL.md to the shipped baseline (issue #677,
+// ADR-0109 Decision 5): the file is rewritten at the CURRENT locale and the
+// side table re-recorded (future version upgrades follow again). Returns the
+// updated full app-config.
+export async function restoreBuiltinSkill(name: string): Promise<AppConfig> {
+  return invoke<AppConfig>("restore_builtin_skill", { name });
+}
+
 // The manual rescan (issue #675): detect the shipped builtin definitions'
 // executables on PATH and auto-register the hits (also the conflict
 // catch-up point after the user disposes of a name-clashing entry).

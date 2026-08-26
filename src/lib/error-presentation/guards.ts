@@ -297,6 +297,9 @@ export function isSkillError(e: unknown): e is SkillError {
     case "InvalidSkill":
     case "NoSuchSkill":
     case "NameTaken":
+    case "ReservedSkillName":
+    case "BuiltinNameLocked":
+    case "BuiltinUndeletable":
     case "ReadOnly":
     case "FsFailure":
       return typeof (e as { data?: unknown }).data === "string";

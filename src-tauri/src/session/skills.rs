@@ -99,6 +99,38 @@ impl super::Session {
         Ok(())
     }
 
+    /// Seed the folded active set's INITIAL state (issue #677, ADR-0109
+    /// Decision 6): the auto-included builtin skills enter as the fold's
+    /// starting accumulator, not as events. No `Mount` event is appended, no
+    /// thread timeline entry is created, nothing is persisted (the initial
+    /// set is recomputed from the CURRENT config at every creation / resume).
+    /// Recomputes the live cache by folding the existing timeline's skill
+    /// events OVER the initial set, so an in-session unmount that the recipe
+    /// recorded still wins at resume and a later manual mount folds in
+    /// normally. A fresh session has an empty timeline, so the fold is the
+    /// initial set itself.
+    pub fn seed_initial_skills(&mut self, initial: Vec<String>) {
+        let mut mounted: Vec<String> = Vec::new();
+        for name in initial {
+            if !mounted.iter().any(|n| n == &name) {
+                mounted.push(name);
+            }
+        }
+        for entry in &self.timeline {
+            if let super::TimelineEntry::Skill(ev) = entry {
+                match ev.kind {
+                    crate::model::SkillLifecycleKind::Mount => {
+                        if !mounted.iter().any(|n| n == &ev.name) {
+                            mounted.push(ev.name.clone());
+                        }
+                    }
+                    crate::model::SkillLifecycleKind::Unmount => mounted.retain(|n| n != &ev.name),
+                }
+            }
+        }
+        self.mounted_skills = mounted;
+    }
+
     /// Append a skill lifecycle event (Mount / Unmount) to the conversation
     /// thread and atomically persist the recipe (ADR-0086, issue #363).
     /// Mirrors [`super::Session::append_source_event`]: first-class timeline
@@ -223,5 +255,46 @@ mod tests {
         session.mount_skill("b").expect("mount b");
         session.unmount_skill("a").expect("unmount a");
         assert_eq!(session.mounted_skills(), vec!["b".to_string()]);
+    }
+
+    /// Auto-include (issue #677): the initial set seeds the fold without
+    /// events; a recorded in-session Unmount still wins over the initial
+    /// set; a later manual Mount folds in normally.
+    #[test]
+    fn seed_initial_skills_folds_events_over_the_initial_set() {
+        let mut session = Session::new().expect("session");
+        session.mount_skill("auto-a").expect("mount");
+        session.unmount_skill("auto-a").expect("unmount");
+        session.mount_skill("user-b").expect("mount");
+        session.seed_initial_skills(vec![
+            "auto-a".to_string(),
+            "auto-c".to_string(),
+            "auto-a".to_string(), // deduped
+        ]);
+        // auto-a: the recorded Unmount removed it; user-b survives; auto-c
+        // joins via the initial set.
+        assert_eq!(
+            session.mounted_skills(),
+            vec!["auto-c".to_string(), "user-b".to_string()]
+        );
+        // No new timeline entries: the conversation still holds exactly the
+        // three events the manual actions wrote.
+        assert_eq!(session.conversation().len(), 3);
+        // The unmount of an initial-set member works through the normal
+        // event path (the live cache carries it).
+        session.unmount_skill("auto-c").expect("unmount");
+        assert_eq!(session.mounted_skills(), vec!["user-b".to_string()]);
+    }
+
+    /// A fresh session's fold is the initial set itself (empty timeline).
+    #[test]
+    fn seed_initial_skills_on_a_fresh_session_is_the_initial_set() {
+        let mut session = Session::new().expect("session");
+        session.seed_initial_skills(vec!["pandoc".to_string(), "python".to_string()]);
+        assert_eq!(
+            session.mounted_skills(),
+            vec!["pandoc".to_string(), "python".to_string()]
+        );
+        assert!(session.conversation().is_empty(), "no timeline entry");
     }
 }

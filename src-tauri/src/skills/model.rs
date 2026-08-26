@@ -30,6 +30,15 @@ pub enum Acquired {
     /// A real directory -- authored in-app (`create_skill`) or copied in by a
     /// future import slice. Fully editable.
     Local,
+    /// A materialized builtin skill (issue #677, ADR-0109 Decision 5): the
+    /// app-authored companion of a builtin CLI registration entry, written
+    /// by the scan window. Keyed on the app-config side table
+    /// (`builtin_skill_baselines`) membership -- NOT on the static name set
+    /// -- so a user's pre-existing same-named skill keeps its own source
+    /// until materialization actually happens. Undeletable; every field
+    /// except `name` is editable (name is the locked identity the CLI
+    /// reference anchors on).
+    Builtin,
 }
 
 /// One registry skill as it crosses IPC (issue #362). The full declaration face
@@ -188,6 +197,24 @@ pub enum SkillError {
     /// Carries the name.
     #[error("skill name already taken: {0}")]
     NameTaken(String),
+    /// A create / import / rename targeted a name in the builtin skills'
+    /// reserved set (issue #677, ADR-0109 Decision 7): the static full-set
+    /// membership, independent of detection or materialization. Distinct
+    /// from [`Self::NameTaken`] so the refusal reads as "reserved", not
+    /// "taken by another skill of yours". Carries the name.
+    #[error("skill name is reserved for a built-in skill: {0}")]
+    ReservedSkillName(String),
+    /// A rename targeted a MATERIALIZED builtin skill (issue #677): the name
+    /// is the locked identity the skill's CLI reference and the auto-include
+    /// pairing anchor on. Carries the name.
+    #[error("built-in skill name is locked: {0}")]
+    BuiltinNameLocked(String),
+    /// A delete targeted a MATERIALIZED builtin skill (issue #677): builtin
+    /// skills are undeletable (they re-materialize on the next scan anyway);
+    /// the single shutdown axis is disabling the companion CLI entry.
+    /// Carries the name.
+    #[error("built-in skill cannot be deleted: {0}")]
+    BuiltinUndeletable(String),
     /// A mutating call targeted a `linked` skill (the app never writes through
     /// an external link). Carries the name.
     #[error("skill is linked (read-only): {0}")]

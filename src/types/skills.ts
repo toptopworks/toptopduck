@@ -11,7 +11,7 @@
 
 // Loader-derived link/real-directory posture. Crosses IPC as the bare
 // snake_case variant (mirrors the Rust `#[serde(rename_all = "snake_case")]`).
-export type SkillAcquired = "linked" | "local";
+export type SkillAcquired = "linked" | "local" | "builtin";
 
 // One registry skill as it crosses IPC (list_skills + the mutating commands'
 // return). Mirrors the Rust SkillEntry. Option fields are `| null` (the
@@ -115,6 +115,9 @@ export type SkillError =
   | { kind: "InvalidSkill"; data: string }
   | { kind: "NoSuchSkill"; data: string }
   | { kind: "NameTaken"; data: string }
+  | { kind: "ReservedSkillName"; data: string }
+  | { kind: "BuiltinNameLocked"; data: string }
+  | { kind: "BuiltinUndeletable"; data: string }
   | { kind: "ReadOnly"; data: string }
   | { kind: "FsFailure"; data: string };
 
@@ -224,6 +227,13 @@ export interface ImportItem {
 
 // The per-item outcome of an import batch (issue #367). Mirrors the Rust
 // ImportOutcome as an adjacently-tagged union. `failed` nests the typed
+// One builtin_skill_baselines record (issue #677): the recorded baseline of
+// a materialized builtin skill. Mirrors the Rust BuiltinSkillBaseline.
+export interface BuiltinSkillBaseline {
+  hash: string;
+  locale: string;
+}
+
 // SkillError (already adjacently tagged) as its `data`, so the frontend
 // reaches the reject detail through `data.kind` + `data.data`.
 export type ImportOutcome =

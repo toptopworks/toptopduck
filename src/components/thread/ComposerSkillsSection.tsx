@@ -249,6 +249,14 @@ export function ComposerSkillsSection({
                 <TruncatingTooltip text={skill.name} className="truncate">
                   {skill.name}
                 </TruncatingTooltip>
+                {skill.acquired === "builtin" && (
+                  <span className="bg-muted text-muted-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+                    <FormattedMessage
+                      id="composer.contextPanel.builtinSkillBadge"
+                      defaultMessage="Built-in"
+                    />
+                  </span>
+                )}
               </label>
             </li>
           );

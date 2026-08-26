@@ -361,6 +361,7 @@ impl LiveProviderConfig {
     pub fn scan_and_register(
         &self,
         path_env: Option<std::ffi::OsString>,
+        skills_root: &std::path::Path,
     ) -> Result<crate::cli_tools::builtin::BuiltinScanResult, CliToolWriteError> {
         let _guard = self
             .write_lock
@@ -385,19 +386,33 @@ impl LiveProviderConfig {
             crate::cli_tools::builtin::BUILTIN_DEFINITIONS,
             &mut cfg.cli_tools,
         );
-        let config = if to_register.is_empty() && upgraded.is_empty() {
+        let nothing_registered = to_register.is_empty();
+        for tool in to_register {
+            cfg.cli_tools
+                .upsert(tool)
+                .map_err(CliToolWriteError::Invalid)?;
+        }
+        // Builtin-skill materialization rides the same write (issue #677,
+        // ADR-0109 Decision 5): the freshly-registered entries are already
+        // in `cfg.cli_tools`, so a first detection materializes its
+        // companion skill in this same window. The side-table mutation
+        // folds into the persist decision below.
+        let locale = crate::skills::builtin::resolve_materialization_locale(cfg.locale);
+        let skills_dirty = crate::skills::builtin::reconcile(
+            skills_root,
+            locale,
+            &cfg.cli_tools,
+            &mut cfg.builtin_skill_baselines,
+        );
+        let config = if nothing_registered && upgraded.is_empty() && !skills_dirty {
             // Nothing to persist: every shipped definition is dormant,
-            // already registered, and in agreement with its baseline. Skip
-            // the rewrite so startup and pane mounts do not churn the
-            // config file (normalize + atomic write) -- and a fresh install
-            // with no hits keeps the lazily materialized no-config state.
+            // already registered, and in agreement with its baseline, and no
+            // builtin skill changed. Skip the rewrite so startup and pane
+            // mounts do not churn the config file (normalize + atomic
+            // write) -- and a fresh install with no hits keeps the lazily
+            // materialized no-config state.
             cfg
         } else {
-            for tool in to_register {
-                cfg.cli_tools
-                    .upsert(tool)
-                    .map_err(CliToolWriteError::Invalid)?;
-            }
             self.store_inner(cfg).map_err(CliToolWriteError::Write)?
         };
         for name in upgraded {
@@ -407,6 +422,34 @@ impl LiveProviderConfig {
             );
         }
         Ok(crate::cli_tools::builtin::BuiltinScanResult { config, scan })
+    }
+
+    /// Restore one builtin skill's SKILL.md to the shipped baseline
+    /// (issue #677): the file is rewritten at the CURRENT locale and the
+    /// side table re-recorded, so future version upgrades follow the
+    /// baseline again. Refuses anything that is not a materialized builtin
+    /// skill. Returns the updated full config (ADR-0109 Decision 9).
+    pub fn restore_builtin_skill(
+        &self,
+        skills_root: &std::path::Path,
+        name: &str,
+    ) -> Result<AppConfig, crate::skills::SkillError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self
+            .load_for_write()
+            .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))?;
+        let locale = crate::skills::builtin::resolve_materialization_locale(cfg.locale);
+        crate::skills::builtin::restore(
+            skills_root,
+            locale,
+            name,
+            &mut cfg.builtin_skill_baselines,
+        )?;
+        self.store_inner(cfg)
+            .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))
     }
 
     /// Read-only snapshot of the configured CLI registry: every entry,
@@ -1012,9 +1055,12 @@ mod tests {
         // entry, the write landed on disk, and the snapshot reports
         // detected (issue #675 AC).
         let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        let result = live.scan_and_register(Some(path_env)).expect("scan");
+        let result = live
+            .scan_and_register(Some(path_env), skills.path())
+            .expect("scan");
         let registered = result
             .config
             .cli_tools
@@ -1052,6 +1098,7 @@ mod tests {
         // their entry registers the builtin one (the next-scan catch-up).
         // A user-disabled builtin entry is never re-enabled by a rescan.
         let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
         live.upsert_cli_tool(cli_tool("my-pandoc"))
             .expect("user entry");
         let mut user_pandoc = cli_tool("my-pandoc");
@@ -1065,7 +1112,9 @@ mod tests {
 
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        let result = live.scan_and_register(Some(path_env)).expect("scan 1");
+        let result = live
+            .scan_and_register(Some(path_env), skills.path())
+            .expect("scan 1");
         let entry = result
             .scan
             .iter()
@@ -1087,7 +1136,7 @@ mod tests {
         // registers the builtin one.
         live.remove_cli_tool("pandoc").expect("remove");
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        live.scan_and_register(Some(path_env.clone()))
+        live.scan_and_register(Some(path_env.clone()), skills.path())
             .expect("scan 2");
         let tools = live.cli_tools();
         let builtin = tools
@@ -1100,7 +1149,9 @@ mod tests {
         let mut disabled = builtin.clone();
         disabled.enabled = false;
         live.upsert_cli_tool(disabled).expect("disable");
-        let result = live.scan_and_register(Some(path_env)).expect("scan 3");
+        let result = live
+            .scan_and_register(Some(path_env), skills.path())
+            .expect("scan 3");
         assert!(
             !result
                 .config
@@ -1122,7 +1173,9 @@ mod tests {
         let (_dir, live) = live();
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        crate::cli_tools::builtin::startup_register(&live, Some(path_env)).expect("startup");
+        let skills = tempfile::tempdir().expect("skills root");
+        crate::cli_tools::builtin::startup_register(&live, Some(path_env), skills.path())
+            .expect("startup");
         let tools = live.cli_tools();
         let builtin = tools
             .iter()
@@ -1140,7 +1193,9 @@ mod tests {
         let (dir, live) = live();
         let empty_dir = tempfile::tempdir().expect("tempdir");
         let path_env = std::env::join_paths([empty_dir.path()]).expect("join");
-        crate::cli_tools::builtin::startup_register(&live, Some(path_env)).expect("startup");
+        let skills = tempfile::tempdir().expect("skills root");
+        crate::cli_tools::builtin::startup_register(&live, Some(path_env), skills.path())
+            .expect("startup");
         assert!(live.cli_tools().is_empty());
         assert!(
             !dir.path().join("config.json").exists(),
@@ -1161,7 +1216,9 @@ mod tests {
         std::fs::write(live.path(), serde_json::to_string(&cfg).unwrap()).unwrap();
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        crate::cli_tools::builtin::startup_register(&live, Some(path_env)).expect("startup");
+        let skills = tempfile::tempdir().expect("skills root");
+        crate::cli_tools::builtin::startup_register(&live, Some(path_env), skills.path())
+            .expect("startup");
         let tools = live.cli_tools();
         assert_eq!(
             tools.len(),
@@ -1181,6 +1238,7 @@ mod tests {
         // executable and enable state; an EDITED entry is preserved
         // verbatim, the app never overwrites a user edit.
         let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
         let mut cfg = AppConfig::defaults();
         let mut drifted = cli_tool("pandoc");
         drifted.name = "pandoc".to_string();
@@ -1199,7 +1257,8 @@ mod tests {
         // reconciliation still has work to do.
         let empty_dir = tempfile::tempdir().expect("tempdir");
         let path_env = std::env::join_paths([empty_dir.path()]).expect("join");
-        live.scan_and_register(Some(path_env)).expect("scan");
+        live.scan_and_register(Some(path_env), skills.path())
+            .expect("scan");
 
         let tools = live.cli_tools();
         let pandoc = tools.iter().find(|t| t.name == "pandoc").expect("entry");
@@ -1228,13 +1287,15 @@ mod tests {
         // byte-identical (the store skip -- pane mounts must not churn the
         // config file).
         let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        live.scan_and_register(Some(path_env.clone()))
+        live.scan_and_register(Some(path_env.clone()), skills.path())
             .expect("scan 1");
         let after_first = std::fs::read_to_string(live.path()).expect("file");
         // The registered entry matches the shipped baseline: nothing to do.
-        live.scan_and_register(Some(path_env)).expect("scan 2");
+        live.scan_and_register(Some(path_env), skills.path())
+            .expect("scan 2");
         let after_second = std::fs::read_to_string(live.path()).expect("file");
         assert_eq!(
             after_first, after_second,
@@ -1250,9 +1311,11 @@ mod tests {
         // to the shipped values stays EDITED; the explicit restore is the
         // way back). User entries stay baseline-free.
         let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        live.scan_and_register(Some(path_env)).expect("scan");
+        live.scan_and_register(Some(path_env), skills.path())
+            .expect("scan");
         let registered = live.cli_tools().remove(0);
 
         // The enable toggle (the row switch path: same body, one field).
@@ -1316,9 +1379,11 @@ mod tests {
         // builtin name (the conflict posture) stays removable -- disposing
         // of it is how the builtin entry gets to register.
         let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        live.scan_and_register(Some(path_env)).expect("scan");
+        live.scan_and_register(Some(path_env), skills.path())
+            .expect("scan");
         assert!(matches!(
             live.remove_cli_tool("pandoc"),
             Err(CliToolWriteError::Invalid(_))
@@ -1340,9 +1405,10 @@ mod tests {
         // untouched -- after which the entry upgrades with the baseline
         // again.
         let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        live.scan_and_register(Some(path_env.clone()))
+        live.scan_and_register(Some(path_env.clone()), skills.path())
             .expect("scan");
         let mut edited = live.cli_tools().remove(0);
         edited.description = "custom".to_string();
@@ -1378,7 +1444,8 @@ mod tests {
         drifted.description = "drifted again".to_string();
         cfg2.cli_tools.tools = vec![drifted];
         std::fs::write(live.path(), serde_json::to_string(&cfg2).unwrap()).unwrap();
-        live.scan_and_register(Some(path_env)).expect("rescan");
+        live.scan_and_register(Some(path_env), skills.path())
+            .expect("rescan");
         assert!(def.baseline_matches(&live.cli_tools()[0]));
     }
 

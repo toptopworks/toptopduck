@@ -232,6 +232,30 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
         },
         { name: e.data },
       );
+    case "ReservedSkillName":
+      return intl.formatMessage(
+        {
+          id: "error.skill.reservedName",
+          defaultMessage: "The name \"{name}\" is reserved for a built-in skill",
+        },
+        { name: e.data },
+      );
+    case "BuiltinNameLocked":
+      return intl.formatMessage(
+        {
+          id: "error.skill.nameLocked",
+          defaultMessage: "Built-in skill \"{name}\" cannot be renamed",
+        },
+        { name: e.data },
+      );
+    case "BuiltinUndeletable":
+      return intl.formatMessage(
+        {
+          id: "error.skill.undeletable",
+          defaultMessage: "Built-in skill \"{name}\" cannot be deleted; disable its tool instead",
+        },
+        { name: e.data },
+      );
     case "ReadOnly":
       return intl.formatMessage({
         id: "error.skill.readOnly",

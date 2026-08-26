@@ -162,6 +162,8 @@ function SectionContent({
         <SkillsSection
           configuredMcpIds={appConfig.mcp_servers.servers.map((s) => s.id)}
           configuredCliIds={appConfig.cli_tools.tools.map((t) => t.name)}
+          builtinSkillBaselines={appConfig.builtin_skill_baselines}
+          onAppConfigSync={onCliToolsChanged}
         />
       );
     case "runtime":
