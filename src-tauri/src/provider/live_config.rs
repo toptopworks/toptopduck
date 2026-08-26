@@ -372,20 +372,13 @@ impl LiveProviderConfig {
             Some(env) => crate::cli_tools::builtin::which_in(name, env),
             None => crate::cli_tools::builtin::which(name),
         };
-        let (scan, to_register) = crate::cli_tools::builtin::scan(
-            crate::cli_tools::builtin::BUILTIN_DEFINITIONS,
-            &cfg.cli_tools,
-            resolve,
-        );
+        let (scan, to_register) = crate::cli_tools::builtin::scan(&cfg.cli_tools, resolve);
         // Baseline reconciliation rides the same write (issue #676,
         // ADR-0109 Decision 2): a FOLLOWING entry drifted from the shipped
         // definition upgrades silently; EDITED entries are preserved. The
         // two plans are disjoint by construction -- the scan only plans
         // names with no entry, the reconciler only touches existing ones.
-        let upgraded = crate::cli_tools::builtin::reconcile_baselines(
-            crate::cli_tools::builtin::BUILTIN_DEFINITIONS,
-            &mut cfg.cli_tools,
-        );
+        let upgraded = crate::cli_tools::builtin::reconcile_baselines(&mut cfg.cli_tools);
         let nothing_registered = to_register.is_empty();
         for tool in to_register {
             cfg.cli_tools
@@ -1078,17 +1071,23 @@ mod tests {
         let entry = result
             .scan
             .iter()
-            .find(|e| e.name == "pandoc")
+            .find(|e| e.name() == "pandoc")
             .expect("row");
-        assert_eq!(
-            entry.state,
-            crate::cli_tools::builtin::BuiltinDetectionState::Detected
+        assert!(
+            matches!(
+                entry,
+                crate::cli_tools::builtin::BuiltinScanEntry::Detected { .. }
+            ),
+            "the fresh hit reports detected"
         );
         assert!(result
             .scan
             .iter()
-            .filter(|e| e.name != "pandoc")
-            .all(|e| e.state == crate::cli_tools::builtin::BuiltinDetectionState::Dormant));
+            .filter(|e| e.name() != "pandoc")
+            .all(|e| matches!(
+                e,
+                crate::cli_tools::builtin::BuiltinScanEntry::Dormant { .. }
+            )));
     }
 
     #[test]
@@ -1118,12 +1117,12 @@ mod tests {
         let entry = result
             .scan
             .iter()
-            .find(|e| e.name == "pandoc")
+            .find(|e| e.name() == "pandoc")
             .expect("row");
-        assert_eq!(
-            entry.state,
-            crate::cli_tools::builtin::BuiltinDetectionState::Conflict
-        );
+        assert!(matches!(
+            entry,
+            crate::cli_tools::builtin::BuiltinScanEntry::Conflict { .. }
+        ));
         // The user entry survived byte-for-byte in name + executable.
         let tools = live.cli_tools();
         let user = tools
@@ -1163,6 +1162,56 @@ mod tests {
                 .enabled,
             "a rescan never re-arms a disabled builtin entry"
         );
+    }
+
+    #[test]
+    fn scan_and_register_concurrent_with_user_writes_never_interleaves() {
+        // Issue #683: scan_and_register holds write_lock across the whole
+        // detect -> register -> persist window, so a concurrent user write
+        // can never interleave mid-scan (a lost registration or a lost user
+        // entry). Mixed workers -- 4 scans over a controlled PATH hitting
+        // pandoc, 8 user upserts with distinct names -- must all complete
+        // (no deadlock) and all land (no lost update), the upsert
+        // concurrency test's contract applied to the scan entry point.
+        use std::thread;
+
+        let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let live = live.clone();
+            let env = path_env.clone();
+            let skills_root = skills.path().to_path_buf();
+            handles.push(thread::spawn(move || {
+                live.scan_and_register(Some(env), &skills_root)
+                    .expect("scan and register");
+            }));
+        }
+        for i in 0..8 {
+            let live = live.clone();
+            handles.push(thread::spawn(move || {
+                live.upsert_cli_tool(cli_tool(&format!("user-{i}")))
+                    .expect("user upsert");
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker thread panicked");
+        }
+        let tools = live.cli_tools();
+        assert_eq!(
+            tools.iter().filter(|t| t.name == "pandoc").count(),
+            1,
+            "the builtin hit registered exactly once (unique-name invariant)"
+        );
+        for i in 0..8 {
+            assert!(
+                tools.iter().any(|t| t.name == format!("user-{i}")),
+                "the concurrent scan lost user entry user-{i}"
+            );
+        }
+        assert_eq!(tools.len(), 9, "exactly the 1 builtin + 8 user entries");
     }
 
     #[test]

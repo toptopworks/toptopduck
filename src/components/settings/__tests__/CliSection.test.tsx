@@ -11,8 +11,9 @@ import {
   restoreBuiltinCliTool,
   upsertCliTool,
 } from "../../../api";
+import { log } from "../../../lib/log";
 import { blankCliTool } from "../../../types/cli-tool";
-import type { BuiltinScanEntry } from "../../../types/cli-tool";
+import type { BuiltinScanEntry, BuiltinScanResult } from "../../../types/cli-tool";
 import type { AppConfig } from "../../../types/app-config";
 
 // The section drives everything through IPC; mock the API so the test never
@@ -22,6 +23,18 @@ vi.mock("../../../api", () => ({
   removeCliTool: vi.fn(),
   restoreBuiltinCliTool: vi.fn(),
   rescanBuiltinCliTools: vi.fn(),
+}));
+
+// The mount rescan's failure lane logs through the shared sink (issue #683):
+// mock it so the assertion pins the log call without a plugin-log IPC.
+vi.mock("../../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 function makeTool(overrides: Partial<Parameters<typeof upsertCliTool>[0]> = {}) {
@@ -82,28 +95,45 @@ function renderWithProviders(ui: ReactElement) {
 }
 
 function makeScanEntry(
-  overrides: Partial<BuiltinScanEntry> = {},
+  overrides:
+    | {
+      name?: string;
+      description?: string;
+      state: "detected";
+      executable: string;
+    }
+    | {
+      name?: string;
+      description?: string;
+      state?: "dormant" | "conflict";
+    },
 ): BuiltinScanEntry {
-  return {
-    name: "pandoc",
-    description: "Convert documents between formats.",
-    state: "dormant",
-    ...overrides,
-  };
+  const { name = "pandoc", description = "Convert documents between formats." } =
+    overrides;
+  if (overrides.state === "detected") {
+    return {
+      state: "detected",
+      name,
+      description,
+      executable: overrides.executable,
+    };
+  }
+  return { state: overrides.state ?? "dormant", name, description };
 }
 
-describe("CliSection", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    // The mount effect rescan resolves quietly in every test: no builtin
-    // rows render and the sync callback fires with an empty registry (the
-    // per-test rescan expectations override this with mockResolvedValueOnce).
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: makeAppConfig([]),
-      scan: [],
-    });
+// One shared default for every describe in this file (issue #683): the
+// mount effect rescan resolves quietly -- no builtin rows render and the
+// sync callback fires with an empty registry. Per-test expectations
+// override this with mockResolvedValueOnce / mockImplementationOnce.
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
+    config: makeAppConfig([]),
+    scan: [],
   });
+});
 
+describe("CliSection", () => {
   it("renders the empty state when nothing is registered", () => {
     const onCliToolsChanged = vi.fn();
     renderWithProviders(
@@ -145,6 +175,38 @@ describe("CliSection", () => {
       name: /Value delivery \(row \d\)/,
     });
     expect(deliveries).toHaveLength(2);
+  });
+
+  it("edits a multi-line tool description in the textarea (issue #683 rider)", async () => {
+    // The description is the LLM-facing copy and legitimately runs long;
+    // the field is an auto-growing Textarea, not a single-line Input. Pin
+    // the multi-line round-trip through save (the value survives the
+    // controlled wiring intact).
+    vi.mocked(upsertCliTool).mockResolvedValue(makeAppConfig([]));
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.change(screen.getByLabelText(/Name \(locked after save\)/), {
+      target: { value: "my-pandoc" },
+    });
+    fireEvent.change(screen.getByLabelText(/Description/), {
+      target: {
+        value: "Converts documents.\nAlso reads markdown and writes docx.",
+      },
+    });
+    fireEvent.change(screen.getByLabelText(/Executable/), {
+      target: { value: "pandoc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(upsertCliTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "my-pandoc",
+          description: "Converts documents.\nAlso reads markdown and writes docx.",
+        }),
+      );
+    });
   });
 
   it("syncs the returned full config after the enable toggle's upsert", async () => {
@@ -197,14 +259,6 @@ describe("CliSection", () => {
 });
 
 describe("CliSection builtin panel (issue #675)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: makeAppConfig([]),
-      scan: [],
-    });
-  });
-
   it("renders the three detection states on mount", async () => {
     const scan = [
       makeScanEntry({
@@ -244,7 +298,7 @@ describe("CliSection builtin panel (issue #675)", () => {
     expect(onCliToolsChanged).toHaveBeenCalledWith(makeAppConfig([]));
   });
 
-  it("keeps the pane usable when the mount rescan fails silently", async () => {
+  it("keeps the pane usable and logs a warning when the mount rescan fails", async () => {
     vi.mocked(rescanBuiltinCliTools).mockRejectedValueOnce(new Error("ipc down"));
     renderWithProviders(
       <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
@@ -256,6 +310,14 @@ describe("CliSection builtin panel (issue #675)", () => {
     });
     expect(screen.queryByTestId("builtin-cli-panel")).not.toBeInTheDocument();
     expect(screen.queryByText(/ipc down/)).not.toBeInTheDocument();
+    // The silent-in-the-UI failure still lands one log.warn (issue #683):
+    // a persistently failing scan stays diagnosable.
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      "CliSection",
+      "builtin CLI mount rescan failed",
+      expect.any(Error),
+    );
   });
 
   it("refreshes the snapshot and syncs the config on the Rescan button", async () => {
@@ -309,17 +371,220 @@ describe("CliSection builtin panel (issue #675)", () => {
     expect(disabledRow).toHaveTextContent("Disabled");
     expect(disabledRow).not.toHaveTextContent("Built-in");
   });
+
+  it("badges a user row that occupies a builtin name (issue #683)", async () => {
+    // The registration-list mirror of the builtin panel's conflict row: the
+    // user entry owning a shipped name gets the annotation, derived from the
+    // same snapshot; other user rows stay unbadged.
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
+      config: makeAppConfig([]),
+      scan: [
+        makeScanEntry({ name: "pandoc", state: "conflict" }),
+        makeScanEntry({ name: "python", state: "dormant" }),
+      ],
+    });
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([
+          makeTool({ name: "pandoc" }),
+          makeTool({ name: "my-tool" }),
+        ])}
+        onCliToolsChanged={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("builtin-cli-panel");
+    const ownerRow = screen.getByTestId("cli-tool-row-pandoc");
+    expect(ownerRow).toHaveTextContent("Holds built-in name");
+    const otherRow = screen.getByTestId("cli-tool-row-my-tool");
+    expect(otherRow).not.toHaveTextContent("Holds built-in name");
+  });
 });
 
-describe("CliSection baseline lifecycle (issue #676)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: makeAppConfig([]),
-      scan: [],
+describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
+  it("skips the stale config sync when the mount rescan lands after a user write", async () => {
+    // The write-generation guard: the mount rescan read the config BEFORE
+    // the toggle's write, so its late response would roll the user's change
+    // back. The sync is skipped; the snapshot still applies.
+    const staleConfig = makeAppConfig([makeTool()]);
+    const next = makeAppConfig([makeTool({ enabled: false })]);
+    let resolveMount: (result: BuiltinScanResult) => void = () => {};
+    vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
+      () =>
+        new Promise<BuiltinScanResult>((resolve) => {
+          resolveMount = resolve;
+        }),
+    );
+    vi.mocked(upsertCliTool).mockResolvedValue(next);
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([makeTool()])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    // The user write lands while the mount rescan is still in flight.
+    fireEvent.click(screen.getByRole("switch"));
+    await waitFor(() => {
+      expect(onCliToolsChanged).toHaveBeenCalledWith(next);
+    });
+    resolveMount({
+      config: staleConfig,
+      scan: [makeScanEntry({ name: "python", state: "dormant" })],
+    });
+    // The snapshot applies (the panel fills), the stale sync does not.
+    expect(
+      await screen.findByTestId("builtin-cli-row-python"),
+    ).toBeInTheDocument();
+    expect(onCliToolsChanged).toHaveBeenCalledTimes(1);
+    expect(onCliToolsChanged).not.toHaveBeenCalledWith(staleConfig);
+  });
+
+  it("skips the stale config sync when the manual rescan lands after a user write", async () => {
+    // The same guard covers the manual path: a toggle landing mid-scan
+    // blocks the scan's config sync; the refreshed snapshot still applies.
+    const staleConfig = makeAppConfig([makeTool()]);
+    const next = makeAppConfig([makeTool({ enabled: false })]);
+    vi.mocked(upsertCliTool).mockResolvedValue(next);
+    let resolveRescan: (result: BuiltinScanResult) => void = () => {};
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([makeTool()])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    // Let the mount rescan settle on the shared default first.
+    await waitFor(() => {
+      expect(rescanBuiltinCliTools).toHaveBeenCalledTimes(1);
+    });
+    vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
+      () =>
+        new Promise<BuiltinScanResult>((resolve) => {
+          resolveRescan = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    fireEvent.click(screen.getByRole("switch"));
+    await waitFor(() => {
+      expect(onCliToolsChanged).toHaveBeenCalledWith(next);
+    });
+    resolveRescan({
+      config: staleConfig,
+      scan: [
+        makeScanEntry({
+          name: "python",
+          state: "detected",
+          executable: "python3",
+        }),
+      ],
+    });
+    // The refreshed snapshot renders; the stale sync never fires.
+    expect(
+      await screen.findByTestId("builtin-cli-row-python"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("python3")).toBeInTheDocument();
+    expect(onCliToolsChanged).toHaveBeenCalledTimes(2); // mount + toggle
+    expect(onCliToolsChanged).toHaveBeenLastCalledWith(next);
+  });
+
+  it("syncs the rescan's config when the user write completed before the rescan started", async () => {
+    // The guard's negative control: it skips only responses that predate
+    // an applied user write. A rescan launched after a write has fully
+    // landed captures the post-write generation and syncs normally --
+    // proving the guard is a per-response check, not "any write ever
+    // happened, skip forever" (that regression would leave the
+    // registration list stale after every write and pass every other
+    // test in this file).
+    const postWrite = makeAppConfig([makeTool({ enabled: false })]);
+    const rescanned = makeAppConfig([
+      makeTool({ enabled: false }),
+      makeTool({ name: "python", executable: "python3" }),
+    ]);
+    vi.mocked(upsertCliTool).mockResolvedValue(postWrite);
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([makeTool()])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    // Let the mount rescan settle on the shared default, then complete a
+    // user write (the toggle) BEFORE issuing the manual rescan.
+    await waitFor(() => {
+      expect(rescanBuiltinCliTools).toHaveBeenCalledTimes(1);
+    });
+    fireEvent.click(screen.getByRole("switch"));
+    await waitFor(() => {
+      expect(onCliToolsChanged).toHaveBeenCalledWith(postWrite);
+    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
+      config: rescanned,
+      scan: [
+        makeScanEntry({ name: "python", state: "detected", executable: "python3" }),
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    expect(
+      await screen.findByTestId("builtin-cli-row-python"),
+    ).toBeInTheDocument();
+    // The fresh response syncs its config: the guard did not trip.
+    await waitFor(() => {
+      expect(onCliToolsChanged).toHaveBeenLastCalledWith(rescanned);
     });
   });
 
+  it("pins the in-flight scanning state (disabled button + Scanning label)", async () => {
+    let resolveRescan: (result: BuiltinScanResult) => void = () => {};
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    await waitFor(() => {
+      expect(rescanBuiltinCliTools).toHaveBeenCalledTimes(1);
+    });
+    vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
+      () =>
+        new Promise<BuiltinScanResult>((resolve) => {
+          resolveRescan = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    // In flight: the button is disabled and swaps its label.
+    expect(screen.getByRole("button", { name: "Scanning…" })).toBeDisabled();
+    resolveRescan({ config: makeAppConfig([]), scan: [] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
+    });
+  });
+
+  it("surfaces a rejected manual rescan and resets the scanning state", async () => {
+    // The manual path's error half: the rejection renders through the
+    // shared error lane, and the scanning state resets (the button
+    // re-enables, the label returns) so a retry is possible.
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    // Queue the rejection for the MANUAL call (the mount call settles on
+    // the shared default first).
+    await waitFor(() => {
+      expect(rescanBuiltinCliTools).toHaveBeenCalledTimes(1);
+    });
+    vi.mocked(rescanBuiltinCliTools).mockRejectedValueOnce(
+      new Error("scan down"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    expect(await screen.findByText("scan down")).toBeInTheDocument();
+    expect(screen.queryByText("Scanning…")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
+    // A failed manual rescan syncs nothing: only the mount call's sync.
+    expect(onCliToolsChanged).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("CliSection baseline lifecycle (issue #676)", () => {
   it("gates the row actions by source and baseline", () => {
     // A builtin row has no delete entry point (undeletable -- disabling is
     // the single shutdown axis) and no restore while it still follows the

@@ -593,6 +593,7 @@
   "settings.cli.builtin.state.conflict": "名称冲突",
   "settings.cli.builtin.conflictHint": "你的注册项占用了该名称。删除后重新扫描。",
   "settings.cli.builtinBadge": "内置",
+  "settings.cli.conflictBadge": "占用内置名",
   "settings.cli.disabledBadge": "已禁用",
   "settings.skills.filterBuiltin": "内置",
   "settings.skills.acquiredBuiltin": "内置",

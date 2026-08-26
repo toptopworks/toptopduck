@@ -84,21 +84,27 @@ export function blankCliTool(): CliToolConfig {
 }
 
 // One shipped builtin definition's detection outcome (issue #675, ADR-0109
-// Decision 3): a computed snapshot, never persisted. "detected" = a
-// candidate resolved on PATH (registered now or already in the registry);
-// "dormant" = no candidate resolved (no config entry exists);
-// "conflict" = a user registration owns the name (the builtin entry defers
-// until the user renames or removes theirs, then the next scan registers).
-export type BuiltinDetectionState = "detected" | "dormant" | "conflict";
-
-export interface BuiltinScanEntry {
-  name: string;
-  description: string;
-  state: BuiltinDetectionState;
-  // The resolved candidate name (what got written into the registration);
-  // present only when detected.
-  executable?: string;
-}
+// Decision 3): a computed snapshot, never persisted. The detection state IS
+// the row -- a discriminated union mirroring the Rust internally-tagged
+// enum (issue #683), so a detected row carries its executable by
+// construction and the other states cannot. "detected" = a candidate
+// resolved on PATH and the registry carries the entry (registered now or
+// already present); it reports the REGISTERED executable (the value this
+// scan wrote for a fresh hit, or the existing entry's own), the same value
+// the registration list shows. "dormant" = no candidate resolved (a
+// registered-but-uninstalled entry also reports dormant; the dangling
+// registration is kept). "conflict" = a user registration owns the name
+// (the builtin entry defers until the user renames or removes theirs, then
+// the next scan registers).
+export type BuiltinScanEntry =
+  | {
+    state: "detected";
+    name: string;
+    description: string;
+    executable: string;
+  }
+  | { state: "dormant"; name: string; description: string }
+  | { state: "conflict"; name: string; description: string };
 
 // The rescan command's return: the updated full config (the ADR-0109
 // Decision 9 sync contract -- commit wholesale, no re-fetch) plus the

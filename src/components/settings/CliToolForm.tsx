@@ -172,7 +172,12 @@ export function CliToolForm({
               defaultMessage="Description (the agent reads this)"
             />
           </span>
-          <Input
+          {/* A prose field, not mono: the description rides the tool
+           * definition to the model, so registrations legitimately carry
+           * multi-sentence text -- the textarea's field-sizing-content
+           * auto-grow keeps long copy readable and editable where a
+           * single-line input would scroll it out of view. */}
+          <Textarea
             className="mt-1"
             value={tool.description}
             placeholder={intl.formatMessage({

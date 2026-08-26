@@ -1644,3 +1644,47 @@ fn probe_error_wire_shape() {
     );
     assert_wire(&ProbeError::Timeout, r#"{"kind":"Timeout"}"#);
 }
+
+/// The builtin scan snapshot rows (issue #683, ADR-0109 Decision 3) cross
+/// IPC as an INTERNALLY-tagged enum (`tag = "state"`, snake_case variants)
+/// -- unlike every other shape pinned in this file there is no `data`
+/// content key: the tag rides beside the row's own fields, so `Detected`
+/// carries `executable` by construction and the dormant/conflict literals
+/// pin that the other variants cannot. The type is Serialize-only (a
+/// computed snapshot, never read back), so the round-trip half of
+/// `assert_wire` does not apply -- the literal is the pin.
+/// `src/types/cli-tool.ts` mirrors the union; pin it so a serde attribute
+/// change fails before the hand-mirror can drift.
+#[test]
+fn builtin_scan_entry_wire_shape() {
+    use toptopduck_lib::cli_tools::builtin::BuiltinScanEntry;
+    let assert_shape = |value: &BuiltinScanEntry, expected: &str| {
+        assert_eq!(
+            serde_json::to_string(value).expect("serialize"),
+            expected,
+            "wire format drifted from pinned contract"
+        );
+    };
+    assert_shape(
+        &BuiltinScanEntry::Detected {
+            name: "pandoc".into(),
+            description: "Converts documents".into(),
+            executable: "pandoc".into(),
+        },
+        r#"{"state":"detected","name":"pandoc","description":"Converts documents","executable":"pandoc"}"#,
+    );
+    assert_shape(
+        &BuiltinScanEntry::Dormant {
+            name: "pandoc".into(),
+            description: "Converts documents".into(),
+        },
+        r#"{"state":"dormant","name":"pandoc","description":"Converts documents"}"#,
+    );
+    assert_shape(
+        &BuiltinScanEntry::Conflict {
+            name: "pandoc".into(),
+            description: "Converts documents".into(),
+        },
+        r#"{"state":"conflict","name":"pandoc","description":"Converts documents"}"#,
+    );
+}

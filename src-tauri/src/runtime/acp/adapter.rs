@@ -395,8 +395,11 @@ static V1_ADAPTERS: [AdapterSpec; 5] = [
 /// caching -- detection is cheap and the picker re-scans on demand (the user
 /// may install a CLI between scans).
 pub fn detect_adapter(spec: &AdapterSpec) -> Option<PathBuf> {
+    // The single process-PATH wrapper lives in `cli_tools::builtin`
+    // (issue #683): the adapter scan and the builtin-CLI detection resolve
+    // names with one rule set.
     for name in spec.binary_names {
-        if let Some(path) = which(name) {
+        if let Some(path) = crate::cli_tools::builtin::which(name) {
             return Some(path);
         }
     }
@@ -619,16 +622,6 @@ fn flatten_option_values(options: Option<&serde_json::Value>) -> Vec<String> {
         }
     }
     out
-}
-
-/// `which`-style PATH lookup for a single binary name. Returns the first
-/// `PATH` entry that holds the binary as an executable. Delegates to the
-/// shared pure core (`cli_tools::builtin::which_in`, extracted there for
-/// the builtin-CLI install detection, issue #675) so both scans resolve
-/// names with one rule set.
-fn which(name: &str) -> Option<PathBuf> {
-    let path_env = std::env::var_os("PATH")?;
-    crate::cli_tools::builtin::which_in(name, &path_env)
 }
 
 #[cfg(test)]
@@ -1113,31 +1106,6 @@ mod tests {
         // installed may resolve to Some; the assertion pins the Option shape,
         // not the absence, so the test is portable.
         let _ = detect_adapter(&spec);
-    }
-
-    /// which finds a binary that IS on PATH (the test runner's own tooling).
-    /// Uses `cargo` (always present in a cargo test run) to exercise the
-    /// resolution path positively, not just the absent path.
-    #[test]
-    fn which_resolves_a_present_binary() {
-        // `cargo` is on PATH in any `cargo test` invocation. The bare name on
-        // Windows resolves via the `.exe` suffix branch; on POSIX directly.
-        let found = which("cargo");
-        assert!(
-            found.is_some(),
-            "cargo must resolve on PATH in a cargo test"
-        );
-        assert!(
-            found.unwrap().is_file(),
-            "the resolved path must be an existing file"
-        );
-    }
-
-    /// which returns None for a binary that is definitely not on PATH.
-    #[test]
-    fn which_returns_none_for_definitely_absent_binary() {
-        let found = which("definitely-not-a-real-binary-xyz-12345");
-        assert!(found.is_none(), "an absent binary resolves to None");
     }
 
     /// AdapterId round-trips through Display + as_str (provenance + IPC).
