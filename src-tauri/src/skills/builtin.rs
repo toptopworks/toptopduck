@@ -273,8 +273,18 @@ impl BuiltinSkillMark {
     }
 
     pub fn from_config(cfg: &AppConfig) -> Self {
+        // Only shipped names can be materialized builtin skills: a stale or
+        // hand-edited record outside the static set must not promote a user
+        // skill to the builtin posture (undeletable, name-locked). The
+        // scan-window retain drops such records from disk; this filter keeps
+        // the runtime view consistent until it does.
         Self {
-            names: cfg.builtin_skill_baselines.keys().cloned().collect(),
+            names: cfg
+                .builtin_skill_baselines
+                .keys()
+                .filter(|n| find_skill_definition(n).is_some())
+                .cloned()
+                .collect(),
         }
     }
 
@@ -352,20 +362,57 @@ pub(crate) fn reconcile(
             }
             continue;
         }
-        let Some(record) = baselines.get(def.name).cloned() else {
-            // Reverse conflict: a directory we never wrote owns the name.
-            log::warn!(
-                target: "skills",
-                "builtin skill `{}` deferred: a user skill owns the name; it \
-                 materializes once the user renames or removes it",
-                def.name
-            );
-            continue;
-        };
-        let Ok(bytes) = std::fs::read(&md_path) else {
-            continue;
+        let bytes = match std::fs::read(&md_path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::warn!(
+                    target: "skills",
+                    "builtin skill `{}` hash read failed (the next scan retries): {e}",
+                    def.name
+                );
+                continue;
+            }
         };
         let current = crate::util::sha256_hex(&bytes);
+        let Some(record) = baselines.get(def.name).cloned() else {
+            // An existing file with no record is either the reverse-conflict
+            // posture (a user skill owns the name) or the interrupted-persist
+            // half state (the file landed, the side-table store did not).
+            // Content tells them apart: a shipped render is ours by
+            // construction, so it is adopted as the record -- the self-heal,
+            // no rewrite (the bytes already agree), the locale is the
+            // render's own. Anything else is the user's -- defer.
+            let adopted_locale = def.locales.iter().find_map(|(tag, _)| {
+                def.render(tag)
+                    .ok()
+                    .filter(|content| crate::util::sha256_hex(content.as_bytes()) == current)
+                    .map(|_| *tag)
+            });
+            if let Some(tag) = adopted_locale {
+                baselines.insert(
+                    def.name.to_string(),
+                    BuiltinSkillBaseline {
+                        hash: current,
+                        locale: tag.to_string(),
+                    },
+                );
+                dirty = true;
+                log::info!(
+                    target: "skills",
+                    "builtin skill `{}` adopted a shipped-render file with no \
+                     record (self-heal after an interrupted persist)",
+                    def.name
+                );
+            } else {
+                log::warn!(
+                    target: "skills",
+                    "builtin skill `{}` deferred: a user skill owns the name; it \
+                     materializes once the user renames or removes it",
+                    def.name
+                );
+            }
+            continue;
+        };
         if current != record.hash {
             continue; // Edited (in-app or by an external editor): preserved.
         }
@@ -397,18 +444,24 @@ pub(crate) fn reconcile(
     // local skill), or when neither the file nor a Builtin CLI entry anchors
     // it anymore (dormant + hand-deleted file -- a future detection starts
     // fresh at the then-current locale).
-    let root_owned = root.to_path_buf();
+    let before = baselines.len();
     baselines.retain(|name, _| {
         if find_skill_definition(name).is_none() {
             return false;
         }
-        if root_owned.join(name).join("SKILL.md").exists() {
+        if root.join(name).join("SKILL.md").exists() {
             return true;
         }
         cli.tools.iter().any(|t| {
             t.name == *name && t.source == crate::cli_tools::config::CliToolSource::Builtin
         })
     });
+    // A dropped record is a side-table change like an insert: without this
+    // the cleanup is the one mutation the caller's persist-skip branch
+    // swallows, and a retired name's stale record would survive on disk
+    // forever -- pinning the user's same-named skill into the undeletable
+    // builtin posture with no self-service exit.
+    dirty |= baselines.len() != before;
     dirty
 }
 
@@ -462,13 +515,18 @@ pub(crate) fn restore(
 // Auto-include (ADR-0109 Decision 6: the folded initial set)
 
 /// The builtin skill names a NEW session auto-includes: the companion CLI
-/// entry is `Builtin`-sourced AND enabled, and the skill file exists (a
-/// materialized skill whose CLI entry went missing kept its file -- but with
-/// no entry there is nothing to detect+enable, so it stays out). Computed
-/// fresh at session creation and at resume (never persisted, never an
-/// event); a disabled tool drops out on the next recomputation.
+/// entry is `Builtin`-sourced AND enabled, the skill is MATERIALIZED (a
+/// side-table record -- the same anchor the frontend's `acquired: builtin`
+/// derives from, so the chip count and the seeded set agree even in the
+/// reverse-conflict window, where the file exists but is the user's), and
+/// the skill file exists (a materialized skill whose CLI entry went missing
+/// kept its file -- but with no entry there is nothing to detect+enable, so
+/// it stays out). Computed fresh at session creation and at resume (never
+/// persisted, never an event); a disabled tool drops out on the next
+/// recomputation.
 pub(crate) fn auto_included_names(
     cli: &[crate::cli_tools::config::CliToolConfig],
+    mark: &BuiltinSkillMark,
     skills_root: &Path,
 ) -> Vec<String> {
     BUILTIN_SKILL_DEFINITIONS
@@ -478,7 +536,8 @@ pub(crate) fn auto_included_names(
                 t.name == def.name
                     && t.source == crate::cli_tools::config::CliToolSource::Builtin
                     && t.enabled
-            }) && skills_root.join(def.name).join("SKILL.md").exists()
+            }) && mark.contains(def.name)
+                && skills_root.join(def.name).join("SKILL.md").exists()
         })
         .map(|def| def.name.to_string())
         .collect()
@@ -643,6 +702,43 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_adopts_a_shipped_render_file_with_no_record() {
+        // The interrupted-persist half state (the file landed, the side-table
+        // store did not): content identifies the file as ours -- adopted as
+        // the record without a rewrite, at the render's own locale. The
+        // user-file deference is pinned by the test above.
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
+        std::fs::write(
+            root.path().join("pandoc/SKILL.md"),
+            pandoc_def().render("zh-CN").unwrap(),
+        )
+        .expect("write shipped render");
+        let mut baselines = BTreeMap::new();
+        let dirty = reconcile(
+            root.path(),
+            "en-US",
+            &registry_with(vec![builtin_pandoc(true)]),
+            &mut baselines,
+        );
+        assert!(dirty);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).unwrap(),
+            pandoc_def().render("zh-CN").unwrap(),
+            "no rewrite: the bytes already agree"
+        );
+        let record = &baselines["pandoc"];
+        assert_eq!(
+            record.locale, "zh-CN",
+            "the adopt records the render's locale"
+        );
+        assert_eq!(
+            record.hash,
+            crate::util::sha256_hex(pandoc_def().render("zh-CN").unwrap().as_bytes())
+        );
+    }
+
+    #[test]
     fn reconcile_preserves_an_edited_file() {
         let root = tempfile::tempdir().expect("root");
         let mut baselines = BTreeMap::new();
@@ -715,8 +811,11 @@ mod tests {
             },
         );
         // No file, no Builtin CLI entry -> dropped; unknown name -> dropped.
-        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        // The drops report dirty: a cleanup-only scan still persists (the
+        // skip-write branch must not swallow a side-table shrink).
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
         assert!(baselines.is_empty());
+        assert!(dirty, "a dropped record is a side-table change");
     }
 
     #[test]
@@ -772,10 +871,11 @@ mod tests {
     // --- auto-include ---------------------------------------------------
 
     #[test]
-    fn auto_included_names_gates_on_source_enabled_and_file_presence() {
+    fn auto_included_names_gates_on_source_enabled_materialization_and_file_presence() {
         let root = tempfile::tempdir().expect("root");
+        let marked = BuiltinSkillMark::of(&["pandoc"]);
         // No file yet: nothing auto-included even with an enabled entry.
-        assert!(auto_included_names(&[builtin_pandoc(true)], root.path()).is_empty());
+        assert!(auto_included_names(&[builtin_pandoc(true)], &marked, root.path()).is_empty());
         std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
         std::fs::write(
             root.path().join("pandoc/SKILL.md"),
@@ -783,15 +883,24 @@ mod tests {
         )
         .expect("write");
         assert_eq!(
-            auto_included_names(&[builtin_pandoc(true)], root.path()),
+            auto_included_names(&[builtin_pandoc(true)], &marked, root.path()),
             vec!["pandoc".to_string()]
         );
+        // Not materialized (no side-table record) drops out -- the
+        // reverse-conflict window: the file exists but is the user's, and
+        // the frontend chip (acquired: builtin) does not count it either.
+        assert!(auto_included_names(
+            &[builtin_pandoc(true)],
+            &BuiltinSkillMark::default(),
+            root.path()
+        )
+        .is_empty());
         // Disabled drops out; a user-sourced entry of the same name is not
         // an auto-include anchor.
-        assert!(auto_included_names(&[builtin_pandoc(false)], root.path()).is_empty());
+        assert!(auto_included_names(&[builtin_pandoc(false)], &marked, root.path()).is_empty());
         let mut user = builtin_pandoc(true);
         user.source = CliToolSource::User;
-        assert!(auto_included_names(&[user], root.path()).is_empty());
+        assert!(auto_included_names(&[user], &marked, root.path()).is_empty());
     }
 
     // --- the registry mark -------------------------------------------------
@@ -810,5 +919,23 @@ mod tests {
         // A linked directory outranks the mark (the read-only posture is
         // the safer reading of a hand-mangled state).
         assert_eq!(with.acquired("pandoc", Acquired::Linked), Acquired::Linked);
+    }
+
+    #[test]
+    fn from_config_ignores_records_outside_the_shipped_set() {
+        // A hand-edited or stale record for a non-shipped name must not
+        // promote a user skill to the builtin posture; the scan-window
+        // retain drops the record from disk on its next pass.
+        let mut cfg = AppConfig::defaults();
+        cfg.builtin_skill_baselines.insert(
+            "ghost".to_string(),
+            BuiltinSkillBaseline {
+                hash: "h".to_string(),
+                locale: "en-US".to_string(),
+            },
+        );
+        let mark = BuiltinSkillMark::from_config(&cfg);
+        assert!(!mark.contains("ghost"));
+        assert_eq!(mark.acquired("ghost", Acquired::Local), Acquired::Local);
     }
 }

@@ -1450,6 +1450,78 @@ mod tests {
     }
 
     #[test]
+    fn scan_and_register_materializes_the_companion_skill_in_the_same_window() {
+        // The wiring pin (issue #677): a first detection registers the CLI
+        // entry AND materializes the companion SKILL.md in the same write
+        // window -- the file lands in the skills root and the side table
+        // reaches the PERSISTED config, not just the returned view.
+        let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        let result = live
+            .scan_and_register(Some(path_env), skills.path())
+            .expect("scan");
+        let md = skills.path().join("pandoc").join("SKILL.md");
+        assert!(md.exists(), "the companion skill file materialized");
+        assert!(
+            result.config.builtin_skill_baselines.contains_key("pandoc"),
+            "the side table is in the returned config"
+        );
+        // Persisted, not just the returned view (the mark re-reads through
+        // the live provider).
+        assert!(crate::skills::BuiltinSkillMark::from_config(&live.load()).contains("pandoc"));
+    }
+
+    #[test]
+    fn restore_builtin_skill_rewrites_at_the_config_locale_and_persists() {
+        // The wrapper-layer pin (issue #677): the IPC path resolves the
+        // materialization locale off the CURRENT config, rewrites the file
+        // through the shared atomic write, and persists the re-recorded side
+        // table in the same read-modify-write.
+        let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
+        let path_dir = controlled_path(&["pandoc"]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        live.scan_and_register(Some(path_env), skills.path())
+            .expect("scan");
+        std::fs::write(
+            skills.path().join("pandoc/SKILL.md"),
+            "---\nname: pandoc\ndescription: edited\n---\nEdited.\n",
+        )
+        .expect("edit");
+        let cfg = live
+            .restore_builtin_skill(skills.path(), "pandoc")
+            .expect("restore");
+        let def = crate::skills::builtin::find_skill_definition("pandoc").expect("definition");
+        let locale = crate::skills::builtin::resolve_materialization_locale(cfg.locale);
+        assert_eq!(
+            std::fs::read_to_string(skills.path().join("pandoc/SKILL.md")).unwrap(),
+            def.render(locale).unwrap(),
+            "rewritten at the current config locale"
+        );
+        // Persisted, not just the returned view.
+        assert!(crate::skills::BuiltinSkillMark::from_config(&live.load()).contains("pandoc"));
+    }
+
+    #[test]
+    fn restore_builtin_skill_refuses_and_writes_nothing() {
+        // Unknown names and curated-but-unmaterialized names (the
+        // reverse-conflict window) are refusals, and a refused restore
+        // leaves neither a file nor a side-table record behind.
+        let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
+        for name in ["no-such-skill", "pandoc"] {
+            assert!(matches!(
+                live.restore_builtin_skill(skills.path(), name),
+                Err(crate::skills::SkillError::NoSuchSkill(_))
+            ));
+        }
+        assert!(!skills.path().join("pandoc/SKILL.md").exists());
+        assert!(live.load().builtin_skill_baselines.is_empty());
+    }
+
+    #[test]
     fn restore_builtin_cli_tool_refuses_non_builtin_targets() {
         // A registered user entry, an unregistered builtin name, and a user
         // entry OWNING a builtin name (the conflict posture) are all refusals

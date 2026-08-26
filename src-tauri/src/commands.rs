@@ -263,12 +263,18 @@ pub fn create_session(
         // persists it (ADR-0100 Decision 1; see the helper's doc).
         apply_startup_posture(&handle, &posture)?;
         let mut s = handle.session_lock()?;
-        // Auto-include (issue #677, ADR-0109 Decision 6): the builtin skills
-        // whose companion CLI entries are detected + enabled seed the folded
-        // active set's INITIAL state -- no Mount event, no timeline entry,
-        // nothing persisted (the recipe stays event-only).
-        let auto_skills =
-            crate::skills::builtin::auto_included_names(&live.cli_tools(), &skills_root.0);
+        // Auto-include (issue #677, ADR-0109 Decision 6): the MATERIALIZED
+        // builtin skills whose companion CLI entries are detected + enabled
+        // seed the folded active set's INITIAL state -- no Mount event, no
+        // timeline entry, nothing persisted (the recipe stays event-only).
+        // The materialized gate is the side-table mark (the same anchor the
+        // frontend's `acquired: builtin` derives from), so a reverse-conflict
+        // user file is never seeded.
+        let auto_skills = crate::skills::builtin::auto_included_names(
+            &live.cli_tools(),
+            &crate::skills::BuiltinSkillMark::from_config(&live.load()),
+            &skills_root.0,
+        );
         s.seed_initial_skills(auto_skills);
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
@@ -1899,9 +1905,14 @@ pub async fn open_duck(
     // Auto-include recomputed at resume (issue #677, ADR-0109 Decision 6):
     // a tool disabled since the session last ran drops its skill from the
     // initial set; the recipe's own Mount/Unmount events still fold over
-    // the initial set, so an explicit in-session unmount keeps winning.
-    let auto_skills =
-        crate::skills::builtin::auto_included_names(&live.cli_tools(), &skills_root.0);
+    // the initial set, so an explicit in-session unmount keeps winning. The
+    // materialized gate (the side-table mark, mirroring the creation path)
+    // keeps a reverse-conflict user file out.
+    let auto_skills = crate::skills::builtin::auto_included_names(
+        &live.cli_tools(),
+        &crate::skills::BuiltinSkillMark::from_config(&live.load()),
+        &skills_root.0,
+    );
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,

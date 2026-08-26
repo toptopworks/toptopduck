@@ -371,6 +371,37 @@ describe("useShellSessions", () => {
     expect(log.warn).toHaveBeenCalled();
   });
 
+  it("createSessionWithQuestion tolerates the redundant mount of an auto-included skill (#677)", async () => {
+    // A cold-start pick that names an auto-included builtin skill is already
+    // in the session's folded initial set: the backend refuses the redundant
+    // mount with the AlreadyMounted kind, and that refusal is the expected
+    // outcome here -- no error banner, the session opens, the remaining
+    // picks still land. The nested IPC shape (the SessionError data.kind the
+    // tolerance matches on) is the contract under test; anything else
+    // rejects loudly (the test above).
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    vi.mocked(mountSkill).mockRejectedValueOnce({ data: { kind: "AlreadyMounted" } });
+    const { result, setShellError } = renderSessions();
+    let created = false;
+    await act(async () => {
+      created = await result.current.createSessionWithQuestion(
+        "q",
+        {
+          runtime: null,
+          modelPosture: null,
+          authMode: AUTH_MODE_DEFAULT,
+          skills: ["pandoc", "charting"],
+        },
+        [],
+      );
+    });
+    expect(created).toBe(true);
+    expect(setShellError).not.toHaveBeenCalled();
+    // The second skill still lands.
+    expect(mountSkill).toHaveBeenNthCalledWith(2, "s1", "charting");
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
   it("createSessionWithQuestion returns false + surfaces setShellError when createSession rejects", async () => {
     vi.mocked(createSession).mockRejectedValue(new Error("backend gone"));
     const { result, setShellError } = renderSessions();

@@ -496,6 +496,23 @@ mod tests {
     }
 
     #[test]
+    fn import_refuses_a_reserved_builtin_name_statically() {
+        // The static full-set refusal (issue #677): a third-party skill that
+        // happens to carry a curated name cannot take it -- the refusal
+        // fires before any filesystem effect, so neither a link nor a
+        // partial copy can land.
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("lib");
+        let source_dir = put_skill(&lib, "pandoc", "Third-party pandoc.\n");
+        let root = tmp.path().join("skills");
+        let err = import_skill(&root, &source_dir, ImportMode::Link).unwrap_err();
+        assert_eq!(err, SkillError::ReservedSkillName("pandoc".into()));
+        let err = import_skill(&root, &source_dir, ImportMode::Copy).unwrap_err();
+        assert_eq!(err, SkillError::ReservedSkillName("pandoc".into()));
+        assert!(!root.join("pandoc").exists(), "nothing landed on disk");
+    }
+
+    #[test]
     fn import_refuses_a_taken_name_and_an_invalid_source() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("skills");
