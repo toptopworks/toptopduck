@@ -448,6 +448,10 @@ enum ServerMode {
     /// `text/event-stream` response carrying the JSON-RPC envelope (exercises
     /// `HttpClient`'s SSE branch, issue #389).
     HttpSse,
+    /// Streamable HTTP whose SSE `message` event carries non-JSON data —
+    /// exercises `HttpClient`'s malformed-SSE-data framing error (the
+    /// streamable-HTTP half of the shared `malformed_sse_event` attribution).
+    HttpSseMalformed,
     /// Legacy SSE: GET opens SSE stream; POST sends messages.
     Sse,
     /// Legacy SSE that sends `event: message` (not `event: endpoint`) as the
@@ -566,6 +570,7 @@ fn handle_connection(
         (ServerMode::HttpSse, "POST") => {
             handle_jsonrpc_sse_post(&mut stream, &body, "http-sse-fake")
         }
+        (ServerMode::HttpSseMalformed, "POST") => handle_jsonrpc_sse_malformed_post(&mut stream),
         (ServerMode::Sse, "GET") => handle_sse_stream(&mut stream, &state, base_url),
         (ServerMode::Sse, "POST") => handle_sse_post(&mut stream, &body, &state),
         (ServerMode::SseBadFirstEvent, "GET") => {
@@ -617,6 +622,15 @@ fn handle_jsonrpc_sse_post(stream: &mut TcpStream, body: &[u8], server_name: &st
         let sse_body = format!("event: message\r\ndata: {}\r\n\r\n", resp);
         write_response(stream, 200, "text/event-stream", &sse_body);
     }
+}
+
+/// POST handler for streamable HTTP whose SSE `message` event carries
+/// non-JSON data: the client must fail the request with the framing
+/// attribution instead of skipping the event and waiting for a well-formed
+/// one. The request body is drained by the shared accept path.
+fn handle_jsonrpc_sse_malformed_post(stream: &mut TcpStream) {
+    let body = "event: message\r\ndata: not-json\r\n\r\n";
+    write_response(stream, 200, "text/event-stream", body);
 }
 
 // --- Legacy SSE handlers ---------------------------------------------------
@@ -869,6 +883,36 @@ fn http_transport_handles_sse_response_branch() {
         .call("add", &json!({"a": 20, "b": 22}))
         .expect("tools/call via SSE response");
     assert_eq!(first_text(&result), "42");
+}
+
+/// `HttpClient`'s SSE branch fails the request when the `message` event's
+/// data is not JSON: `Framing(InvalidData)` carrying the malformed-JSON
+/// wording — the streamable-HTTP half of the shared attribution (the legacy
+/// reader thread's half is pinned in the unit tests). The handshake itself
+/// hits the malformed event, so the failure surfaces at `connect`.
+#[test]
+fn http_transport_sse_malformed_data_fails_as_framing() {
+    let server = HttpMcpServer::spawn(ServerMode::HttpSseMalformed);
+    let url = format!("{}/mcp", server.url());
+
+    let err = match toptopduck_lib::mcp::client::HttpClient::connect(&url) {
+        Ok(_) => panic!("malformed SSE data must fail the request"),
+        Err(e) => e,
+    };
+    match err {
+        toptopduck_lib::mcp::client::ClientError::Framing(ref e) => {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::InvalidData,
+                "malformed -> Framing(InvalidData), got {e:?}"
+            );
+            assert!(
+                e.to_string().contains("malformed JSON in SSE event"),
+                "the shared wording, got {e}"
+            );
+        }
+        other => panic!("expected Err(Framing), got {other:?}"),
+    }
 }
 
 // --- SSE first-event rejection tests (issue #389 I4) ------------------------
