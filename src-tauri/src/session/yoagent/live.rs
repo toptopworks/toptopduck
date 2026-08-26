@@ -27,7 +27,7 @@ use yoagent::provider::{
     AnthropicProvider as UpstreamAnthropic, ModelConfig, OpenAiCompatProvider as UpstreamOpenAi,
     ProviderError as UpstreamError, StreamConfig, StreamEvent, StreamProvider,
 };
-use yoagent::types::{Content, Message, StopReason, Usage};
+use yoagent::types::{AgentMessage, Content, Message};
 
 use crate::model::Protocol;
 use crate::provider::tool_calling::{
@@ -87,10 +87,6 @@ fn termination_for(err: ProviderError) -> Termination {
     }
 }
 
-/// Bridge a facts-less provider (the scripted fake, `UnwiredProvider`) onto
-/// the loop. The model config is an inert placeholder: the loop carries it
-/// onto every `StreamConfig` it builds, but the bridge ignores it -- the
-/// app provider behind the bridge reads its own configuration.
 /// The bridge's inert model identity: the loop stamps it onto every
 /// `StreamConfig` it builds, but the bridge ignores it -- the app provider
 /// behind the bridge reads its own configuration. Named so the sentinel
@@ -98,6 +94,8 @@ fn termination_for(err: ProviderError) -> Termination {
 const BRIDGE_MODEL_ID: &str = "app-provider";
 const BRIDGE_API_KEY: &str = "unused";
 
+/// Bridge a facts-less provider (the scripted fake, `UnwiredProvider`) onto
+/// the loop with the inert placeholder model config above.
 fn bridged_loop(provider: Arc<dyn Provider>) -> YoagentLoop {
     let placeholder = ResolvedYoagentModel {
         config: ModelConfig::anthropic(BRIDGE_MODEL_ID, BRIDGE_MODEL_ID),
@@ -276,47 +274,25 @@ fn join_text(content: &[Content]) -> String {
         .collect()
 }
 
-/// Translate the app reply onto the upstream assistant message -- the exact
-/// shape [`super::convert_messages`] produces for the same turn, so the
-/// loop's re-feed round-trips bit-for-bit through both directions.
+/// Translate the app reply onto the upstream assistant message -- by
+/// construction the exact shape [`super::convert_messages`] produces for
+/// the same turn (the forward map IS the translation), so the loop's
+/// re-feed round-trips bit-for-bit through both directions.
 fn outcome_to_upstream_message(outcome: ToolTurnOutcome) -> Message {
-    let mut content = Vec::new();
-    for block in &outcome.thinking {
-        match block {
-            ThinkingBlock::Thinking {
-                thinking,
-                signature,
-            } => {
-                content.push(Content::thinking_signed(
-                    thinking.clone(),
-                    signature.clone(),
-                ));
-            }
-            ThinkingBlock::Redacted { data } => {
-                content.push(Content::thinking(data.clone()));
-            }
-        }
-    }
-    let stop_reason = match &outcome.reply {
-        ToolTurnReply::Text(text) => {
-            content.push(Content::Text { text: text.clone() });
-            StopReason::Stop
-        }
-        ToolTurnReply::ToolCalls { text, calls } => {
-            if let Some(t) = text {
-                content.push(Content::Text { text: t.clone() });
-            }
-            for call in calls {
-                content.push(Content::tool_call(
-                    call.id.clone(),
-                    call.name.clone(),
-                    call.input.clone(),
-                ));
-            }
-            StopReason::ToolUse
-        }
+    let (text, tool_calls) = match outcome.reply {
+        ToolTurnReply::Text(text) => (Some(text), Vec::new()),
+        ToolTurnReply::ToolCalls { text, calls } => (text, calls),
     };
-    Message::assistant(content, stop_reason, "app", "app", Usage::default())
+    let turn = ToolTurnMessage::Assistant {
+        text,
+        tool_calls,
+        thinking: outcome.thinking,
+    };
+    match super::convert_messages(&[turn]).pop() {
+        Some(AgentMessage::Llm(message)) => message,
+        // One assistant message converts to exactly one LLM message.
+        _ => unreachable!("the Assistant arm pushes exactly one Llm message"),
+    }
 }
 
 /// Encode an app provider fault onto the upstream error channel. Each

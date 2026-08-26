@@ -265,12 +265,26 @@ pub enum ProviderError {
 /// provider with no live profile behind it (the scripted test fake,
 /// [`UnwiredProvider`]); the wiring seam bridges those onto the loop as-is
 /// instead of constructing an upstream provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnModelFacts {
     pub protocol: crate::model::Protocol,
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for TurnModelFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key never rides a Debug render (ADR-0029): a present key
+        // prints as the redaction marker, mirroring the upstream
+        // `StreamConfig`'s masked Debug instead of a derived impl.
+        f.debug_struct("TurnModelFacts")
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// The provider abstraction (ADR-0007). Two methods: the single-shot
@@ -422,6 +436,24 @@ mod tests {
     use crate::model::Protocol;
     use crate::provider::prompt::ResponseLocale;
     use std::sync::{Arc, Mutex};
+
+    /// The key never rides a Debug render: a present key prints as the
+    /// redaction marker (ADR-0029, mirroring the upstream `StreamConfig`'s
+    /// masked Debug) -- a derived Debug would print the keychain secret in
+    /// the clear wherever a future log line or panic payload renders the
+    /// facts.
+    #[test]
+    fn turn_model_facts_debug_masks_the_api_key() {
+        let facts = TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "m".into(),
+            api_key: Some("sk-secret".into()),
+        };
+        let rendered = format!("{facts:?}");
+        assert!(!rendered.contains("sk-secret"), "got {rendered}");
+        assert!(rendered.contains("[redacted]"), "got {rendered}");
+    }
 
     /// A minimal request with no history / datasets -- the routing tests only
     /// care which HTTP endpoint the dispatch hit, not the body shape.

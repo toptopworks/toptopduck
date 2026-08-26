@@ -576,11 +576,14 @@ fn step_cap_exhaustion_lands_a_failed_turn() {
         TurnFailure::Execute { detail } => detail,
         other => panic!("expected Execute, got {other:?}"),
     };
-    assert!(detail.contains("did not converge"), "got {detail:?}");
     assert!(
-        captured.lock().expect("capture lock").len() >= 20,
-        "the run went deep before the cap stopped it: {}",
-        captured.lock().expect("capture lock").len()
+        detail.contains("did not converge within 24 steps"),
+        "the detail carries the default cap value: got {detail:?}"
+    );
+    assert_eq!(
+        captured.lock().expect("capture lock").len(),
+        24,
+        "the cap stops the run at exactly the default 24 round-trips"
     );
     assert!(session.get("result_1").is_none());
 }
@@ -1359,6 +1362,21 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
 // Completed -> Thinking{2} (the terminal-text round-trip). These tests pin
 // the event SEQUENCE the UI renders the live trace from.
 
+/// A `'static` phase collector (issue #669): the phase callback crosses
+/// into the yoagent loop's driver thread, so the collector rides an
+/// `Arc<Mutex>` -- one construction covers the capture + drain pattern
+/// every phase-asserting test repeats.
+fn phase_collector() -> (
+    Arc<Mutex<Vec<TurnPhase>>>,
+    impl FnMut(TurnPhase) + Send + 'static,
+) {
+    let phases: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let capture = Arc::clone(&phases);
+    (phases, move |p| {
+        capture.lock().expect("phases lock poisoned").push(p)
+    })
+}
+
 #[test]
 fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
     // ADR-0059/0078/0081: a one-call result turn emits the first provider
@@ -1368,15 +1386,12 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
     let approval = ApprovalState::new();
     let sink = NullSink;
-    // 'static capture (issue #669): the phase callback crosses into the
-    // yoagent loop's driver thread, so the collector rides an Arc<Mutex>.
-    let phases: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
-    let capture = Arc::clone(&phases);
+    let (phases, collect) = phase_collector();
     let outcome = session.ask_with_phase(
         "建结果",
         &approval,
         &sink,
-        move |p| capture.lock().expect("phases lock poisoned").push(p),
+        collect,
         &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(
@@ -1416,13 +1431,12 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
     let approval = ApprovalState::new();
     let sink = NullSink;
 
-    let phases: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
-    let capture = Arc::clone(&phases);
+    let (phases, collect) = phase_collector();
     let outcome = session.ask_with_phase(
         "澄清",
         &approval,
         &sink,
-        move |p| capture.lock().expect("phases lock poisoned").push(p),
+        collect,
         &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(

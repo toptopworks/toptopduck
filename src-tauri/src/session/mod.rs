@@ -1282,13 +1282,14 @@ impl Session {
                 // API-invalid interleaving). `None` leaves the request
                 // thinking-disabled, byte-identical to the status quo.
                 request.thought_level = self.runtime_facts.thought_level.clone();
-                // Disjoint field borrows: the loop borrows `&*self.provider`
-                // while TurnDeps borrows `&self.admin_engine` /
-                // `&mut self.source_files` /
-                // `&mut self.working_set` / `&self.temp_path` and the loop takes
-                // `&mut *self.materializer` -- distinct Session fields, so they
-                // coexist without widening to `&mut self`. The block scope drops
-                // the borrows before `record_turn` takes its own `&mut self`.
+                // Disjoint field borrows: `TurnDeps` borrows
+                // `&self.admin_engine` / `&mut self.source_files` /
+                // `&mut self.working_set` / `&self.temp_path` and the loop
+                // takes `&mut *self.materializer` (the provider crosses into
+                // the loop as an `Arc` clone, not a borrow) -- distinct
+                // Session fields, so they coexist without widening to
+                // `&mut self`. The block scope drops the borrows before
+                // `record_turn` takes its own `&mut self`.
                 let (outcome, trace) = {
                     // Connect the user's configured external MCP servers
                     // (issue #301 slice C-loop / slice D): same per-turn

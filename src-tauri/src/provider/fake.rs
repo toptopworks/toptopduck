@@ -28,12 +28,10 @@ use super::{Provider, ProviderError, ProviderReply, ProviderRequest};
 struct Script<T> {
     /// Canned results, returned front-first; the last sticks once reached.
     results: Vec<Result<T, ProviderError>>,
-    /// How many times this script has been drawn. `Cell` (not `RefCell`)
-    /// because the counter is a single Copy value -- the trait takes `&self`,
-    /// so interior mutability is required, and a Cell suffices.
-    /// `AtomicUsize` over `Cell` so the fake stays `Sync` (the `Provider`
-    /// trait's bound, issue #669: the turn's runner hands the provider across
-    /// the loop's thread scope).
+    /// How many times this script has been drawn. Interior mutability is
+    /// required (the trait takes `&self`); `AtomicUsize` (not `Cell`) so the
+    /// fake stays `Sync` (the `Provider` trait's bound, issue #669: the
+    /// turn's runner hands the provider across the loop's thread scope).
     calls: std::sync::atomic::AtomicUsize,
 }
 

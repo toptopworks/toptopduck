@@ -13,13 +13,13 @@
 //! network or a real key.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use toptopduck_lib::{
-    CancelToken, LiveProvider, LoadOutcome, Protocol, ResponseLocale, Session, StaticConfig,
-    TurnFailure, TurnOutcome,
+    CancelToken, LiveProvider, LoadOutcome, Protocol, ProviderConfigSource, ResponseLocale,
+    Session, StaticConfig, TurnFailure, TurnOutcome,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -47,31 +47,35 @@ fn sse(events: &[(&str, serde_json::Value)]) -> String {
 /// (first round-trip): a tool_use block whose arguments arrive as one
 /// `input_json_delta`, closed by `content_block_stop` (where the upstream
 /// parser resolves the accumulated buffer into the call's arguments) and a
-/// `tool_use` stop reason.
-fn anthropic_tool_use_body() -> String {
+/// `tool_use` stop reason. `leading` block events (start/stop pairs) ride
+/// ahead of the tool_use block, which then takes index `leading.len()` --
+/// the redacted-thinking pin fronts the stream this way.
+fn anthropic_tool_use_body_with_leading(leading: &[(&str, serde_json::Value)]) -> String {
     let partial = serde_json::json!({"sql": COUNT_SQL}).to_string();
-    sse(&[
-        (
-            "message_start",
-            serde_json::json!({"type": "message_start"}),
-        ),
+    let tool_index = leading.len();
+    let mut events: Vec<(&str, serde_json::Value)> = vec![(
+        "message_start",
+        serde_json::json!({"type": "message_start"}),
+    )];
+    events.extend_from_slice(leading);
+    events.extend([
         (
             "content_block_start",
             serde_json::json!({
-                "type": "content_block_start", "index": 0,
+                "type": "content_block_start", "index": tool_index,
                 "content_block": {"type": "tool_use", "id": "tu_1", "name": "materialize", "input": {}},
             }),
         ),
         (
             "content_block_delta",
             serde_json::json!({
-                "type": "content_block_delta", "index": 0,
+                "type": "content_block_delta", "index": tool_index,
                 "delta": {"type": "input_json_delta", "partial_json": partial},
             }),
         ),
         (
             "content_block_stop",
-            serde_json::json!({"type": "content_block_stop", "index": 0}),
+            serde_json::json!({"type": "content_block_stop", "index": tool_index}),
         ),
         (
             "message_delta",
@@ -82,7 +86,12 @@ fn anthropic_tool_use_body() -> String {
             }),
         ),
         ("message_stop", serde_json::json!({"type": "message_stop"})),
-    ])
+    ]);
+    sse(&events)
+}
+
+fn anthropic_tool_use_body() -> String {
+    anthropic_tool_use_body_with_leading(&[])
 }
 
 /// The Anthropic SSE terminal-text stream ending the turn (second
@@ -318,6 +327,7 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
         other => panic!("expected people.csv to load, got {other:?}"),
     }
 
+    let started = Instant::now();
     let handle = thread::spawn(move || session.ask("多少人"));
     // Let ask enter the blocking provider call, then fire cancel mid-call.
     thread::sleep(Duration::from_millis(300));
@@ -327,6 +337,16 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
     assert!(
         matches!(outcome, TurnOutcome::Cancelled),
         "soft cancel during HTTP block should land Cancelled: got {outcome:?}"
+    );
+    // Immediacy (ADR-0107): the watcher aborts the in-flight SSE read
+    // instead of waiting the HTTP call out, so the turn lands well under
+    // the 1s the blocked read takes. 900ms bounds the happy path (300ms
+    // cancel + the 25ms watcher poll + overhead) with slack for a slow CI
+    // runner; a dead watcher would read the stream out at ~1.3s.
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "cancel should land immediately mid-read, took {:?}",
+        started.elapsed()
     );
 }
 
@@ -428,12 +448,7 @@ fn anthropic_redacted_thinking_block_is_dropped_but_the_turn_survives() {
         .create();
     // A redacted_thinking block (index 0) ahead of the tool_use block
     // (index 1): what the real API emits under a safety intervention.
-    let partial = serde_json::json!({ "sql": COUNT_SQL }).to_string();
-    let tool_with_redacted = sse(&[
-        (
-            "message_start",
-            serde_json::json!({"type": "message_start"}),
-        ),
+    let tool_with_redacted = anthropic_tool_use_body_with_leading(&[
         (
             "content_block_start",
             serde_json::json!({
@@ -445,33 +460,6 @@ fn anthropic_redacted_thinking_block_is_dropped_but_the_turn_survives() {
             "content_block_stop",
             serde_json::json!({"type": "content_block_stop", "index": 0}),
         ),
-        (
-            "content_block_start",
-            serde_json::json!({
-                "type": "content_block_start", "index": 1,
-                "content_block": {"type": "tool_use", "id": "tu_1", "name": "materialize", "input": {}},
-            }),
-        ),
-        (
-            "content_block_delta",
-            serde_json::json!({
-                "type": "content_block_delta", "index": 1,
-                "delta": {"type": "input_json_delta", "partial_json": partial},
-            }),
-        ),
-        (
-            "content_block_stop",
-            serde_json::json!({"type": "content_block_stop", "index": 1}),
-        ),
-        (
-            "message_delta",
-            serde_json::json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": "tool_use"},
-                "usage": {"output_tokens": 10},
-            }),
-        ),
-        ("message_stop", serde_json::json!({"type": "message_stop"})),
     ]);
     let tool_mock = server
         .mock("POST", "/v1/messages")
@@ -556,6 +544,7 @@ fn openai_cancel_during_http_block_lands_cancelled() {
         other => panic!("expected people.csv to load, got {other:?}"),
     }
 
+    let started = Instant::now();
     let handle = thread::spawn(move || session.ask("多少人"));
     thread::sleep(Duration::from_millis(300));
     cancel.request();
@@ -565,4 +554,99 @@ fn openai_cancel_during_http_block_lands_cancelled() {
         matches!(outcome, TurnOutcome::Cancelled),
         "mid-stream cancel on the openai wire lands Cancelled: got {outcome:?}"
     );
+    // Immediacy, mirroring the anthropic pin: the watcher aborts the
+    // in-flight SSE read, so the turn lands well under the 1s the blocked
+    // read takes (900ms bounds the happy path with slack for a slow CI
+    // runner).
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "cancel should land immediately mid-read, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// A config source whose `protocol` can be flipped between turns (via the
+/// shared `Arc<Mutex>`), so the per-turn freshness of the swapped loop can
+/// be pinned on the wire. All other fields are fixed; derives `Clone`
+/// sharing the protocol cell so the test can hand a copy to the
+/// `LiveProvider` and still flip the protocol afterward.
+#[derive(Clone)]
+struct FlippableConfig {
+    base_url: String,
+    protocol: Arc<Mutex<Protocol>>,
+}
+
+impl ProviderConfigSource for FlippableConfig {
+    fn api_key(&self) -> Option<String> {
+        Some("sk-test".into())
+    }
+    fn base_url(&self) -> String {
+        self.base_url.clone()
+    }
+    fn model(&self) -> String {
+        "m".into()
+    }
+    fn locale(&self) -> ResponseLocale {
+        ResponseLocale::EnUS
+    }
+    fn protocol(&self) -> Protocol {
+        *self
+            .protocol
+            .lock()
+            .expect("flippable protocol mutex poisoned")
+    }
+}
+
+/// Per-turn profile freshness on the swapped loop (ADR-0107, issue #669):
+/// a protocol switch between two turns of the SAME Session reroutes the
+/// second turn to the other upstream streamer -- the wiring seam reads
+/// `turn_model_facts` fresh each turn and rebuilds the streamer from it,
+/// so a mid-session profile switch lands the very next turn. A layer that
+/// cached the resolution (at Session construction or the first ask) would
+/// send both turns to one endpoint and miss the other mock. The wire-level
+/// mirror of `re_reads_protocol_per_turn_not_cached_at_construction` (the
+/// single-shot generate path's pin, in the provider unit tests).
+#[test]
+fn a_protocol_switch_between_turns_reroutes_the_next_turn() {
+    let mut server = mockito::Server::new();
+    let anthropic_mock = server
+        .mock("POST", "/v1/messages")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(anthropic_text_body("第一回合完成"))
+        .create();
+    let openai_mock = server
+        .mock("POST", "/chat/completions")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(openai_text_body("第二回合完成"))
+        .create();
+
+    let config = FlippableConfig {
+        base_url: server.url(),
+        protocol: Arc::new(Mutex::new(Protocol::Anthropic)),
+    };
+    let provider = LiveProvider::new(config.clone());
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+
+    // Turn 1: the anthropic facts construct the anthropic streamer; a
+    // textual turn needs no fixture, only the one round-trip.
+    match session.ask("第一回合") {
+        TurnOutcome::Textual { .. } => {}
+        other => panic!("expected Textual, got {other:?}"),
+    }
+    // The profile switch: flip the protocol between turns of one Session.
+    *config
+        .protocol
+        .lock()
+        .expect("flippable protocol mutex poisoned") = Protocol::Openai;
+    // Turn 2 must resolve through the fresh facts and hit the openai wire.
+    match session.ask("第二回合") {
+        TurnOutcome::Textual { .. } => {}
+        other => panic!("expected Textual, got {other:?}"),
+    }
+    anthropic_mock.assert();
+    openai_mock.assert();
 }
