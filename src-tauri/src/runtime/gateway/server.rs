@@ -1343,8 +1343,10 @@ mod tests {
             s.set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set read timeout");
             // Half an initialize frame, a pause longer than READ_TIMEOUT
-            // (100ms) so the serve's read times out mid-line at least twice,
-            // then the frame's tail + terminator.
+            // (100ms) so the serve's read times out mid-line -- typically
+            // at least twice, though the count is timing-dependent and any
+            // single timeout exercises the resume -- then the frame's tail
+            // + terminator.
             let frame = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
             let wire = serde_json::to_string(&frame).expect("serialize");
             let wire = wire.as_bytes();

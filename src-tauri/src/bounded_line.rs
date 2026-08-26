@@ -25,10 +25,15 @@
 //! continuing (issue #647).
 //!
 //! There are two consumption shapes sharing one implementation (issue #649):
-//! the stateless [`read_line_bounded`] (a fresh line per call -- every caller
+//! the stateless [`read_line_bounded`] (a fresh line per call -- for callers
 //! whose reads cannot time out), and [`BoundedLineReader`] (the partial line
 //! stays with the reader, so a caller that retries on a read timeout resumes
 //! the same line instead of re-framing from the stream's mid-line position).
+//! The one stateless caller whose reads can time out is the serve loop's
+//! pre-auth handshake: it reads under `READ_TIMEOUT` statelessly, so a
+//! mid-line pause longer than that fails the connection (theoretical window
+//! -- the bridge writes the auth line in a single call); the serve loop past
+//! auth reads through [`BoundedLineReader`] and does not share the gap.
 use std::io::{BufRead, Read};
 
 /// The byte cap on a single incoming line (issue #629): an untrusted
@@ -84,7 +89,10 @@ impl<R: BufRead> BoundedLineReader<R> {
 
     /// Read one line under the same cap + disposition contract as
     /// [`read_line_bounded`]. An error return (a read timeout included)
-    /// leaves the partial line buffered; call again to resume it.
+    /// leaves the partial line buffered; call again to resume it. The cap
+    /// bounds the accumulated line, not each call's read: a retry under a
+    /// smaller cap than the bytes already buffered fails the line as
+    /// over-long rather than emitting a line past the cap.
     pub(crate) fn read_line_bounded(&mut self, max: usize) -> std::io::Result<LineRead> {
         // A zero budget can never read a byte, so it reports EOF -- the
         // stateless shape's answer to the same degenerate input (the
@@ -103,7 +111,10 @@ impl<R: BufRead> BoundedLineReader<R> {
         // The budget was exhausted without a newline: the line is over-long,
         // whether it filled in this call or across retried ones (an
         // error-interrupted read can leave appended bytes at exactly the
-        // limit). (A short line without a newline is the final line before
+        // limit). `>=` rather than `==` also routes a retry under a smaller
+        // cap here -- unreachable under the fixed cap every real caller
+        // passes, but the fall-through would otherwise emit an over-cap
+        // line. (A short line without a newline is the final line before
         // EOF -- a normal line. A line whose payload reaches `max` bytes
         // drops as over-long either way: mid-stream its newline lands one
         // byte past the budget, and an exactly-`max` final line is not
@@ -114,7 +125,7 @@ impl<R: BufRead> BoundedLineReader<R> {
         // the over-long evidence, so a read timeout DURING the drain
         // re-enters this branch on retry rather than resuming a garbage
         // line from drained bytes.
-        if self.partial.len() == max && !self.partial.ends_with(b"\n") {
+        if self.partial.len() >= max && !self.partial.ends_with(b"\n") {
             let mut scratch = Vec::new();
             loop {
                 scratch.clear();
@@ -348,8 +359,11 @@ mod tests {
         ));
     }
 
-    /// A timeout before any byte of a line is pending is a plain retry:
-    /// nothing was buffered, so the next call reads the line normally.
+    /// A timeout before any byte of a line is pending still propagates as an
+    /// error -- a shape the stateless reader shares, so this pin is the
+    /// error-propagation contract, not the resume itself (an implementation
+    /// swallowing it into `Ok(Eof)` would make the serve loop treat a live
+    /// bridge as closed); the next call reads the line normally.
     #[test]
     fn resumable_reader_times_out_before_any_bytes() {
         let mut r = BoundedLineReader::new(Scripted::new(vec![
@@ -384,6 +398,31 @@ mod tests {
         // 8 without a newline -> over-long; the drain eats "0\n" and the
         // stream continues with the next line intact.
         assert!(matches!(r.read_line_bounded(8), Ok(LineRead::Overlong)));
+        assert!(matches!(
+            r.read_line_bounded(8),
+            Ok(LineRead::Line(l)) if l == "next\n"
+        ));
+    }
+
+    /// A retry under a smaller cap than the bytes already buffered fails the
+    /// line as over-long rather than emitting an over-cap `Line` -- the `>=`
+    /// guard making the cap contract hold even for a caller that varies the
+    /// cap (no real caller does; every entry point passes one fixed cap).
+    #[test]
+    fn resumable_reader_smaller_cap_on_retry_fails_overlong() {
+        let mut r = BoundedLineReader::new(Scripted::new(vec![
+            Step::Bytes(b"12345".to_vec()),
+            Step::Fail(std::io::ErrorKind::TimedOut),
+            Step::Bytes(b"678\n".to_vec()),
+            Step::Bytes(b"next\n".to_vec()),
+        ]));
+        assert_eq!(
+            r.read_line_bounded(8).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        // Retry under a smaller cap: the 5 buffered bytes already pass it,
+        // so the line fails as over-long and the drain eats "678\n".
+        assert!(matches!(r.read_line_bounded(4), Ok(LineRead::Overlong)));
         assert!(matches!(
             r.read_line_bounded(8),
             Ok(LineRead::Line(l)) if l == "next\n"
