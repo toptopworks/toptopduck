@@ -417,13 +417,15 @@ fn tracked_fields_equal(a: &CliToolConfig, b: &CliToolConfig) -> bool {
 /// timing guarantee -- `setup` completes before any webview IPC). `path_env`
 /// mirrors [`crate::provider::live_config::LiveProviderConfig::scan_and_register`]:
 /// `None` reads the process environment, `Some` is the tests' controlled
-/// PATH. Failures are the caller's to log-and-degrade; the settings-page
-/// rescan retries.
+/// PATH. `skills_root` rides the same window for the builtin-skill
+/// materialization (issue #677). Failures are the caller's to log-and-degrade;
+/// the settings-page rescan retries.
 pub fn startup_register(
     live: &crate::provider::live_config::LiveProviderConfig,
     path_env: Option<OsString>,
+    skills_root: &std::path::Path,
 ) -> Result<(), crate::provider::live_config::CliToolWriteError> {
-    let result = live.scan_and_register(path_env)?;
+    let result = live.scan_and_register(path_env, skills_root)?;
     for entry in &result.scan {
         if entry.state == BuiltinDetectionState::Conflict {
             log::warn!(

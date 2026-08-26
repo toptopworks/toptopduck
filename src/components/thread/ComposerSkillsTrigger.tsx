@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
 import { Puzzle } from "lucide-react";
 
 import { listMountedSkills, listSkills } from "../../api";
+import type { CliToolConfig } from "../../types/cli-tool";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { ComposerSkillsSection } from "./ComposerSkillsSection";
@@ -36,6 +37,10 @@ export type ComposerSkillsTriggerProps = {
    *  toggle writes to the shell-level pending list via this callback instead
    *  of the per-session mount IPC. Undefined when sessionId is non-null. */
   onPendingSkillsChange?: (next: string[]) => void;
+  /** The registered CLI tools (issue #677): the cold-start chip's count
+   *  folds the auto-included builtin skills in, derived purely on the
+   *  frontend from the skills listing x this registry (no extra IPC). */
+  cliTools?: CliToolConfig[];
 };
 
 const CHIP_CLASS =
@@ -47,6 +52,7 @@ export function ComposerSkillsTrigger({
   onOpenSettingsSkills,
   pendingSkills,
   onPendingSkillsChange,
+  cliTools,
 }: ComposerSkillsTriggerProps) {
   const intl = useIntl();
   const [open, setOpen] = useState(false);
@@ -65,8 +71,28 @@ export function ComposerSkillsTrigger({
     queryFn: listSkills,
   });
 
+  // Cold start (issue #677): the count the chip reports is what the NEXT
+  // session's folded active set will hold -- the pending picks PLUS the
+  // auto-included builtin skills (builtin-sourced, enabled entries whose
+  // companion skill file is in the registry; the backend computes the same
+  // set at creation). Unioned + deduped so a pending pick that names an
+  // auto skill counts once.
+  const autoIncluded = useMemo(() => {
+    const tools = cliTools ?? [];
+    return (listing?.skills ?? [])
+      .filter(
+        (s) =>
+          s.acquired === "builtin" &&
+          tools.some(
+            (t) => t.name === s.name && t.source === "builtin" && t.enabled,
+          ),
+      )
+      .map((s) => s.name);
+  }, [listing, cliTools]);
   const mountedCount =
-    sessionId === null ? (pendingSkills ?? []).length : (mounted ?? []).length;
+    sessionId === null
+      ? new Set([...(pendingSkills ?? []), ...autoIncluded]).size
+      : (mounted ?? []).length;
   const totalCount = (listing?.skills ?? []).length;
   const label = intl.formatMessage(
     {

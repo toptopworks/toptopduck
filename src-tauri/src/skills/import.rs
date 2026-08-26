@@ -81,7 +81,15 @@ pub fn import_skill(
     source_dir: &Path,
     mode: ImportMode,
 ) -> Result<SkillEntry, SkillError> {
-    let entry = load_skill(source_dir)?;
+    // External sources are never registry material: the source load runs
+    // with an empty builtin mark (marking keys on registry side-table
+    // membership, and a same-named external dir is not ours to claim).
+    let entry = load_skill(source_dir, &Default::default())?;
+    // The builtin reserved set is refused statically (issue #677) -- a
+    // third-party skill that happens to carry a curated name cannot take it.
+    if super::builtin::is_reserved_skill_name(&entry.name) {
+        return Err(SkillError::ReservedSkillName(entry.name.clone()));
+    }
     let target = root.join(&entry.name);
     if target.exists() {
         return Err(SkillError::NameTaken(entry.name.clone()));
@@ -106,8 +114,9 @@ pub fn import_skill(
     }
     // Read back through the link / copy so the entry carries the correct
     // `acquired` variant + the link target the drawer's "open source location"
-    // reveals.
-    load_skill(&target)
+    // reveals. The reserved-set refusal above keeps the name out of the
+    // builtin namespace, so the read-back cannot be a builtin skill.
+    load_skill(&target, &Default::default())
 }
 
 /// Run a batch of imports, collecting each outcome so a per-item failure never
@@ -161,7 +170,7 @@ fn scan_source_children(source: &Path, existing_names: &HashSet<String>) -> Vec<
         {
             continue;
         }
-        match load_skill(&path) {
+        match load_skill(&path, &Default::default()) {
             Ok(loaded) => {
                 let status = if existing_names.contains(&loaded.name) {
                     DiscoveredSkillStatus::AlreadyExists
@@ -484,6 +493,23 @@ mod tests {
         assert!(!fs::symlink_metadata(&copied)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false));
+    }
+
+    #[test]
+    fn import_refuses_a_reserved_builtin_name_statically() {
+        // The static full-set refusal (issue #677): a third-party skill that
+        // happens to carry a curated name cannot take it -- the refusal
+        // fires before any filesystem effect, so neither a link nor a
+        // partial copy can land.
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("lib");
+        let source_dir = put_skill(&lib, "pandoc", "Third-party pandoc.\n");
+        let root = tmp.path().join("skills");
+        let err = import_skill(&root, &source_dir, ImportMode::Link).unwrap_err();
+        assert_eq!(err, SkillError::ReservedSkillName("pandoc".into()));
+        let err = import_skill(&root, &source_dir, ImportMode::Copy).unwrap_err();
+        assert_eq!(err, SkillError::ReservedSkillName("pandoc".into()));
+        assert!(!root.join("pandoc").exists(), "nothing landed on disk");
     }
 
     #[test]

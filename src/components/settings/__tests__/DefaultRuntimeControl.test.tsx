@@ -56,6 +56,7 @@ const updatedConfig: AppConfig = {
   mcp_servers: { servers: [] },
   sessions_dir: null,
   default_runtime: { kind: "built_in" },
+  builtin_skill_baselines: {},
   last_model_postures: {},
 };
 

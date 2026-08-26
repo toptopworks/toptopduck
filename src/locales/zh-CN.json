@@ -593,5 +593,17 @@
   "settings.cli.builtin.state.conflict": "名称冲突",
   "settings.cli.builtin.conflictHint": "你的注册项占用了该名称。删除后重新扫描。",
   "settings.cli.builtinBadge": "内置",
-  "settings.cli.disabledBadge": "已禁用"
+  "settings.cli.disabledBadge": "已禁用",
+  "settings.skills.filterBuiltin": "内置",
+  "settings.skills.acquiredBuiltin": "内置",
+  "settings.skills.editedBadge": "已编辑",
+  "settings.skills.fieldNameLockedHint": "内置技能的名称不可更改",
+  "settings.skills.confirmRestoreTitle": "恢复 {name} 的内置定义？",
+  "settings.skills.confirmRestoreBody": "这会丢弃你对 {name} 的修改，将其恢复为随应用发行的内置定义。此操作无法撤销。",
+  "settings.skills.restoreAction": "恢复",
+  "settings.skills.restoreLabel": "恢复技能 {name} 的内置定义",
+  "composer.contextPanel.builtinSkillBadge": "内置",
+  "error.skill.reservedName": "名称「{name}」为内置技能保留",
+  "error.skill.nameLocked": "内置技能「{name}」不能重命名",
+  "error.skill.undeletable": "内置技能「{name}」不能删除；请改为禁用对应工具"
 }

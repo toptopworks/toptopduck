@@ -2,15 +2,23 @@ import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Download, Plus, Puzzle, RefreshCw, Trash2 } from "lucide-react";
+import { Download, Plus, Puzzle, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 
 import type {
+  BuiltinSkillBaseline,
   SkillAcquired,
   SkillEntry,
   SkillUpdate,
   SkippedSkill,
 } from "../../types/skills";
-import { createSkill, deleteSkill, listSkills, updateSkill } from "../../api";
+import type { AppConfig } from "../../types/app-config";
+import {
+  createSkill,
+  deleteSkill,
+  listSkills,
+  restoreBuiltinSkill,
+  updateSkill,
+} from "../../api";
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
 import { fmtError } from "../../lib/error-presentation";
 import { skillKeys } from "../../session/queryKeys";
@@ -71,7 +79,12 @@ type DrawerDraft = {
   linkTarget: string | null;
 };
 
-const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = ["all", "linked", "local"];
+const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
+  "all",
+  "linked",
+  "local",
+  "builtin",
+];
 
 const ROW_CLASS =
   "hover:bg-accent focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 flex cursor-pointer items-center gap-3 px-4 py-3 outline-none";
@@ -89,9 +102,19 @@ function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
 export function SkillsSection({
   configuredMcpIds,
   configuredCliIds,
+  builtinSkillBaselines,
+  onAppConfigSync,
 }: {
   configuredMcpIds: string[];
   configuredCliIds: string[];
+  /** The builtin-skill baseline side table (issue #677): the anchor the
+   *  Edited derivation on builtin rows compares each skill's
+   *  `content_hash` against. */
+  builtinSkillBaselines: Record<string, BuiltinSkillBaseline>;
+  /** Sync the shell's app-config wholesale after a restore command (the
+   *  command already persisted and returned the updated full config -- the
+   *  same state-only-sync contract the CLI pane's writes use). */
+  onAppConfigSync: (cfg: AppConfig) => void;
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -105,6 +128,7 @@ export function SkillsSection({
   const [filter, setFilter] = useState<AcquiredFilter>("all");
   const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -141,6 +165,22 @@ export function SkillsSection({
     onError: (e) => {
       setError(fmtError(e, intl));
       setConfirmDelete(null);
+    },
+  });
+
+  // The explicit builtin-skill restore (issue #677): the command returns the
+  // updated full config (synced wholesale) and the skills query refetches so
+  // the row's content_hash -- and with it the Edited derivation -- follows.
+  const restoreMutation = useMutation({
+    mutationFn: (name: string) => restoreBuiltinSkill(name),
+    onSuccess: (cfg) => {
+      onAppConfigSync(cfg);
+      invalidate();
+      setConfirmRestore(null);
+    },
+    onError: (e) => {
+      setError(fmtError(e, intl));
+      setConfirmRestore(null);
     },
   });
 
@@ -183,6 +223,18 @@ export function SkillsSection({
 
   function openEdit(skill: SkillEntry) {
     setDrawer({ mode: "edit", name: skill.name });
+  }
+
+  // The Edited derivation on builtin rows (issue #677): pure comparison of
+  // the listing's whole-file hash against the side table's recorded hash --
+  // an external editor's change reads as edited exactly like an in-app edit.
+  // A builtin row with no record (config lag) reads as edited: the safer
+  // display, and the restore reconciles it.
+  function isEditedBuiltin(skill: SkillEntry): boolean {
+    return (
+      skill.acquired === "builtin" &&
+      builtinSkillBaselines[skill.name]?.hash !== skill.content_hash
+    );
   }
 
   async function openSource(target: string | null) {
@@ -316,10 +368,15 @@ export function SkillsSection({
                       id: "settings.skills.filterLinked",
                       defaultMessage: "Linked",
                     })
-                  : intl.formatMessage({
-                      id: "settings.skills.filterLocal",
-                      defaultMessage: "Local",
-                    })}
+                  : opt === "builtin"
+                    ? intl.formatMessage({
+                        id: "settings.skills.filterBuiltin",
+                        defaultMessage: "Built-in",
+                      })
+                    : intl.formatMessage({
+                        id: "settings.skills.filterLocal",
+                        defaultMessage: "Local",
+                      })}
             </option>
           ))}
         </select>
@@ -345,8 +402,23 @@ export function SkillsSection({
             <SkillRow
               key={skill.name}
               skill={skill}
+              edited={isEditedBuiltin(skill)}
               onOpen={() => openEdit(skill)}
-              onDelete={() => setConfirmDelete(skill.name)}
+              // A builtin skill is undeletable (issue #677): no delete entry
+              // point renders -- disabling the companion CLI tool is the
+              // single shutdown axis.
+              onDelete={
+                skill.acquired === "builtin"
+                  ? undefined
+                  : () => setConfirmDelete(skill.name)
+              }
+              // The restore shows only on an EDITED builtin row -- an
+              // unedited row already agrees with the shipped baseline.
+              onRestore={
+                skill.acquired === "builtin" && isEditedBuiltin(skill)
+                  ? () => setConfirmRestore(skill.name)
+                  : undefined
+              }
             />
           ))
         )}
@@ -417,6 +489,56 @@ export function SkillsSection({
         </AlertDialog>
       )}
 
+      {confirmRestore && (
+        <AlertDialog
+          defaultOpen
+          onOpenChange={(open) => {
+            if (!open && !restoreMutation.isPending) setConfirmRestore(null);
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                <FormattedMessage
+                  id="settings.skills.confirmRestoreTitle"
+                  defaultMessage="Restore built-in definition for {name}?"
+                  values={{ name: confirmRestore }}
+                />
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                <FormattedMessage
+                  id="settings.skills.confirmRestoreBody"
+                  defaultMessage="This discards your edits to {name} and returns it to the definition shipped with the app. This cannot be undone."
+                  values={{ name: confirmRestore }}
+                />
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={restoreMutation.isPending}>
+                <FormattedMessage
+                  id="common.cancel"
+                  defaultMessage="Cancel"
+                />
+              </AlertDialogCancel>
+              <AlertDialogAction
+                disabled={restoreMutation.isPending}
+                onClick={(e) => {
+                  // Prevent Radix AlertDialog auto-close so the busy state
+                  // can render while the IPC runs (the CLI pane pattern).
+                  e.preventDefault();
+                  restoreMutation.mutate(confirmRestore);
+                }}
+              >
+                <FormattedMessage
+                  id="settings.skills.restoreAction"
+                  defaultMessage="Restore"
+                />
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+
       {importOpen && (
         <ImportSkillsDialog
           onClose={() => setImportOpen(false)}
@@ -428,11 +550,17 @@ export function SkillsSection({
 
 type SkillRowProps = {
   skill: SkillEntry;
+  /** The Edited derivation (builtin rows only, issue #677). */
+  edited: boolean;
   onOpen: () => void;
-  onDelete: () => void;
+  /** Undefined on builtin rows: undeletable (issue #677). */
+  onDelete?: () => void;
+  /** Present only on an EDITED builtin row: the explicit restore (issue #677). */
+  onRestore?: () => void;
 };
 
-function SkillRow({ skill, onOpen, onDelete }: SkillRowProps) {
+function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps) {
+  const intl = useIntl();
   return (
     <div
       role="button"
@@ -457,6 +585,11 @@ function SkillRow({ skill, onOpen, onDelete }: SkillRowProps) {
                 id="settings.skills.acquiredLinked"
                 defaultMessage="linked"
               />
+            ) : skill.acquired === "builtin" ? (
+              <FormattedMessage
+                id="settings.skills.acquiredBuiltin"
+                defaultMessage="built-in"
+              />
             ) : (
               <FormattedMessage
                 id="settings.skills.acquiredLocal"
@@ -464,24 +597,57 @@ function SkillRow({ skill, onOpen, onDelete }: SkillRowProps) {
               />
             )}
           </Badge>
+          {edited && (
+            <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+              <FormattedMessage
+                id="settings.skills.editedBadge"
+                defaultMessage="Edited"
+              />
+            </span>
+          )}
         </div>
         <p className="text-muted-foreground truncate text-xs">
           {skill.description}
         </p>
       </div>
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        className="text-muted-foreground hover:text-destructive shrink-0"
-        aria-label={skill.name}
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete();
-        }}
-      >
-        <Trash2 className="size-4" aria-hidden />
-      </Button>
+      <div className="flex shrink-0 items-center gap-0.5">
+        {onRestore && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-foreground shrink-0"
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.skills.restoreLabel",
+                defaultMessage: "Restore built-in definition for skill {name}",
+              },
+              { name: skill.name },
+            )}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRestore();
+            }}
+          >
+            <RotateCcw className="size-4" aria-hidden />
+          </Button>
+        )}
+        {onDelete && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-destructive shrink-0"
+            aria-label={skill.name}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+          >
+            <Trash2 className="size-4" aria-hidden />
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -509,7 +675,12 @@ function SkillDrawer({
 }: SkillDrawerProps) {
   const isCreate = draft.currentName === "";
   const isLinked = draft.acquired === "linked";
+  const isBuiltin = draft.acquired === "builtin";
   const readOnly = isLinked;
+  // A builtin skill locks its name (issue #677): the identity the skill's
+  // CLI reference and the auto-include pairing anchor on. Everything else
+  // stays editable.
+  const nameLocked = isBuiltin;
   // Local draft state so the user can type before committing. Reset when the
   // draft identity changes (switching skills / opening create).
   const [name, setName] = useState(draft.name);
@@ -618,14 +789,21 @@ function SkillDrawer({
               id="skill-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={readOnly}
+              disabled={readOnly || nameLocked}
               placeholder="pdf-tools"
             />
             <p className="text-muted-foreground text-xs">
-              <FormattedMessage
-                id="settings.skills.fieldNameHint"
-                defaultMessage="kebab-case (lowercase a-z / 0-9 + hyphens); equals the directory name"
-              />
+              {nameLocked ? (
+                <FormattedMessage
+                  id="settings.skills.fieldNameLockedHint"
+                  defaultMessage="Built-in skill names are locked"
+                />
+              ) : (
+                <FormattedMessage
+                  id="settings.skills.fieldNameHint"
+                  defaultMessage="kebab-case (lowercase a-z / 0-9 + hyphens); equals the directory name"
+                />
+              )}
             </p>
           </div>
 

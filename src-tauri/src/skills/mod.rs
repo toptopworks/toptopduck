@@ -29,12 +29,14 @@
 //!   (issue #364) -- resolves each mounted skill into its verbatim body + the
 //!   SHA-256 of the whole `SKILL.md`.
 
+pub mod builtin;
 pub mod frontmatter;
 pub mod import;
 pub mod model;
 pub mod prompt;
 pub mod registry;
 
+pub use builtin::{BuiltinSkillBaseline, BuiltinSkillMark};
 pub use import::{discover_skill_sources, import_skill, import_skills};
 pub use model::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,

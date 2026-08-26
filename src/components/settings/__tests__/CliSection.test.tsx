@@ -66,6 +66,7 @@ function makeAppConfig(tools: ReturnType<typeof makeTool>[]): AppConfig {
     cli_tools: { tools },
     sessions_dir: null,
     default_runtime: "built_in",
+    builtin_skill_baselines: {},
     last_model_postures: {},
   } as unknown as AppConfig;
 }

@@ -901,6 +901,7 @@ export default function App() {
                               openSettings({ section: "skills" })}
                             pendingSkills={pendingSkills}
                             onPendingSkillsChange={setPendingSkills}
+                            cliTools={appConfig?.cli_tools.tools ?? []}
                           />
                         )}
                         trailing={

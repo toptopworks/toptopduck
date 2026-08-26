@@ -433,7 +433,22 @@ export function useShellSessions({
           }
           for (const name of posture.skills) {
             await applyPostureWrite(
-              () => mountSkill(sid, name),
+              () =>
+                mountSkill(sid, name).catch((e: unknown) => {
+                  // Issue #677: a cold-start pick that names an auto-included
+                  // builtin skill is already in the session's folded initial
+                  // set -- the backend refuses the redundant mount, and that
+                  // refusal is the expected outcome here, not an error.
+                  if (
+                    typeof e === "object" &&
+                    e !== null &&
+                    (e as { data?: { kind?: string } }).data?.kind ===
+                    "AlreadyMounted"
+                  ) {
+                    return null;
+                  }
+                  throw e;
+                }),
               "skill mount",
               name,
             );

@@ -8,6 +8,7 @@
 // app-config.
 
 import type { CliToolRegistry } from "./cli-tool";
+import type { BuiltinSkillBaseline } from "./skills";
 import type { McpServerRegistry } from "./mcp";
 import type { ProviderConfig } from "./provider";
 
@@ -125,6 +126,14 @@ export interface AppConfig {
   // serialization ALWAYS carries the field, so the wire shape is
   // non-optional here too.
   cli_tools: CliToolRegistry;
+  // The builtin skills' baseline side table (issue #677, ADR-0109 Decision 5):
+  // materialized skill name -> the recorded baseline (rendered-content hash +
+  // the locale it was rendered in). Pure derivation anchor -- the frontend
+  // derives a builtin row's Edited state by comparing the skill listing's
+  // content_hash against the recorded hash. Mirrors the Rust
+  // BTreeMap<String, BuiltinSkillBaseline> (serde default: absent on
+  // pre-#677 files).
+  builtin_skill_baselines: Record<string, BuiltinSkillBaseline>;
   // Managed sessions directory override (issue #452, ADR-0089 Decision 2).
   // null = runtime-computed default (<Documents>/toptopduck/sessions/).
   // serde(default) fills null for a pre-#452 file.
