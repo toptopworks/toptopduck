@@ -157,28 +157,12 @@ impl<'p> AgentLoop<'p> {
         let cancel = Arc::clone(&self.cancel);
         let guard = cancel.begin_turn();
         if let Some(timeout) = self.wall_clock {
-            let alive = guard.watchdog_alive();
-            let token = Arc::clone(&cancel);
-            // Detached: the alive flag is its only tie to this turn. KNOWN
-            // RACE: if the watchdog reads alive=true and then the turn ends
-            // and a new turn begins before request() runs, the cancel lands
-            // on the new turn. The window is a handful of instructions
-            // between the load and request(), only reachable when the timeout
-            // ~= the prior turn's runtime; the 120s default makes production
-            // exposure near zero. A generation/turn-id guard closes it fully
-            // (deferred). catch_unwind keeps this detached thread
-            // self-sufficient.
-            thread::spawn(move || {
-                thread::sleep(timeout);
-                if alive.load(Ordering::SeqCst)
-                    && catch_unwind(AssertUnwindSafe(|| token.request())).is_err()
-                {
-                    log::error!(
-                        target: "toptopduck::agent_loop",
-                        "wall-clock watchdog panicked firing cancel; timeout path may be impaired"
-                    );
-                }
-            });
+            spawn_wall_clock_watchdog(
+                guard.watchdog_alive(),
+                Arc::clone(&cancel),
+                timeout,
+                "toptopduck::agent_loop",
+            );
         }
 
         // The in-progress conversation, grown one round-trip at a time. Begins
@@ -304,45 +288,31 @@ impl<'p> AgentLoop<'p> {
                         // started/completed pair around the dispatch (or only
                         // the completion for a gate-denied call).
                         //
-                        // Issue #321: guard the tool dispatch against a panic.
-                        // The materialize path registers result_N partway
-                        // through try_materialize; a panic in any subsequent
-                        // step (record_provenance, gc_stale_results,
-                        // apply_display_label, descriptor_json, ToolOutcome
-                        // construction) can leave a ghost result_N. The
-                        // snapshot + diff in rollback_ghost_result detects +
-                        // reverts any orphan so the working_set <-> history
-                        // invariant holds (ADR-0084).
-                        let prev_next = deps.working_set.next_result_number();
-                        match catch_unwind(AssertUnwindSafe(|| {
-                            execute_call(
-                                call,
-                                deps,
-                                materializer,
-                                mcp,
-                                cli,
-                                &gate,
-                                &mut outputs,
-                                &mut on_phase,
-                            )
-                        })) {
-                            Err(payload) => {
-                                rollback_ghost_result(deps, prev_next);
-                                let site = format!("tool dispatch `{}`", call.name);
-                                return outcome(
-                                    panic_to_transient(&site, &*payload),
-                                    outputs,
-                                    round_trips,
-                                );
+                        // Issue #321: the dispatch panic guard (snapshot +
+                        // ghost rollback) lives inside the shared
+                        // `dispatch_gated_call` core, so this site only maps
+                        // the outcome.
+                        match execute_call(
+                            call,
+                            deps,
+                            materializer,
+                            mcp,
+                            cli,
+                            &gate,
+                            &mut outputs,
+                            &mut on_phase,
+                        ) {
+                            Err(DispatchAbort::Panic(termination)) => {
+                                return outcome(termination, outputs, round_trips);
                             }
                             // The gate was cancelled (close / resume / cancel
                             // interrupted an in-flight approval). The whole
                             // turn aborts.
-                            Ok(Err(GateCancelled)) => {
+                            Err(DispatchAbort::Gate) => {
                                 aborted = true;
                                 break;
                             }
-                            Ok(Ok(result)) => messages.push(ToolTurnMessage::tool_result(result)),
+                            Ok(result) => messages.push(ToolTurnMessage::tool_result(result)),
                         }
                     }
                     if aborted || cancel.is_requested() {
@@ -381,16 +351,7 @@ impl<'p> AgentLoop<'p> {
 /// source of truth (trace, promotions, and round-trip count always travel
 /// together); each branch contributes only its [`Termination`].
 fn outcome(termination: Termination, mut outputs: CallOutputs, round_trips: u32) -> LoopOutcome {
-    // ADR-0103 (issue #608): drop a round the reply opened but nothing
-    // landed on -- no thinking, no prose, no completed call (a cancel
-    // between the reply and the first dispatch, a gate-cancelled first
-    // call). The recorded trace then matches the frontend fold, which
-    // cannot see such a round (none of its events ever fired); a
-    // prose-bearing round survives (the prose-only round of a mid-batch
-    // cancel).
-    outputs.rounds.retain(|round| {
-        round.thinking.is_some() || round.text.is_some() || !round.calls.is_empty()
-    });
+    retain_landed_rounds(&mut outputs.rounds);
     LoopOutcome {
         termination,
         promotions: outputs.promotions,
@@ -400,6 +361,37 @@ fn outcome(termination: Termination, mut outputs: CallOutputs, round_trips: u32)
         // profile -- there is no handshake catalog to discover.
         discovered_runtime: None,
     }
+}
+
+/// Arm the wall-clock watchdog (ADR-0081): a DETACHED thread (the alive flag
+/// is its only tie to the turn -- sleeping out the full timeout inside the
+/// caller's scope would hold the join) that fires the app token on expiry.
+/// Shared by the built-in loop and the yoagent runner (issue #668) so the
+/// posture lives once. KNOWN RACE: if the watchdog reads alive=true and then
+/// the turn ends and a new turn begins before request() runs, the cancel
+/// lands on the new turn. The window is a handful of instructions between
+/// the load and request(), only reachable when the timeout ~= the prior
+/// turn's runtime; the 120s default makes production exposure near zero. A
+/// generation/turn-id guard closes it fully (deferred). catch_unwind keeps
+/// the detached thread self-sufficient (the issue #321 posture): a panicking
+/// request() is logged, never silently eaten.
+pub(crate) fn spawn_wall_clock_watchdog(
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    token: Arc<CancelToken>,
+    timeout: Duration,
+    log_target: &'static str,
+) {
+    thread::spawn(move || {
+        thread::sleep(timeout);
+        if alive.load(Ordering::SeqCst)
+            && catch_unwind(AssertUnwindSafe(|| token.request())).is_err()
+        {
+            log::error!(
+                target: log_target,
+                "wall-clock watchdog panicked firing cancel; timeout path may be impaired"
+            );
+        }
+    });
 }
 
 /// Extract a human-readable message from a panic payload (the `Err` variant of
@@ -419,7 +411,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Build the `Transient` termination for a caught panic (issue #321):
 /// single-sources the detail format + the log target so the two guard
 /// sites stay consistent.
-fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
+pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
     let detail = format!("agent loop panicked in {site}: {}", panic_message(payload));
     log::error!(target: "toptopduck::agent_loop", "{detail}");
     Termination::Transient(detail)
@@ -477,7 +469,7 @@ fn complete_round_thinking(
 /// safer than rewinding the number and clashing on reuse. The ghost was never
 /// user-visible, so ADR-0022's no-reuse constraint does not apply to the
 /// rollback itself.
-fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
+pub(crate) fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
     let curr_next = deps.working_set.next_result_number();
     if curr_next <= prev_next {
         return;
@@ -510,17 +502,39 @@ struct CallOutputs {
 }
 
 impl CallOutputs {
-    /// Record one completed call on the CURRENT round. The loop opens a
-    /// round before dispatching its batch, so the last round is the current
-    /// one; the fallback folds a call that arrives with no open round
-    /// (structurally unreachable from the loop -- every dispatch site runs
-    /// after the round push) into a fresh one so no trace entry is dropped.
+    /// Record one completed call on the current round (the shared
+    /// [`push_call`]).
     fn push_call(&mut self, entry: TraceEntry) {
-        match self.rounds.last_mut() {
-            Some(round) => round.calls.push(entry),
-            None => self.rounds.push(LoopRound::flat(vec![entry])),
-        }
+        push_call(&mut self.rounds, entry);
     }
+}
+
+/// Append one completed call's entry to the open round. Shared by the
+/// built-in loop's [`CallOutputs`] and the yoagent fold (issue #668): both
+/// runtimes open a round before dispatching its batch, so the last round is
+/// the current one; the fallback folds a call that arrives with no open
+/// round (structurally unreachable from either runtime -- every dispatch
+/// site runs after the round push) into a fresh flat round so no trace entry
+/// is dropped. One implementation so the fallback semantics cannot drift
+/// between the two runtimes.
+pub(crate) fn push_call(rounds: &mut Vec<LoopRound>, entry: TraceEntry) {
+    match rounds.last_mut() {
+        Some(round) => round.calls.push(entry),
+        None => rounds.push(LoopRound::flat(vec![entry])),
+    }
+}
+
+/// Drop a round nothing landed on -- no thinking, no prose, no completed
+/// call (a cancel between the reply and the first dispatch, a
+/// gate-cancelled first call). ADR-0103 (issue #608). Shared by both
+/// runtimes' outcome assembly so the recorded trace matches the frontend
+/// fold, which cannot see such a round (none of its events ever fired); a
+/// prose-bearing round survives (the prose-only round of a mid-batch
+/// cancel).
+pub(crate) fn retain_landed_rounds(rounds: &mut Vec<LoopRound>) {
+    rounds.retain(|round| {
+        round.thinking.is_some() || round.text.is_some() || !round.calls.is_empty()
+    });
 }
 
 /// One round's in-memory trace accumulation (ADR-0103, issue #608): the
@@ -582,15 +596,28 @@ impl LoopRound {
 /// the gate suspends on. Bundled (like [`CallOutputs`]) so the call
 /// signature stays under clippy's argument-count threshold now that the
 /// ADR-0078 event emitter rides it too.
-struct GateCtx<'a> {
-    approval: &'a ApprovalState,
-    sink: &'a dyn ApprovalSink,
-    cancel: &'a CancelToken,
+pub(crate) struct GateCtx<'a> {
+    pub(crate) approval: &'a ApprovalState,
+    pub(crate) sink: &'a dyn ApprovalSink,
+    pub(crate) cancel: &'a CancelToken,
+}
+
+/// Why a shared-core dispatch aborted (the error side of
+/// [`dispatch_gated_call`]): the approval gate cancelled mid-call (the whole
+/// turn aborts, both runtimes' semantics), or the dispatch panicked (the
+/// issue #321 guard, sunk into the core so every runtime gets the snapshot +
+/// ghost-rollback ritual by construction -- a third runtime cannot silently
+/// omit it). The panic's [`Termination`] is pre-derived so each runtime maps
+/// it onto its own failure channel without re-deriving the detail.
+pub(crate) enum DispatchAbort {
+    Gate,
+    Panic(Termination),
 }
 
 /// Drive one tool call through the gateway + dispatch, append a trace entry,
 /// and capture any promotion. Returns the [`ToolResult`] to feed back to the
-/// model, or [`GateCancelled`] if the approval gate was cancelled mid-call.
+/// model, or [`DispatchAbort`] if the approval gate was cancelled mid-call
+/// or the dispatch panicked (the guard lives in the shared core).
 ///
 /// Emits the ADR-0078 tool-call event stream through `on_phase`:
 /// `ToolCallStarted` right before dispatch (AFTER the gate, so a gated call
@@ -618,7 +645,74 @@ fn execute_call(
     gate: &GateCtx<'_>,
     outputs: &mut CallOutputs,
     on_phase: &mut impl FnMut(TurnPhase),
-) -> Result<ToolResult, GateCancelled> {
+) -> Result<ToolResult, DispatchAbort> {
+    let (result, entry, promotion) =
+        dispatch_gated_call(call, deps, materializer, mcp, cli, gate, on_phase)?;
+    if let Some(promotion) = promotion {
+        outputs.promotions.push(promotion);
+    }
+    if let Some(entry) = entry {
+        outputs.push_call(entry);
+    }
+    Ok(result)
+}
+
+/// Route one tool call through the approval gateway + dispatch (ADR-0080 /
+/// ADR-0076): the shared dispatch core behind [`execute_call`] and the yoagent
+/// integration layer's gateway tool adapter (issue #668, ADR-0107). One
+/// implementation so gate classification, meta-tool resolution, external
+/// routing, `result_N` numbering, and the trace-entry shape cannot drift
+/// between the two runtimes -- the adapter calls THIS, never a re-assembly.
+/// Returns the model-facing result, the call's trace entry (`None` for a
+/// meta-tool resolution failure that never reached a tool, ADR-0105
+/// Decision 4), and any promotion. Emits the ADR-0078 phase pair through
+/// `on_phase` exactly as the built-in loop does.
+///
+/// The issue #321 dispatch panic guard lives HERE (sunk from the two
+/// runtimes' call sites, issue #668 review): the `result_N` snapshot + ghost
+/// rollback runs for every dispatch by construction, and a panic surfaces as
+/// [`DispatchAbort::Panic`] instead of unwinding into either runtime.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_gated_call(
+    call: &ToolUse,
+    deps: &mut TurnDeps,
+    materializer: &mut dyn Materializer,
+    mcp: &mut McpAggregator,
+    cli: &[crate::cli_tools::config::CliToolConfig],
+    gate: &GateCtx<'_>,
+    on_phase: &mut impl FnMut(TurnPhase),
+) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), DispatchAbort> {
+    // Issue #321: guard the dispatch against a panic. The materialize path
+    // registers result_N partway through try_materialize; a panic in any
+    // subsequent step (record_provenance, gc_stale_results,
+    // apply_display_label, descriptor_json, ToolOutcome construction) can
+    // leave a ghost result_N. The snapshot + diff in rollback_ghost_result
+    // detects + reverts any orphan so the working_set <-> history invariant
+    // holds (ADR-0084).
+    let prev_next = deps.working_set.next_result_number();
+    match catch_unwind(AssertUnwindSafe(|| {
+        dispatch_gated_call_inner(call, deps, materializer, mcp, cli, gate, on_phase)
+    })) {
+        Err(payload) => {
+            rollback_ghost_result(deps, prev_next);
+            let site = format!("tool dispatch `{}`", call.name);
+            Err(DispatchAbort::Panic(panic_to_transient(&site, &*payload)))
+        }
+        Ok(result) => result.map_err(|GateCancelled| DispatchAbort::Gate),
+    }
+}
+
+/// The dispatch body under the panic guard (see [`dispatch_gated_call`]).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_gated_call_inner(
+    call: &ToolUse,
+    deps: &mut TurnDeps,
+    materializer: &mut dyn Materializer,
+    mcp: &mut McpAggregator,
+    cli: &[crate::cli_tools::config::CliToolConfig],
+    gate: &GateCtx<'_>,
+    on_phase: &mut impl FnMut(TurnPhase),
+) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
     // Meta-tool trio dispatch (ADR-0105): the classification -- list / search
     // run locally against the aggregator's catalog (read-only, short of the
     // gate -- the built-in read tools' trust shape); mcp_invoke resolves its
@@ -632,9 +726,12 @@ fn execute_call(
     let resolved;
     let call: &ToolUse = match meta_tools::resolve_meta_call(mcp, call) {
         meta_tools::MetaDispatch::Local { summary, payload } => {
-            return Ok(local_meta_call(call, &summary, payload, outputs, on_phase));
+            let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+            return Ok((result, Some(entry), None));
         }
-        meta_tools::MetaDispatch::Refused(message) => return Ok(meta_failure(call, &message)),
+        meta_tools::MetaDispatch::Refused(message) => {
+            return Ok((meta_failure(call, &message), None, None))
+        }
         meta_tools::MetaDispatch::Resolved(replacement) => {
             resolved = replacement;
             &resolved
@@ -681,12 +778,15 @@ fn execute_call(
             // keeps its message -- here the denial -- so the resolved card
             // and the recorded trace show the same why).
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-            outputs.push_call(entry);
-            return Ok(ToolResult {
-                tool_use_id: call.id.clone(),
-                content: "tool call denied by the approval gateway".to_string(),
-                is_error: true,
-            });
+            return Ok((
+                ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: "tool call denied by the approval gateway".to_string(),
+                    is_error: true,
+                },
+                Some(entry),
+                None,
+            ));
         }
         Ok(GateOutcome::Allow) => {}
     }
@@ -742,11 +842,9 @@ fn execute_call(
     // landed (today, only `materialize` produces one, and only on success --
     // the executor builds it from the typed sql + descriptor, so there is no
     // "success but no promotion" contract violation to guard). The loop is
-    // tool-agnostic: it pushes `outcome.promotion` without naming any tool
+    // tool-agnostic: it carries `outcome.promotion` without naming any tool
     // (issue #336).
-    if let Some(promotion) = outcome.promotion {
-        outputs.promotions.push(promotion);
-    }
+    let promotion = outcome.promotion;
     let entry = TraceEntry {
         tool_use_id: call.id.clone(),
         name: call.name.clone(),
@@ -759,8 +857,7 @@ fn execute_call(
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the
     // ToolCallStarted emitted pre-dispatch.
     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-    outputs.push_call(entry);
-    Ok(result)
+    Ok((result, Some(entry), promotion))
 }
 
 /// Serve one locally-executed meta-tool (`mcp_list_servers` /
@@ -769,14 +866,15 @@ fn execute_call(
 /// flat String on this path), with the standard started / completed phase
 /// pair + trace entry so a meta-tool call renders like any other call. These
 /// never touch a backend server, so there is no gate suspension (catalog
-/// reads carry the built-in read tools' trust shape).
+/// reads carry the built-in read tools' trust shape). Returns the result
+/// paired with its trace entry -- the push into the loop's outputs belongs
+/// to the caller ([`execute_call`] / the yoagent dispatcher).
 fn local_meta_call(
     call: &ToolUse,
     summary: &str,
     payload: serde_json::Value,
-    outputs: &mut CallOutputs,
     on_phase: &mut impl FnMut(TurnPhase),
-) -> ToolResult {
+) -> (ToolResult, TraceEntry) {
     on_phase(TurnPhase::ToolCallStarted {
         name: call.name.clone(),
         operation_kind: OperationKind::Read,
@@ -793,12 +891,14 @@ fn local_meta_call(
         result_excerpt: String::new(),
     };
     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-    outputs.push_call(entry);
-    ToolResult {
-        tool_use_id: call.id.clone(),
-        content: payload.to_string(),
-        is_error: false,
-    }
+    (
+        ToolResult {
+            tool_use_id: call.id.clone(),
+            content: payload.to_string(),
+            is_error: false,
+        },
+        entry,
+    )
 }
 
 /// A meta-tool resolution failure (a malformed `mcp_search_tools` input, or
