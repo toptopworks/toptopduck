@@ -260,9 +260,11 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
 /// accumulated for the event being built, or `Voided` after a cap breach (an
 /// over-long line or an over-budget `data:` accumulation) drops the whole
 /// in-progress event. Voiding is a single whole-value assignment -- the
-/// "resyncing implies an empty accumulator" invariant is carried by the type,
-/// not by each breach site remembering a four-statement clearing sequence
-/// (issue #666).
+/// "resyncing implies an empty accumulator" invariant is carried by the
+/// type's representation, not by each breach site remembering a
+/// four-statement clearing sequence; the field methods are only reachable
+/// while `Building` (the resync pre-block guards that, and each method
+/// asserts it) (issue #666).
 enum EventAccumulator {
     Building {
         event_type: Option<String>,
@@ -286,20 +288,23 @@ impl EventAccumulator {
     /// pre-block in [`read_sse_event_bounded`] skips them -- so the `Voided`
     /// arm is unreachable and a no-op.
     fn set_event_type(&mut self, event_type: String) {
-        if let EventAccumulator::Building {
+        debug_assert!(matches!(self, EventAccumulator::Building { .. }));
+        let EventAccumulator::Building {
             event_type: slot, ..
         } = self
-        {
-            *slot = Some(event_type);
-        }
+        else {
+            return; // Unreachable behind the resync pre-block.
+        };
+        *slot = Some(event_type);
     }
 
     /// Accumulate one `data:` field line under the per-event budget (`max`,
     /// the same cap source as the line level): `true` while the event still
     /// fits, `false` once the accumulated cost breaches the budget (the event
     /// must be voided). Like [`Self::set_event_type`], only called while
-    /// `Building`.
+    /// `Building`; a `false` return leaves the accumulator untouched.
     fn push_data(&mut self, data: &str, max: usize) -> bool {
+        debug_assert!(matches!(self, EventAccumulator::Building { .. }));
         let EventAccumulator::Building {
             data_parts,
             data_bytes,
@@ -312,10 +317,10 @@ impl EventAccumulator {
         // counting it keeps zero-length parts (each costing one budget
         // byte) from growing `data_parts` without bound, and bounds the
         // joined string's length.
-        *data_bytes += data.len() + 1;
-        if *data_bytes > max {
+        if *data_bytes + data.len() + 1 > max {
             return false;
         }
+        *data_bytes += data.len() + 1;
         data_parts.push(data.to_string());
         true
     }
@@ -649,22 +654,16 @@ impl McpClient for HttpClient {
             let mut reader = BufReader::new(response.into_reader());
             loop {
                 match read_sse_event(&mut reader).map_err(ClientError::Framing)? {
-                    Some(event) => {
-                        match serde_json::from_str::<Value>(&event.data) {
-                            Ok(msg) => {
-                                if msg.get("id") == id.as_ref() && id.is_some() {
-                                    return check_rpc_response(&msg);
-                                }
-                            }
-                            Err(e) => {
-                                // Malformed JSON in an SSE event: return a
-                                // framing error to match the stdio path's
-                                // contract (framing::read_message →
-                                // InvalidData).
-                                return Err(malformed_sse_event(event.data.len(), e));
+                    Some(event) => match serde_json::from_str::<Value>(&event.data) {
+                        Ok(msg) => {
+                            if msg.get("id") == id.as_ref() && id.is_some() {
+                                return check_rpc_response(&msg);
                             }
                         }
-                    }
+                        Err(e) => {
+                            return Err(malformed_sse_event(event.data.len(), e));
+                        }
+                    },
                     None => return Err(ClientError::ServerClosed),
                 }
             }
@@ -1380,10 +1379,11 @@ mod tests {
 
     /// Issue #665: a second over-long line while STILL resyncing (two
     /// oversized lines in the same voided event -- the shape of an unbounded
-    /// server) re-enters the void path idempotently: the accumulators are
-    /// re-cleared (already empty) and the resync flag stays set. A regression
-    /// that reset the flag or returned early on the second hit would stitch
-    /// the survivors into the next event.
+    /// server) re-enters the void path idempotently: a second breach while
+    /// `Voided` re-assigns the variant, dropping what was already being
+    /// dropped. A regression that switched back to `Building` early (or
+    /// returned the half-dropped event) would stitch the survivors into the
+    /// next event.
     #[test]
     fn read_sse_event_second_overlong_during_resync_stays_resyncing() {
         // Two 30-byte lines (over the 16-byte cap) inside one voided event,
@@ -1458,6 +1458,27 @@ mod tests {
             .expect("read")
             .expect("the at-budget event is accepted, not voided");
         assert_eq!(event.data, "1234567\n1234567");
+    }
+
+    /// Zero-length `data:` parts each cost one budget byte -- the `+1` in
+    /// `push_data`'s accounting, which counts the "\n" the join inserts
+    /// between parts. Dropping it would let a server spamming bare `data:`
+    /// lines grow `data_parts` (and the joined string) without ever touching
+    /// the budget -- the unbounded-memory shape the caps exist for; this
+    /// fixture is the one that goes red if the `+1` is dropped.
+    #[test]
+    fn read_sse_event_voids_zero_length_data_spam() {
+        // Eight bare `data:` lines (5 bytes each, under the 6-byte line cap)
+        // under a 6-byte budget: the parts cost (0+1) each, so the seventh
+        // breaches (7 > 6) and the event is voided -- None at the boundary,
+        // and None again at the EOF right after it.
+        let wire = "data:\ndata:\ndata:\ndata:\ndata:\ndata:\ndata:\ndata:\n\n";
+        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let event = read_sse_event_bounded(&mut reader, 6).expect("read");
+        assert!(
+            event.is_none(),
+            "the zero-length-parts event is voided, not joined into newline spam"
+        );
     }
 
     /// EOF while still resyncing (the broken event never reached its blank
