@@ -705,7 +705,9 @@ fn new_question_referencing_stale_result_is_rejected() {
             ],
         )
         // No terminal answer: the stale-referencing call clamps, re-issued
-        // every round-trip until the step cap fails the turn.
+        // every round-trip until a safety net fails the turn -- under the
+        // yoagent loop (ADR-0107) the identical-repeat trajectory is stopped
+        // by loop detection well before the step cap.
         .scripted_tool_turn("again", materialize(r#"SELECT * FROM "result_1""#));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
@@ -721,8 +723,8 @@ fn new_question_referencing_stale_result_is_rejected() {
     match outcome {
         TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
             assert!(
-                detail.contains("did not converge"),
-                "the non-correcting stale-reference loop exhausts the step cap: {detail:?}"
+                detail.contains("identical arguments"),
+                "the non-correcting stale-reference loop is stopped by loop detection: {detail:?}"
             );
         }
         other => panic!("step-cap Failed after stale-reference refusal, got {other:?}"),

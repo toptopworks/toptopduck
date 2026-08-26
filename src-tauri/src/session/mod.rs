@@ -48,7 +48,7 @@ use crate::runtime::acp::adapter::{detect_adapter, AdapterSpec};
 use crate::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx, GatewayOutcome};
-use crate::session::agent_loop::{AgentLoop, LoopOutcome, LoopRound, Termination};
+use crate::session::agent_loop::{LoopOutcome, LoopRound, Termination};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
@@ -409,12 +409,18 @@ pub struct Session {
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
-    /// The LLM provider (ADR-0007/0064), held behind `Box<dyn>` (dyn, not
+    /// The LLM provider (ADR-0007/0064), held behind `Arc<dyn>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
-    /// [`Self::ask_with_phase`] borrows it per turn to drive the agent loop
-    /// (ADR-0081) and reads the live response locale off it for the system
-    /// prompt. Built in [`Self::with_provider_and_cancel`].
-    provider: Box<dyn Provider>,
+    /// [`Self::ask_with_phase`] reads the live response locale off it for the
+    /// system prompt and hands the Arc to the wiring seam each turn (ADR-0107,
+    /// issue #669): a profile-backed provider constructs the upstream
+    /// streamer inside `session::yoagent`, anything else bridges onto the
+    /// loop -- either way the provider crosses into the loop's driver thread,
+    /// which is why the handle is `Arc` (a `Box` cannot be shared across the
+    /// `std::thread::scope` boundary). Built (converted from the `Box` the
+    /// constructors keep taking, so no call site changes) in
+    /// [`Self::with_provider_and_cancel`].
+    provider: Arc<dyn Provider>,
     /// The shared materializer (ADR-0053): the SAME trait object the live-turn
     /// agent loop drives (`materialize` tool calls) and the resume path borrows
     /// (recipe replay) -- one promotion mechanism across both paths, so a fake
@@ -825,6 +831,10 @@ impl Session {
         provider: Box<dyn Provider>,
         cancel: Arc<CancelToken>,
     ) -> anyhow::Result<Self> {
+        // Box -> Arc: the signature keeps taking the Box every call site
+        // builds; the conversion happens once here (issue #669) because the
+        // turn's runner hands the provider across the loop's thread scope.
+        let provider: Arc<dyn Provider> = provider.into();
         let temp_dir = tempfile::Builder::new()
             .prefix("toptopduck-session-")
             .tempdir()?;
@@ -843,13 +853,13 @@ impl Session {
         // resolves through the unit's acquisition point, and the connection
         // is then held until session close (no idle reclaim).
         let admin_engine = AdminEngine::new();
-        // The provider + materializer live on the Session behind `Box<dyn>`
-        // (dyn, not generic) so this struct does not parameterize the IPC
-        // layer (ADR-0053). The agent loop borrows both per turn; the resume
-        // path borrows the same materializer for the recipe replay. The
-        // materializer is stateless (RealMaterializer); the admin connection /
-        // source_files / working_set it borrows live on this Session and are
-        // passed per turn via TurnDeps.
+        // The provider (Arc, see the field doc) + materializer (`Box<dyn>`)
+        // live on the Session (dyn, not generic) so this struct does not
+        // parameterize the IPC layer (ADR-0053). The turn's runner borrows
+        // both per turn; the resume path borrows the same materializer for
+        // the recipe replay. The materializer is stateless (RealMaterializer);
+        // the admin connection / source_files / working_set it borrows live
+        // on this Session and are passed per turn via TurnDeps.
         Ok(Self {
             admin_engine,
             working_set: WorkingSet::default(),
@@ -1190,7 +1200,7 @@ impl Session {
         question: &str,
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
-        on_phase: impl FnMut(TurnPhase) + Send,
+        on_phase: impl FnMut(TurnPhase) + Send + 'static,
         inputs: &TurnInputs<'_>,
     ) -> TurnOutcome {
         // Facade over the agent loop (ADR-0081, issue #318): assemble the
@@ -1248,9 +1258,14 @@ impl Session {
                 question, &turns, locale, adapter, approval, sink, on_phase, inputs,
             ),
             None => {
-                // Built-in agent loop (ADR-0081, issue #318): assemble the
-                // windowed tool-calling request, drive the loop with the shared
-                // session state, map the structured LoopOutcome onto TurnOutcome.
+                // Built-in runtime turn (ADR-0081, swapped onto the yoagent
+                // loop by ADR-0107 / issue #669): assemble the windowed
+                // tool-calling request exactly as before (ADR-0023 windowing
+                // is the app's), then drive the UPSTREAM stateless loop with
+                // the shared session state and map the structured LoopOutcome
+                // onto TurnOutcome. Single track by decision: the self-written
+                // `AgentLoop` is out of the execution path (its retirement is
+                // #670); there is no runtime switch and no fallback.
                 let mut request = window::assemble_tool_turn(
                     question,
                     &self.working_set,
@@ -1309,8 +1324,34 @@ impl Session {
                         temp_path: &self.temp_path,
                         tool_output_refs: &mut self.tool_output_refs,
                     };
-                    let mut loop_outcome =
-                        AgentLoop::new(&*self.provider, Arc::clone(&self.cancel)).run(
+                    // The switchover (ADR-0107 Decision 2, issue #669):
+                    // `turn_loop_for` is the seam's single entry -- a
+                    // profile-backed provider constructs the upstream streamer
+                    // (sealed inside `session::yoagent`; no upstream type is
+                    // named here), a refused facts resolution short-circuits
+                    // into the same terminal vocabulary the adapters used.
+                    //
+                    // Live-phase ordering (issue #668 tail, decided at wiring
+                    // time): phases flow from two threads (this thread's
+                    // dispatch server + the driver's fold emissions) through
+                    // the shared sink, so cross-source ordering is best-effort
+                    // -- and stays that way by decision. Phases are transient
+                    // UI progress hints (the trace is the ordered, persisted
+                    // surface, and `Thinking` carries its 1-based attempt so
+                    // a late arrival self-corrects), while a barrier would
+                    // couple the dispatch server to the driver's fold cadence
+                    // -- a cross-thread round-trip per phase that buys spinner
+                    // stability at real deadlock surface.
+                    let mut loop_outcome = match yoagent::turn_loop_for(Arc::clone(&self.provider))
+                    {
+                        Err(termination) => LoopOutcome {
+                            termination,
+                            promotions: Vec::new(),
+                            trace: Vec::new(),
+                            round_trips: 0,
+                            discovered_runtime: None,
+                        },
+                        Ok(runner) => runner.run(
                             &request,
                             &mut deps,
                             &mut *self.materializer,
@@ -1318,8 +1359,10 @@ impl Session {
                             inputs.cli_tools,
                             approval,
                             sink,
+                            Arc::clone(&self.cancel),
                             on_phase,
-                        );
+                        ),
+                    };
                     // The loop's real multi-call trace rides alongside the
                     // mapped outcome to record_turn (ADR-0078, issue #319): the
                     // mapper stays focused on the four-way classification, so
@@ -2108,6 +2151,7 @@ mod tests {
     use crate::model::{TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
+    use crate::provider::ProviderError;
     use serde_json::json;
     use tempfile::NamedTempFile;
 
@@ -3171,9 +3215,11 @@ mod tests {
     // and clashes on CREATE, wedging every later turn (ADR-0022 never-reused).
     // Under the agent contract (ADR-0077) the derive failure routes back to the
     // model as a tool error; this scripted model never self-corrects (the
-    // single call clamps, re-issued every round-trip), so the turn exhausts
-    // the step cap and fails honestly -- but EVERY failed attempt must still
-    // roll back result_1.
+    // single call clamps, re-issued every round-trip). Under the yoagent loop
+    // (ADR-0107 Decision 4) the non-converging trajectory is stopped by loop
+    // detection -- steer at 3 identical calls, abort on the repeat after the
+    // nudge -- long before the 24-step cap, failing honestly with the loop's
+    // own reason; EVERY failed attempt must still roll back result_1.
     #[test]
     fn ask_drops_the_result_table_when_shape_derivation_fails() {
         let provider =
@@ -3184,17 +3230,17 @@ mod tests {
         let file = NamedTempFile::new().expect("temp file");
         session.temp_path = file.path().to_path_buf();
 
-        // The non-self-correcting trajectory exhausts the step cap and surfaces
-        // as a typed Execute failure carrying the cap (the per-attempt engine
-        // errors rode back to the model as tool results, ADR-0077 -- they are
-        // not the turn-level detail).
+        // The non-self-correcting trajectory is stopped by loop detection and
+        // surfaces as a typed Execute failure carrying the honest repetition
+        // reason (the per-attempt engine errors rode back to the model as tool
+        // results, ADR-0077 -- they are not the turn-level detail).
         let detail = match session.ask("建表") {
             TurnOutcome::Failed(TurnFailure::Execute { detail }) => detail,
             other => panic!("expected Execute failure after derive failure, got {other:?}"),
         };
         assert!(
-            detail.contains("did not converge"),
-            "step-cap exhaustion carries the honest non-convergence detail: {detail:?}"
+            detail.contains("identical arguments"),
+            "loop-detection stop carries the honest repetition detail: {detail:?}"
         );
 
         // result_1 was rolled back on every attempt: it is no longer a table in
@@ -3213,6 +3259,44 @@ mod tests {
             remaining, 0,
             "result_1 must be dropped after the derive failure (M1)"
         );
+    }
+
+    // The bridged fault vocabulary (issue #669): a bridged provider's error
+    // classification survives the upstream round-trip unchanged. The bridge
+    // encodes each app fault onto the upstream error channel and the loop's
+    // terminal derivation reads it back into the SAME TurnFailure kinds the
+    // self-written loop surfaced -- one round-trip, no upstream retry
+    // (ADR-0044: none of the three are retryable there).
+    #[test]
+    fn ask_maps_a_bridged_invalid_config_onto_the_typed_failure() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "坏端点",
+            vec![Err(ProviderError::InvalidConfig(
+                "scheme `file` is not http/https".into(),
+            ))],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        match session.ask("坏端点") {
+            TurnOutcome::Failed(TurnFailure::InvalidConfig { detail }) => {
+                assert!(detail.contains("scheme"), "{detail}");
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_maps_a_bridged_unavailable_onto_execute_verbatim() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "断连",
+            vec![Err(ProviderError::Unavailable("connection reset".into()))],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        match session.ask("断连") {
+            TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+                assert_eq!(detail, "connection reset");
+            }
+            other => panic!("expected Execute, got {other:?}"),
+        }
     }
 
     // --- ADR-0104 on-demand materialization (issue #652) ----------------------
