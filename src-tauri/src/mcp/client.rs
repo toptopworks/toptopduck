@@ -1279,23 +1279,63 @@ mod tests {
     /// next blank-line boundary. Dropping only the line would stitch the
     /// surviving fields into a partial franken-event the consumer cannot
     /// parse; the next full event after the boundary parses normally.
+    /// Issue #665: the survivor lines include an `event:` line and a comment
+    /// -- the skip guard sits BEFORE field parsing, so a regression moving it
+    /// below the `event:` arm still compiles and leaks the type into the next
+    /// event, where the stitched data becomes malformed JSON and kills the
+    /// whole transport (issue #647's escalation, one notch worse).
     #[test]
     fn read_sse_event_overlong_line_voids_event_and_resyncs_at_boundary() {
         // First `data:` line is 30 bytes (over the 16-byte cap); the short
-        // `data: tail` survivor is skipped during the resync, not stitched.
+        // survivors (`data: tail`, `event: leaked`, `: comment`) are skipped
+        // during the resync, not stitched or leaked into the next event.
         let wire = format!(
-            "data: {}\ndata: tail\n\ndata: {{\"ok\":1}}\n\n",
+            "data: {}\ndata: tail\nevent: leaked\n: comment\n\ndata: {{\"ok\":1}}\n\n",
             "a".repeat(24)
         );
         let mut reader = Cursor::new(wire.into_bytes());
         let event = read_sse_event_bounded(&mut reader, 16)
             .expect("read")
             .expect("the event after the voided one");
-        assert!(event.event.is_none());
+        assert!(
+            event.event.is_none(),
+            "the `event:` survivor must not leak into the next event"
+        );
         assert_eq!(event.data, "{\"ok\":1}");
         // The stream continues past the drop: the next read is clean EOF.
         let next = read_sse_event_bounded(&mut reader, 16).expect("read 2");
         assert!(next.is_none(), "stream continues to clean EOF");
+    }
+
+    /// Issue #665: a second over-long line while STILL resyncing (two
+    /// oversized lines in the same voided event -- the shape of an unbounded
+    /// server) re-enters the void path idempotently: the accumulators are
+    /// re-cleared (already empty) and the resync flag stays set. A regression
+    /// that reset the flag or returned early on the second hit would stitch
+    /// the survivors into the next event.
+    #[test]
+    fn read_sse_event_second_overlong_during_resync_stays_resyncing() {
+        // Two 30-byte lines (over the 16-byte cap) inside one voided event,
+        // each followed by a short survivor of a different field kind (12
+        // and 10 bytes, well under the cap); the healthy event after the
+        // boundary parses normally.
+        let wire = format!(
+            "data: {}\nevent: sv-a\ndata: {}\ndata: sv-b\n\ndata: ok\n\n",
+            "a".repeat(24),
+            "b".repeat(24)
+        );
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the healthy event after the double-voided one");
+        assert!(
+            event.event.is_none(),
+            "the `event:` survivor must not leak after the re-void"
+        );
+        assert_eq!(
+            event.data, "ok",
+            "the `data:` survivors must not be stitched into the healthy event"
+        );
     }
 
     /// The voided event's already-accumulated fields are cleared too: an
@@ -1344,22 +1384,45 @@ mod tests {
         );
     }
 
+    /// Issue #665: the EOF arm's non-resync half -- fields already
+    /// accumulated, no terminating blank line, then EOF -- returns the
+    /// pending event rather than discarding it. A regression to an
+    /// unconditional `None` would silently drop the stream's last
+    /// unterminated event (every other fixture ends in a blank line, so this
+    /// half had zero coverage).
+    #[test]
+    fn read_sse_event_returns_pending_event_at_eof_without_blank_line() {
+        let wire = b"data: last";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the unterminated final event is returned, not dropped");
+        assert_eq!(event.data, "last");
+    }
+
     /// Issue #647: a malformed `message` event propagates to the waiting
     /// consumer as a `Framing(InvalidData)` failure (the streamable-HTTP
     /// path's attribution) instead of warn-and-continue, which left the
     /// pending request hanging until the turn watchdog cancelled it. After
     /// propagating, the reader exits (drops the sender), so a later `recv()`
-    /// reports the channel closed.
+    /// reports the channel closed. Issue #665: the loop runs on a real
+    /// thread and the test asserts its join result -- a reader that PANICKED
+    /// on the malformed event would also drop the sender and pass the
+    /// closed-channel assertion, so only the join distinguishes the clean
+    /// `break` exit.
     #[test]
     fn sse_reader_loop_propagates_malformed_message_and_exits() {
         let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
         let wire = b"data: {\"id\":1,\"ok\":true}\n\ndata: not-json\n\n";
-        // Finite input: the loop runs to EOF on this thread (no stop needed).
-        sse_reader_loop(
-            Cursor::new(wire.to_vec()),
-            tx,
-            Arc::new(AtomicBool::new(false)),
-        );
+        // Finite input: the loop runs to its exit on its own thread (no stop
+        // needed); the join result pins the exit as clean, not a panic.
+        let reader_thread = thread::spawn(move || {
+            sse_reader_loop(
+                Cursor::new(wire.to_vec()),
+                tx,
+                Arc::new(AtomicBool::new(false)),
+            );
+        });
         let first = rx.recv().expect("healthy message forwarded");
         assert_eq!(first.expect("Ok"), json!({"id": 1, "ok": true}));
         let second = rx.recv().expect("malformed event forwarded as Err");
@@ -1371,6 +1434,9 @@ mod tests {
             other => panic!("expected Err(Framing), got {other:?}"),
         }
         assert!(rx.recv().is_err(), "reader exits after propagating");
+        reader_thread
+            .join()
+            .expect("reader exits via break after propagating, not a panic");
     }
 
     /// Issue #647, consumer side: a malformed `message` event fails the
@@ -1529,6 +1595,87 @@ mod tests {
             sse_reader_loop(
                 BufReader::new(FloodReader {
                     reads: reads_for_reader,
+                }),
+                tx,
+                stop_for_reader,
+            );
+        });
+        // Wait until the reader has actually entered its loop: one inner
+        // read proves the stop check passed while stop was still false, and
+        // from there the reader has no exit path before the blocked send.
+        let mut started = false;
+        for _ in 0..500 {
+            if reads.load(Ordering::SeqCst) > 0 {
+                started = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started, "reader never reached its first read");
+
+        let client = sse_client_with_parts(
+            rx,
+            "http://127.0.0.1:1/message".to_string(),
+            stop,
+            Some(reader_thread),
+        );
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            drop(client);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Drop returned within the timeout (no join hang)");
+    }
+
+    /// Issue #665: the reader's SECOND blocking send point -- the malformed
+    /// event's error forward (`tx.send(Err(...))` in the reader loop) -- must
+    /// also be released by `Drop`'s receiver release (the #667 fix). Same
+    /// shape as the Ok-path pin above: the channel is filled to its bound
+    /// BEFORE the reader starts, so the error forward blocks deterministically
+    /// (no consumer ever drains); the counted first read proves the reader
+    /// entered its loop while stop was still false -- from there it has no
+    /// exit path before the blocked send.
+    #[test]
+    fn sse_client_drop_returns_when_malformed_error_forward_blocks_on_full_channel() {
+        // One malformed message event on the first read, EOF after: the
+        // reader parses it, serde fails, and the error forward blocks.
+        struct MalformedReader {
+            reads: Arc<std::sync::atomic::AtomicUsize>,
+            first: bool,
+        }
+        impl std::io::Read for MalformedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                if self.first {
+                    self.first = false;
+                    let event = b"data: not-json\n\n";
+                    let n = event.len().min(buf.len());
+                    buf[..n].copy_from_slice(&event[..n]);
+                    Ok(n)
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        // Fill the channel to its bound first: with no consumer, the
+        // malformed event's error forward blocks (deterministic hang shape).
+        for _ in 0..SSE_CHANNEL_BOUND {
+            tx.send(Ok(json!({"id": 1, "ok": true}))).expect("fill");
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_reader = stop.clone();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads_for_reader = reads.clone();
+        let reader_thread = thread::spawn(move || {
+            sse_reader_loop(
+                BufReader::new(MalformedReader {
+                    reads: reads_for_reader,
+                    first: true,
                 }),
                 tx,
                 stop_for_reader,
