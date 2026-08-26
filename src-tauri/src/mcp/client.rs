@@ -641,7 +641,10 @@ pub struct SseClient {
     agent: ureq::Agent,
     /// Stop flag shared with the reader thread.
     stop: Arc<AtomicBool>,
-    /// The reader thread handle (joined on Drop).
+    /// The reader thread handle. `Drop` releases `response_rx` before
+    /// joining this thread (issue #667): a reader blocked in `send` on a
+    /// full channel only exits when the receiver's destruction fails that
+    /// send.
     reader_thread: Option<thread::JoinHandle<()>>,
     next_id: i64,
 }
@@ -758,11 +761,21 @@ impl McpClient for SseClient {
 impl Drop for SseClient {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // Release the receiver BEFORE joining. Two reader exit paths meet
+        // here: a reader blocked in `send` on a full channel never re-checks
+        // the stop flag, so only the receiver's destruction fails that send
+        // with `SendError` (field destruction would happen only after
+        // `drop()` returns -- i.e. after a join that never returns, issue
+        // #667); a reader between reads sees the stop flag at its next
+        // read-timeout wakeup (at most SSE_READ_TIMEOUT). The plain
+        // assignment is the move-a-field-out idiom for Drop: it destroys
+        // the old receiver immediately; the placeholder is a disconnected
+        // channel nobody reads after this point.
+        self.response_rx = mpsc::channel().1;
         if let Some(handle) = self.reader_thread.take() {
-            // The reader thread checks the stop flag on each read-timeout
-            // (at most SSE_READ_TIMEOUT), so join returns promptly. If the
-            // thread panicked, log the payload — panics cannot propagate from
-            // Drop, but the diagnostic should not be silently lost.
+            // If the thread panicked, log the payload — panics cannot
+            // propagate from Drop, but the diagnostic should not be
+            // silently lost.
             if let Err(payload) = handle.join() {
                 log::error!(
                     target: "toptopduck::mcp",
@@ -1384,8 +1397,32 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set read timeout");
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf); // The one-line JSON-RPC POST.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            // Drain the full request (headers + Content-Length body) before
+            // answering: closing with unread receive-buffer bytes makes
+            // Windows send an RST that fails the client's status-line read
+            // (os error 10053, a flake).
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break, // Client closed or stalled.
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf);
+                        if let Some(headers_end) = text.find("\r\n\r\n") {
+                            let content_length: usize = text[..headers_end]
+                                .lines()
+                                .filter_map(|l| l.split_once(':'))
+                                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, v)| v.trim().parse().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= headers_end + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             stream
                 .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
                 .expect("write 202");
@@ -1401,16 +1438,12 @@ mod tests {
             sse_reader_loop(Cursor::new(wire.to_vec()), tx, stop_for_reader);
         });
 
-        let mut client = SseClient {
-            response_rx: rx,
-            post_url: format!("http://127.0.0.1:{port}/message"),
-            agent: ureq::AgentBuilder::new()
-                .timeout_read(SSE_READ_TIMEOUT)
-                .build(),
+        let mut client = sse_client_with_parts(
+            rx,
+            format!("http://127.0.0.1:{port}/message"),
             stop,
-            reader_thread: Some(reader_thread),
-            next_id: 1,
-        };
+            Some(reader_thread),
+        );
 
         let err = client
             .request(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
@@ -1430,6 +1463,105 @@ mod tests {
             other => panic!("expected Err(Framing), got {other:?}"),
         }
         server.join().expect("server thread");
+    }
+
+    /// Build an `SseClient` around hand-made reader plumbing (in-module
+    /// construction, no HTTP handshake): shared by the tests that drive the
+    /// channel / reader-thread lifecycle directly.
+    fn sse_client_with_parts(
+        response_rx: mpsc::Receiver<Result<Value, ClientError>>,
+        post_url: String,
+        stop: Arc<AtomicBool>,
+        reader_thread: Option<thread::JoinHandle<()>>,
+    ) -> SseClient {
+        SseClient {
+            response_rx,
+            post_url,
+            agent: ureq::AgentBuilder::new()
+                .timeout_read(SSE_READ_TIMEOUT)
+                .build(),
+            stop,
+            reader_thread,
+            next_id: 1,
+        }
+    }
+
+    /// Issue #667: `Drop` joins the reader thread, but a reader blocked in
+    /// `send` on a full channel never re-checks the stop flag, and the
+    /// receiver's destruction happens only after `drop()` returns -- after
+    /// the join that never returns. The channel is filled to its bound
+    /// BEFORE the reader starts, so the reader's first forward blocks
+    /// deterministically; a pre-fix `Drop` hangs on the join and the 10 s
+    /// timeout fails the test instead of hanging it. The post-fix order
+    /// (release the receiver, then join) fails the blocked `send` with
+    /// `SendError` and the reader exits via its channel-closed break.
+    #[test]
+    fn sse_client_drop_returns_when_reader_blocks_on_full_channel() {
+        // An endless stream of one valid message event per read: the
+        // flooding-server shape that keeps the reader trying to forward.
+        // The read count lets the test WAIT for the reader to enter its
+        // loop instead of sleeping a fixed interval (a sleep can pass
+        // vacuously if the thread has not been scheduled yet).
+        struct FloodReader {
+            reads: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl std::io::Read for FloodReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                let event = b"data: {\"id\":1,\"ok\":true}\n\n";
+                let n = event.len().min(buf.len());
+                buf[..n].copy_from_slice(&event[..n]);
+                Ok(n)
+            }
+        }
+
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        // Fill the channel to its bound first: with no consumer, the
+        // reader's very first forward blocks (deterministic hang shape).
+        for _ in 0..SSE_CHANNEL_BOUND {
+            tx.send(Ok(json!({"id": 1, "ok": true}))).expect("fill");
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_reader = stop.clone();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads_for_reader = reads.clone();
+        let reader_thread = thread::spawn(move || {
+            sse_reader_loop(
+                BufReader::new(FloodReader {
+                    reads: reads_for_reader,
+                }),
+                tx,
+                stop_for_reader,
+            );
+        });
+        // Wait until the reader has actually entered its loop: one inner
+        // read proves the stop check passed while stop was still false, and
+        // from there the reader has no exit path before the blocked send.
+        let mut started = false;
+        for _ in 0..500 {
+            if reads.load(Ordering::SeqCst) > 0 {
+                started = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started, "reader never reached its first read");
+
+        let client = sse_client_with_parts(
+            rx,
+            "http://127.0.0.1:1/message".to_string(),
+            stop,
+            Some(reader_thread),
+        );
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            drop(client);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Drop returned within the timeout (no join hang)");
     }
 
     /// `check_rpc_response` returns the `result` field on success and maps an
