@@ -1279,18 +1279,21 @@ mod tests {
     /// next blank-line boundary. Dropping only the line would stitch the
     /// surviving fields into a partial franken-event the consumer cannot
     /// parse; the next full event after the boundary parses normally.
-    /// Issue #665: the survivor lines include an `event:` line and a comment
-    /// -- the skip guard sits BEFORE field parsing, so a regression moving it
-    /// below the `event:` arm still compiles and leaks the type into the next
-    /// event, where the stitched data becomes malformed JSON and kills the
-    /// whole transport (issue #647's escalation, one notch worse).
+    /// Issue #665: the survivor lines include an `event: message` and a
+    /// comment -- the skip guard sits BEFORE field parsing, so a regression
+    /// moving it below the `event:` arm still compiles and leaks the type
+    /// into the next event, where the stitched data becomes malformed JSON
+    /// and kills the whole transport (issue #647's escalation, one notch
+    /// worse). The survivor's type is `message` on purpose: only a leaked
+    /// message-typed event is consumed, so its stitched data actually
+    /// reaches the parser and fails.
     #[test]
     fn read_sse_event_overlong_line_voids_event_and_resyncs_at_boundary() {
         // First `data:` line is 30 bytes (over the 16-byte cap); the short
-        // survivors (`data: tail`, `event: leaked`, `: comment`) are skipped
+        // survivors (`data: tail`, `event: message`, `: comment`) are skipped
         // during the resync, not stitched or leaked into the next event.
         let wire = format!(
-            "data: {}\ndata: tail\nevent: leaked\n: comment\n\ndata: {{\"ok\":1}}\n\n",
+            "data: {}\ndata: tail\nevent: message\n: comment\n\ndata: {{\"ok\":1}}\n\n",
             "a".repeat(24)
         );
         let mut reader = Cursor::new(wire.into_bytes());
@@ -1316,7 +1319,7 @@ mod tests {
     #[test]
     fn read_sse_event_second_overlong_during_resync_stays_resyncing() {
         // Two 30-byte lines (over the 16-byte cap) inside one voided event,
-        // each followed by a short survivor of a different field kind (12
+        // each followed by a short survivor of a different field kind (11
         // and 10 bytes, well under the cap); the healthy event after the
         // boundary parses normally.
         let wire = format!(
@@ -1409,11 +1412,15 @@ mod tests {
     /// thread and the test asserts its join result -- a reader that PANICKED
     /// on the malformed event would also drop the sender and pass the
     /// closed-channel assertion, so only the join distinguishes the clean
-    /// `break` exit.
+    /// `break` exit. The wire carries one more healthy event AFTER the
+    /// malformed one: the error forward is a stop, so a deleted `break`
+    /// would forward that event and fail the closed-channel assertion --
+    /// the exit cannot ride on the EOF that follows.
     #[test]
     fn sse_reader_loop_propagates_malformed_message_and_exits() {
         let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
-        let wire = b"data: {\"id\":1,\"ok\":true}\n\ndata: not-json\n\n";
+        let wire =
+            b"data: {\"id\":1,\"ok\":true}\n\ndata: not-json\n\ndata: {\"id\":2,\"ok\":true}\n\n";
         // Finite input: the loop runs to its exit on its own thread (no stop
         // needed); the join result pins the exit as clean, not a panic.
         let reader_thread = thread::spawn(move || {
