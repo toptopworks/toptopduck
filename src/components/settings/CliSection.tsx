@@ -44,14 +44,10 @@ import { CliToolForm } from "./CliToolForm";
 // shell state ONLY (the setDefaultRuntime state-only-sync precedent), never
 // a second disk write over a snapshot that read nothing.
 
-type DeleteTarget = { name: string };
-
 /** The gated row actions (the delete and the restore both overwrite user
  * state irreversibly, so both route through the shared confirmation
  * dialog before their IPC lands). */
-type ConfirmTarget =
-  | ({ kind: "delete" } & DeleteTarget)
-  | { kind: "restore"; name: string };
+type ConfirmTarget = { kind: "delete" | "restore"; name: string };
 
 export function CliSection({
   appConfig,

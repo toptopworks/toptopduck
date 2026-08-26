@@ -1384,9 +1384,11 @@ mod tests {
 
     #[test]
     fn restore_builtin_cli_tool_refuses_non_builtin_targets() {
-        // A registered user entry and an unregistered builtin name are both
-        // refusals (structured, through the same Invalid lane as every
-        // other registration-shape rejection).
+        // A registered user entry, an unregistered builtin name, and a user
+        // entry OWNING a builtin name (the conflict posture) are all refusals
+        // (structured, through the same Invalid lane as every other
+        // registration-shape rejection). The third guard is what keeps
+        // apply_baseline off a user entry, so its body survives verbatim.
         let (_dir, live) = live();
         live.upsert_cli_tool(cli_tool("my-pandoc")).expect("upsert");
         assert!(matches!(
@@ -1397,6 +1399,21 @@ mod tests {
             live.restore_builtin_cli_tool("pandoc"),
             Err(CliToolWriteError::Invalid(_))
         ));
+        let mut cfg = AppConfig::defaults();
+        cfg.cli_tools.tools = vec![cli_tool("pandoc")];
+        std::fs::write(live.path(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(matches!(
+            live.restore_builtin_cli_tool("pandoc"),
+            Err(CliToolWriteError::Invalid(_))
+        ));
+        let tool = live
+            .cli_tools()
+            .into_iter()
+            .find(|t| t.name == "pandoc")
+            .expect("entry");
+        assert_eq!(tool.source, CliToolSource::User);
+        assert_eq!(tool.description, "convert documents");
+        assert_eq!(tool.baseline, None);
     }
 
     /// An app-config with one active anthropic profile -- the pre-0098 stored

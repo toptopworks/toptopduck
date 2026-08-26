@@ -179,8 +179,10 @@ pub(crate) fn is_builtin_name(name: &str) -> bool {
 }
 
 /// Find the shipped definition a builtin name belongs to. `None` means the
-/// name is not in the curated set (which `has_legal_shape` already refuses
-/// for `source = Builtin` -- the lookup's `None` arm is defensive).
+/// name is not in the curated set. On the upsert path that arm is defensive
+/// (`has_legal_shape` already refuses a `source = Builtin` entry on a
+/// non-curated name); on the explicit restore it is a primary refusal lane
+/// (an unknown or user-owned name is the user-facing error).
 pub(crate) fn find_definition(name: &str) -> Option<&'static BuiltinCliDefinition> {
     BUILTIN_DEFINITIONS.iter().find(|d| d.name == name)
 }
@@ -764,6 +766,24 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_never_touches_a_user_entry_owning_the_name() {
+        // The conflict posture is untouchable: the source guard skips a user
+        // entry even with a FOLLOWING marker and a body that disagrees with
+        // the definition -- reconciliation is baseline curation, and only a
+        // builtin entry carries a baseline.
+        let mut user_pandoc = crate::cli_tools::config::CliToolConfig {
+            source: CliToolSource::User,
+            ..pandoc().to_config("users-own-pandoc")
+        };
+        user_pandoc.description = "the user's own body".into();
+        let mut registry = registry_with(vec![user_pandoc]);
+        assert!(reconcile_baselines(BUILTIN_DEFINITIONS, &mut registry).is_empty());
+        let tool = registry.get("pandoc").expect("entry");
+        assert_eq!(tool.source, CliToolSource::User);
+        assert_eq!(tool.description, "the user's own body");
+    }
+
+    #[test]
     fn baseline_after_edit_keeps_the_posture_for_untracked_changes() {
         // The enable toggle and the executable relocation paths (the row
         // switch and a custom interpreter path) are not edits.
@@ -816,6 +836,29 @@ mod tests {
         drifted.description = "custom".into();
         assert_eq!(
             baseline_after_edit(None, &drifted),
+            CliBaselineState::Edited
+        );
+    }
+
+    #[test]
+    fn baseline_after_edit_treats_a_user_entry_conversion_as_a_fresh_upsert() {
+        // The `_` arm's other half: an old USER entry with the name (the
+        // conflict posture converting to builtin through the defensive
+        // direct-upsert path) follows the fresh rule -- agreement is
+        // Following, drift is Edited.
+        let old_user = crate::cli_tools::config::CliToolConfig {
+            source: CliToolSource::User,
+            ..pandoc().to_config("users-own-pandoc")
+        };
+        let matching = pandoc().to_config("pandoc");
+        assert_eq!(
+            baseline_after_edit(Some(&old_user), &matching),
+            CliBaselineState::Following
+        );
+        let mut drifted = pandoc().to_config("pandoc");
+        drifted.description = "custom".into();
+        assert_eq!(
+            baseline_after_edit(Some(&old_user), &drifted),
             CliBaselineState::Edited
         );
     }
