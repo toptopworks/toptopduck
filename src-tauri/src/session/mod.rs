@@ -14,6 +14,7 @@ pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
+pub mod yoagent;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;

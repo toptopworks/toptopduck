@@ -419,7 +419,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Build the `Transient` termination for a caught panic (issue #321):
 /// single-sources the detail format + the log target so the two guard
 /// sites stay consistent.
-fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
+pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
     let detail = format!("agent loop panicked in {site}: {}", panic_message(payload));
     log::error!(target: "toptopduck::agent_loop", "{detail}");
     Termination::Transient(detail)
@@ -477,7 +477,7 @@ fn complete_round_thinking(
 /// safer than rewinding the number and clashing on reuse. The ghost was never
 /// user-visible, so ADR-0022's no-reuse constraint does not apply to the
 /// rollback itself.
-fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
+pub(crate) fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
     let curr_next = deps.working_set.next_result_number();
     if curr_next <= prev_next {
         return;
@@ -582,10 +582,10 @@ impl LoopRound {
 /// the gate suspends on. Bundled (like [`CallOutputs`]) so the call
 /// signature stays under clippy's argument-count threshold now that the
 /// ADR-0078 event emitter rides it too.
-struct GateCtx<'a> {
-    approval: &'a ApprovalState,
-    sink: &'a dyn ApprovalSink,
-    cancel: &'a CancelToken,
+pub(crate) struct GateCtx<'a> {
+    pub(crate) approval: &'a ApprovalState,
+    pub(crate) sink: &'a dyn ApprovalSink,
+    pub(crate) cancel: &'a CancelToken,
 }
 
 /// Drive one tool call through the gateway + dispatch, append a trace entry,
@@ -619,6 +619,37 @@ fn execute_call(
     outputs: &mut CallOutputs,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<ToolResult, GateCancelled> {
+    let (result, entry, promotion) =
+        dispatch_gated_call(call, deps, materializer, mcp, cli, gate, on_phase)?;
+    if let Some(promotion) = promotion {
+        outputs.promotions.push(promotion);
+    }
+    if let Some(entry) = entry {
+        outputs.push_call(entry);
+    }
+    Ok(result)
+}
+
+/// Route one tool call through the approval gateway + dispatch (ADR-0080 /
+/// ADR-0076): the shared dispatch core behind [`execute_call`] and the yoagent
+/// integration layer's gateway tool adapter (issue #668, ADR-0107). One
+/// implementation so gate classification, meta-tool resolution, external
+/// routing, `result_N` numbering, and the trace-entry shape cannot drift
+/// between the two runtimes -- the adapter calls THIS, never a re-assembly.
+/// Returns the model-facing result, the call's trace entry (`None` for a
+/// meta-tool resolution failure that never reached a tool, ADR-0105
+/// Decision 4), and any promotion. Emits the ADR-0078 phase pair through
+/// `on_phase` exactly as the built-in loop does.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_gated_call(
+    call: &ToolUse,
+    deps: &mut TurnDeps,
+    materializer: &mut dyn Materializer,
+    mcp: &mut McpAggregator,
+    cli: &[crate::cli_tools::config::CliToolConfig],
+    gate: &GateCtx<'_>,
+    on_phase: &mut impl FnMut(TurnPhase),
+) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
     // Meta-tool trio dispatch (ADR-0105): the classification -- list / search
     // run locally against the aggregator's catalog (read-only, short of the
     // gate -- the built-in read tools' trust shape); mcp_invoke resolves its
@@ -632,9 +663,12 @@ fn execute_call(
     let resolved;
     let call: &ToolUse = match meta_tools::resolve_meta_call(mcp, call) {
         meta_tools::MetaDispatch::Local { summary, payload } => {
-            return Ok(local_meta_call(call, &summary, payload, outputs, on_phase));
+            let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+            return Ok((result, Some(entry), None));
         }
-        meta_tools::MetaDispatch::Refused(message) => return Ok(meta_failure(call, &message)),
+        meta_tools::MetaDispatch::Refused(message) => {
+            return Ok((meta_failure(call, &message), None, None))
+        }
         meta_tools::MetaDispatch::Resolved(replacement) => {
             resolved = replacement;
             &resolved
@@ -681,12 +715,15 @@ fn execute_call(
             // keeps its message -- here the denial -- so the resolved card
             // and the recorded trace show the same why).
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-            outputs.push_call(entry);
-            return Ok(ToolResult {
-                tool_use_id: call.id.clone(),
-                content: "tool call denied by the approval gateway".to_string(),
-                is_error: true,
-            });
+            return Ok((
+                ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: "tool call denied by the approval gateway".to_string(),
+                    is_error: true,
+                },
+                Some(entry),
+                None,
+            ));
         }
         Ok(GateOutcome::Allow) => {}
     }
@@ -742,11 +779,9 @@ fn execute_call(
     // landed (today, only `materialize` produces one, and only on success --
     // the executor builds it from the typed sql + descriptor, so there is no
     // "success but no promotion" contract violation to guard). The loop is
-    // tool-agnostic: it pushes `outcome.promotion` without naming any tool
+    // tool-agnostic: it carries `outcome.promotion` without naming any tool
     // (issue #336).
-    if let Some(promotion) = outcome.promotion {
-        outputs.promotions.push(promotion);
-    }
+    let promotion = outcome.promotion;
     let entry = TraceEntry {
         tool_use_id: call.id.clone(),
         name: call.name.clone(),
@@ -759,8 +794,7 @@ fn execute_call(
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the
     // ToolCallStarted emitted pre-dispatch.
     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-    outputs.push_call(entry);
-    Ok(result)
+    Ok((result, Some(entry), promotion))
 }
 
 /// Serve one locally-executed meta-tool (`mcp_list_servers` /
@@ -769,14 +803,15 @@ fn execute_call(
 /// flat String on this path), with the standard started / completed phase
 /// pair + trace entry so a meta-tool call renders like any other call. These
 /// never touch a backend server, so there is no gate suspension (catalog
-/// reads carry the built-in read tools' trust shape).
+/// reads carry the built-in read tools' trust shape). Returns the result
+/// paired with its trace entry -- the push into the loop's outputs belongs
+/// to the caller ([`execute_call`] / the yoagent dispatcher).
 fn local_meta_call(
     call: &ToolUse,
     summary: &str,
     payload: serde_json::Value,
-    outputs: &mut CallOutputs,
     on_phase: &mut impl FnMut(TurnPhase),
-) -> ToolResult {
+) -> (ToolResult, TraceEntry) {
     on_phase(TurnPhase::ToolCallStarted {
         name: call.name.clone(),
         operation_kind: OperationKind::Read,
@@ -793,12 +828,14 @@ fn local_meta_call(
         result_excerpt: String::new(),
     };
     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-    outputs.push_call(entry);
-    ToolResult {
-        tool_use_id: call.id.clone(),
-        content: payload.to_string(),
-        is_error: false,
-    }
+    (
+        ToolResult {
+            tool_use_id: call.id.clone(),
+            content: payload.to_string(),
+            is_error: false,
+        },
+        entry,
+    )
 }
 
 /// A meta-tool resolution failure (a malformed `mcp_search_tools` input, or

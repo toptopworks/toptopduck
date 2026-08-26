@@ -3,7 +3,10 @@ name = "toptopduck"
 version = "0.1.0"
 description = "Local-first AI data analysis desktop tool"
 edition = "2021"
-rust-version = "1.80"
+# MSRV raised from 1.80 for yoagent 0.18 (ADR-0107, issue #668): the crate's
+# own floor (1.86 at 0.18.1) becomes ours. CI runs stable (no toolchain pin),
+# so only the declaration moves.
+rust-version = "1.86"
 # The crate declares multiple [[bin]] targets below (acp-fake-cli / mcp-fake-server
 # test fixtures + toptopduck-acp-bridge process), so a bare `cargo run` -- and
 # `tauri dev`, which shells out to cargo for the main app binary -- cannot infer
@@ -179,7 +182,11 @@ tauri-plugin-log = "2"
 # (issue #392). Only the `time` feature is needed — the runtime itself is
 # managed by Tauri's async_runtime. Zero additional code is shipped: the
 # tokio shared object is already linked.
-tokio = { version = "1", features = ["time"] }
+# `rt` + `sync` (issue #668): the yoagent integration layer drives the
+# upstream agent loop on a dedicated per-turn runtime and consumes its event
+# channel (`tokio::sync::mpsc`); `macros` backs `select!` in the layer's
+# offline tests.
+tokio = { version = "1", features = ["time", "rt", "sync", "macros"] }
 # `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
 # for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
 # materialized result_N records which working-set members its SQL named, so a
@@ -224,6 +231,25 @@ sys-locale = "0.3"
 # Codex CLI config parsing for the MCP import wizard (issue #390): reads the
 # `[mcp_servers.*]` tables from `~/.codex/config.toml`. MSRV 1.76 (<= 1.80).
 toml = "0.9"
+# In-process agent loop + protocol adapter crate (ADR-0107, issue #668): the
+# self-written loop and anthropic/openai adapters converge onto this linked-in
+# crate -- same process, so the API key stays an explicit parameter (ADR-0029
+# invariant 3; never an env-var path). Minor gate "0.18" per ADR-0107: the 0.x
+# single-org supply-chain exposure is taken on via the gate + the Cargo.lock
+# exact pin + the revert floor. The app keeps its domain layers (prompt
+# assembly, gateway, windowing, preflight, config) and registers NONE of the
+# crate's own built-in tools / MCP client / skills / subagents / compaction --
+# every tool call routes the app gateway (ADR-0105), the single enforcement
+# point.
+yoagent = "0.18"
+# Impl-block `async fn` for our gateway tool adapter: yoagent's `AgentTool`
+# trait is `#[async_trait]`-declared, so an implementing crate needs the same
+# macro in scope as a direct dependency (issue #668).
+async-trait = "0.1"
+# Task cancellation token bridging the app's `CancelToken` into yoagent's loop
+# (issue #668): the upstream `CancellationToken` type is named in our runner's
+# signatures, so it is declared here rather than reached transitively.
+tokio-util = "0.7"
 
 # Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
 # non-mobile targets to mirror lib.rs `#[cfg(desktop)]` -- these plugins have
