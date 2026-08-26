@@ -641,7 +641,10 @@ pub struct SseClient {
     agent: ureq::Agent,
     /// Stop flag shared with the reader thread.
     stop: Arc<AtomicBool>,
-    /// The reader thread handle (joined on Drop).
+    /// The reader thread handle. `Drop` releases `response_rx` before
+    /// joining this thread (issue #667): a reader blocked in `send` on a
+    /// full channel only exits when the receiver's destruction fails that
+    /// send.
     reader_thread: Option<thread::JoinHandle<()>>,
     next_id: i64,
 }
@@ -761,7 +764,7 @@ impl Drop for SseClient {
         // Release the receiver BEFORE joining. Two reader exit paths meet
         // here: a reader blocked in `send` on a full channel never re-checks
         // the stop flag, so only the receiver's destruction fails that send
-        // with Disconnected (field destruction would happen only after
+        // with `SendError` (field destruction would happen only after
         // `drop()` returns -- i.e. after a join that never returns, issue
         // #667); a reader between reads sees the stop flag at its next
         // read-timeout wakeup (at most SSE_READ_TIMEOUT). The plain
@@ -1491,7 +1494,7 @@ mod tests {
     /// deterministically; a pre-fix `Drop` hangs on the join and the 10 s
     /// timeout fails the test instead of hanging it. The post-fix order
     /// (release the receiver, then join) fails the blocked `send` with
-    /// Disconnected and the reader exits via its channel-closed break.
+    /// `SendError` and the reader exits via its channel-closed break.
     #[test]
     fn sse_client_drop_returns_when_reader_blocks_on_full_channel() {
         // An endless stream of one valid message event per read: the
