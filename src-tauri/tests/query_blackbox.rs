@@ -558,7 +558,16 @@ fn step_cap_exhaustion_lands_a_failed_turn() {
     // (Cancelled) shares the cancel path; its deterministic coverage lives at
     // the agent-loop unit seam (the 120s default is not tunable through the
     // Session facade).
-    let provider = FakeProvider::new().scripted_tool_turn("不收敛", explore("SELECT 1"));
+    //
+    // Under the yoagent loop (ADR-0107, issue #669) the trajectory must
+    // VARY its call to reach the cap: identical repeated calls are stopped
+    // earlier by upstream loop detection (steer at 3, abort on the repeat
+    // after the nudge -- that path has its own pins). A draw-time-unique SQL
+    // keeps every call distinct, so nothing but the cap ends the run.
+    let trajectory: Vec<Result<ToolTurnReply, ProviderError>> = (0..24)
+        .map(|n| Ok(explore(&format!("SELECT {n}"))))
+        .collect();
+    let provider = FakeProvider::new().scripted_tool_turn_seq("不收敛", trajectory);
     let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
@@ -567,11 +576,14 @@ fn step_cap_exhaustion_lands_a_failed_turn() {
         TurnFailure::Execute { detail } => detail,
         other => panic!("expected Execute, got {other:?}"),
     };
-    assert!(detail.contains("did not converge"), "got {detail:?}");
+    assert!(
+        detail.contains("did not converge within 24 steps"),
+        "the detail carries the default cap value: got {detail:?}"
+    );
     assert_eq!(
         captured.lock().expect("capture lock").len(),
-        24, // ADR-0081 DEFAULT_STEP_CAP
-        "ran exactly the step-cap round-trips"
+        24,
+        "the cap stops the run at exactly the default 24 round-trips"
     );
     assert!(session.get("result_1").is_none());
 }
@@ -1350,6 +1362,21 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
 // Completed -> Thinking{2} (the terminal-text round-trip). These tests pin
 // the event SEQUENCE the UI renders the live trace from.
 
+/// A `'static` phase collector (issue #669): the phase callback crosses
+/// into the yoagent loop's driver thread, so the collector rides an
+/// `Arc<Mutex>` -- one construction covers the capture + drain pattern
+/// every phase-asserting test repeats.
+fn phase_collector() -> (
+    Arc<Mutex<Vec<TurnPhase>>>,
+    impl FnMut(TurnPhase) + Send + 'static,
+) {
+    let phases: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let capture = Arc::clone(&phases);
+    (phases, move |p| {
+        capture.lock().expect("phases lock poisoned").push(p)
+    })
+}
+
 #[test]
 fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
     // ADR-0059/0078/0081: a one-call result turn emits the first provider
@@ -1359,18 +1386,19 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
     let approval = ApprovalState::new();
     let sink = NullSink;
-    let mut phases: Vec<TurnPhase> = Vec::new();
+    let (phases, collect) = phase_collector();
     let outcome = session.ask_with_phase(
         "建结果",
         &approval,
         &sink,
-        |p| phases.push(p),
+        collect,
         &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
         "got {outcome:?}"
     );
+    let phases = phases.lock().expect("phases lock poisoned").clone();
     assert_eq!(
         phases,
         vec![
@@ -1403,18 +1431,19 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
     let approval = ApprovalState::new();
     let sink = NullSink;
 
-    let mut phases: Vec<TurnPhase> = Vec::new();
+    let (phases, collect) = phase_collector();
     let outcome = session.ask_with_phase(
         "澄清",
         &approval,
         &sink,
-        |p| phases.push(p),
+        collect,
         &TurnInputs::empty(&KeychainStore::new()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
         "got {outcome:?}"
     );
+    let phases = phases.lock().expect("phases lock poisoned").clone();
     assert_eq!(
         phases,
         vec![TurnPhase::Thinking { attempt: 1 }],
@@ -1444,19 +1473,26 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
     // Issue #462: session_id is a typed SessionId (valid v4 UUID).
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
     let sid = SessionId::parse(SID).expect("valid v4 UUID");
+    let sid_for_assert = sid.clone();
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
     let approval = ApprovalState::new();
     let sink = NullSink;
-    let mut addressed: Vec<TurnProgress> = Vec::new();
+    // 'static capture (issue #669): the phase callback crosses into the
+    // yoagent loop's driver thread, so the collector rides an Arc<Mutex>.
+    let addressed: Arc<Mutex<Vec<TurnProgress>>> = Arc::new(Mutex::new(Vec::new()));
+    let capture = Arc::clone(&addressed);
     let outcome = session.ask_with_phase(
         "建结果",
         &approval,
         &sink,
-        |phase| {
-            addressed.push(TurnProgress {
-                session_id: sid.clone(),
-                phase,
-            });
+        move |phase| {
+            capture
+                .lock()
+                .expect("addressed lock poisoned")
+                .push(TurnProgress {
+                    session_id: sid.clone(),
+                    phase,
+                });
         },
         &TurnInputs::empty(&KeychainStore::new()),
     );
@@ -1464,11 +1500,12 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
         matches!(outcome, TurnOutcome::Materialized { .. }),
         "got {outcome:?}"
     );
+    let addressed = addressed.lock().expect("addressed lock poisoned");
     // A one-call result turn emits Thinking{1} + the materialize
     // started/completed pair + Thinking{2} (ADR-0078 event stream).
     assert!(addressed.len() >= 2, "got {addressed:?}");
     assert!(
-        addressed.iter().all(|p| p.session_id == sid),
+        addressed.iter().all(|p| p.session_id == sid_for_assert),
         "every turn-progress event carries the ask's session_id: {addressed:?}"
     );
 }

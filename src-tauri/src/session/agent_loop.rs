@@ -82,6 +82,8 @@ pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 /// loop is cheap to build per turn), the shared cancel token (owned `Arc` so the
 /// watchdog can fire cancel without the session lock), and the two
 /// execution-level caps. Built per turn; [`Self::run`] consumes it.
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 pub(crate) struct AgentLoop<'p> {
     provider: &'p dyn Provider,
     cancel: Arc<CancelToken>,
@@ -89,6 +91,8 @@ pub(crate) struct AgentLoop<'p> {
     wall_clock: Option<Duration>,
 }
 
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 impl<'p> AgentLoop<'p> {
     /// Build a loop with the default caps (step cap 24, wall-clock 120s,
     /// ADR-0081). The provider is borrowed -- the loop does not own it -- and
@@ -350,6 +354,8 @@ impl<'p> AgentLoop<'p> {
 /// Every exit path funnels through here so the `LoopOutcome` shape has one
 /// source of truth (trace, promotions, and round-trip count always travel
 /// together); each branch contributes only its [`Termination`].
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 fn outcome(termination: Termination, mut outputs: CallOutputs, round_trips: u32) -> LoopOutcome {
     retain_landed_rounds(&mut outputs.rounds);
     LoopOutcome {
@@ -426,6 +432,8 @@ pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send
 /// non-streaming round-trip -- there is no observable thinking-only window,
 /// and no wall-clock approximation is fabricated for it (the #612
 /// precedent).
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 fn thinking_trace(blocks: &[ThinkingBlock]) -> Option<ThinkingTrace> {
     let text = blocks
         .iter()
@@ -443,6 +451,8 @@ fn thinking_trace(blocks: &[ThinkingBlock]) -> Option<ThinkingTrace> {
 /// (readable text present). The trace then rides whichever `LoopRound`
 /// shape the caller records -- the thinking-only trailing round of a
 /// terminal reply or the prose round of a tool batch.
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 fn complete_round_thinking(
     thinking: &[ThinkingBlock],
     on_phase: &mut impl FnMut(TurnPhase),
@@ -496,11 +506,15 @@ pub(crate) fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
 /// (ADR-0022). Bundled into one struct so [`execute_call`] stays under
 /// clippy's argument-count threshold and the two always-coupled accumulators
 /// move together.
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 struct CallOutputs {
     rounds: Vec<LoopRound>,
     promotions: Vec<Promotion>,
 }
 
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 impl CallOutputs {
     /// Record one completed call on the current round (the shared
     /// [`push_call`]).
@@ -636,6 +650,8 @@ pub(crate) enum DispatchAbort {
 // outputs, on_phase) and bundling any two would blur ownership for callers
 // that thread them separately.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // retired from the execution path by the yoagent
+                    // switchover (ADR-0107, issue #669); deleted with the rest of the loop in #670
 fn execute_call(
     call: &ToolUse,
     deps: &mut TurnDeps,

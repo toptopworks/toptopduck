@@ -25,15 +25,17 @@
 //! async loop on a dedicated single-threaded runtime. Only owned data
 //! crosses (channels + shared state).
 
-// The layer is deliberately UNWIRED in this slice (issue #668): no
-// production call site constructs `YoagentLoop` until #669 swaps the turn
-// execution over, so the non-test build sees the whole surface as dead code.
-// The tests exercise every path; retire this allow with #669's wiring.
-#![allow(dead_code)]
+// The layer is wired into turn execution (issue #669): `Session::ask` routes
+// every built-in turn through `turn_loop_for` below. The retired self-written
+// loop (`AgentLoop`) carries the dead-code allowances now, until #670 deletes
+// it.
 
 mod adapter;
 mod fold;
+mod live;
 mod model_config;
+
+pub(crate) use live::turn_loop_for;
 
 #[cfg(test)]
 mod tests;
@@ -79,6 +81,15 @@ const MAX_TURNS_PREFIX: &str = "Max turns"; // check_limits, yoagent context.rs
 const MAX_DURATION_PREFIX: &str = "Max duration"; // check_limits, yoagent context.rs
 const AUTH_ERROR_PREFIX: &str = "Auth error"; // ProviderError::Auth Display
 
+/// The bridge's error-side encoding for an app `InvalidConfig` fault (issue
+/// #669): the app provider bridge (live.rs) writes this prefix into the
+/// upstream error channel, and `derive_reply_termination` strips it back
+/// into `Termination::InvalidConfig` -- the same write/read pairing the
+/// upstream `Auth error` wording has, but for a classification the upstream
+/// vocabulary has no variant for. Both sides live in this module, so the
+/// contract cannot drift apart.
+const INVALID_CONFIG_PREFIX: &str = "Invalid config";
+
 /// The per-turn yoagent runner -- the layer's mirror of
 /// [`crate::session::agent_loop::AgentLoop`]. Built per turn (cheap): the
 /// resolved model + key, the provider, and the two execution-level caps.
@@ -102,6 +113,9 @@ impl YoagentLoop {
     }
 
     /// Override the caps (the test seam mirroring `AgentLoop::with_caps`).
+    /// Test-only at the call sites: the production wiring always runs the
+    /// ADR-0081 defaults.
+    #[allow(dead_code)]
     pub(crate) fn with_caps(mut self, step_cap: u32, wall_clock: Option<Duration>) -> Self {
         self.step_cap = step_cap;
         self.wall_clock = wall_clock;
@@ -449,10 +463,12 @@ fn finish(
 /// ADR-0021 timeout -> cancel mapping; normally the watchdog's token fired
 /// first and the run never reaches this arm). A terminal provider error
 /// classifies through the existing vocabulary -- the upstream `Auth error`
-/// prefix maps to `NotWired`, everything else to `Transient` (rate-limit /
-/// network faults reach here only after the upstream backoff exhausted, so
-/// nothing transient leaks to the user mid-run, ADR-0044). Otherwise the
-/// last assistant reply's text is the terminal text, verbatim.
+/// prefix maps to `NotWired`, the bridge's `Invalid config` encoding (see
+/// [`INVALID_CONFIG_PREFIX`]) back to `InvalidConfig`, everything else to
+/// `Transient` (rate-limit / network faults reach here only after the
+/// upstream backoff exhausted, so nothing transient leaks to the user
+/// mid-run, ADR-0044). Otherwise the last assistant reply's text is the
+/// terminal text, verbatim.
 fn derive_reply_termination(fold: &EventFold, step_cap: u32) -> Termination {
     // A trailing stop-marker User message names the limit that stopped the
     // run (loop-abort markers were consumed earlier, before this fn).
@@ -499,11 +515,20 @@ fn derive_reply_termination(fold: &EventFold, step_cap: u32) -> Termination {
         let detail = error_message
             .clone()
             .unwrap_or_else(|| "provider stream failed without a diagnostic".to_string());
-        return if detail.starts_with(AUTH_ERROR_PREFIX) {
-            Termination::NotWired
-        } else {
-            Termination::Transient(detail)
-        };
+        if detail.starts_with(AUTH_ERROR_PREFIX) {
+            return Termination::NotWired;
+        }
+        // The app-provider bridge's encoding (live.rs): the prefix strips
+        // back off, the payload rides verbatim -- the same diagnosis the
+        // built-in adapters surfaced (issue #277's "scheme `file` is not
+        // http/https" wording reaches the UI fold unchanged).
+        if let Some(rest) = detail
+            .strip_prefix(INVALID_CONFIG_PREFIX)
+            .and_then(|rest| rest.strip_prefix(": "))
+        {
+            return Termination::InvalidConfig(rest.to_string());
+        }
+        return Termination::Transient(detail);
     }
     let text = content
         .iter()

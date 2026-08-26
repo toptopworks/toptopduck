@@ -70,6 +70,21 @@ pub(crate) fn thinking_level_for(level: Option<&str>) -> yoagent::ThinkingLevel 
     }
 }
 
+/// The inverse of [`thinking_level_for`] (issue #669): the wiring seam's
+/// bridge rebuilds an app `ToolTurnRequest` from the upstream `StreamConfig`,
+/// so a level the loop asked for maps back onto the posture id it came from.
+/// `Off` maps to `None` (no thinking enablement); the mapping is total
+/// because the upstream level vocabulary is exactly the four known ids.
+pub(crate) fn thought_level_id(level: yoagent::ThinkingLevel) -> Option<&'static str> {
+    match level {
+        yoagent::ThinkingLevel::Off => None,
+        yoagent::ThinkingLevel::Minimal => Some("minimal"),
+        yoagent::ThinkingLevel::Low => Some("low"),
+        yoagent::ThinkingLevel::Medium => Some("medium"),
+        yoagent::ThinkingLevel::High => Some("high"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +166,25 @@ mod tests {
         assert_eq!(
             thinking_level_for(Some("custom-tier")),
             yoagent::ThinkingLevel::Off
+        );
+    }
+
+    /// The bridge's inverse: every upstream level round-trips back onto the
+    /// posture id it came from, so a rebuilt request asks for the same
+    /// thinking posture the window assembly chose.
+    #[test]
+    fn thought_level_id_inverts_the_forward_map() {
+        for id in ["minimal", "low", "medium", "high"] {
+            assert_eq!(
+                thought_level_id(thinking_level_for(Some(id))),
+                Some(id),
+                "{id} round-trips"
+            );
+        }
+        assert_eq!(
+            thought_level_id(thinking_level_for(None)),
+            None,
+            "Off maps to no enablement"
         );
     }
 }

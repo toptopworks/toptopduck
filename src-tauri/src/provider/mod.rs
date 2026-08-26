@@ -256,6 +256,37 @@ pub enum ProviderError {
     Unavailable(String),
 }
 
+/// The per-turn upstream construction facts (ADR-0107, issue #669): the
+/// active access profile's wire coordinates plus the keychain key, read
+/// FRESH each turn so a profile switch lands the next turn. All app-owned
+/// types on purpose -- the upstream provider construction these feed is
+/// sealed inside `session::yoagent`, so no upstream type crosses this
+/// boundary (the #669 encapsulation AC). `None` (the trait default) marks a
+/// provider with no live profile behind it (the scripted test fake,
+/// [`UnwiredProvider`]); the wiring seam bridges those onto the loop as-is
+/// instead of constructing an upstream provider.
+#[derive(Clone)]
+pub struct TurnModelFacts {
+    pub protocol: crate::model::Protocol,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for TurnModelFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key never rides a Debug render (ADR-0029): a present key
+        // prints as the redaction marker, mirroring the upstream
+        // `StreamConfig`'s masked Debug instead of a derived impl.
+        f.debug_struct("TurnModelFacts")
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
 /// The provider abstraction (ADR-0007). Two methods: the single-shot
 /// [`Self::generate`] (turn a schema-aware request into the one-SQL reply
 /// contract, ADR-0009) and the native tool-calling [`Self::generate_tool_turn`]
@@ -264,7 +295,7 @@ pub enum ProviderError {
 /// client (openai::OpenaiProvider), the scripted test fake
 /// (fake::FakeProvider), and the default UnwiredProvider. Send so the session
 /// can hold it behind an Arc<Mutex> and run turns on a blocking thread.
-pub trait Provider: Send {
+pub trait Provider: Send + Sync {
     fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError>;
 
     /// One native tool-calling round-trip (ADR-0081, issue #291):
@@ -303,6 +334,15 @@ pub trait Provider: Send {
     /// prompt, so the default is inert for them.
     fn response_locale(&self) -> ResponseLocale {
         ResponseLocale::EnUS
+    }
+
+    /// The live upstream construction facts (ADR-0107, issue #669), read
+    /// per turn like [`Self::response_locale`] / the adapter routing: a
+    /// profile switch (protocol, endpoint, model, key) lands the next turn.
+    /// `None` for providers with no live profile behind them -- the default
+    /// keeps [`UnwiredProvider`] and the scripted fake inert.
+    fn turn_model_facts(&self) -> Option<TurnModelFacts> {
+        None
     }
 }
 
@@ -373,6 +413,21 @@ impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
         // directly (ADR-0052).
         self.config.locale()
     }
+
+    fn turn_model_facts(&self) -> Option<TurnModelFacts> {
+        // Per-turn read off the config source (ADR-0107, issue #669): the
+        // same freshness the adapter routing above applies -- a profile
+        // switch lands the next turn on the new upstream construction. A
+        // present-but-keyless profile rides through with `api_key: None` so
+        // the wiring seam's resolution refuses the turn as NotWired exactly
+        // where the adapters used to (ADR-0029).
+        Some(TurnModelFacts {
+            protocol: self.config.protocol(),
+            base_url: self.config.base_url(),
+            model: self.config.model(),
+            api_key: self.config.api_key(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +436,24 @@ mod tests {
     use crate::model::Protocol;
     use crate::provider::prompt::ResponseLocale;
     use std::sync::{Arc, Mutex};
+
+    /// The key never rides a Debug render: a present key prints as the
+    /// redaction marker (ADR-0029, mirroring the upstream `StreamConfig`'s
+    /// masked Debug) -- a derived Debug would print the keychain secret in
+    /// the clear wherever a future log line or panic payload renders the
+    /// facts.
+    #[test]
+    fn turn_model_facts_debug_masks_the_api_key() {
+        let facts = TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "m".into(),
+            api_key: Some("sk-secret".into()),
+        };
+        let rendered = format!("{facts:?}");
+        assert!(!rendered.contains("sk-secret"), "got {rendered}");
+        assert!(rendered.contains("[redacted]"), "got {rendered}");
+    }
 
     /// A minimal request with no history / datasets -- the routing tests only
     /// care which HTTP endpoint the dispatch hit, not the body shape.

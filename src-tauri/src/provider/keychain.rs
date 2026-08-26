@@ -28,7 +28,7 @@ use crate::model::{ProfileId, Protocol};
 /// of touching the OS keychain; production wires
 /// [`crate::provider::LiveProviderConfig`] (key from this keychain + baseURL/model
 /// from app-config, ADR-0038).
-pub trait ProviderConfigSource: Send {
+pub trait ProviderConfigSource: Send + Sync {
     /// The decrypted API key, or `None` when none is stored (the provider then
     /// refuses the turn as not-wired -- ADR-0028 `NotWired`).
     fn api_key(&self) -> Option<String>;

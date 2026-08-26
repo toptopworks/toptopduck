@@ -12,7 +12,6 @@
 //! path (ADR-0077/0081): "explore, then materialize, then answer" (or a
 //! failing call clamped until the step cap).
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,10 +28,11 @@ use super::{Provider, ProviderError, ProviderReply, ProviderRequest};
 struct Script<T> {
     /// Canned results, returned front-first; the last sticks once reached.
     results: Vec<Result<T, ProviderError>>,
-    /// How many times this script has been drawn. `Cell` (not `RefCell`)
-    /// because the counter is a single Copy value -- the trait takes `&self`,
-    /// so interior mutability is required, and a Cell suffices.
-    calls: Cell<usize>,
+    /// How many times this script has been drawn. Interior mutability is
+    /// required (the trait takes `&self`); `AtomicUsize` (not `Cell`) so the
+    /// fake stays `Sync` (the `Provider` trait's bound, issue #669: the
+    /// turn's runner hands the provider across the loop's thread scope).
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl<T: Clone> Script<T> {
@@ -45,8 +45,7 @@ impl<T: Clone> Script<T> {
     /// exercise offline. An empty queue yields `NotWired` so a misconfigured
     /// script never invents a reply.
     fn draw(&self) -> Result<T, ProviderError> {
-        let calls = self.calls.get();
-        self.calls.set(calls + 1);
+        let calls = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Clamp to the last canned result: a single scripted reply is stable
         // (always index 0), and a sequence advances one step per call until it
         // settles on the final result.
@@ -274,7 +273,7 @@ fn insert_script<T>(
         question.to_string(),
         Script {
             results,
-            calls: Cell::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
         },
     );
 }
@@ -289,6 +288,13 @@ fn insert_script<T>(
 /// is present -- a malformed request that yields `NotWired` (the unscripted
 /// fallback).
 fn asking_question(request: &ToolTurnRequest) -> String {
+    // The LAST user message: the window closes with the asking question, so
+    // last-wins keys the script on the current question across every
+    // round-trip of the turn. The upstream's own injected User turns (the
+    // loop-detection nudge, the stop marker) never reach this shape -- the
+    // yoagent bridge (session::yoagent::live) drops them, keeping the bridged
+    // request's conversation identical to what the self-written loop fed this
+    // fake pre-swap (ADR-0107, issue #669).
     request
         .messages
         .iter()
