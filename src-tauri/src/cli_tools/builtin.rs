@@ -241,7 +241,7 @@ fn is_empty_stub(_path: &std::path::Path) -> bool {
 }
 
 /// Resolve against the process PATH (the production wrapper over
-/// [`which_in`]; the adapter scan shares the same core).
+/// [`which_in`]; the adapter scan calls this wrapper directly, issue #683).
 pub(crate) fn which(name: &str) -> Option<PathBuf> {
     which_in(name, &std::env::var_os("PATH")?)
 }
@@ -249,35 +249,46 @@ pub(crate) fn which(name: &str) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 // Scan snapshot + registration plan
 
-/// One shipped definition's detection outcome. A computed snapshot, never
-/// persisted (ADR-0109 Decision 3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BuiltinDetectionState {
+/// One row of the scan snapshot returned by the rescan IPC (and rendered
+/// by the settings page). The detection state IS the row: the `(state,
+/// executable)` pairing lives in the type, so a detected row carries its
+/// executable by construction and the other states cannot (the frontend
+/// narrows the internally-tagged wire shape as a discriminated union,
+/// issue #683). A computed snapshot, never persisted (ADR-0109 Decision 3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BuiltinScanEntry {
     /// A candidate resolved on PATH (newly registered now, or already in
     /// the registry).
-    Detected,
+    Detected {
+        name: String,
+        description: String,
+        /// The registered entry's `executable` as of this scan -- the value
+        /// this scan just wrote for a fresh hit, or the EXISTING entry's
+        /// own when one is already registered. The registry is the display
+        /// truth: a machine that registered `python` and now resolves only
+        /// `python3` still reports `python`, so the pane never shows two
+        /// executables for one tool (issue #683).
+        executable: String,
+    },
     /// No candidate resolved; the definition stays out of the registry
     /// (dormant -- no config entry, no tool-surface slot).
-    Dormant,
+    Dormant { name: String, description: String },
     /// A user registration already owns the name: the builtin entry
     /// defers (no registration, no mutation of the user entry); once the
     /// user renames or removes theirs, the next scan registers.
-    Conflict,
+    Conflict { name: String, description: String },
 }
 
-/// One row of the scan snapshot returned by the rescan IPC (and rendered
-/// by the settings page).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BuiltinScanEntry {
-    pub name: String,
-    pub description: String,
-    pub state: BuiltinDetectionState,
-    /// The resolved candidate (the bare name, not the full path -- it is
-    /// what gets written into the registration). Present only when
-    /// detected.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub executable: Option<String>,
+impl BuiltinScanEntry {
+    /// The row's tool name (shared by every variant).
+    pub fn name(&self) -> &str {
+        match self {
+            BuiltinScanEntry::Detected { name, .. }
+            | BuiltinScanEntry::Dormant { name, .. }
+            | BuiltinScanEntry::Conflict { name, .. } => name,
+        }
+    }
 }
 
 /// The rescan command's return: the updated full config (ADR-0109
@@ -288,47 +299,60 @@ pub struct BuiltinScanResult {
     pub scan: Vec<BuiltinScanEntry>,
 }
 
-/// Classify every shipped definition against the registry and plan the
-/// auto-registrations (ADR-0109 Decisions 1/3/4). Registration happens
-/// ONLY for a definition whose name has no registry entry at all AND whose
-/// candidates resolve: an existing entry is never touched, whatever its
-/// source -- a user entry owning the name is the Conflict deference, and
-/// an already-registered builtin entry (possibly disabled or edited by the
-/// user) keeps its state instead of being re-armed on every scan.
+/// Classify every shipped definition ([`BUILTIN_DEFINITIONS`], read
+/// internally -- the set is a version constant, not a caller input, issue
+/// #683) against the registry and plan the auto-registrations (ADR-0109
+/// Decisions 1/3/4). Registration happens ONLY for a definition whose name
+/// has no registry entry at all AND whose candidates resolve: an existing
+/// entry is never touched, whatever its source -- a user entry owning the
+/// name is the Conflict deference, and an already-registered builtin entry
+/// (possibly disabled or edited by the user) keeps its state instead of
+/// being re-armed on every scan. A detected row reports the post-scan
+/// REGISTRY executable (the value a fresh hit just wrote, or the existing
+/// entry's own -- see [`BuiltinScanEntry::Detected`]).
 pub(crate) fn scan(
-    defs: &'static [BuiltinCliDefinition],
     registry: &CliToolRegistry,
     resolve: impl Fn(&str) -> Option<PathBuf>,
 ) -> (Vec<BuiltinScanEntry>, Vec<CliToolConfig>) {
-    let mut entries = Vec::with_capacity(defs.len());
+    let mut entries = Vec::with_capacity(BUILTIN_DEFINITIONS.len());
     let mut to_register = Vec::new();
-    for def in defs {
+    for def in BUILTIN_DEFINITIONS {
         let resolved = def
             .executables
             .iter()
             .find_map(|name| resolve(name).map(|_| *name));
-        let state = if registry.get(def.name).map(|t| t.source) == Some(CliToolSource::User) {
-            BuiltinDetectionState::Conflict
-        } else {
-            match resolved {
-                Some(_) => BuiltinDetectionState::Detected,
-                None => BuiltinDetectionState::Dormant,
+        let name = def.name.to_string();
+        let description = def.description.to_string();
+        let entry = match (registry.get(def.name), resolved) {
+            // The conflict posture: a user entry owns the name -- the
+            // builtin entry defers, untouched, however the PATH resolves.
+            (Some(t), _) if t.source == CliToolSource::User => {
+                BuiltinScanEntry::Conflict { name, description }
             }
-        };
-        if registry.get(def.name).is_none() {
-            if let Some(exe) = resolved {
-                to_register.push(def.to_config(exe));
-            }
-        }
-        entries.push(BuiltinScanEntry {
-            name: def.name.to_string(),
-            description: def.description.to_string(),
-            state,
-            executable: match state {
-                BuiltinDetectionState::Detected => resolved.map(str::to_string),
-                _ => None,
+            // Detected against an existing entry: the snapshot reports the
+            // registry's executable, not this scan's resolution.
+            (Some(t), Some(_)) => BuiltinScanEntry::Detected {
+                name,
+                description,
+                executable: t.executable.clone(),
             },
-        });
+            // An already-registered builtin entry whose candidate stopped
+            // resolving reports dormant (honest detection; the dangling
+            // registration stays, ADR-0108 probe semantics).
+            (Some(_), None) => BuiltinScanEntry::Dormant { name, description },
+            // No entry at all: a hit registers now with the resolved
+            // candidate, a miss stays dormant.
+            (None, Some(exe)) => {
+                to_register.push(def.to_config(exe));
+                BuiltinScanEntry::Detected {
+                    name,
+                    description,
+                    executable: exe.to_string(),
+                }
+            }
+            (None, None) => BuiltinScanEntry::Dormant { name, description },
+        };
+        entries.push(entry);
     }
     (entries, to_register)
 }
@@ -343,12 +367,9 @@ pub(crate) fn scan(
 /// app never overwrites a user edit. Returns the upgraded names (one
 /// upgrade log line each); empty means the registry already agrees with the
 /// baseline.
-pub(crate) fn reconcile_baselines(
-    defs: &'static [BuiltinCliDefinition],
-    registry: &mut CliToolRegistry,
-) -> Vec<String> {
+pub(crate) fn reconcile_baselines(registry: &mut CliToolRegistry) -> Vec<String> {
     let mut upgraded = Vec::new();
-    for def in defs {
+    for def in BUILTIN_DEFINITIONS {
         // Only a FOLLOWING builtin entry is reconciliation material: a user
         // entry owning the name is the conflict posture (untouchable), an
         // EDITED builtin entry opted out of the baseline, and an entry that
@@ -427,11 +448,10 @@ pub fn startup_register(
 ) -> Result<(), crate::provider::live_config::CliToolWriteError> {
     let result = live.scan_and_register(path_env, skills_root)?;
     for entry in &result.scan {
-        if entry.state == BuiltinDetectionState::Conflict {
+        if let BuiltinScanEntry::Conflict { name, .. } = entry {
             log::warn!(
-                "builtin CLI entry `{}` deferred: a user registration owns the \
-                 name; it registers once the user renames or removes it",
-                entry.name
+                "builtin CLI entry `{name}` deferred: a user registration owns the \
+                 name; it registers once the user renames or removes it"
             );
         }
     }
@@ -542,6 +562,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn which_in_takes_the_first_hit_directory_in_path_order() {
+        // Multi-directory priority: PATH order is priority order -- the
+        // FIRST directory whose candidate exists wins, even when a later
+        // directory would also resolve.
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+        let name = if cfg!(windows) { "tool.exe" } else { "tool" };
+        std::fs::write(first.path().join(name), b"bin").expect("write first");
+        std::fs::write(second.path().join(name), b"bin").expect("write second");
+        let path_env = std::env::join_paths([first.path(), second.path()]).expect("join");
+        assert_eq!(
+            which_in("tool", path_env.as_os_str()),
+            Some(first.path().join(name))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn which_in_prefers_exe_when_real_suffix_variants_coexist() {
+        // Suffix priority with REAL files side by side: `.exe` beats
+        // `.bat` and `.cmd` in the same directory (the alias-stub test
+        // only covers the empty-stub skip, not the coexistence order).
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("tool.exe"), b"real exe").expect("write exe");
+        std::fs::write(dir.path().join("tool.bat"), b"@echo off").expect("write bat");
+        std::fs::write(dir.path().join("tool.cmd"), b"@echo off").expect("write cmd");
+        assert_eq!(
+            which_in("tool", path_env_of(dir.path()).as_os_str()),
+            Some(dir.path().join("tool.exe"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn which_in_resolves_an_extension_bearing_name_without_appending_suffixes() {
+        // An extension-bearing candidate skips the suffix branch: asking
+        // for `tool.bat` means exactly `tool.bat`, never `tool.bat.exe` --
+        // pinned by a `tool.bat.exe` also existing in the directory.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("tool.bat"), b"@echo off").expect("write bat");
+        std::fs::write(dir.path().join("tool.bat.exe"), b"decoy").expect("write decoy");
+        assert_eq!(
+            which_in("tool.bat", path_env_of(dir.path()).as_os_str()),
+            Some(dir.path().join("tool.bat"))
+        );
+    }
+
+    // --- which (the single process-PATH wrapper, issue #683) ---------------
+
+    #[test]
+    fn which_resolves_a_present_binary() {
+        // `cargo` is on PATH in any `cargo test` invocation. The bare name
+        // on Windows resolves via the `.exe` suffix branch; on POSIX
+        // directly.
+        let found = which("cargo");
+        assert!(
+            found.is_some(),
+            "cargo must resolve on PATH in a cargo test"
+        );
+        assert!(
+            found.unwrap().is_file(),
+            "the resolved path must be an existing file"
+        );
+    }
+
+    #[test]
+    fn which_returns_none_for_definitely_absent_binary() {
+        assert!(
+            which("definitely-not-a-real-binary-xyz-12345").is_none(),
+            "an absent binary resolves to None"
+        );
+    }
+
     // --- to_config ---------------------------------------------------------
 
     #[test]
@@ -574,14 +668,23 @@ mod tests {
         }
     }
 
+    /// The detected row's executable, panicking on any other variant (the
+    /// scan tests' assertion helper -- the pairing is in the type, so a
+    /// non-detected row has no executable to read).
+    fn detected_executable(entry: &BuiltinScanEntry) -> &str {
+        let BuiltinScanEntry::Detected { executable, .. } = entry else {
+            panic!("expected Detected, got {entry:?}")
+        };
+        executable
+    }
+
     #[test]
     fn scan_registers_a_detected_definition_with_no_existing_entry() {
         let registry = registry_with(vec![]);
-        let (entries, to_register) =
-            scan(BUILTIN_DEFINITIONS, &registry, resolver_for(&["pandoc"]));
-        let pandoc_entry = entries.iter().find(|e| e.name == "pandoc").expect("row");
-        assert_eq!(pandoc_entry.state, BuiltinDetectionState::Detected);
-        assert_eq!(pandoc_entry.executable.as_deref(), Some("pandoc"));
+        let (entries, to_register) = scan(&registry, resolver_for(&["pandoc"]));
+        let pandoc_entry = entries.iter().find(|e| e.name() == "pandoc").expect("row");
+        assert!(matches!(pandoc_entry, BuiltinScanEntry::Detected { .. }));
+        assert_eq!(detected_executable(pandoc_entry), "pandoc");
         assert_eq!(to_register.len(), 1);
         assert_eq!(to_register[0].name, "pandoc");
         assert_eq!(to_register[0].source, CliToolSource::Builtin);
@@ -593,11 +696,11 @@ mod tests {
         // the snapshot state says dormant (the settings page renders
         // dormancy from the definition set + snapshot, not the registry).
         let registry = registry_with(vec![]);
-        let (entries, to_register) = scan(BUILTIN_DEFINITIONS, &registry, resolver_for(&[]));
+        let (entries, to_register) = scan(&registry, resolver_for(&[]));
         assert!(to_register.is_empty());
         assert!(entries
             .iter()
-            .all(|e| e.state == BuiltinDetectionState::Dormant));
+            .all(|e| matches!(e, BuiltinScanEntry::Dormant { .. })));
     }
 
     #[test]
@@ -610,12 +713,10 @@ mod tests {
             ..pandoc().to_config("users-own-pandoc")
         };
         let registry = registry_with(vec![user_pandoc]);
-        let (entries, to_register) =
-            scan(BUILTIN_DEFINITIONS, &registry, resolver_for(&["pandoc"]));
+        let (entries, to_register) = scan(&registry, resolver_for(&["pandoc"]));
         assert!(to_register.is_empty());
-        let pandoc_entry = entries.iter().find(|e| e.name == "pandoc").expect("row");
-        assert_eq!(pandoc_entry.state, BuiltinDetectionState::Conflict);
-        assert!(pandoc_entry.executable.is_none());
+        let pandoc_entry = entries.iter().find(|e| e.name() == "pandoc").expect("row");
+        assert!(matches!(pandoc_entry, BuiltinScanEntry::Conflict { .. }));
     }
 
     #[test]
@@ -627,11 +728,10 @@ mod tests {
         let mut disabled_builtin = pandoc().to_config("pandoc");
         disabled_builtin.enabled = false;
         let registry = registry_with(vec![disabled_builtin]);
-        let (entries, to_register) =
-            scan(BUILTIN_DEFINITIONS, &registry, resolver_for(&["pandoc"]));
+        let (entries, to_register) = scan(&registry, resolver_for(&["pandoc"]));
         assert!(to_register.is_empty(), "no re-registration");
-        let pandoc_entry = entries.iter().find(|e| e.name == "pandoc").expect("row");
-        assert_eq!(pandoc_entry.state, BuiltinDetectionState::Detected);
+        let pandoc_entry = entries.iter().find(|e| e.name() == "pandoc").expect("row");
+        assert!(matches!(pandoc_entry, BuiltinScanEntry::Detected { .. }));
     }
 
     #[test]
@@ -640,10 +740,24 @@ mod tests {
         // kept, ADR-0108 probe semantics) but the snapshot says dormant.
         let registered = pandoc().to_config("pandoc");
         let registry = registry_with(vec![registered]);
-        let (entries, to_register) = scan(BUILTIN_DEFINITIONS, &registry, resolver_for(&[]));
+        let (entries, to_register) = scan(&registry, resolver_for(&[]));
         assert!(to_register.is_empty());
-        let pandoc_entry = entries.iter().find(|e| e.name == "pandoc").expect("row");
-        assert_eq!(pandoc_entry.state, BuiltinDetectionState::Dormant);
+        let pandoc_entry = entries.iter().find(|e| e.name() == "pandoc").expect("row");
+        assert!(matches!(pandoc_entry, BuiltinScanEntry::Dormant { .. }));
+    }
+
+    #[test]
+    fn scan_reports_the_registered_executable_for_an_already_registered_definition() {
+        // The registry value wins over this scan's resolution (issue #683):
+        // a machine that registered `python` and now resolves only
+        // `python3` still reports `python` -- the pane never shows two
+        // executables for one tool, and no re-registration happens.
+        let registered = python().to_config("python");
+        let registry = registry_with(vec![registered]);
+        let (entries, to_register) = scan(&registry, resolver_for(&["python3"]));
+        assert!(to_register.is_empty(), "an existing entry is never touched");
+        let python_entry = entries.iter().find(|e| e.name() == "python").expect("row");
+        assert_eq!(detected_executable(python_entry), "python");
     }
 
     #[test]
@@ -651,11 +765,10 @@ mod tests {
         // `python` before `python3`: the first hit wins and its NAME (not
         // the full path) is what lands in the registration.
         let registry = registry_with(vec![]);
-        let (entries, to_register) =
-            scan(BUILTIN_DEFINITIONS, &registry, resolver_for(&["python3"]));
-        let python_entry = entries.iter().find(|e| e.name == "python").expect("row");
-        assert_eq!(python_entry.state, BuiltinDetectionState::Detected);
-        assert_eq!(python_entry.executable.as_deref(), Some("python3"));
+        let (entries, to_register) = scan(&registry, resolver_for(&["python3"]));
+        let python_entry = entries.iter().find(|e| e.name() == "python").expect("row");
+        assert!(matches!(python_entry, BuiltinScanEntry::Detected { .. }));
+        assert_eq!(detected_executable(python_entry), "python3");
         assert_eq!(to_register[0].executable, "python3");
     }
 
@@ -735,7 +848,7 @@ mod tests {
         edited.description = "user's own description".into();
         edited.baseline = Some(CliBaselineState::Edited);
         let mut registry = registry_with(vec![drifted, edited]);
-        let upgraded = reconcile_baselines(BUILTIN_DEFINITIONS, &mut registry);
+        let upgraded = reconcile_baselines(&mut registry);
         assert_eq!(upgraded, vec!["pandoc".to_string()]);
         let upgraded_tool = registry.get("pandoc").expect("entry");
         assert!(
@@ -763,7 +876,7 @@ mod tests {
         // produce an empty plan: nothing upgrades, nothing writes.
         let fresh = pandoc().to_config("pandoc");
         let mut registry = registry_with(vec![fresh]);
-        assert!(reconcile_baselines(BUILTIN_DEFINITIONS, &mut registry).is_empty());
+        assert!(reconcile_baselines(&mut registry).is_empty());
         assert!(registry.get("python").is_none());
     }
 
@@ -779,7 +892,7 @@ mod tests {
         };
         user_pandoc.description = "the user's own body".into();
         let mut registry = registry_with(vec![user_pandoc]);
-        assert!(reconcile_baselines(BUILTIN_DEFINITIONS, &mut registry).is_empty());
+        assert!(reconcile_baselines(&mut registry).is_empty());
         let tool = registry.get("pandoc").expect("entry");
         assert_eq!(tool.source, CliToolSource::User);
         assert_eq!(tool.description, "the user's own body");

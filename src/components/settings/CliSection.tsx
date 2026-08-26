@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Pencil, Plus, RefreshCw, RotateCcw, Terminal, Trash2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -11,6 +12,7 @@ import {
   restoreBuiltinCliTool,
   upsertCliTool,
 } from "../../api";
+import { log } from "../../lib/log";
 import { fmtError } from "../../lib/error-presentation";
 import { cn } from "../../lib/utils";
 import {
@@ -69,21 +71,50 @@ export function CliSection({
   const tools = appConfig.cli_tools.tools;
   const [scan, setScan] = useState<BuiltinScanEntry[] | null>(null);
   const [scanning, setScanning] = useState(false);
+  // The registration-list mirror of the builtin panel's conflict rows
+  // (issue #683): a user row whose name a shipped definition owns gets the
+  // same annotation, derived from the same snapshot. Null scan (mount
+  // rescan failed) shows no badges -- there is no panel to mirror either.
+  const conflictingNames = new Set(
+    (scan?.filter((entry) => entry.state === "conflict") ?? []).map(
+      (entry) => entry.name,
+    ),
+  );
+
+  // The write-generation guard (issue #683): advances with every APPLIED
+  // user write. A rescan response that arrives after a user write landed
+  // reads a stale config snapshot (the backend read it before the write),
+  // so applying it would silently roll the user's change back. The guard
+  // is a monotonic counter, not a request queue -- the backend's RMW write
+  // lock already serializes the registry; this only fixes the frontend's
+  // response-application order.
+  const writeGenRef = useRef(0);
+
+  /** Apply a user write's returned config: the sync advances the write
+   *  generation, so any rescan response still in flight (issued before
+   *  this write) skips its config sync instead of rolling it back. */
+  function applyUserWrite(next: AppConfig) {
+    writeGenRef.current += 1;
+    onCliToolsChanged(next);
+  }
 
   /** Opening the pane refreshes the detection snapshot (issue #675): one
    * read-modify-write IPC returns the full config + snapshot together. A
-   * mount failure stays silent -- the explicit Rescan button surfaces
-   * errors through the shared error lane. */
+   * mount failure leaves no visible UI state -- it lands one log.warn so a
+   * persistently failing scan is diagnosable, and the explicit Rescan
+   * button still surfaces errors through the shared error lane. */
   useEffect(() => {
     let cancelled = false;
+    const gen = writeGenRef.current;
     rescanBuiltinCliTools()
       .then((result) => {
         if (cancelled) return;
         setScan(result.scan);
-        onCliToolsChanged(result.config);
+        if (writeGenRef.current === gen) onCliToolsChanged(result.config);
       })
-      .catch(() => {
-        /* silent on mount; the manual rescan surfaces errors */
+      .catch((e) => {
+        // Silent in the UI on mount; the manual rescan surfaces errors.
+        log.warn("CliSection", "builtin CLI mount rescan failed", e);
       });
     return () => {
       cancelled = true;
@@ -95,14 +126,17 @@ export function CliSection({
 
   /** The manual rescan (issue #675): refresh the detection snapshot and
    * sync the registry view from the returned full config; also the
-   * conflict catch-up point after the user disposes of a clashing entry. */
+   * conflict catch-up point after the user disposes of a clashing entry.
+   * Guarded like the mount rescan: a user write landing while this scan is
+   * in flight skips the (stale) config sync; the snapshot still applies. */
   async function handleRescan() {
     setScanning(true);
     setError(null);
+    const gen = writeGenRef.current;
     try {
       const result = await rescanBuiltinCliTools();
       setScan(result.scan);
-      onCliToolsChanged(result.config);
+      if (writeGenRef.current === gen) onCliToolsChanged(result.config);
     } catch (e) {
       setError(fmtError(e, intl));
     } finally {
@@ -134,7 +168,7 @@ export function CliSection({
     setError(null);
     await runCommit(async () => {
       const next = await upsertCliTool({ ...tool, enabled });
-      onCliToolsChanged(next);
+      applyUserWrite(next);
       return null;
     });
     setTogglingName(null);
@@ -144,7 +178,7 @@ export function CliSection({
    *  persisted and returned the updated full config -- sync state and
    *  return to the list (no second write). */
   function handleFormSaved(next: AppConfig) {
-    onCliToolsChanged(next);
+    applyUserWrite(next);
     setFormTarget(null);
   }
 
@@ -162,7 +196,7 @@ export function CliSection({
         kind === "delete"
           ? await removeCliTool(name)
           : await restoreBuiltinCliTool(name);
-      onCliToolsChanged(next);
+      applyUserWrite(next);
       return null;
     });
     setConfirmBusy(false);
@@ -264,6 +298,9 @@ export function CliSection({
               key={tool.name}
               tool={tool}
               toggling={togglingName === tool.name}
+              holdsBuiltinName={
+                tool.source === "user" && conflictingNames.has(tool.name)
+              }
               onToggleEnabled={(next) => void handleToggleEnabled(tool, next)}
               onEdit={() => setFormTarget({ tool, isEdit: true })}
               // A builtin entry is undeletable (ADR-0109 Decision 2):
@@ -296,7 +333,7 @@ export function CliSection({
           <p className="text-muted-foreground mt-1 text-xs">
             <FormattedMessage
               id="settings.cli.builtin.description"
-              defaultMessage="Curated tools that register automatically when installed on this machine. Install one, then rescan to use it."
+              defaultMessage="Curated tools that ship with the app and register automatically when installed on this machine. Install one, then rescan to use it."
             />
           </p>
           <SettingsCard data-testid="builtin-cli-scan" className="mt-2">
@@ -415,7 +452,7 @@ function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium truncate">{entry.name}</span>
-          {entry.state === "detected" && entry.executable && (
+          {entry.state === "detected" && (
             <span className="text-muted-foreground truncate font-mono text-xs">
               {entry.executable}
             </span>
@@ -471,9 +508,21 @@ function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
   );
 }
 
+/** The row-name badge chrome (issue #683): the DESIGN.md badge token,
+ * typography.badge (12px/500) on rounded.md with 2px 8px padding, in the
+ * secondary coloring shared by the row badges that are not state alerts. */
+function NameBadge({ children }: { children: ReactNode }) {
+  return (
+    <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+      {children}
+    </span>
+  );
+}
+
 function CliToolRow({
   tool,
   toggling,
+  holdsBuiltinName,
   onToggleEnabled,
   onEdit,
   onDelete,
@@ -484,6 +533,10 @@ function CliToolRow({
    *  action buttons gate so an edit form cannot save a stale `enabled` over
    *  the in-flight write (the MCP row's toggling contract). */
   toggling: boolean;
+  /** True on a USER row whose name a shipped builtin definition owns (the
+   *  builtin panel's conflict row mirrored onto the registration list,
+   *  issue #683): the annotation marks why no builtin entry registered. */
+  holdsBuiltinName: boolean;
   onToggleEnabled: (enabled: boolean) => void;
   onEdit: () => void;
   /** Undefined on builtin rows: the entry is undeletable (ADR-0109
@@ -520,20 +573,28 @@ function CliToolRow({
             {tool.name}
           </span>
           {tool.source === "builtin" && (
-            <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+            <NameBadge>
               <FormattedMessage
                 id="settings.cli.builtinBadge"
                 defaultMessage="Built-in"
               />
-            </span>
+            </NameBadge>
+          )}
+          {holdsBuiltinName && (
+            <NameBadge>
+              <FormattedMessage
+                id="settings.cli.conflictBadge"
+                defaultMessage="Holds built-in name"
+              />
+            </NameBadge>
           )}
           {!tool.enabled && (
-            <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+            <NameBadge>
               <FormattedMessage
                 id="settings.cli.disabledBadge"
                 defaultMessage="Disabled"
               />
-            </span>
+            </NameBadge>
           )}
         </div>
         <div className="text-muted-foreground mt-1 truncate text-xs">
