@@ -585,6 +585,8 @@ mod tests {
         // Suffix priority with REAL files side by side: `.exe` beats
         // `.bat` and `.cmd` in the same directory (the alias-stub test
         // only covers the empty-stub skip, not the coexistence order).
+        // CI gate note: the Rust job runs ubuntu-only, so this
+        // Windows-only pin executes in local `cargo test` runs, not CI.
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("tool.exe"), b"real exe").expect("write exe");
         std::fs::write(dir.path().join("tool.bat"), b"@echo off").expect("write bat");
@@ -601,6 +603,8 @@ mod tests {
         // An extension-bearing candidate skips the suffix branch: asking
         // for `tool.bat` means exactly `tool.bat`, never `tool.bat.exe` --
         // pinned by a `tool.bat.exe` also existing in the directory.
+        // CI gate note: the Rust job runs ubuntu-only, so this
+        // Windows-only pin executes in local `cargo test` runs, not CI.
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("tool.bat"), b"@echo off").expect("write bat");
         std::fs::write(dir.path().join("tool.bat.exe"), b"decoy").expect("write decoy");
@@ -714,6 +718,23 @@ mod tests {
         };
         let registry = registry_with(vec![user_pandoc]);
         let (entries, to_register) = scan(&registry, resolver_for(&["pandoc"]));
+        assert!(to_register.is_empty());
+        let pandoc_entry = entries.iter().find(|e| e.name() == "pandoc").expect("row");
+        assert!(matches!(pandoc_entry, BuiltinScanEntry::Conflict { .. }));
+    }
+
+    #[test]
+    fn scan_defers_when_a_user_registration_owns_the_name_even_unresolved() {
+        // The wildcard half of the conflict arm: ownership alone defers and
+        // PATH resolution is irrelevant -- an unresolved candidate must not
+        // fall through to the dormant arms (arm reordering would otherwise
+        // pass the resolving test above).
+        let user_pandoc = crate::cli_tools::config::CliToolConfig {
+            source: CliToolSource::User,
+            ..pandoc().to_config("users-own-pandoc")
+        };
+        let registry = registry_with(vec![user_pandoc]);
+        let (entries, to_register) = scan(&registry, resolver_for(&[]));
         assert!(to_register.is_empty());
         let pandoc_entry = entries.iter().find(|e| e.name() == "pandoc").expect("row");
         assert!(matches!(pandoc_entry, BuiltinScanEntry::Conflict { .. }));

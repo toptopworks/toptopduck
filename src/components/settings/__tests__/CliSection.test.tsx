@@ -177,6 +177,38 @@ describe("CliSection", () => {
     expect(deliveries).toHaveLength(2);
   });
 
+  it("edits a multi-line tool description in the textarea (issue #683 rider)", async () => {
+    // The description is the LLM-facing copy and legitimately runs long;
+    // the field is an auto-growing Textarea, not a single-line Input. Pin
+    // the multi-line round-trip through save (the value survives the
+    // controlled wiring intact).
+    vi.mocked(upsertCliTool).mockResolvedValue(makeAppConfig([]));
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.change(screen.getByLabelText(/Name \(locked after save\)/), {
+      target: { value: "my-pandoc" },
+    });
+    fireEvent.change(screen.getByLabelText(/Description/), {
+      target: {
+        value: "Converts documents.\nAlso reads markdown and writes docx.",
+      },
+    });
+    fireEvent.change(screen.getByLabelText(/Executable/), {
+      target: { value: "pandoc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(upsertCliTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "my-pandoc",
+          description: "Converts documents.\nAlso reads markdown and writes docx.",
+        }),
+      );
+    });
+  });
+
   it("syncs the returned full config after the enable toggle's upsert", async () => {
     const next = makeAppConfig([makeTool({ enabled: false })]);
     vi.mocked(upsertCliTool).mockResolvedValue(next);
@@ -453,6 +485,52 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
     expect(screen.getByText("python3")).toBeInTheDocument();
     expect(onCliToolsChanged).toHaveBeenCalledTimes(2); // mount + toggle
     expect(onCliToolsChanged).toHaveBeenLastCalledWith(next);
+  });
+
+  it("syncs the rescan's config when the user write completed before the rescan started", async () => {
+    // The guard's negative control: it skips only responses that predate
+    // an applied user write. A rescan launched after a write has fully
+    // landed captures the post-write generation and syncs normally --
+    // proving the guard is a per-response check, not "any write ever
+    // happened, skip forever" (that regression would leave the
+    // registration list stale after every write and pass every other
+    // test in this file).
+    const postWrite = makeAppConfig([makeTool({ enabled: false })]);
+    const rescanned = makeAppConfig([
+      makeTool({ enabled: false }),
+      makeTool({ name: "python", executable: "python3" }),
+    ]);
+    vi.mocked(upsertCliTool).mockResolvedValue(postWrite);
+    const onCliToolsChanged = vi.fn();
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([makeTool()])}
+        onCliToolsChanged={onCliToolsChanged}
+      />,
+    );
+    // Let the mount rescan settle on the shared default, then complete a
+    // user write (the toggle) BEFORE issuing the manual rescan.
+    await waitFor(() => {
+      expect(rescanBuiltinCliTools).toHaveBeenCalledTimes(1);
+    });
+    fireEvent.click(screen.getByRole("switch"));
+    await waitFor(() => {
+      expect(onCliToolsChanged).toHaveBeenCalledWith(postWrite);
+    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
+      config: rescanned,
+      scan: [
+        makeScanEntry({ name: "python", state: "detected", executable: "python3" }),
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    expect(
+      await screen.findByTestId("builtin-cli-row-python"),
+    ).toBeInTheDocument();
+    // The fresh response syncs its config: the guard did not trip.
+    await waitFor(() => {
+      expect(onCliToolsChanged).toHaveBeenLastCalledWith(rescanned);
+    });
   });
 
   it("pins the in-flight scanning state (disabled button + Scanning label)", async () => {
