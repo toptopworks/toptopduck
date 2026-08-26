@@ -256,6 +256,96 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
     read_sse_event_bounded(reader, LINE_MAX_BYTES)
 }
 
+/// The per-event parsing state of [`read_sse_event_bounded`]: the fields
+/// accumulated for the event being built, or `Voided` after a cap breach (an
+/// over-long line or an over-budget `data:` accumulation) drops the whole
+/// in-progress event. Voiding is a single whole-value assignment -- the
+/// "resyncing implies an empty accumulator" invariant is carried by the type,
+/// not by each breach site remembering a four-statement clearing sequence
+/// (issue #666).
+enum EventAccumulator {
+    Building {
+        event_type: Option<String>,
+        data_parts: Vec<String>,
+        data_bytes: usize,
+    },
+    Voided,
+}
+
+impl EventAccumulator {
+    fn building() -> Self {
+        EventAccumulator::Building {
+            event_type: None,
+            data_parts: Vec::new(),
+            data_bytes: 0,
+        }
+    }
+
+    /// Set the `event:` field type (the last `event:` line wins, per the SSE
+    /// spec). A voided event's lines never reach field parsing -- the resync
+    /// pre-block in [`read_sse_event_bounded`] skips them -- so the `Voided`
+    /// arm is unreachable and a no-op.
+    fn set_event_type(&mut self, event_type: String) {
+        if let EventAccumulator::Building {
+            event_type: slot, ..
+        } = self
+        {
+            *slot = Some(event_type);
+        }
+    }
+
+    /// Accumulate one `data:` field line under the per-event budget (`max`,
+    /// the same cap source as the line level): `true` while the event still
+    /// fits, `false` once the accumulated cost breaches the budget (the event
+    /// must be voided). Like [`Self::set_event_type`], only called while
+    /// `Building`.
+    fn push_data(&mut self, data: &str, max: usize) -> bool {
+        let EventAccumulator::Building {
+            data_parts,
+            data_bytes,
+            ..
+        } = self
+        else {
+            return false; // Unreachable behind the resync pre-block.
+        };
+        // The +1 is the "\n" the join in `finish` inserts between parts:
+        // counting it keeps zero-length parts (each costing one budget
+        // byte) from growing `data_parts` without bound, and bounds the
+        // joined string's length.
+        *data_bytes += data.len() + 1;
+        if *data_bytes > max {
+            return false;
+        }
+        data_parts.push(data.to_string());
+        true
+    }
+
+    /// Extract the completed event -- the single construction point shared by
+    /// the blank-line boundary and the EOF arm. `None` when nothing was
+    /// accumulated (a leading blank line, or a clean close) or when a voided
+    /// event never reached its boundary; the accumulator is left building a
+    /// fresh event either way.
+    fn finish(&mut self) -> Option<SseEvent> {
+        match std::mem::replace(self, EventAccumulator::building()) {
+            EventAccumulator::Building {
+                event_type,
+                data_parts,
+                ..
+            } => {
+                if data_parts.is_empty() && event_type.is_none() {
+                    None
+                } else {
+                    Some(SseEvent {
+                        event: event_type,
+                        data: data_parts.join("\n"),
+                    })
+                }
+            }
+            EventAccumulator::Voided => None,
+        }
+    }
+}
+
 /// The cap-parameterized core of [`read_sse_event`]. The `max` parameter
 /// exists for the unit tests (small caps keep fixtures tiny -- the same
 /// convention as [`read_line_bounded`]); every production caller passes
@@ -264,35 +354,21 @@ fn read_sse_event_bounded<R: BufRead>(
     reader: &mut R,
     max: usize,
 ) -> std::io::Result<Option<SseEvent>> {
-    let mut event_type: Option<String> = None;
-    let mut data_parts: Vec<String> = Vec::new();
-    let mut data_bytes = 0;
-    // Set while skipping the surviving lines of a voided event, until the
-    // blank line that ends it.
-    let mut resyncing = false;
+    let mut acc = EventAccumulator::building();
 
     loop {
         let line = match read_line_bounded(reader, max)? {
             LineRead::Eof => {
                 // EOF: return any buffered event, else None (clean close).
                 // A voided event that never reached its boundary is dropped.
-                if resyncing || (data_parts.is_empty() && event_type.is_none()) {
-                    return Ok(None);
-                }
-                return Ok(Some(SseEvent {
-                    event: event_type,
-                    data: data_parts.join("\n"),
-                }));
+                return Ok(acc.finish());
             }
             LineRead::Overlong => {
                 log::warn!(
                     target: "toptopduck::mcp",
                     "SSE event dropped: line exceeds {max} bytes; resyncing at the next event boundary"
                 );
-                event_type = None;
-                data_parts.clear();
-                data_bytes = 0;
-                resyncing = true;
+                acc = EventAccumulator::Voided;
                 continue;
             }
             LineRead::Line(line) => line,
@@ -300,56 +376,60 @@ fn read_sse_event_bounded<R: BufRead>(
 
         let trimmed = line.trim_end_matches(['\r', '\n']);
 
+        // Resync pre-block -- the single skip point for a voided event's
+        // surviving lines: every line up to and including the blank-line
+        // boundary is dropped, and the field parser below never sees any of
+        // them. The boundary switches back to building the next event.
+        if matches!(acc, EventAccumulator::Voided) {
+            if trimmed.is_empty() {
+                acc = EventAccumulator::building();
+            }
+            continue;
+        }
+
         if trimmed.is_empty() {
             // Blank line = event boundary. Leading blank lines (before any
             // field) are skipped so a keepalive gap does not produce an empty
-            // event; one hit while resyncing just ends the voided event.
-            if resyncing {
-                resyncing = false;
-                continue;
+            // event.
+            if let Some(event) = acc.finish() {
+                return Ok(Some(event));
             }
-            if data_parts.is_empty() && event_type.is_none() {
-                continue;
-            }
-            return Ok(Some(SseEvent {
-                event: event_type,
-                data: data_parts.join("\n"),
-            }));
-        }
-
-        if resyncing {
-            continue; // Surviving field of the voided event.
+            continue;
         }
 
         if trimmed.starts_with(':') {
             continue; // SSE comment (keepalive)
         } else if let Some(rest) = trimmed.strip_prefix("event:") {
-            event_type = Some(rest.trim().to_string());
+            acc.set_event_type(rest.trim().to_string());
         } else if let Some(rest) = trimmed.strip_prefix("data:") {
             // Per the SSE spec, a single leading space after the colon is
             // stripped; everything else (including additional spaces) is
             // retained as data.
             let data = rest.strip_prefix(' ').unwrap_or(rest);
-            // The +1 is the "\n" the join below inserts between parts:
-            // counting it keeps zero-length parts (each costing one budget
-            // byte) from growing `data_parts` without bound, and bounds the
-            // joined string's length.
-            data_bytes += data.len() + 1;
-            if data_bytes > max {
+            if !acc.push_data(data, max) {
                 log::warn!(
                     target: "toptopduck::mcp",
                     "SSE event dropped: accumulated data exceeds {max} bytes; resyncing at the next event boundary"
                 );
-                event_type = None;
-                data_parts.clear();
-                data_bytes = 0;
-                resyncing = true;
+                acc = EventAccumulator::Voided;
                 continue;
             }
-            data_parts.push(data.to_string());
         }
         // id:, retry:, and unknown fields are silently ignored.
     }
+}
+
+/// The failure attribution for malformed JSON in an SSE event's data,
+/// shared by the two payload consumers (the streamable-HTTP response path
+/// and the legacy reader thread): `Framing(InvalidData)` carrying the
+/// payload length and the serde error, matching the stdio path's
+/// framing::read_message contract. One source keeps the two attributions
+/// from drifting (issue #666; previously a verbatim copy at each site).
+fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
+    ClientError::Framing(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("malformed JSON in SSE event ({data_len} bytes): {e}"),
+    ))
 }
 
 /// Production wrapper: a [`FramedClient`] backed by a spawned stdio MCP
@@ -581,13 +661,7 @@ impl McpClient for HttpClient {
                                 // framing error to match the stdio path's
                                 // contract (framing::read_message →
                                 // InvalidData).
-                                return Err(ClientError::Framing(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!(
-                                        "malformed JSON in SSE event ({} bytes): {e}",
-                                        event.data.len()
-                                    ),
-                                )));
+                                return Err(malformed_sse_event(event.data.len(), e));
                             }
                         }
                     }
@@ -825,13 +899,7 @@ fn sse_reader_loop<R: BufRead + Send>(
                             // hanging until the turn watchdog cancelled it.
                             // Best-effort send: a closed channel just means
                             // the client already dropped.
-                            let err = ClientError::Framing(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!(
-                                    "malformed JSON in SSE event ({} bytes): {e}",
-                                    event.data.len()
-                                ),
-                            ));
+                            let err = malformed_sse_event(event.data.len(), e);
                             log::warn!(
                                 target: "toptopduck::mcp",
                                 "SSE reader: {err}; stopping reader thread"
@@ -1374,6 +1442,24 @@ mod tests {
         assert_eq!(event.data, "ok");
     }
 
+    /// Issue #666: the budget's at-boundary half -- an event whose `data:`
+    /// parts cost EXACTLY the budget is accepted, not voided (the breach
+    /// comparison is strict). Every other budget fixture breaches well past
+    /// the cap, so a regression of `>` to `>=` leaves them green and only
+    /// this pin goes red.
+    #[test]
+    fn read_sse_event_accepts_data_at_exactly_the_budget() {
+        // Two 13-byte lines (7-byte payloads + the 6-byte "data: " prefix),
+        // under the 16-byte line cap; the parts' budget cost is
+        // (7+1) + (7+1) = 16 = max exactly -- at the budget, not over it.
+        let wire = "data: 1234567\ndata: 1234567\n\n";
+        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the at-budget event is accepted, not voided");
+        assert_eq!(event.data, "1234567\n1234567");
+    }
+
     /// EOF while still resyncing (the broken event never reached its blank
     /// boundary) drops the voided event: nothing half-parsed is returned.
     #[test]
@@ -1559,38 +1645,22 @@ mod tests {
         }
     }
 
-    /// Issue #667: `Drop` joins the reader thread, but a reader blocked in
-    /// `send` on a full channel never re-checks the stop flag, and the
-    /// receiver's destruction happens only after `drop()` returns -- after
-    /// the join that never returns. The channel is filled to its bound
-    /// BEFORE the reader starts, so the reader's first forward blocks
-    /// deterministically; a pre-fix `Drop` hangs on the join and the 10 s
-    /// timeout fails the test instead of hanging it. The post-fix order
-    /// (release the receiver, then join) fails the blocked `send` with
-    /// `SendError` and the reader exits via its channel-closed break.
-    #[test]
-    fn sse_client_drop_returns_when_reader_blocks_on_full_channel() {
-        // An endless stream of one valid message event per read: the
-        // flooding-server shape that keeps the reader trying to forward.
-        // The read count lets the test WAIT for the reader to enter its
-        // loop instead of sleeping a fixed interval (a sleep can pass
-        // vacuously if the thread has not been scheduled yet).
-        struct FloodReader {
-            reads: Arc<std::sync::atomic::AtomicUsize>,
-        }
-        impl std::io::Read for FloodReader {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                self.reads.fetch_add(1, Ordering::SeqCst);
-                let event = b"data: {\"id\":1,\"ok\":true}\n\n";
-                let n = event.len().min(buf.len());
-                buf[..n].copy_from_slice(&event[..n]);
-                Ok(n)
-            }
-        }
-
+    /// Shared scaffolding for the two drop pins (issues #667 / #665): fill
+    /// the channel to its bound, spawn the reader thread around a
+    /// caller-built reader, wait until the reader has entered its loop, then
+    /// assert that dropping the client (on its own thread) returns within
+    /// the timeout -- a `Drop` that hangs on the join fails the test
+    /// instead of hanging it. The reader constructor is the pins' only
+    /// substantive difference; it receives the read counter its struct
+    /// increments, keeping the entry wait deterministic (issue #666).
+    fn assert_drop_returns_when_reader_blocks<R>(
+        make_reader: impl FnOnce(Arc<std::sync::atomic::AtomicUsize>) -> R + Send + 'static,
+    ) where
+        R: BufRead + Send + 'static,
+    {
         let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
         // Fill the channel to its bound first: with no consumer, the
-        // reader's very first forward blocks (deterministic hang shape).
+        // reader's forward blocks (deterministic hang shape).
         for _ in 0..SSE_CHANNEL_BOUND {
             tx.send(Ok(json!({"id": 1, "ok": true}))).expect("fill");
         }
@@ -1599,13 +1669,7 @@ mod tests {
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reads_for_reader = reads.clone();
         let reader_thread = thread::spawn(move || {
-            sse_reader_loop(
-                BufReader::new(FloodReader {
-                    reads: reads_for_reader,
-                }),
-                tx,
-                stop_for_reader,
-            );
+            sse_reader_loop(make_reader(reads_for_reader), tx, stop_for_reader);
         });
         // Wait until the reader has actually entered its loop: one inner
         // read proves the stop check passed while stop was still false, and
@@ -1635,6 +1699,38 @@ mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("Drop returned within the timeout (no join hang)");
+    }
+
+    /// Issue #667: `Drop` joins the reader thread, but a reader blocked in
+    /// `send` on a full channel never re-checks the stop flag, and the
+    /// receiver's destruction happens only after `drop()` returns -- after
+    /// the join that never returns. The channel is filled to its bound
+    /// BEFORE the reader starts, so the reader's first forward blocks
+    /// deterministically; a pre-fix `Drop` hangs on the join and the 10 s
+    /// timeout fails the test instead of hanging it. The post-fix order
+    /// (release the receiver, then join) fails the blocked `send` with
+    /// `SendError` and the reader exits via its channel-closed break.
+    #[test]
+    fn sse_client_drop_returns_when_reader_blocks_on_full_channel() {
+        // An endless stream of one valid message event per read: the
+        // flooding-server shape that keeps the reader trying to forward.
+        // The read count lets the test WAIT for the reader to enter its
+        // loop instead of sleeping a fixed interval (a sleep can pass
+        // vacuously if the thread has not been scheduled yet).
+        struct FloodReader {
+            reads: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl std::io::Read for FloodReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                let event = b"data: {\"id\":1,\"ok\":true}\n\n";
+                let n = event.len().min(buf.len());
+                buf[..n].copy_from_slice(&event[..n]);
+                Ok(n)
+            }
+        }
+
+        assert_drop_returns_when_reader_blocks(|reads| BufReader::new(FloodReader { reads }));
     }
 
     /// Issue #665: the reader's SECOND blocking send point -- the malformed
@@ -1668,54 +1764,9 @@ mod tests {
             }
         }
 
-        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
-        // Fill the channel to its bound first: with no consumer, the
-        // malformed event's error forward blocks (deterministic hang shape).
-        for _ in 0..SSE_CHANNEL_BOUND {
-            tx.send(Ok(json!({"id": 1, "ok": true}))).expect("fill");
-        }
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_reader = stop.clone();
-        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let reads_for_reader = reads.clone();
-        let reader_thread = thread::spawn(move || {
-            sse_reader_loop(
-                BufReader::new(MalformedReader {
-                    reads: reads_for_reader,
-                    first: true,
-                }),
-                tx,
-                stop_for_reader,
-            );
+        assert_drop_returns_when_reader_blocks(|reads| {
+            BufReader::new(MalformedReader { reads, first: true })
         });
-        // Wait until the reader has actually entered its loop: one inner
-        // read proves the stop check passed while stop was still false, and
-        // from there the reader has no exit path before the blocked send.
-        let mut started = false;
-        for _ in 0..500 {
-            if reads.load(Ordering::SeqCst) > 0 {
-                started = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(started, "reader never reached its first read");
-
-        let client = sse_client_with_parts(
-            rx,
-            "http://127.0.0.1:1/message".to_string(),
-            stop,
-            Some(reader_thread),
-        );
-
-        let (done_tx, done_rx) = mpsc::channel();
-        thread::spawn(move || {
-            drop(client);
-            let _ = done_tx.send(());
-        });
-        done_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("Drop returned within the timeout (no join hang)");
     }
 
     /// `check_rpc_response` returns the `result` field on success and maps an
