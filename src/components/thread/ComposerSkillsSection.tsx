@@ -133,10 +133,11 @@ export function ComposerSkillsSection({
   });
   const activatedSet = useMemo(() => new Set(activated ?? []), [activated]);
 
-  // Session-mode-only mutation machinery below: toggle() routes null-sessionId
-  // rows to the pending-list path, so none of these ever run in draft mode.
-  // The `as string` casts carry that invariant (the same pattern the
-  // disabled-query queryFns above use).
+  // Session-mode-only machinery below: toggle() holds the invariant -- it
+  // routes null-sessionId rows to the pending-list path before any mutation
+  // runs -- so none of these ever execute in draft mode. The `as string`
+  // casts trust that routing (the same pattern the disabled-query queryFns
+  // above use).
   function applyMountDelta(delta: (prev: string[] | undefined) => string[]) {
     setError(null);
     queryClient.setQueryData<string[]>(
@@ -167,9 +168,9 @@ export function ComposerSkillsSection({
   // the thread cache must re-read or the marker never appears (staleTime is
   // Infinity, so nothing else refetches it). Unlike the turn flow's "thread
   // stays un-invalidated" rule (ADR-0051 -- a refetch there would wipe the
-  // optimistic append), the skill mutations only run OUTSIDE a turn (the
-  // loading gate and the backend's reject_if_in_flight agree), so there is
-  // no optimistic thread state to protect.
+  // optimistic append), a skill mutation cannot overlap a turn: the loading
+  // gate below blocks the click and the backend's reject_if_in_flight
+  // refuses the write, so there is no optimistic thread state to protect.
   function refreshThread() {
     void queryClient.invalidateQueries({
       queryKey: sessionKeys.thread(sessionId as string),
@@ -200,9 +201,10 @@ export function ComposerSkillsSection({
     onSuccess: (_data, name) => {
       applyMountDelta((prev) => prev?.filter((n) => n !== name) ?? []);
       // Cascade (ADR-0110 Decision 4: unmount is activation's sole exit) --
-      // subtract from the activated cache in the same synchronous step so the
-      // badge drops without a stale one-beat flash; invalidate-only would
-      // leave the old state visible until the refetch lands.
+      // subtract from the activated cache with a setQueryData right after the
+      // mounted one, before any refetch starts, so the badge drops without a
+      // stale one-beat flash; invalidate-only would leave the old state
+      // visible until the refetch lands.
       applyActivationDelta((prev) => prev?.filter((n) => n !== name) ?? []);
       refreshThread();
     },

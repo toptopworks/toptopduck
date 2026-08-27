@@ -11,6 +11,7 @@ import {
   listActivatedSkills,
   listMountedSkills,
   listSkills,
+  mountSkill,
   unmountSkill,
 } from "../../../api";
 import { sessionKeys } from "../../../session/queryKeys";
@@ -33,6 +34,7 @@ vi.mock("../../../api", async (importOriginal) => {
     listMountedSkills: vi.fn(),
     listActivatedSkills: vi.fn(),
     conversation: vi.fn(),
+    mountSkill: vi.fn(async () => {}),
     unmountSkill: vi.fn(async () => {}),
     activateSkill: vi.fn(async () => {}),
   };
@@ -199,6 +201,55 @@ describe("ComposerSkillsSection activation affordance (issue #699)", () => {
     });
   });
 
+  it("drops the activation with the unmount delta, not the refetch (remount shows the action, no badge flash)", async () => {
+    // The convergence test above stays green with the activated-cache
+    // subtraction deleted outright (the badge dies with the row via
+    // isMounted); the cascade's only observable face is a re-mount of the
+    // same row. Freeze the activated refetch after the unmount so the
+    // synchronous delta is the only writer of the activated cache.
+    const state = {
+      mounted: ["charting"],
+      activated: ["charting"],
+    };
+    vi.mocked(listMountedSkills).mockImplementation(async () => [
+      ...state.mounted,
+    ]);
+    vi.mocked(listActivatedSkills).mockImplementation(async () => [
+      ...state.activated,
+    ]);
+    vi.mocked(unmountSkill).mockImplementation(async (_sid, name) => {
+      state.mounted = state.mounted.filter((n) => n !== name);
+      state.activated = state.activated.filter((n) => n !== name);
+    });
+    vi.mocked(mountSkill).mockImplementation(async (_sid, name) => {
+      state.mounted = [...state.mounted, name];
+    });
+    renderSection(
+      <ComposerSkillsSection sessionId="sess-1" {...PROPS} />,
+    );
+    await screen.findByText("Active");
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Mount skill charting" }),
+    );
+    // The unchecked checkbox marks the onSuccess deltas (both caches) done;
+    // from here on the activated refetch hangs forever.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: "Mount skill charting" }),
+      ).not.toBeChecked(),
+    );
+    vi.mocked(listActivatedSkills).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    // Re-mount: the activated cache must already read empty (the cascade's
+    // synchronous subtraction) -- a stale badge here is the one-beat flash.
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Mount skill charting" }),
+    );
+    await screen.findByRole("button", { name: "Activate skill charting" });
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
   it("renders no activation affordance on unmounted rows", async () => {
     renderSection(
       <ComposerSkillsSection sessionId="sess-1" {...PROPS} />,
@@ -209,7 +260,7 @@ describe("ComposerSkillsSection activation affordance (issue #699)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders no activation affordance in draft mode and reads no activation IPC", async () => {
+  it("renders no activation affordance in draft mode (no activation IPC read)", async () => {
     renderSection(
       <ComposerSkillsSection
         sessionId={null}
@@ -237,7 +288,7 @@ describe("ComposerSkillsSection activation affordance (issue #699)", () => {
       await screen.findByRole("button", { name: "Activate skill charting" }),
     );
     await waitFor(() =>
-      expect(screen.getByRole("alert")).toBeInTheDocument(),
+      expect(screen.getByRole("alert")).toHaveTextContent("boom"),
     );
   });
 
@@ -263,6 +314,9 @@ describe("ComposerSkillsSection activation affordance (issue #699)", () => {
     vi.mocked(unmountSkill).mockImplementation(async (_sid, name) => {
       state.mounted = state.mounted.filter((n) => n !== name);
       state.activated = state.activated.filter((n) => n !== name);
+    });
+    vi.mocked(mountSkill).mockImplementation(async (_sid, name) => {
+      state.mounted = [...state.mounted, name];
     });
     vi.mocked(conversation).mockResolvedValue([]);
     function ThreadObserver() {
@@ -297,6 +351,14 @@ describe("ComposerSkillsSection activation affordance (issue #699)", () => {
         beforeActivate,
       ),
     );
+    // No-op subtraction: cleaning was never activated, so its unmount must
+    // leave charting's badge untouched (the activated delta filters, it
+    // does not overwrite). Freeze the activated refetch before the unmount
+    // -- otherwise it would mask an overwrite bug by writing the truth
+    // right back.
+    vi.mocked(listActivatedSkills).mockImplementation(
+      () => new Promise(() => {}),
+    );
     // The unmount cascade rides the same thread refresh (its Unmount marker
     // has the same channel).
     const beforeUnmount = vi.mocked(conversation).mock.calls.length;
@@ -305,8 +367,28 @@ describe("ComposerSkillsSection activation affordance (issue #699)", () => {
     );
     await waitFor(() => expect(unmountSkill).toHaveBeenCalled());
     await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: "Mount skill cleaning" }),
+      ).not.toBeChecked(),
+    );
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    // The frozen refetch holds no thread claim; the unmount beat still
+    // refreshes the thread.
+    await waitFor(() =>
       expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
         beforeUnmount,
+      ),
+    );
+    // The mount beat rides the same refresh -- the Mount marker shares the
+    // channel, and it is this invalidation (not a turn) that surfaces it.
+    const beforeMount = vi.mocked(conversation).mock.calls.length;
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Mount skill cleaning" }),
+    );
+    await waitFor(() => expect(mountSkill).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
+        beforeMount,
       ),
     );
   });
