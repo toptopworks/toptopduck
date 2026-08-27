@@ -1487,7 +1487,7 @@ fn adapter_entry_wire_shape() {
 #[test]
 fn session_model_config_wire_shape() {
     use toptopduck_lib::commands::SessionModelConfig;
-    use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
+    use toptopduck_lib::session::loop_contract::DiscoveredRuntime;
     assert_wire(
         &SessionModelConfig {
             model: None,
@@ -1566,8 +1566,8 @@ where
 /// kind allowlist, but the success shape has no other guard).
 #[test]
 fn probe_ok_wire_shape() {
-    use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
     use toptopduck_lib::runtime::acp::probe::{CatalogModel, ModelCatalogOutcome, ProbeOk};
+    use toptopduck_lib::session::loop_contract::DiscoveredRuntime;
     assert_wire_out(
         &ProbeOk::Acp {
             discovered: DiscoveredRuntime {

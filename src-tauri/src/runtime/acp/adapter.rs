@@ -25,6 +25,8 @@
 
 use std::path::PathBuf;
 
+use crate::session::loop_contract::DiscoveredRuntime;
+
 // ---------------------------------------------------------------------------
 // Stream format (ADR-0094)
 // ---------------------------------------------------------------------------
@@ -409,71 +411,6 @@ pub fn detect_adapter(spec: &AdapterSpec) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 // Runtime discovery (ADR-0095)
 // ---------------------------------------------------------------------------
-
-/// The model + thought-level catalog extracted from an ACP handshake's
-/// `config_options` (ADR-0095 Discovery Decision). Produced by the engine at
-/// the handshake boundary (per format: ACP extracts, CodexEventStream has
-/// none, ClaudeStreamJson reports the `system{init}` current model),
-/// returned to the frontend via `LoopOutcome.discovered_runtime`, and cached
-/// on the session for resume cold-start rendering.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct DiscoveredRuntime {
-    /// The model ids the CLI offered (empty when the CLI reports none).
-    pub models: Vec<String>,
-    /// The model the CLI reported as current / default, if any.
-    pub current_model: Option<String>,
-    /// The thought-level ids the CLI offered (empty when none).
-    pub thought_levels: Vec<String>,
-    /// The thought level the CLI reported as current / default, if any.
-    pub current_thought_level: Option<String>,
-    /// The config id of the catalog entry the CLI used for the model setting,
-    /// when a model entry was seen (ADR-0095 D4). The ACP schema makes the
-    /// option `id` agent-chosen -- only `category` is the semi-standardized
-    /// tag -- so the engine keys injection on this id, falling back to the
-    /// category constant when the entry carried no usable id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_config_id: Option<String>,
-    /// Same as [`Self::model_config_id`] for the thought-level entry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thought_level_config_id: Option<String>,
-    /// The adapter that produced this catalog (issue #529): stamped by the
-    /// engine after the handshake extract, NOT read from the CLI wire (the
-    /// config_options shape carries no adapter identity). The frontend
-    /// compares it against the active runtime to detect a catalog cached
-    /// under a different adapter (stale across a runtime switch). Absent on
-    /// recipes persisted before the field existed (old-recipe compatibility).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adapter_id: Option<String>,
-}
-
-impl DiscoveredRuntime {
-    /// Nothing discovered (the honest empty shape for a config_options value
-    /// that carried no model / thought_level entries).
-    pub fn empty() -> Self {
-        Self {
-            models: Vec::new(),
-            current_model: None,
-            thought_levels: Vec::new(),
-            current_thought_level: None,
-            model_config_id: None,
-            thought_level_config_id: None,
-            adapter_id: None,
-        }
-    }
-
-    /// True when no selector-facing field carries data (issue #531): the
-    /// picker can render nothing from this catalog. The injection-facing
-    /// `*_config_id`s and the engine-stamped `adapter_id` are deliberately
-    /// excluded -- an id alone can only re-key an already-persisted
-    /// selection, it offers the selector nothing.
-    fn selector_fields_empty(&self) -> bool {
-        self.models.is_empty()
-            && self.current_model.is_none()
-            && self.thought_levels.is_empty()
-            && self.current_thought_level.is_none()
-    }
-}
 
 /// The semantic categories the discovery path keys on (ADR-0095 Decision 3):
 /// the ACP `SessionConfigOption.category` enum's model + thought_level

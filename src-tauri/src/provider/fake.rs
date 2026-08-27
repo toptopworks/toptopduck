@@ -24,9 +24,11 @@ use super::tool_calling::{ThinkingBlock, ToolTurnOutcome, ToolTurnReply, ToolTur
 use super::{Provider, ProviderError};
 
 /// One question's scripted outcomes, drawn in order then clamped to the last.
-struct Script<T> {
+/// Non-generic: the single-shot reply face retired with the self-written
+/// adapters (issue #670), so `ToolTurnOutcome` is the only scripted shape.
+struct Script {
     /// Canned results, returned front-first; the last sticks once reached.
-    results: Vec<Result<T, ProviderError>>,
+    results: Vec<Result<ToolTurnOutcome, ProviderError>>,
     /// How many times this script has been drawn. Interior mutability is
     /// required (the trait takes `&self`); `AtomicUsize` (not `Cell`) so the
     /// fake stays `Sync` (the `Provider` trait's bound, issue #669: the
@@ -34,7 +36,7 @@ struct Script<T> {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-impl<T: Clone> Script<T> {
+impl Script {
     /// Draw the next canned result front-first, clamping to the last once
     /// reached: the first call returns `results[0]`, and once only one remains
     /// it sticks (returned on every later call). A single scripted result is
@@ -42,7 +44,7 @@ impl<T: Clone> Script<T> {
     /// then answer" (ADR-0081) -- the trajectories the loop tests need to
     /// exercise offline. An empty queue yields `NotWired` so a misconfigured
     /// script never invents a reply.
-    fn draw(&self) -> Result<T, ProviderError> {
+    fn draw(&self) -> Result<ToolTurnOutcome, ProviderError> {
         let calls = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Clamp to the last canned result: a single scripted reply is stable
         // (always index 0), and a sequence advances one step per call until it
@@ -65,7 +67,7 @@ pub struct FakeProvider {
     /// message of the windowed request -- see [`asking_question`]). The loop
     /// drives `generate_tool_turn` once per round-trip; an unscripted question
     /// yields `NotWired`, the "never invent a reply" contract.
-    tool_scripts: HashMap<String, Script<ToolTurnOutcome>>,
+    tool_scripts: HashMap<String, Script>,
     /// Every `ToolTurnRequest` handed to `generate_tool_turn`, newest last (one
     /// entry per round-trip). Shared by `Arc` so an agent-loop unit test can
     /// assert the assembled conversation (messages + tools + system) after
@@ -208,10 +210,10 @@ impl FakeProvider {
 /// in [`Script::draw`]; the `Script { results, calls: 0 }` construction has
 /// one source here. An empty queue yields `NotWired` on draw (a misconfigured
 /// script never invents a reply).
-fn insert_script<T>(
-    map: &mut HashMap<String, Script<T>>,
+fn insert_script(
+    map: &mut HashMap<String, Script>,
     question: &str,
-    results: Vec<Result<T, ProviderError>>,
+    results: Vec<Result<ToolTurnOutcome, ProviderError>>,
 ) {
     map.insert(
         question.to_string(),

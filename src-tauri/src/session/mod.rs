@@ -398,7 +398,7 @@ pub struct PosturePair {
 pub struct SessionRuntimeFacts {
     pub model: Option<String>,
     pub thought_level: Option<String>,
-    pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    pub cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     pub last_runtime: Option<LastRuntime>,
 }
 
@@ -517,7 +517,7 @@ pub struct Session {
     external_runtime: Option<AdapterSpec>,
     /// The last external turn's discovered model / thought-level catalog
     /// (ADR-0095). See [`Self::last_discovered_runtime`].
-    last_discovered_runtime: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    last_discovered_runtime: Option<crate::session::loop_contract::DiscoveredRuntime>,
     /// The single source of truth for the session-level model / thought-level
     /// selections + the discovery cache (ADR-0095). Mirrored from the handle
     /// at each turn top (the same pattern as [`Self::external_runtime`]) and
@@ -796,7 +796,7 @@ impl Session {
     /// idempotent.
     pub fn last_discovered_runtime(
         &self,
-    ) -> Option<crate::runtime::acp::adapter::DiscoveredRuntime> {
+    ) -> Option<crate::session::loop_contract::DiscoveredRuntime> {
         self.last_discovered_runtime.clone()
     }
 
@@ -809,7 +809,7 @@ impl Session {
     /// caller skips the call (issue #530).
     pub fn set_last_discovered_runtime(
         &mut self,
-        discovered: crate::runtime::acp::adapter::DiscoveredRuntime,
+        discovered: crate::session::loop_contract::DiscoveredRuntime,
     ) {
         self.runtime_facts.cached_discovered = Some(discovered.clone());
         self.last_discovered_runtime = Some(discovered);
@@ -1350,7 +1350,6 @@ impl Session {
                             termination,
                             promotions: Vec::new(),
                             trace: Vec::new(),
-                            round_trips: 0,
                             discovered_runtime: None,
                         },
                         Ok(runner) => runner.run(
@@ -1975,7 +1974,7 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// calling its own same-named tool and stays -- registration validation
 /// cannot see the external runtime's namespace, so a name match alone is
 /// not proof the gateway served the call. Promotions are gateway-only (the ACP engine leaves
-/// them empty by design, slice 9a); termination + `round_trips` are ACP-only
+/// them empty by design, slice 9a); termination is ACP-only
 /// (the gateway serves tools, it does not produce a turn termination).
 ///
 /// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may prefix MCP tool names
@@ -2263,7 +2262,6 @@ mod tests {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
             trace: LoopRound::flat_wrap(trace),
-            round_trips: 1,
             discovered_runtime: None,
         }
     }
@@ -2402,7 +2400,6 @@ mod tests {
         let acp = LoopOutcome {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
-            round_trips: 1,
             discovered_runtime: None,
             trace: vec![
                 LoopRound {
@@ -2436,22 +2433,20 @@ mod tests {
         assert_eq!(r1.calls[0].tool_use_id, "a1");
     }
 
-    /// Termination + round_trips are ACP-only (the gateway serves tools, it
-    /// does not produce a turn termination). The merge preserves the ACP
-    /// values verbatim.
+    /// Termination is ACP-only (the gateway serves tools, it does not
+    /// produce a turn termination). The merge preserves the ACP value
+    /// verbatim.
     #[test]
-    fn merge_outcomes_termination_and_round_trips_from_acp() {
+    fn merge_outcomes_termination_from_acp() {
         let gateway = gateway_outcome(Vec::new());
         let acp = LoopOutcome {
             discovered_runtime: None,
             termination: Termination::Text("done".into()),
             promotions: Vec::new(),
             trace: Vec::new(),
-            round_trips: 3,
         };
         let merged = merge_outcomes(gateway, acp, &[]);
         assert_eq!(merged.termination, Termination::Text("done".into()));
-        assert_eq!(merged.round_trips, 3);
     }
 
     /// Promotions are gateway-only (the ACP engine leaves them empty by

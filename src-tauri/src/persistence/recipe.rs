@@ -346,15 +346,7 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
 /// and the agent loop's live `materialize` summary (`summarize_field`) so a
 /// persisted trace never bloats the `.duck` file while staying recognizable.
 pub(crate) fn truncate_trace_summary(s: &str) -> String {
-    if s.chars().count() <= TRACE_SUMMARY_MAX {
-        s.to_string()
-    } else {
-        let head: String = s
-            .chars()
-            .take(TRACE_SUMMARY_MAX.saturating_sub(1))
-            .collect();
-        format!("{head}…")
-    }
+    crate::util::truncate_chars_with_ellipsis(s, TRACE_SUMMARY_MAX)
 }
 
 /// One turn in the recipe timeline (ADR-0028): the verbatim question paired
@@ -578,7 +570,7 @@ pub struct Recipe {
     /// the selector immediately instead of waiting for the next turn's
     /// handshake re-discovery. Optional for old-recipe compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    pub cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     /// The runtime the session's last effective segment header names
     /// (ADR-0102 Decision 1): stamped at the segment's two effective points
     /// -- turn end, from the turn's attribution snapshot, and a posture
@@ -756,7 +748,7 @@ impl Recipe {
         mut self,
         model: Option<String>,
         thought_level: Option<String>,
-        cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+        cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
         last_runtime: Option<LastRuntime>,
     ) -> Recipe {
         self.model = model;
@@ -1828,7 +1820,7 @@ mod tests {
         let layered = recipe.with_session_runtime_facts(
             Some("fake-opus".into()),
             Some("high".into()),
-            Some(crate::runtime::acp::adapter::DiscoveredRuntime {
+            Some(crate::session::loop_contract::DiscoveredRuntime {
                 models: vec!["fake-opus".into()],
                 current_model: Some("fake-opus".into()),
                 thought_levels: vec!["low".into(), "high".into()],

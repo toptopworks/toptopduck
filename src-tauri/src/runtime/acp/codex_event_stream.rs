@@ -283,7 +283,7 @@ pub(super) fn run_codex_event_stream(
     // Wall-clock watchdog (same as ACP): fire cancel on expiry.
     if let Some(timeout) = wall_clock {
         spawn_wall_clock_watchdog(
-            guard.watchdog_alive(),
+            guard.generation(),
             Arc::clone(&cancel),
             timeout,
             "toptopduck::acp",
@@ -312,7 +312,6 @@ pub(super) fn run_codex_event_stream(
             return outcome(
                 Termination::Transient(format!("failed to spawn codex exec `{}`: {e}", adapter.id)),
                 Vec::new(),
-                0,
             )
         }
     };
@@ -327,7 +326,6 @@ pub(super) fn run_codex_event_stream(
             let result = outcome(
                 Termination::Transient(format!("stdin write failed: {e}")),
                 Vec::new(),
-                0,
             );
             super::process::kill_and_reap(&mut child);
             return result;
@@ -336,7 +334,6 @@ pub(super) fn run_codex_event_stream(
             let result = outcome(
                 Termination::Transient(format!("stdin flush failed: {e}")),
                 Vec::new(),
-                0,
             );
             super::process::kill_and_reap(&mut child);
             return result;
@@ -415,7 +412,7 @@ pub(super) fn run_codex_event_stream(
     });
 
     let rounds = pump.tracker.settle_rounds(&term);
-    outcome(term, rounds, 1)
+    outcome(term, rounds)
 }
 
 /// Mutable state accumulated while pumping codex events. The round
@@ -493,7 +490,7 @@ impl JsonPump {
 }
 
 /// Build the [`LoopOutcome`] (same shape as the ACP engine's `outcome`).
-fn outcome(termination: Termination, rounds: Vec<LoopRound>, round_trips: u32) -> LoopOutcome {
+fn outcome(termination: Termination, rounds: Vec<LoopRound>) -> LoopOutcome {
     LoopOutcome {
         termination,
         // Promotions are gateway-side (ADR-0085: the bridge -> gateway ->
@@ -504,7 +501,6 @@ fn outcome(termination: Termination, rounds: Vec<LoopRound>, round_trips: u32) -
         // batch round carries its prose); an empty trajectory stays an
         // empty round list (no ghost round).
         trace: rounds,
-        round_trips,
         // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
         discovered_runtime: None,
     }

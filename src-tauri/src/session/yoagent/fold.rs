@@ -209,3 +209,56 @@ fn text_of(content: &[Content]) -> Option<String> {
         .join("");
     (!text.is_empty()).then_some(text)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yoagent::types::{StopReason, Usage};
+
+    /// `round_trips` counts streamed assistant replies -- one per assistant
+    /// `MessageStart`, the driver of the Thinking phase's attempt number. The
+    /// `LoopOutcome` field that mirrored it is gone (write-only, issue #696);
+    /// this is the count's one home. Pin both the count itself and the
+    /// documented retry divergence: an upstream retry after a mid-stream
+    /// failure starts a fresh stream and emits another `MessageStart`, so a
+    /// turn that retried counts both where the built-in loop counted one.
+    #[test]
+    fn round_trips_counts_streamed_assistant_replies_including_retries() {
+        let state = Arc::new(SharedTurnState::new());
+        let sink: PhaseSink = Arc::new(std::sync::Mutex::new(|_p: TurnPhase| {}));
+        let assistant = || {
+            AgentMessage::Llm(Message::assistant(
+                Vec::new(),
+                StopReason::Stop,
+                "m",
+                "p",
+                Usage::default(),
+            ))
+        };
+        let mut fold = EventFold::new();
+        // TurnStart alone is not a round-trip (the upstream fires it even for
+        // a turn the limits check then refuses -- no phantom step).
+        fold.event(&AgentEvent::TurnStart, &state, &sink);
+        assert_eq!(fold.round_trips, 0, "TurnStart is not a round-trip");
+        fold.event(
+            &AgentEvent::MessageStart {
+                message: assistant(),
+            },
+            &state,
+            &sink,
+        );
+        // A mid-stream failure then retry emits a second MessageStart -- the
+        // retry counts (the documented divergence, see the field's doc).
+        fold.event(
+            &AgentEvent::MessageStart {
+                message: assistant(),
+            },
+            &state,
+            &sink,
+        );
+        assert_eq!(
+            fold.round_trips, 2,
+            "one per assistant stream, retries included"
+        );
+    }
+}

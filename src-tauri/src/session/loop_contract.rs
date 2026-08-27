@@ -100,6 +100,16 @@ pub struct TraceEntry {
 /// release builds, so the constructor enforces the floor itself.
 const FAILURE_ANCHOR_FALLBACK: &str = "<no failure message>";
 
+/// The trace-excerpt anchor of an approval-gateway denial (the ADR-0078
+/// failure anchor, denial flavor): the single source both denial sites -- the
+/// dispatch core and the gateway's `tools/call` arm -- construct their rows
+/// from, so the wording cannot drift between the two callers.
+pub(crate) const DENIED_BY_GATEWAY_EXCERPT: &str = "denied by approval gateway";
+
+/// The model-facing content of a denial (ADR-0077: a tool-level error the
+/// agent self-corrects from), shared by the same two denial sites.
+pub(crate) const DENIED_BY_GATEWAY_CONTENT: &str = "tool call denied by the approval gateway";
+
 impl TraceEntry {
     /// A completed call's entry: `result_excerpt` carries the bounded success
     /// payload (the loop's own next-turn context; the projections empty it).
@@ -144,6 +154,25 @@ impl TraceEntry {
                 message
             },
         }
+    }
+
+    /// The approval-gateway denial row: the failed entry whose bounded anchor
+    /// is `DENIED_BY_GATEWAY_EXCERPT` -- the why the resolved-deny row (the
+    /// flipped approval card) and the recorded trace both render, single-
+    /// sourced across the dispatch core and the gateway's `tools/call` arm.
+    pub fn denied(
+        tool_use_id: impl Into<String>,
+        name: impl Into<String>,
+        operation_kind: OperationKind,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self::failed(
+            tool_use_id,
+            name,
+            operation_kind,
+            summary,
+            DENIED_BY_GATEWAY_EXCERPT,
+        )
     }
 }
 
@@ -319,23 +348,83 @@ pub(crate) fn retain_landed_rounds(rounds: &mut Vec<LoopRound>) {
     });
 }
 
-/// Truncate a string to `max` chars, appending an ellipsis when it was cut.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let head: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{head}…")
-    }
-}
-
 /// Shared trace-excerpt truncation (ADR-0078). Exposed `pub(crate)` so the ACP
 /// adapter engine ([`crate::runtime::acp`], ADR-0081) bounds a tool-call's
 /// result excerpt with the SAME rule every runtime uses -- a trace row from
 /// any runtime renders identically (the badge + the failure anchor are the
-/// cross-runtime trace contract).
+/// cross-runtime trace contract). The implementation is the one char-level
+/// truncator in [`crate::util::truncate_chars_with_ellipsis`], shared with
+/// the persisted-summary cap so a cut renders identically everywhere.
 pub(crate) fn truncate_trace_excerpt(s: &str, max: usize) -> String {
-    truncate(s, max)
+    crate::util::truncate_chars_with_ellipsis(s, max)
+}
+
+/// The model + thought-level catalog extracted from an ACP handshake's
+/// `config_options` (ADR-0095 Discovery Decision). Produced by the engine at
+/// the handshake boundary (per format: ACP extracts, CodexEventStream has
+/// none, ClaudeStreamJson reports the `system{init}` current model),
+/// returned to the frontend via `LoopOutcome.discovered_runtime`, and cached
+/// on the session for resume cold-start rendering. Pure serde data with its
+/// home HERE -- the loop-contract module -- so the contract names no runtime
+/// module type; the runtime adapter layer consumes it, not the other way
+/// round (issue #696: the contract must not reverse-depend on the runtime).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DiscoveredRuntime {
+    /// The model ids the CLI offered (empty when the CLI reports none).
+    pub models: Vec<String>,
+    /// The model the CLI reported as current / default, if any.
+    pub current_model: Option<String>,
+    /// The thought-level ids the CLI offered (empty when none).
+    pub thought_levels: Vec<String>,
+    /// The thought level the CLI reported as current / default, if any.
+    pub current_thought_level: Option<String>,
+    /// The config id of the catalog entry the CLI used for the model setting,
+    /// when a model entry was seen (ADR-0095 D4). The ACP schema makes the
+    /// option `id` agent-chosen -- only `category` is the semi-standardized
+    /// tag -- so the engine keys injection on this id, falling back to the
+    /// category constant when the entry carried no usable id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_config_id: Option<String>,
+    /// Same as [`Self::model_config_id`] for the thought-level entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_level_config_id: Option<String>,
+    /// The adapter that produced this catalog (issue #529): stamped by the
+    /// engine after the handshake extract, NOT read from the CLI wire (the
+    /// config_options shape carries no adapter identity). The frontend
+    /// compares it against the active runtime to detect a catalog cached
+    /// under a different adapter (stale across a runtime switch). Absent on
+    /// recipes persisted before the field existed (old-recipe compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<String>,
+}
+
+impl DiscoveredRuntime {
+    /// Nothing discovered (the honest empty shape for a config_options value
+    /// that carried no model / thought_level entries).
+    pub fn empty() -> Self {
+        Self {
+            models: Vec::new(),
+            current_model: None,
+            thought_levels: Vec::new(),
+            current_thought_level: None,
+            model_config_id: None,
+            thought_level_config_id: None,
+            adapter_id: None,
+        }
+    }
+
+    /// True when no selector-facing field carries data (issue #531): the
+    /// picker can render nothing from this catalog. The injection-facing
+    /// `*_config_id`s and the engine-stamped `adapter_id` are deliberately
+    /// excluded -- an id alone can only re-key an already-persisted
+    /// selection, it offers the selector nothing.
+    pub(crate) fn selector_fields_empty(&self) -> bool {
+        self.models.is_empty()
+            && self.current_model.is_none()
+            && self.thought_levels.is_empty()
+            && self.current_thought_level.is_none()
+    }
 }
 
 /// The structured outcome a turn runtime returns. Pure data -- the wiring seam
@@ -357,11 +446,6 @@ pub struct LoopOutcome {
     /// the turn's recipe entry (issue #319): the real multi-round trajectory,
     /// mapped to [`crate::persistence::recipe::RecipeTraceRound`].
     pub trace: Vec<LoopRound>,
-    /// Count of provider round-trips executed. A loop-diagnostic surface (the
-    /// loop tests assert it); NOT persisted -- the trace entries already tell
-    /// the trajectory (ADR-0078, issue #319).
-    #[allow(dead_code)]
-    pub round_trips: u32,
     /// The external runtime's discovered model / thought-level catalog
     /// (ADR-0095). `Some` only on the ACP path (handshake config_options
     /// extraction); the built-in loop and the CodexEventStream path have no
@@ -369,7 +453,7 @@ pub struct LoopOutcome {
     /// `system{init}` current model, ADR-0097) -- the Option distinguishes
     /// "this runtime does not support discovery" from "discovery found
     /// nothing".
-    pub discovered_runtime: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    pub discovered_runtime: Option<DiscoveredRuntime>,
 }
 
 #[cfg(test)]
@@ -444,9 +528,9 @@ mod tests {
 
     #[test]
     fn truncate_cuts_with_ellipsis() {
-        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate_trace_excerpt("short", 10), "short");
         let long = "x".repeat(50);
-        let cut = truncate(&long, 10);
+        let cut = truncate_trace_excerpt(&long, 10);
         assert_eq!(cut.chars().count(), 10);
         assert!(cut.ends_with('…'), "ends with ellipsis: {cut}");
     }

@@ -15,12 +15,10 @@ use std::sync::Arc;
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
-use toptopduck_lib::runtime::acp::adapter::{
-    codex, gemini_cli, opencode, qwen_code, AdapterSpec, DiscoveredRuntime,
-};
+use toptopduck_lib::runtime::acp::adapter::{codex, gemini_cli, opencode, qwen_code, AdapterSpec};
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
-use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination};
+use toptopduck_lib::session::loop_contract::{DiscoveredRuntime, LoopOutcome, Termination};
 
 /// Resolve the fake-CLI binary path (cargo sets `CARGO_BIN_EXE_acp-fake-cli`
 /// for integration tests of the same package).

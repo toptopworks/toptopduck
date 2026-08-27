@@ -13,8 +13,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use toptopduck_lib::runtime::acp::adapter::{gemini_cli, DiscoveredRuntime};
+use toptopduck_lib::runtime::acp::adapter::gemini_cli;
 use toptopduck_lib::runtime::acp::probe::{self, ProbeError};
+use toptopduck_lib::session::loop_contract::DiscoveredRuntime;
 
 /// Resolve the fake-CLI binary path (cargo sets `CARGO_BIN_EXE_acp-fake-cli`
 /// for integration tests of the same package).

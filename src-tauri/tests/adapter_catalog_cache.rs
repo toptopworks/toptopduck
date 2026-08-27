@@ -11,11 +11,11 @@
 
 use std::sync::Arc;
 
-use toptopduck_lib::runtime::acp::adapter::DiscoveredRuntime;
 use toptopduck_lib::runtime::acp::catalog_store::{
     AdapterCatalogEntry, AdapterCatalogStore, CachedOutcome, ProbeKind, CATALOGS_FILE_NAME,
 };
 use toptopduck_lib::runtime::acp::probe::CatalogModel;
+use toptopduck_lib::session::loop_contract::DiscoveredRuntime;
 
 /// The file the store mints under the given root: `adapter-catalogs.json`
 /// (ADR-0096 D5 names the file).

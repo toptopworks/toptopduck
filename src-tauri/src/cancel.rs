@@ -5,7 +5,8 @@
 //! command must reach the signal through a separate `Arc`.
 //!
 //! Two cooperating pieces:
-//! 1. A cooperative `requested` flag ([`AtomicBool`]), checked by the
+//! 1. A cooperative `requested` flag (bit 0 of the packed `AtomicU64` state,
+//!    shared with the turn generation), checked by the
 //!    orchestrator between phases (before the provider call, after it, after the
 //!    SQL execution). A cancel sets it; the orchestrator short-circuits to a
 //!    [`crate::model::TurnOutcome::Cancelled`] the next time it checks.
@@ -22,20 +23,35 @@
 //! lock. The frontend disables input while a turn runs; this flag is the
 //! observable backend truth that exactly one query is executing.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use duckdb::InterruptHandle;
+
+/// A turn's identity for the wall-clock watchdog: minted per
+/// [`CancelToken::begin_turn`], retired when the next turn begins. Opaque --
+/// compared only through [`CancelToken::request_if`] -- so a raw counter
+/// cannot stand in for it (the same pairing-as-type posture as the dispatch
+/// core's `GhostSnapshot`, issue #696).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnGeneration(u64);
 
 /// The shared cancel + in-flight signal for one session's query loop. Held
 /// behind an `Arc` cloned between the [`crate::session::Session`] and the cancel
 /// command (and the timeout watchdog). All mutation goes through interior
 /// mutability, so `request()` reaches the running turn without the session lock.
 pub struct CancelToken {
-    /// Whether cancel was requested for the in-flight turn. Set by `request()`
-    /// (user cancel or the timeout watchdog); reset by `begin_turn` at the start
-    /// of each turn so a stale request from a prior turn cannot leak in.
-    requested: AtomicBool,
+    /// Packed turn state: the high bits carry the turn GENERATION (one per
+    /// `begin_turn`), bit 0 the cancel-request flag. Packing both into ONE
+    /// word makes "request a cancel for generation N" a single atomic RMW
+    /// ([`Self::request_if`]) -- a watchdog that slept through a turn
+    /// boundary sees the generation changed and stands down, with no
+    /// check-then-act window between a liveness read and the request (the
+    /// KNOWN RACE the retired bare `alive` flag left open, closed by
+    /// issue #696). The flag half behaves exactly as the old bare
+    /// `requested`: set by `request()` (user cancel or watchdog), cleared by
+    /// `begin_turn` at the start of each turn.
+    state: AtomicU64,
     /// Whether a turn is currently executing. Toggled by [`InFlightGuard`] (via
     /// `begin_turn`); read by tests + the command layer to assert the single-
     /// in-flight invariant without the session lock.
@@ -52,7 +68,7 @@ pub struct CancelToken {
 impl Default for CancelToken {
     fn default() -> Self {
         Self {
-            requested: AtomicBool::new(false),
+            state: AtomicU64::new(0),
             in_flight: AtomicBool::new(false),
             interrupt: Mutex::new(None),
         }
@@ -86,7 +102,42 @@ impl CancelToken {
     /// second interrupt that DuckDB treats as a no-op once the query has ended).
     /// Called from the cancel command (user hit 停止) and the timeout watchdog.
     pub fn request(&self) {
-        self.requested.store(true, Ordering::SeqCst);
+        self.state.fetch_or(1, Ordering::SeqCst);
+        self.fire_interrupt();
+    }
+
+    /// Fire the cancel only when `generation` is still the current turn's:
+    /// the wall-clock watchdog's turn identity (issue #696). The generation
+    /// and the request flag share one atomic word, so a turn boundary
+    /// (`begin_turn` swaps in the next generation) and a late watchdog
+    /// decision cannot interleave -- the watchdog either fires inside its own
+    /// turn or observes the changed generation and stands down. Returns
+    /// whether the cancel fired.
+    pub fn request_if(&self, generation: TurnGeneration) -> bool {
+        loop {
+            let current = self.state.load(Ordering::SeqCst);
+            if current >> 1 != generation.0 {
+                return false;
+            }
+            match self.state.compare_exchange(
+                current,
+                current | 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    self.fire_interrupt();
+                    return true;
+                }
+                // The word moved under us (a racing begin_turn / request);
+                // re-read and re-judge.
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// The best-effort engine abort on top of the already-set flag.
+    fn fire_interrupt(&self) {
         // The interrupt is a best-effort engine-abort enhancement on top of the
         // cooperative flag (already set above). On lock poison -- the ask thread
         // panicked mid set/clear -- degrade to flag-only instead of panicking:
@@ -112,7 +163,7 @@ impl CancelToken {
     /// Whether cancel was requested for the in-flight turn. The orchestrator
     /// checks this between phases and short-circuits to Cancelled when set.
     pub fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::SeqCst)
+        self.state.load(Ordering::SeqCst) & 1 == 1
     }
 
     /// Whether a turn is currently executing (the single-in-flight invariant,
@@ -124,49 +175,50 @@ impl CancelToken {
     /// Begin a turn: clear any stale request from the prior turn and mark a
     /// query as in-flight. Returns an [`InFlightGuard`] whose `Drop` clears the
     /// in-flight flag and the interrupt slot (RAII -- every exit from `ask`,
-    /// including early Cancelled, drops the guard). The guard also exposes a
-    /// liveness flag for the optional timeout watchdog: dropping the guard
-    /// invalidates it so a slow timer cannot fire into the next turn.
+    /// including early Cancelled, drops the guard). The guard also carries the
+    /// turn's generation for the optional timeout watchdog: a slow timer's
+    /// cancel is generation-guarded (`request_if`) so it cannot fire into the
+    /// next turn.
     pub fn begin_turn(self: &Arc<Self>) -> InFlightGuard {
-        // Reset unconditionally at the start of each turn so a stale
-        // `requested=true` from a prior turn cannot leak into the new one. A
-        // cancel arriving *during* begin is intentionally honored: it writes
-        // `requested=true` after this reset, so the new turn observes it at its
-        // first loop-top check and lands as Cancelled. SeqCst matches the rest of
-        // the token for cross-thread visibility; the reset+set are NOT coordinated
-        // with a racing cancel, but need not be -- the two stores touch different
-        // fields, and `request()` only writes `requested`.
-        self.requested.store(false, Ordering::SeqCst);
+        // Advance to the next generation with the flag cleared in ONE swap so
+        // the new turn starts unrequested: a stale `requested=1` from a prior
+        // turn cannot leak in, and a racing `request_if(old)` either lands
+        // before the swap (cleared with it) or observes the new generation
+        // and stands down. A user `request()` racing the swap is either
+        // wiped (it landed before) or honored by the new turn (after) -- the
+        // same nondeterminism the old bare flag had, unchanged.
+        let generation = TurnGeneration((self.state.load(Ordering::SeqCst) >> 1) + 1);
+        self.state.swap(generation.0 << 1, Ordering::SeqCst);
         self.in_flight.store(true, Ordering::SeqCst);
         InFlightGuard {
             token: Arc::clone(self),
-            alive: Arc::new(AtomicBool::new(true)),
+            generation,
         }
     }
 }
 
-/// RAII guard for the in-flight flag + the timeout watchdog's liveness. Created
-/// by [`CancelToken::begin_turn`]; dropping it (at every exit from `ask`) clears
-/// in-flight + the interrupt slot and invalidates the watchdog. Holds an
-/// `Arc<CancelToken>` (not a borrow) so it coexists with `&mut self` method
-/// calls on the Session within `ask`.
+/// RAII guard for the in-flight flag. Created by
+/// [`CancelToken::begin_turn`]; dropping it (at every exit from `ask`) clears
+/// in-flight + the interrupt slot. Holds an `Arc<CancelToken>` (not a borrow)
+/// so it coexists with `&mut self` method calls on the Session within `ask`.
 pub struct InFlightGuard {
     token: Arc<CancelToken>,
-    alive: Arc<AtomicBool>,
+    generation: TurnGeneration,
 }
 
 impl InFlightGuard {
-    /// The liveness flag for a timeout watchdog. Clone before spawning the
-    /// watchdog; when this guard drops the flag clears, so a late timeout sees
-    /// `false` and does not fire into a later turn.
-    pub fn watchdog_alive(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.alive)
+    /// The turn's generation -- the wall-clock watchdog's turn identity.
+    /// Pass to [`CancelToken::request_if`]; the token retires the
+    /// generation at the next `begin_turn`, so a watchdog firing after its
+    /// turn ended stands down instead of cancelling the successor turn (the
+    /// race the retired `alive` flag left open, closed by issue #696).
+    pub fn generation(&self) -> TurnGeneration {
+        self.generation
     }
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.alive.store(false, Ordering::SeqCst);
         self.token.in_flight.store(false, Ordering::SeqCst);
         self.token.clear_interrupt();
     }
@@ -217,6 +269,47 @@ mod tests {
         token.request();
         token.request(); // second call must not panic
         assert!(token.is_requested());
+    }
+
+    /// `request_if` fires for the generation it captured -- the watchdog's
+    /// normal path: its turn is still current when the timeout lands.
+    #[test]
+    fn request_if_fires_for_the_current_generation() {
+        let token = Arc::new(CancelToken::new());
+        let guard = token.begin_turn();
+        assert!(
+            token.request_if(guard.generation()),
+            "the current generation's cancel fires"
+        );
+        assert!(token.is_requested());
+    }
+
+    /// The generation guard (issue #696): a watchdog whose timeout lands
+    /// AFTER its turn ended and a successor began must stand down -- the
+    /// cancel does not leak into the successor turn. This is the race the
+    /// retired `alive` flag left open (its check-then-act window between the
+    /// load and `request()`); packing generation + flag into one atomic word
+    /// closes it.
+    #[test]
+    fn request_if_stands_down_after_a_successor_turn_began() {
+        let token = Arc::new(CancelToken::new());
+        let gen1 = token.begin_turn().generation();
+        drop(token.begin_turn()); // turn 1 ended, turn 2 began
+        assert!(
+            !token.request_if(gen1),
+            "a stale generation's cancel stands down"
+        );
+        assert!(!token.is_requested(), "the successor turn is untouched");
+    }
+
+    /// The guard exposes a fresh generation per turn: two `begin_turn` calls
+    /// never share a watchdog identity.
+    #[test]
+    fn generations_advance_per_turn() {
+        let token = Arc::new(CancelToken::new());
+        let g1 = token.begin_turn().generation();
+        let g2 = token.begin_turn().generation();
+        assert_ne!(g1, g2, "each turn gets its own generation");
     }
 
     #[test]

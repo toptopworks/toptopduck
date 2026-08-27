@@ -19,3 +19,19 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+
+/// Truncate a string to `max` chars, appending an ellipsis when cut. The ONE
+/// char-level implementation shared by the trace surfaces -- the persisted
+/// summary (`persistence::recipe::truncate_trace_summary`) and the live
+/// excerpt (`session::loop_contract::truncate_trace_excerpt`) -- so a cut
+/// renders identically everywhere. (The byte-level UTF-8-boundary truncator
+/// in `provider::http` serves a different contract -- panic-free slicing on
+/// untrusted bodies at a byte cap -- and stays separate.)
+pub(crate) fn truncate_chars_with_ellipsis(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}

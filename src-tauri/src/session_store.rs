@@ -310,7 +310,7 @@ pub struct SessionHandle {
     /// last ACP turn. Lets the frontend render the selector immediately on
     /// session open / resume cold-start (before any turn re-discovers). None
     /// until the first ACP turn; persisted alongside the two selections.
-    cached_discovered: Mutex<Option<crate::runtime::acp::adapter::DiscoveredRuntime>>,
+    cached_discovered: Mutex<Option<crate::session::loop_contract::DiscoveredRuntime>>,
 }
 
 impl SessionHandle {
@@ -486,7 +486,7 @@ impl SessionHandle {
     }
 
     /// The cached discovered catalog (ADR-0095). Lock-light read.
-    pub fn cached_discovered(&self) -> Option<crate::runtime::acp::adapter::DiscoveredRuntime> {
+    pub fn cached_discovered(&self) -> Option<crate::session::loop_contract::DiscoveredRuntime> {
         self.cached_discovered
             .lock()
             .expect("cached_discovered lock poisoned")
@@ -572,7 +572,7 @@ impl SessionHandle {
     /// unreachable no-op arm from the setter).
     pub fn set_cached_discovered(
         &self,
-        discovered: crate::runtime::acp::adapter::DiscoveredRuntime,
+        discovered: crate::session::loop_contract::DiscoveredRuntime,
     ) {
         *self
             .cached_discovered
@@ -594,7 +594,7 @@ impl SessionHandle {
     pub fn restore_runtime_model_config(
         &self,
         posture: PosturePair,
-        cached_discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+        cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     ) {
         self.set_external_model_config(posture);
         *self
@@ -1162,7 +1162,7 @@ mod tests {
             }
         );
 
-        let catalog = crate::runtime::acp::adapter::DiscoveredRuntime {
+        let catalog = crate::session::loop_contract::DiscoveredRuntime {
             models: vec!["fake-opus".into(), "fake-sonnet".into()],
             current_model: Some("fake-opus".into()),
             thought_levels: vec!["low".into()],
@@ -1175,7 +1175,7 @@ mod tests {
         assert_eq!(handle.cached_discovered(), Some(catalog.clone()));
         // A built-in / CodexEventStream turn never calls the setter (its None
         // means "no discovery"); a second ACP catalog replaces the first.
-        let empty_catalog = crate::runtime::acp::adapter::DiscoveredRuntime::empty();
+        let empty_catalog = crate::session::loop_contract::DiscoveredRuntime::empty();
         handle.set_cached_discovered(empty_catalog.clone());
         assert_eq!(handle.cached_discovered(), Some(empty_catalog));
 
