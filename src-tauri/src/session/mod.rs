@@ -51,6 +51,7 @@ use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx, GatewayOutcome};
 use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
+use crate::session::skills::SkillActivationCtx;
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
 use crate::tools::definitions::builtin_metadata;
@@ -989,7 +990,7 @@ impl Session {
         // (issue #433, ADR-0087 D2). Before the recipe is persisted, each
         // derived source's source_path is updated so SourceRef carries the
         // portable (relative-to-.duck) location.
-        self.migrate_derived_sources(&path);
+        migrate_derived_sources(&mut self.working_set, &self.temp_path, &path);
         self.persister.bind(
             path,
             session_name,
@@ -1012,75 +1013,6 @@ impl Session {
     /// empty sessions do not linger in the sidebar as "新会话" entries.
     pub fn is_timeline_empty(&self) -> bool {
         self.timeline.is_empty()
-    }
-
-    /// Migrate derived source files from temp staging (`temp_path/derived/`)
-    /// to the per-session directory's `assets/` subdirectory (ADR-0089, issue
-    /// #433, ADR-0087 D2) so they survive session close and are portable with
-    /// the `.duck` file. Updates each descriptor's `source_path` in place so
-    /// the recipe's `SourceRef` carries the persistent location. Best-effort +
-    /// logged: a copy failure leaves the staging path in place (the session
-    /// temp dir is wiped on drop, but the recipe write still succeeds — a
-    /// resume would surface the missing file as an interactive re-link).
-    fn migrate_derived_sources(&mut self, duck_path: &Path) {
-        let staging_dir = self.temp_path.join(derived_source::DERIVED_STAGING_DIR);
-        // ADR-0089: derived sources live in the per-session directory's `assets/`
-        // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat .duck).
-        let Some(session_dir) = duck_path.parent() else {
-            log::warn!(
-                target: "toptopduck::session",
-                "skipped derived-source migration: duck_path has no parent: {}",
-                duck_path.display()
-            );
-            return;
-        };
-        let assets_dir = session_dir.join("assets");
-
-        // Collect (ref_name, old_path, new_path) for sources staged in
-        // temp_path/derived/. Iterating the working set immutably first, then
-        // applying updates mutably (borrow split).
-        let staging_prefix = staging_dir.to_string_lossy().to_string();
-        let to_migrate: Vec<(String, PathBuf, PathBuf)> = self
-            .working_set
-            .list()
-            .iter()
-            .filter(|d| !self.working_set.is_result(&d.reference_name))
-            .filter(|d| d.source_path.starts_with(&staging_prefix))
-            .filter_map(|d| {
-                let old_path = PathBuf::from(&d.source_path);
-                let filename = PathBuf::from(old_path.file_name()?);
-                Some((
-                    d.reference_name.clone(),
-                    old_path,
-                    assets_dir.join(filename),
-                ))
-            })
-            .collect();
-
-        if to_migrate.is_empty() {
-            return;
-        }
-
-        if let Err(e) = fs::create_dir_all(&assets_dir) {
-            log::warn!(
-                target: "toptopduck::session",
-                "failed to create derived assets dir {}: {e}",
-                assets_dir.display()
-            );
-            return;
-        }
-
-        for (ref_name, old_path, new_path) in &to_migrate {
-            if let Err(e) = fs::copy(old_path, new_path) {
-                log::warn!(
-                    target: "toptopduck::session",
-                    "failed to migrate derived source {ref_name}: {e}"
-                );
-                continue;
-            }
-            self.working_set
-                .update_source_path(ref_name, &new_path.to_string_lossy());
-        }
     }
 
     /// The user-facing session name, if bound to a `.duck` (ADR-0034).
@@ -1350,6 +1282,18 @@ impl Session {
                     request
                         .tools
                         .extend(crate::cli_tools::config::tool_definitions(inputs.cli_tools));
+                    // The skill-activation meta-tool (ADR-0110 Decision 3,
+                    // issue #701): mounted iff the turn's mounted set is
+                    // non-empty -- the trio's conditional-attachment posture
+                    // (ADR-0105 Decision 6). Served ahead of the gate by the
+                    // dispatch core's interception arm; the activation channel
+                    // reads the SAME turn-start fragments the prompt above
+                    // assembled from.
+                    if !inputs.skills.is_empty() {
+                        request
+                            .tools
+                            .push(crate::skills::activation::activate_skill_definition());
+                    }
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
@@ -1359,6 +1303,18 @@ impl Session {
                         temp_path: &self.temp_path,
                         tool_output_refs: &mut self.tool_output_refs,
                     };
+                    // The mid-turn activation channel (issue #701): the same
+                    // disjoint-borrow posture as `deps` above -- the four
+                    // session fields no `TurnDeps` field touches, plus the
+                    // turn's fragments. Both runtimes share the one channel
+                    // shape; the gateway path constructs its own below.
+                    let mut skill_channel = SkillActivationCtx::from_session(
+                        inputs.skills,
+                        &mut self.activated_skills,
+                        &mut self.timeline,
+                        &mut self.persister,
+                        &self.runtime_facts,
+                    );
                     // The switchover (ADR-0107 Decision 2, issue #669):
                     // `turn_loop_for` is the seam's single entry -- a
                     // profile-backed provider constructs the upstream streamer
@@ -1391,6 +1347,7 @@ impl Session {
                             &mut *self.materializer,
                             &mut mcp,
                             inputs.cli_tools,
+                            &mut skill_channel,
                             approval,
                             sink,
                             Arc::clone(&self.cancel),
@@ -1600,8 +1557,20 @@ impl Session {
                 temp_path: &self.temp_path,
                 tool_output_refs: &mut self.tool_output_refs,
             };
+            // The bridge face's activation channel (issue #701): the same
+            // disjoint-borrow bundle the built-in loop gets -- the external
+            // runtime activates through the SAME session transition by
+            // construction.
+            let skill_channel = SkillActivationCtx::from_session(
+                inputs.skills,
+                &mut self.activated_skills,
+                &mut self.timeline,
+                &mut self.persister,
+                &self.runtime_facts,
+            );
             let ctx = GatewayCtx {
                 deps,
+                skills: skill_channel,
                 materializer: &mut *self.materializer,
                 approval,
                 sink,
@@ -1757,16 +1726,13 @@ impl Session {
     /// per-turn write, the ADR-0095 set-commands call this so a selection
     /// made without a following turn survives a close (Decision 6).
     pub fn persist_if_bound(&mut self) {
-        // Migrate derived sources before building the recipe so their
-        // source_path carries the portable (.duck-adjacent) location instead
-        // of the temp staging path (issue #433, ADR-0087 D2). Without this,
-        // derived sources created after the initial bind_duck would carry temp
-        // paths in the recipe — wiped on session drop, breaking resume.
-        if let Some(duck_path) = self.persister.duck_path().map(PathBuf::from) {
-            self.migrate_derived_sources(&duck_path);
-        }
-        self.persister
-            .save_if_bound(&self.working_set, &self.timeline, &self.runtime_facts);
+        persist_snapshot(
+            &mut self.persister,
+            &mut self.working_set,
+            &self.temp_path,
+            &self.timeline,
+            &self.runtime_facts,
+        );
     }
 
     /// Take (read + clear) the most recent per-turn persistence failure, if
@@ -2173,6 +2139,99 @@ impl Drop for Session {
         if let Some(tx) = self.drop_signal.take() {
             let _ = tx.send(());
         }
+    }
+}
+
+/// The single recipe-save body behind [`Session::persist_if_bound`] and the
+/// mid-turn skill-activation channel's land-and-persist (ADR-0110 Decision 3,
+/// issue #701): migrate any staged derived sources to their portable
+/// location, then save the recipe atomically. Field-split (not a method)
+/// because the mid-turn caller holds the working set + temp path inside
+/// [`materializer::TurnDeps`] while the activation channel holds the
+/// timeline + persister -- disjoint session borrows that cannot re-widen to
+/// `&mut Session`.
+fn persist_snapshot(
+    persister: &mut recipe_persister::RecipePersister,
+    working_set: &mut WorkingSet,
+    temp_path: &Path,
+    timeline: &[TimelineEntry],
+    runtime_facts: &SessionRuntimeFacts,
+) {
+    // Migrate derived sources before building the recipe so their
+    // source_path carries the portable (.duck-adjacent) location instead
+    // of the temp staging path (issue #433, ADR-0087 D2). Without this,
+    // derived sources created after the initial bind_duck would carry temp
+    // paths in the recipe — wiped on session drop, breaking resume.
+    if let Some(duck_path) = persister.duck_path().map(PathBuf::from) {
+        migrate_derived_sources(working_set, temp_path, &duck_path);
+    }
+    persister.save_if_bound(working_set, timeline, runtime_facts);
+}
+
+/// Migrate derived source files from temp staging (`temp_path/derived/`) to
+/// the per-session directory's `assets/` subdirectory (ADR-0089, issue #433,
+/// ADR-0087 D2) so they survive session close and are portable with the
+/// `.duck` file. Updates each descriptor's `source_path` in place so the
+/// recipe's `SourceRef` carries the persistent location. Best-effort +
+/// logged: a copy failure leaves the staging path in place (the session temp
+/// dir is wiped on drop, but the recipe write still succeeds — a resume
+/// would surface the missing file as an interactive re-link).
+fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_path: &Path) {
+    let staging_dir = temp_path.join(derived_source::DERIVED_STAGING_DIR);
+    // ADR-0089: derived sources live in the per-session directory's `assets/`
+    // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat .duck).
+    let Some(session_dir) = duck_path.parent() else {
+        log::warn!(
+            target: "toptopduck::session",
+            "skipped derived-source migration: duck_path has no parent: {}",
+            duck_path.display()
+        );
+        return;
+    };
+    let assets_dir = session_dir.join("assets");
+
+    // Collect (ref_name, old_path, new_path) for sources staged in
+    // temp_path/derived/. Iterating the working set immutably first, then
+    // applying updates mutably (borrow split).
+    let staging_prefix = staging_dir.to_string_lossy().to_string();
+    let to_migrate: Vec<(String, PathBuf, PathBuf)> = working_set
+        .list()
+        .iter()
+        .filter(|d| !working_set.is_result(&d.reference_name))
+        .filter(|d| d.source_path.starts_with(&staging_prefix))
+        .filter_map(|d| {
+            let old_path = PathBuf::from(&d.source_path);
+            let filename = PathBuf::from(old_path.file_name()?);
+            Some((
+                d.reference_name.clone(),
+                old_path,
+                assets_dir.join(filename),
+            ))
+        })
+        .collect();
+
+    if to_migrate.is_empty() {
+        return;
+    }
+
+    if let Err(e) = fs::create_dir_all(&assets_dir) {
+        log::warn!(
+            target: "toptopduck::session",
+            "failed to create derived assets dir {}: {e}",
+            assets_dir.display()
+        );
+        return;
+    }
+
+    for (ref_name, old_path, new_path) in &to_migrate {
+        if let Err(e) = fs::copy(old_path, new_path) {
+            log::warn!(
+                target: "toptopduck::session",
+                "failed to migrate derived source {ref_name}: {e}"
+            );
+            continue;
+        }
+        working_set.update_source_path(ref_name, &new_path.to_string_lossy());
     }
 }
 

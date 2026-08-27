@@ -341,6 +341,7 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
         || name == crate::mcp::meta_tools::META_LIST_SERVERS
         || name == crate::mcp::meta_tools::META_SEARCH_TOOLS
         || name == crate::mcp::meta_tools::META_INVOKE
+        || name == crate::skills::activation::ACTIVATE_SKILL
 }
 
 /// The legal-shape rule in one place (ADR-0109 Decision 7, issue #675
@@ -781,6 +782,7 @@ mod tests {
         // full-set membership) -- a user `pandoc` would race the
         // conflict-deference mechanism for the builtin entry's own name.
         for reserved in [
+            "activate_skill",
             "explore",
             "materialize",
             "mcp__srv__tool",

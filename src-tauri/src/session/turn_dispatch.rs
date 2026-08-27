@@ -3,7 +3,8 @@
 //! [`dispatch_gated_call`] routes one model-emitted tool call through the
 //! approval gateway and the executor. What lives HERE, and therefore cannot
 //! drift between the runtimes that dispatch tools, is the meta-tool trio
-//! resolution, the gate classification ([`classify_with_cli_tool`], which
+//! resolution, the skill-activation interception beside it (issue #701),
+//! the gate classification ([`classify_with_cli_tool`], which
 //! the gateway's `tools/call` arm also consumes), the `result_N` numbering,
 //! and the dispatch panic guard (issue #321, sunk into the core so every
 //! runtime gets the snapshot + ghost-rollback ritual by construction). The
@@ -45,6 +46,8 @@ use crate::session::loop_contract::{
     truncate_trace_excerpt, Termination, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::skills::SkillActivationCtx;
+use crate::skills::activation;
 use crate::tools;
 use crate::tools::definitions;
 
@@ -232,6 +235,7 @@ pub(crate) fn dispatch_gated_call(
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
+    skills: &mut SkillActivationCtx<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), DispatchAbort> {
@@ -244,7 +248,7 @@ pub(crate) fn dispatch_gated_call(
     // (ADR-0084).
     let site = format!("tool dispatch `{}`", call.name);
     match guarded_dispatch(deps, &site, |deps| {
-        dispatch_gated_call_inner(call, deps, materializer, mcp, cli, gate, on_phase)
+        dispatch_gated_call_inner(call, deps, materializer, mcp, cli, skills, gate, on_phase)
     }) {
         Err(detail) => Err(DispatchAbort::Panic(Termination::Transient(detail))),
         Ok(result) => result.map_err(|GateCancelled| DispatchAbort::Gate),
@@ -259,6 +263,7 @@ fn dispatch_gated_call_inner(
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
+    skills: &mut SkillActivationCtx<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
@@ -287,6 +292,37 @@ fn dispatch_gated_call_inner(
         }
         meta_tools::MetaDispatch::Fallthrough(call) => call,
     };
+    // The skill-activation meta-tool (ADR-0110 Decision 3, issue #701):
+    // intercepted BESIDE the trio match, ahead of any classification / gate
+    // -- activation is approval-free by design (mounting is the only trust
+    // gate). The resolver lands the `Activate` transition + persists
+    // immediately; this site maps its two variants exactly as it maps the
+    // trio's (a Local call gets the started / completed phase pair + trace
+    // row, a Refused call is the bare error result with no trace entry).
+    if call.name == activation::ACTIVATE_SKILL {
+        return Ok(
+            match activation::resolve_skill_activation(
+                call,
+                skills,
+                deps.working_set,
+                deps.temp_path,
+            ) {
+                meta_tools::MetaDispatch::Local { summary, payload } => {
+                    let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+                    (result, Some(entry), None)
+                }
+                meta_tools::MetaDispatch::Refused(message) => {
+                    (meta_failure(call, &message), None, None)
+                }
+                // The skill resolver only yields Local / Refused; the borrowed
+                // variants exist for the trio's fall-through, not this surface.
+                meta_tools::MetaDispatch::Resolved(_)
+                | meta_tools::MetaDispatch::Fallthrough(_) => {
+                    unreachable!("the skill resolver only yields Local / Refused")
+                }
+            },
+        );
+    }
     // A registered CLI tool classifies under its own reserved server
     // (ADR-0108 Decision 7): the trust key is the registration name, the
     // badge is Execute, and the summary renders the full argv the approval
@@ -446,7 +482,7 @@ fn local_meta_call(
     (
         ToolResult {
             tool_use_id: call.id.clone(),
-            content: payload.to_string(),
+            content: meta_tools::meta_payload_text(payload),
             is_error: false,
         },
         entry,
@@ -1141,6 +1177,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1187,6 +1224,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1264,6 +1302,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut forward,
         )
@@ -1347,6 +1386,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1460,6 +1500,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1540,6 +1581,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut forward,
         )
@@ -1624,6 +1666,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1750,6 +1793,7 @@ mod tests {
             &mut materializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut |_| {},
         )
@@ -1994,6 +2038,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -2057,6 +2102,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )

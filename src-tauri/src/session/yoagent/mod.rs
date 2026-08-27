@@ -54,6 +54,7 @@ use crate::session::loop_contract::{
     retain_landed_rounds, LoopOutcome, Termination, DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::skills::SkillActivationCtx;
 use crate::session::turn_dispatch::{
     dispatch_gated_call, panic_to_transient, spawn_wall_clock_watchdog, DispatchAbort, GateCtx,
 };
@@ -127,6 +128,7 @@ impl YoagentLoop {
         materializer: &mut dyn Materializer,
         mcp: &mut McpAggregator,
         cli: &[crate::cli_tools::config::CliToolConfig],
+        skills: &mut SkillActivationCtx<'_>,
         approval: &crate::approval::ApprovalState,
         sink: &dyn crate::approval::ApprovalSink,
         cancel: Arc<CancelToken>,
@@ -267,6 +269,7 @@ impl YoagentLoop {
                     materializer,
                     mcp,
                     cli,
+                    skills,
                     &gate,
                     &mut forward,
                 ) {

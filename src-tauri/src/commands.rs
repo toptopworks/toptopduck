@@ -3320,7 +3320,11 @@ pub fn activate_skill(
     reject_if_resuming(&handle)?;
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
-    s.activate_skill(&name).map_err(SessionError::SkillMount)?;
+    // The user channel: the IPC command always records the User actor (the
+    // agent channel -- actor Agent -- is the gateway meta-tool, issue #701;
+    // both ride the same Session::activate_skill transition).
+    s.activate_skill(&name, crate::model::SkillLifecycleActor::User)
+        .map_err(SessionError::SkillMount)?;
     Ok(())
 }
 
@@ -4485,7 +4489,7 @@ mod tests {
         let handle = store.get(&id).expect("handle");
         let mut s = handle.session_lock().expect("lock");
         let err = s
-            .activate_skill("ghost")
+            .activate_skill("ghost", crate::model::SkillLifecycleActor::User)
             .map_err(SessionError::SkillMount)
             .unwrap_err();
         assert!(

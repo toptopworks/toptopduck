@@ -2,8 +2,9 @@
 // (ADR-0086, issue #366; ADR-0110, issue #698): a sibling species to
 // SourceMarker -- thin, full-width, no question / outcome glyph. Mount =
 // active (Plug + border-l-primary); Activate = the persistent promotion
-// (Zap + border-l-primary -- same present-tense tier as Mount, #698 renders
-// the minimal form; the actor distinction rides #701); Unmount = weakened
+// (Zap + border-l-primary -- same present-tense tier as Mount, #698's
+// minimal form; the actor distinction landed with #701: the copy picks the
+// user / agent key off the event's actor); Unmount = weakened
 // (Unplug + border-l-muted-foreground). A name
 // the registry no longer carries (resume drift: deleted / renamed / external
 // library uninstalled since the event was recorded) overrides the kind tone
@@ -20,6 +21,7 @@ import { cn } from "@/lib/utils";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import type {
   SkillEntry,
+  SkillLifecycleActor,
   SkillLifecycleEvent,
   SkillLifecycleKind,
 } from "../../types/skills";
@@ -36,6 +38,7 @@ function skillMarkerText(
   intl: IntlShape,
   kind: SkillLifecycleKind,
   name: string,
+  actor: SkillLifecycleActor | null,
 ): { Icon: LucideIcon; text: string } {
   switch (kind) {
     case "Mount":
@@ -55,12 +58,26 @@ function skillMarkerText(
         ),
       };
     case "Activate":
+      // The initiation actor picks the copy (issue #701, ADR-0110 Decision
+      // 4): the pre-existing key stays the user's; the agent's meta-tool
+      // activation gets its own. The actor is present IFF the kind is
+      // Activate (the wire contract), so the ternary covers User and there
+      // is no defensive null branch.
       return {
         Icon: Zap,
-        text: intl.formatMessage(
-          { id: "thread.skill.activate", defaultMessage: "Activated skill \"{name}\"" },
-          { name },
-        ),
+        text:
+          actor === "Agent"
+            ? intl.formatMessage(
+                {
+                  id: "thread.skill.activateAgent",
+                  defaultMessage: "Agent activated skill \"{name}\"",
+                },
+                { name },
+              )
+            : intl.formatMessage(
+                { id: "thread.skill.activate", defaultMessage: "Activated skill \"{name}\"" },
+                { name },
+              ),
       };
     default: {
       const unhandled: never = kind;
@@ -80,7 +97,7 @@ export function SkillMarker({
   // The verb + name come from the event alone -- always present, even when
   // the registry has no entry (the timeline's record is the source of truth,
   // not the current registry state).
-  const { Icon, text } = skillMarkerText(intl, event.kind, event.name);
+  const { Icon, text } = skillMarkerText(intl, event.kind, event.name, event.actor);
   const skill = skillIndex?.get(event.name);
   // Three-way lookup distinguishes "registry not wired" (honest degrade, no
   // drift signal) from "registry wired but name absent" (drift warning). The

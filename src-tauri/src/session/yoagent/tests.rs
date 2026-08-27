@@ -250,6 +250,11 @@ struct Harness {
     refs: HashMap<String, crate::session::materializer::CachedDerivedRef>,
     temp: TempDir,
     phases: Arc<Mutex<Vec<TurnPhase>>>,
+    /// The activation channel's owning fixture (issue #701): a loop test
+    /// seeds fragments here to mount the skill surface; the default empty
+    /// set keeps every other test off it (the tool mounts only on a
+    /// non-empty mounted set).
+    skills: crate::session::skills::SkillActivationFixture,
 }
 
 impl Harness {
@@ -261,6 +266,7 @@ impl Harness {
             refs: HashMap::new(),
             temp: TempDir::new().unwrap(),
             phases: Arc::new(Mutex::new(Vec::new())),
+            skills: crate::session::skills::SkillActivationFixture::new(Vec::new()),
         }
     }
 
@@ -380,6 +386,7 @@ impl Harness {
             materializer,
             &mut mcp,
             cli,
+            &mut self.skills.ctx(),
             approval,
             sink,
             cancel,
@@ -1349,4 +1356,73 @@ fn phase_stream_orders_thinking_before_call_events() {
     );
     assert!(tc.unwrap() < rt.unwrap(), "thinking completes before prose");
     assert!(st.unwrap() < cm.unwrap(), "started precedes completed");
+}
+
+/// The `activate_skill` meta-tool through the full loop (issue #701,
+/// ADR-0110 Decision 3): with a mounted fragment, the dispatch core serves
+/// the call ahead of the approval gate (the sink records NO request --
+/// activation is approval-free by design), the turn trace records the row
+/// under the tool name with the skill name as its summary, and the
+/// activation lands on the channel's state with the Agent actor (the same
+/// transition the IPC user channel rides).
+#[test]
+fn activate_skill_call_serves_body_lands_activation_and_traces() {
+    use crate::model::SkillLifecycleActor;
+    use crate::skills::SkillPromptFragment;
+
+    let mut h = Harness::new();
+    h.skills.fragments = vec![SkillPromptFragment {
+        name: "sql-coach".to_string(),
+        description: "Coach SQL.".to_string(),
+        body: "Coach the SQL.".to_string(),
+        content_hash: "hash".to_string(),
+        mcp_servers: Vec::new(),
+        cli_tools: Vec::new(),
+    }];
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        thinking_and_batch(
+            "the task matches sql-coach",
+            None,
+            vec![call("tu_s", "activate_skill", json!({"name": "sql-coach"}))],
+        ),
+        text_reply("Coaching."),
+    ]));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request_with_tools("coach me", &["activate_skill"]),
+        offline_loop(Arc::clone(&provider)),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(outcome.termination, Termination::Text("Coaching.".into()));
+    // Approval-free: the intercept sits ahead of the gate, so no card is
+    // ever requested for the activation.
+    assert!(sink.request_ids.lock().unwrap().is_empty());
+    // The trace row: the tool name + the skill name as the summary (the
+    // locked Local-mapping shape, identical to the trio's).
+    // The round-grouped trace (ADR-0103): the row rides its round's calls.
+    let entry = outcome
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .find(|e| e.name == "activate_skill")
+        .expect("an activate_skill trace row");
+    assert!(entry.success);
+    assert_eq!(entry.summary, "sql-coach");
+    // The transition landed with the Agent actor, fresh (one event).
+    assert_eq!(h.skills.activated, vec!["sql-coach".to_string()]);
+    let events: Vec<_> = h
+        .skills
+        .timeline
+        .iter()
+        .filter_map(|e| match e {
+            crate::session::TimelineEntry::Skill(ev) => Some(ev),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].actor, Some(SkillLifecycleActor::Agent));
 }
