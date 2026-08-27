@@ -300,12 +300,12 @@ fn remove_source_error_serializes_adjacently_tagged() {
 
 #[test]
 fn skill_mount_error_serializes_adjacently_tagged() {
-    // SkillMountError (issue #363, ADR-0086) crosses IPC wrapped in
-    // SessionError::SkillMount. Both variants are struct variants carrying the
-    // offending skill name under data, so the frontend narrows on `kind` and
-    // renders the shared `error.skillMount.*` locale message. Pin the wire
-    // shape src/types/skills.ts mirrors so a serde drift fails here before the
-    // frontend's isSkillMountError narrows on a stale contract.
+    // SkillMountError (issue #363, ADR-0086; issue #698, ADR-0110) crosses IPC
+    // wrapped in SessionError::SkillMount. All variants are struct variants
+    // carrying the offending skill name under data, so the frontend narrows on
+    // `kind` and renders the shared `error.skillMount.*` locale message. Pin
+    // the wire shape src/types/skills.ts mirrors so a serde drift fails here
+    // before the frontend's isSkillMountError narrows on a stale contract.
     use toptopduck_lib::session::skills::SkillMountError;
     assert_wire(
         &SkillMountError::AlreadyMounted {
@@ -318,6 +318,12 @@ fn skill_mount_error_serializes_adjacently_tagged() {
             name: "sql-coach".into(),
         },
         r#"{"kind":"NotMounted","data":{"name":"sql-coach"}}"#,
+    );
+    assert_wire(
+        &SkillMountError::NotMountedForActivation {
+            name: "sql-coach".into(),
+        },
+        r#"{"kind":"NotMountedForActivation","data":{"name":"sql-coach"}}"#,
     );
 }
 
@@ -796,6 +802,54 @@ fn thread_entry_source_wraps_a_source_event_under_data() {
             display_name: "people".into(),
         }),
         r#"{"entry":"Source","data":{"kind":"Added","reference_name":"people","display_name":"people"}}"#,
+    );
+}
+
+#[test]
+fn thread_entry_skill_wraps_a_lifecycle_event_with_the_actor_mark() {
+    // ADR-0086 (issue #363) / ADR-0110 (issue #698): the Skill entry wraps
+    // the lifecycle event under `data`; `actor` rides inline in declaration
+    // order -- explicit null on Mount / Unmount (the no-skip convention) and
+    // the bare variant string on an Activate. Pin the exact shape
+    // src/types/skills.ts mirrors as a REQUIRED `actor` field: a future
+    // skip_serializing_if would silently make it optional on the wire and
+    // break the TS mirror's non-optional contract. Both actor variants are
+    // pinned: the Agent half has no construction site until #701, so only
+    // this pin holds its serde spelling to the TS union.
+    use toptopduck_lib::model::{
+        SkillLifecycleActor, SkillLifecycleEvent, SkillLifecycleKind, ThreadEntry,
+    };
+    assert_wire(
+        &ThreadEntry::Skill(SkillLifecycleEvent {
+            kind: SkillLifecycleKind::Mount,
+            name: "sql-coach".into(),
+            actor: None,
+        }),
+        r#"{"entry":"Skill","data":{"kind":"Mount","name":"sql-coach","actor":null}}"#,
+    );
+    assert_wire(
+        &ThreadEntry::Skill(SkillLifecycleEvent {
+            kind: SkillLifecycleKind::Unmount,
+            name: "sql-coach".into(),
+            actor: None,
+        }),
+        r#"{"entry":"Skill","data":{"kind":"Unmount","name":"sql-coach","actor":null}}"#,
+    );
+    assert_wire(
+        &ThreadEntry::Skill(SkillLifecycleEvent {
+            kind: SkillLifecycleKind::Activate,
+            name: "sql-coach".into(),
+            actor: Some(SkillLifecycleActor::User),
+        }),
+        r#"{"entry":"Skill","data":{"kind":"Activate","name":"sql-coach","actor":"User"}}"#,
+    );
+    assert_wire(
+        &ThreadEntry::Skill(SkillLifecycleEvent {
+            kind: SkillLifecycleKind::Activate,
+            name: "sql-coach".into(),
+            actor: Some(SkillLifecycleActor::Agent),
+        }),
+        r#"{"entry":"Skill","data":{"kind":"Activate","name":"sql-coach","actor":"Agent"}}"#,
     );
 }
 

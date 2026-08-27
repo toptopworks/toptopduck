@@ -276,7 +276,8 @@ export function Thread({
           // Skill lifecycle events (ADR-0086, issue #366): thin markers
           // isomorphic to source events, a distinct species from a turn (no
           // question, no outcome glyph). Mount = active tone + Plug glyph;
-          // Unmount = weakened tone + Unplug glyph; a name the registry no
+          // Activate = primary tone + Zap glyph; Unmount = weakened tone +
+          // Unplug glyph; a name the registry no
           // longer carries (resume drift) flips the marker to a destructive
           // warning. The registry lookup is optional -- without skillIndex
           // the marker renders the verb + name from the event alone.

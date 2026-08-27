@@ -84,6 +84,7 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
             2 => transforms::v2_to_v3(current)?,
             3 => transforms::v3_to_v4(current)?,
             4 => transforms::v4_to_v5(current)?,
+            5 => transforms::v5_to_v6(current)?,
             other => {
                 return Err(MigrationError::NoTransform {
                     from: other,
@@ -435,6 +436,18 @@ mod transforms {
         let calls = std::mem::take(trace);
         *trace = vec![serde_json::json!({ "calls": calls })];
     }
+
+    /// v5 -> v6 (ADR-0110, issue #698): the bump reserves the `Activate`
+    /// skill lifecycle variant + the event `actor` mark. The transform is an
+    /// identity for every PRODUCTION recipe -- a v5 file cannot carry an
+    /// `Activate` event, and the actor field deserializes as None when
+    /// absent (`serde(default)`), so a v5 shape IS a valid v6 shape and
+    /// there is nothing to rewrite. The step exists so the chain stamps
+    /// `format_version` = 6 (an old client reading a v6 file must hit the
+    /// higher-version honest-refuse path, ADR-0036).
+    pub(super) fn v5_to_v6(value: Value) -> Result<Value, MigrationError> {
+        Ok(value)
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +646,40 @@ mod tests {
             recipe.history[0],
             crate::persistence::recipe::RecipeEntry::Turn(_)
         ));
+    }
+
+    #[test]
+    fn v5_to_v6_is_a_noop_for_a_production_recipe() {
+        // ADR-0110 (issue #698): a v5 recipe carries only Mount / Unmount
+        // skill events (no `actor` key anywhere). The v5 -> v6 step rewrites
+        // NOTHING -- only the version stamp moves -- and the migrated shape
+        // deserializes as a v6 Recipe whose activated set folds empty (the
+        // honest post-resume posture, no degrade report).
+        let v5 = serde_json::json!({
+            "format_version": 5,
+            "session_name": "pre-activation",
+            "sources": [],
+            "history": [
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+                { "entry": "Skill", "data": { "kind": "Unmount", "name": "sql-coach" } },
+            ],
+            "active": null,
+        });
+        let migrated = migrate_to_current(v5, 5).expect("migrate");
+        assert_eq!(migrated["format_version"], RECIPE_FORMAT_VERSION);
+        // The entries are untouched -- no actor injected, no shape rewrite.
+        assert_eq!(
+            migrated["history"][0]["data"],
+            serde_json::json!({ "kind": "Mount", "name": "sql-coach" }),
+        );
+        let recipe: crate::persistence::recipe::Recipe =
+            serde_json::from_value(migrated).expect("v6 shape parses");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        assert!(recipe.mounted_skills().is_empty());
+        assert!(
+            recipe.activated_skills().is_empty(),
+            "a pre-activation recipe folds to the honest empty activated set",
+        );
     }
 
     #[test]

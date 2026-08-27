@@ -358,9 +358,10 @@ function formatRenameDatasetError(e: RenameError, intl: IntlShape): string {
 // #121). UnknownDataset shares the merged `error.dataset.notFound` id; Execute
 // renders a generic message and the engine detail rides the technical-details
 // fold (the detail is a DuckDB read error, never an API key per ADR-0029).
-// Format a SkillMountError (issue #363, ADR-0086), reached via SessionError::
-// SkillMount. AlreadyMounted / NotMounted name the offending skill in the
-// primary message; both are self-contained (no fold detail).
+// Format a SkillMountError (issue #363, ADR-0086; issue #698, ADR-0110),
+// reached via SessionError::SkillMount. AlreadyMounted / NotMounted /
+// NotMountedForActivation name the offending skill in the primary message;
+// all are self-contained (no fold detail).
 function formatSkillMountError(e: SkillMountError, intl: IntlShape): string {
   switch (e.kind) {
     case "AlreadyMounted":
@@ -376,6 +377,14 @@ function formatSkillMountError(e: SkillMountError, intl: IntlShape): string {
         {
           id: "error.skillMount.notMounted",
           defaultMessage: "Skill \"{name}\" is not mounted",
+        },
+        { name: e.data.name },
+      );
+    case "NotMountedForActivation":
+      return intl.formatMessage(
+        {
+          id: "error.skillMount.notMountedForActivation",
+          defaultMessage: "Skill \"{name}\" is not mounted; mount it before activating",
         },
         { name: e.data.name },
       );

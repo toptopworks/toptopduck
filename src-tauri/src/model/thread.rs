@@ -1,6 +1,7 @@
 //! Source/skill lifecycle events and the unified conversation timeline (issue
 //! #38, ADR-0040). A source or skill lifecycle event is a user-driven mutation
-//! of the working set's membership -- first-class in the thread, never a turn: it
+//! of the working set's membership -- or, since ADR-0110, an agent-driven
+//! skill activation -- first-class in the thread, never a turn: it
 //! never enters the LLM turn window, never occupies an N=20 slot, and never
 //! advances result_N.
 
@@ -42,30 +43,52 @@ pub struct SourceLifecycleEvent {
 }
 
 /// Which kind of skill lifecycle mutation produced an event (ADR-0086, issue
-/// #363). The lifecycle is intentionally two-state: a skill is either Mounted
-/// into the session's active set or Unmounted from it. A skill CONTENT change
-/// is NOT a lifecycle event -- it is captured per-turn by each
+/// #363; ADR-0110, issue #698). The lifecycle is a straight-line machine of
+/// three transitions -- Mount, Activate, Unmount -- with unmount as the sole
+/// exit: a skill is Mounted into the session's mounted (discoverable) set,
+/// MAY be Activated from it into the persistent activated subset (activated
+/// set ⊆ mounted set), and is Unmounted out of both in one cascade. A skill
+/// CONTENT change is NOT a lifecycle
+/// event -- it is captured per-turn by each
 /// [`crate::model::SkillProvenance`]'s `content_hash`, so the
 /// timeline stays free of content churn (only membership changes are events).
-/// Mirrors the spec's two-state identity (Mount/Unmount); the frontend narrows
-/// on the bare variant string.
+/// Mirrors the spec's three-kind identity (Mount/Unmount/Activate); the
+/// frontend narrows on the bare variant string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillLifecycleKind {
-    /// A skill entered the session's active set. Subsequent turns assemble with
-    /// this skill's prompt fragment + MCP server references until it is
-    /// Unmounted or the session ends.
+    /// A skill entered the session's mounted set. Subsequent turns assemble
+    /// with this skill's metadata until it is Unmounted or the session ends;
+    /// its body awaits Activation (ADR-0110 Decision 1).
     Mount,
-    /// A skill left the session's active set. Subsequent turns no longer
-    /// assemble with it; the Unmount event itself stays in the timeline for
-    /// audit (the active set is folded from the full event sequence).
+    /// A skill left the session's mounted set -- and, by cascade, the
+    /// activated subset (an unmount is the SOLE exit for an activation;
+    /// ADR-0110 Decision 4). Subsequent turns no longer assemble with it;
+    /// the Unmount event itself stays in the timeline for audit (both sets
+    /// are folded from the full event sequence).
     Unmount,
+    /// A mounted skill was promoted into the session's activated subset
+    /// (ADR-0110 Decision 2): its body is persistently injected on every
+    /// subsequent turn until an Unmount cascades it out. Carries the
+    /// initiation actor ([`SkillLifecycleEvent::actor`]).
+    Activate,
 }
 
-/// A skill lifecycle event (ADR-0086, issue #363): first-class in the thread,
-/// never a turn. Carries only the spec `name` (the skill's stable identity,
-/// equal to its directory name) -- the prompt fragment / MCP references live in
-/// the registry and are looked up at assembly time, never snapshotted into the
-/// timeline (a skill's content evolution is captured per-turn by
+/// Who initiated a lifecycle event (ADR-0110 Decision 4). Mount / unmount are
+/// user-only; activation may be initiated by the user (the mounted-list
+/// affordance) or by the agent (the `activate_skill` gateway meta-tool).
+/// Issue #698 records only the user actor -- the agent channel rides #701.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillLifecycleActor {
+    User,
+    Agent,
+}
+
+/// A skill lifecycle event (ADR-0086, issue #363; ADR-0110, issue #698):
+/// first-class in the thread, never a turn. Carries only the spec `name`
+/// (the skill's stable identity, equal to its directory name) plus, for an
+/// `Activate`, the initiation actor -- the prompt fragment / MCP references
+/// live in the registry and are looked up at assembly time, never snapshotted
+/// into the timeline (a skill's content evolution is captured per-turn by
 /// [`crate::model::SkillProvenance::content_hash`], not by
 /// lifecycle events). Isomorphic to [`SourceLifecycleEvent`]: always visible,
 /// occupies a timeline slot, but never enters the LLM window or advances
@@ -75,6 +98,14 @@ pub struct SkillLifecycleEvent {
     pub kind: SkillLifecycleKind,
     /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
     pub name: String,
+    /// The initiation actor, present IFF `kind` is `Activate` (mount /
+    /// unmount are user-only by definition, so they carry None and serialize
+    /// as JSON null -- the project's no-skip convention). `serde(default)`
+    /// keeps v5 recipes (recorded before the field existed) deserializing:
+    /// they contain no `Activate` events, so None is the honest value for
+    /// every event they do carry.
+    #[serde(default)]
+    pub actor: Option<SkillLifecycleActor>,
 }
 
 /// One entry of the unified conversation timeline (ADR-0040 / ADR-0086): either

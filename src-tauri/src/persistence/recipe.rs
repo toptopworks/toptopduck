@@ -75,7 +75,15 @@ use crate::model::{
 /// honest degrade: rendered without a timestamp, never a synthetic one).
 /// Older clients reading a v5 file hit the existing higher-version
 /// honest-refuse path (ADR-0036).
-pub const RECIPE_FORMAT_VERSION: u32 = 5;
+///
+/// v6 (ADR-0110, issue #698) adds the third skill lifecycle state:
+/// [`SkillLifecycleEvent`] gains the `Activate` variant and an actor mark
+/// (`actor`, present iff `Activate`). The v5->v6 mapping is a no-op for every
+/// production recipe -- no v5 file can carry an `Activate` event, and the
+/// actor field deserializes as None when absent (`serde(default)`), so a v5
+/// shape IS a valid v6 shape. Older clients reading a v6 file hit the
+/// existing higher-version honest-refuse path (ADR-0036).
+pub const RECIPE_FORMAT_VERSION: u32 = 6;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
@@ -142,11 +150,13 @@ pub struct ProductiveTurn {
 pub enum RecipeEntry {
     Turn(RecipeTurn),
     Source(SourceLifecycleEvent),
-    /// A skill lifecycle event (ADR-0086, issue #363). Isomorphic to
-    /// [`Self::Source`]: first-class timeline slot (always visible), never a
-    /// turn (never enters the LLM window, never advances `result_N`). The
-    /// active skill set at any point is the fold of the Mount/Unmount
-    /// sequence up to that point -- see [`Recipe::mounted_skills`].
+    /// A skill lifecycle event (ADR-0086, issue #363; ADR-0110, issue #698).
+    /// Isomorphic to [`Self::Source`]: first-class timeline slot (always
+    /// visible), never a turn (never enters the LLM window, never advances
+    /// `result_N`). The mounted set at any point is the fold of the
+    /// Mount/Unmount sequence up to that point -- see
+    /// [`Recipe::mounted_skills`]; the activated subset folds the same
+    /// sequence (Activate in / Unmount out) -- see [`Recipe::activated_skills`].
     Skill(SkillLifecycleEvent),
 }
 
@@ -812,14 +822,17 @@ impl Recipe {
             .collect()
     }
 
-    /// The active skill set, folded from the timeline's Mount/Unmount sequence
-    /// (ADR-0086, issue #363). NOT a stored snapshot -- the timeline is the
-    /// single source of truth, and the set is re-derived on every read:
+    /// The mounted skill set, folded from the timeline's Mount/Unmount sequence
+    /// (ADR-0086, issue #363; ADR-0110, issue #698). NOT a stored snapshot --
+    /// the timeline is the single source of truth, and the set is re-derived
+    /// on every read:
     /// - `Mount(name)` inserts `name` (idempotent -- a re-mount of an already-
     ///   mounted name is a no-op; the live write path refuses it, but a hand-
     ///   edited recipe could carry one and the fold stays well-defined).
     /// - `Unmount(name)` removes `name` (idempotent -- an Unmount of a name
     ///   not in the set is a no-op; same hand-edit resilience).
+    /// - `Activate(name)` is INVISIBLE to this fold -- activation presupposes
+    ///   mounting and mutates only the activated subset (ADR-0110 Decision 2).
     ///
     /// The result preserves first-Mount insertion order so a deterministic
     /// assembly sequence reads it. Used by resume to rebuild the live
@@ -840,17 +853,74 @@ impl Recipe {
                         }
                     }
                     SkillLifecycleKind::Unmount => mounted.retain(|n| n != &ev.name),
+                    // Activation is a promotion within the mounted set, not a
+                    // membership change (ADR-0110 Decision 2).
+                    SkillLifecycleKind::Activate => {}
                 }
             }
         }
         mounted
+    }
+
+    /// The activated skill subset, folded from the same timeline (ADR-0110,
+    /// issue #698). The activated set is a session-persistent subset of the
+    /// mounted set; the fold rules mirror [`Recipe::mounted_skills`]:
+    /// - `Activate(name)` inserts `name` (idempotent -- the live write path
+    ///   never appends a duplicate, but a hand-edited recipe could and the
+    ///   fold stays well-defined).
+    /// - `Unmount(name)` removes `name` -- the cascade: unmount is the sole
+    ///   exit for an activation, so no independent deactivate event exists
+    ///   (ADR-0110 Decision 4).
+    /// - `Mount(name)` is INVISIBLE to this fold -- mounting is discovery
+    ///   only; an activation always carries its own explicit event.
+    ///
+    /// The result preserves first-Activate insertion order. Used by resume to
+    /// rebuild the live `Session.activated_skills` cache and by the
+    /// `list_activated_skills` IPC. A v5 recipe (no `Activate` events) folds
+    /// to the empty set -- the honest post-resume posture a pre-activation
+    /// session resumes with (ADR-0110 Decision 5).
+    ///
+    /// A `mount -> activate -> unmount` sequence yields `[]` -- the AC pinned
+    /// in tests.
+    ///
+    /// The fold finally clamps to [`Recipe::mounted_skills`]: the write path
+    /// guarantees every `Activate` a live `Mount`, but the read path also
+    /// folds hand-edited or imported recipes -- a dangling `Activate` (no
+    /// `Mount` anywhere before it, a shape the write path never produces)
+    /// degrades away rather than surviving as an activation no mount backs
+    /// and nothing could ever clear (ADR-0110 Decision 2).
+    pub fn activated_skills(&self) -> Vec<String> {
+        let mut activated: Vec<String> = Vec::new();
+        for entry in &self.history {
+            if let RecipeEntry::Skill(ev) = entry {
+                match ev.kind {
+                    SkillLifecycleKind::Activate => {
+                        if !activated.iter().any(|n| n == &ev.name) {
+                            activated.push(ev.name.clone());
+                        }
+                    }
+                    SkillLifecycleKind::Unmount => activated.retain(|n| n != &ev.name),
+                    // Discovery only -- mounting alone never activates
+                    // (ADR-0110 Decision 7: builtins auto-mount, never
+                    // pre-activate).
+                    SkillLifecycleKind::Mount => {}
+                }
+            }
+        }
+        // Decision 2's subset clamp (see the doc above): a dangling
+        // Activate degrades away instead of outliving its mount basis.
+        let mounted = self.mounted_skills();
+        activated.retain(|n| mounted.iter().any(|m| m == n));
+        activated
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason};
+    use crate::model::{
+        SkillLifecycleActor, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason,
+    };
 
     fn csv_source(name: &str, fp: &str) -> SourceRef {
         SourceRef {
@@ -919,12 +989,12 @@ mod tests {
     }
 
     #[test]
-    fn recipe_format_version_is_five() {
-        // ADR-0103 (issue #608): v5 carries format_version = 5 (round-grouped
-        // trace + turn timestamps). Pin the constant so the open-path version
-        // check stays in sync with what save writes.
-        assert_eq!(RECIPE_FORMAT_VERSION, 5);
-        assert_eq!(build_recipe().format_version, 5);
+    fn recipe_format_version_is_six() {
+        // ADR-0110 (issue #698): v6 carries format_version = 6 (the Activate
+        // skill lifecycle variant + the event actor mark). Pin the constant so
+        // the open-path version check stays in sync with what save writes.
+        assert_eq!(RECIPE_FORMAT_VERSION, 6);
+        assert_eq!(build_recipe().format_version, 6);
     }
 
     #[test]
@@ -1632,10 +1702,12 @@ mod tests {
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Mount,
                     name: "sql-coach".into(),
+                    actor: None,
                 }),
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Unmount,
                     name: "sql-coach".into(),
+                    actor: None,
                 }),
             ],
             active: None,
@@ -1662,14 +1734,17 @@ mod tests {
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Mount,
                     name: "sql-coach".into(),
+                    actor: None,
                 }),
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Unmount,
                     name: "sql-coach".into(),
+                    actor: None,
                 }),
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Mount,
                     name: "sql-coach".into(),
+                    actor: None,
                 }),
             ],
             active: None,
@@ -1697,14 +1772,17 @@ mod tests {
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Mount,
                     name: "a".into(),
+                    actor: None,
                 }),
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Mount,
                     name: "b".into(),
+                    actor: None,
                 }),
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Unmount,
                     name: "a".into(),
+                    actor: None,
                 }),
             ],
             active: None,
@@ -1735,6 +1813,214 @@ mod tests {
     }
 
     #[test]
+    fn activated_skills_folds_activate_unmount_cascade() {
+        // ADR-0110 (issue #698): the activated set is folded from the same
+        // timeline. The AC's `mount -> activate -> unmount` sequence yields
+        // the EMPTY activated set -- the unmount cascades the activation out
+        // (the sole exit); a mount alone never activates.
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "activate-fold".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "sql-coach".into(),
+                    actor: None,
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "sql-coach".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Unmount,
+                    name: "sql-coach".into(),
+                    actor: None,
+                }),
+            ],
+            active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
+            last_runtime: None,
+        };
+        assert!(recipe.activated_skills().is_empty());
+        // The mount fold over the same sequence is equally empty (the
+        // unmount removed the mount).
+        assert!(recipe.mounted_skills().is_empty());
+    }
+
+    #[test]
+    fn activated_skills_ignores_mounts_and_preserves_first_activate_order() {
+        // A Mount is invisible to the activated fold (discovery only); two
+        // activations keep first-Activate insertion order across a later
+        // cascading unmount of the first.
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "activate-order".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "a".into(),
+                    actor: None,
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "b".into(),
+                    actor: None,
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "b".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "a".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Unmount,
+                    name: "a".into(),
+                    actor: None,
+                }),
+            ],
+            active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
+            last_runtime: None,
+        };
+        assert_eq!(
+            recipe.activated_skills(),
+            vec!["b".to_string()],
+            "mounts never activate; the unmount cascades a out",
+        );
+        // The mounted set keeps both-mount order with a removed -- the two
+        // folds disagree by design over the Activate events.
+        assert_eq!(recipe.mounted_skills(), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn v5_skill_events_without_actor_deserialize_as_none() {
+        // ADR-0110 (issue #698): a v5 recipe's Skill entries carry no `actor`
+        // key (recorded before the field existed). `serde(default)` keeps the
+        // old shape deserializing through the full adjacently-tagged
+        // RecipeEntry envelope -- None is the honest value, and the migrated
+        // save re-stamps it as explicit null under v6.
+        let v5_json = serde_json::json!({
+            "entry": "Skill",
+            "data": { "kind": "Mount", "name": "sql-coach" },
+        });
+        let entry: RecipeEntry = serde_json::from_value(v5_json).expect("v5 shape parses");
+        match entry {
+            RecipeEntry::Skill(ev) => {
+                assert_eq!(ev.kind, SkillLifecycleKind::Mount);
+                assert_eq!(ev.name, "sql-coach");
+                assert_eq!(ev.actor, None);
+            }
+            other => panic!("expected Skill entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recipe_round_trips_an_activate_event_with_actor() {
+        // ADR-0110 (issue #698): an Activate event carrying the user actor
+        // survives a serialize -> deserialize cycle byte-for-byte so the
+        // activated set folds identically after reopen; Mount / Unmount
+        // events serialize their actor as explicit null (the no-skip
+        // convention).
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "activate-rt".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "sql-coach".into(),
+                    actor: None,
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "sql-coach".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+            ],
+            active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
+            last_runtime: None,
+        };
+        let json = serde_json::to_string(&recipe).expect("serialize");
+        assert!(
+            json.contains(r#""actor":"User""#),
+            "the Activate actor serializes inline: {json}",
+        );
+        assert!(
+            json.contains(r#""actor":null"#),
+            "Mount/Unmount serialize explicit null: {json}",
+        );
+        let back: Recipe = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, recipe);
+        assert_eq!(
+            back.activated_skills(),
+            vec!["sql-coach".to_string()],
+            "the fold survives the round trip",
+        );
+        assert_eq!(
+            back.mounted_skills(),
+            vec!["sql-coach".to_string()],
+            "the Activate is invisible to the mounted fold",
+        );
+    }
+
+    #[test]
+    fn activated_skills_drops_a_dangling_activate_without_a_mount() {
+        // Subset clamp (ADR-0110 Decision 2): a hand-edited or imported
+        // recipe may carry an Activate with no Mount anywhere before it --
+        // a shape the write path never produces. The fold degrades the
+        // dangling activation away while keeping every backed one, rather
+        // than surfacing an activation no mount backs and nothing could
+        // clear (unmount refuses NotMounted, no deactivate exists).
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "dangling-activate".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "ghost".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "real".into(),
+                    actor: None,
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "real".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+            ],
+            active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
+            last_runtime: None,
+        };
+        assert_eq!(recipe.mounted_skills(), vec!["real".to_string()]);
+        assert_eq!(
+            recipe.activated_skills(),
+            vec!["real".to_string()],
+            "the dangling ghost degrades away; the backed real activation stays",
+        );
+    }
+
+    #[test]
     fn build_rejects_an_empty_skill_event_name() {
         // ADR-0086: a skill lifecycle event with an empty name is unambiguous
         // corruption (the spec requires a non-empty kebab-case name); build
@@ -1746,6 +2032,7 @@ mod tests {
             vec![RecipeEntry::Skill(SkillLifecycleEvent {
                 kind: SkillLifecycleKind::Mount,
                 name: String::new(),
+                actor: None,
             })],
             None,
         )
@@ -1775,6 +2062,7 @@ mod tests {
                 RecipeEntry::Skill(SkillLifecycleEvent {
                     kind: SkillLifecycleKind::Mount,
                     name: "sql-coach".into(),
+                    actor: None,
                 }),
                 RecipeEntry::Turn(RecipeTurn::without_audit(
                     "q",

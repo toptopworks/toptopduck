@@ -483,8 +483,8 @@ describe("Thread", () => {
     // cards. Each carries its kind's glyph + an i18n'd verb + the spec name
     // (the stable identity the timeline carries, never a snapshot).
     const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools" } },
-      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools" } },
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
+      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
     ];
     const skillIndex = new Map([["pdf-tools", skillEntry("pdf-tools")]]);
     const { container } = renderThread(
@@ -516,13 +516,38 @@ describe("Thread", () => {
     expect(unmountBar.className.split(/\s+/)).toContain("border-l-muted-foreground");
   });
 
+  it("renders an Activate marker in the minimal form (issue #698)", () => {
+    // ADR-0110: an Activate event renders as the third lifecycle species --
+    // verb + spec name + the primary present-tense tier (same as Mount). The
+    // actor distinction is deliberately NOT rendered in this ticket (the
+    // agent channel rides #701); the marker reads from the event alone.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Activate", name: "pdf-tools", actor: "User" } },
+    ];
+    const skillIndex = new Map([["pdf-tools", skillEntry("pdf-tools")]]);
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        skillIndex={skillIndex}
+      />,
+    );
+    expect(screen.getByText(/激活技能「pdf-tools」/)).toBeInTheDocument();
+    const bar = container.querySelector(
+      `.skill-entry[data-skill-kind="activate"] .skill-lifecycle`,
+    ) as HTMLElement;
+    expect(bar).not.toBeNull();
+    expect(bar.className.split(/\s+/)).toContain("border-l-primary");
+  });
+
   it("discloses a mounted skill's declared MCP servers in the marker tooltip (issue #366)", async () => {
     // A Mount marker's tooltip carries the skill's declared MCP server ids
     // (looked up from the registry, never snapshotted into the event) so a
     // long skill name does not erase which servers the mount activates. The
     // visible text still shows the verb + name; the MCP detail is hover-only.
     const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools" } },
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
     ];
     const skillIndex = new Map([
       ["pdf-tools", skillEntry("pdf-tools", ["github-mcp", "fs-server"])],
@@ -556,7 +581,7 @@ describe("Thread", () => {
     // "Declares MCP:" with an empty list) fails here. The default registry
     // entry has no servers, so this is the common path.
     const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "plain-skill" } },
+      { entry: "Skill", data: { kind: "Mount", name: "plain-skill", actor: null } },
     ];
     const skillIndex = new Map([["plain-skill", skillEntry("plain-skill")]]); // empty mcp_servers
     const { container } = renderThread(
@@ -583,7 +608,7 @@ describe("Thread", () => {
     // longer applies, so the tooltip carries the verb + name only -- a
     // regression that copy-pastes the Mount tooltip branch fails here.
     const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools" } },
+      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
     ];
     const skillIndex = new Map([
       ["pdf-tools", skillEntry("pdf-tools", ["github-mcp"])],
@@ -614,7 +639,7 @@ describe("Thread", () => {
     // stays in the timeline (it happened) but the reader sees the skill is
     // gone; the base text keeps the verbatim name (the timeline's record).
     const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "ghost-skill" } },
+      { entry: "Skill", data: { kind: "Mount", name: "ghost-skill", actor: null } },
     ];
     // Empty registry: "ghost-skill" is not carried.
     const skillIndex = new Map<string, SkillEntry>();
@@ -640,7 +665,7 @@ describe("Thread", () => {
     // check against, NO missing-skill warning is raised and NO MCP detail is
     // promised -- the timeline is always readable, the registry only enriches.
     const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools" } },
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
     ];
     const { container } = renderThread(
       <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,

@@ -792,6 +792,14 @@ impl super::Session {
             // applies at assembly time (a name missing from the registry is
             // surfaced then); here every folded name lands regardless.
             session.mounted_skills = recipe.mounted_skills();
+            // ADR-0110 (issue #698): same discipline for the activated
+            // subset -- fold, never snapshot. A pre-activation (v5) recipe
+            // carries no `Activate` events, so the fold is empty: the honest
+            // post-resume posture (body stops injecting until re-activated),
+            // never a degrade report. open_duck's `seed_initial_skills`
+            // refolds both caches over the auto-included initial set right
+            // after the swap.
+            session.activated_skills = recipe.activated_skills();
         }
 
         // ADR-0095 Decision 6 (+ ADR-0102 Decision 1's `last_runtime`):

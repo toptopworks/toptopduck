@@ -609,11 +609,11 @@ export async function importSkills(
 // from the SkillLifecycleEvent sequence (Mount in / Unmount out); these
 // commands append the event + atomically persist the recipe. Session-scoped
 // (ADR-0056): every command takes sessionId first. The loading gate lives on
-// the backend -- both write commands refuse during resume / an in-flight turn
-// (reject_if_resuming + reject_if_in_flight), so the toggle the frontend
+// the backend -- all three write commands refuse during resume / an in-flight
+// turn (reject_if_resuming + reject_if_in_flight), so the toggle the frontend
 // renders is also disabled under the same `loading` gate the composer already
 // honors (issue #365 AC #5). Rejects ride SessionError.SkillMount (typed
-// AlreadyMounted / NotMounted).
+// AlreadyMounted / NotMounted / NotMountedForActivation).
 
 // The session's currently-mounted skill names, in first-mount insertion order
 // (issue #363). Read-only; the composer "+" panel + the badge both derive the
@@ -638,6 +638,23 @@ export async function mountSkill(sessionId: string, name: string): Promise<void>
 // (NotMounted) and rejects during resume / an in-flight turn.
 export async function unmountSkill(sessionId: string, name: string): Promise<void> {
   await invoke<void>("unmount_skill", { sessionId, name });
+}
+
+// Activate a MOUNTED skill into the session's activated subset (issue #698,
+// ADR-0110). Appends an Activate lifecycle event (user actor) + persists; a
+// name not in the mounted set is a typed refuse (NotMountedForActivation) and
+// a repeat activation is idempotent success (no second event). Rejects during
+// resume / an in-flight turn, same gate as the mount commands. Channel only
+// in this ticket -- the user affordance rides #699.
+export async function activateSkill(sessionId: string, name: string): Promise<void> {
+  await invoke<void>("activate_skill", { sessionId, name });
+}
+
+// The session's currently-activated skill names, in first-activation
+// insertion order (issue #698). Read-only mirror of listMountedSkills; always
+// a subset of the mounted set. Lock-light server-side.
+export async function listActivatedSkills(sessionId: string): Promise<string[]> {
+  return invoke<string[]>("list_activated_skills", { sessionId });
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------

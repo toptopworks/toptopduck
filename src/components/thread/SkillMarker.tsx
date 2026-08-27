@@ -1,7 +1,10 @@
 // A skill lifecycle event rendered as a non-interactive timeline marker
-// (ADR-0086, issue #366): a sibling species to SourceMarker -- thin, full-
-// width, no question / outcome glyph. Mount = active (Plug + border-l-
-// primary); Unmount = weakened (Unplug + border-l-muted-foreground). A name
+// (ADR-0086, issue #366; ADR-0110, issue #698): a sibling species to
+// SourceMarker -- thin, full-width, no question / outcome glyph. Mount =
+// active (Plug + border-l-primary); Activate = the persistent promotion
+// (Zap + border-l-primary -- same present-tense tier as Mount, #698 renders
+// the minimal form; the actor distinction rides #701); Unmount = weakened
+// (Unplug + border-l-muted-foreground). A name
 // the registry no longer carries (resume drift: deleted / renamed / external
 // library uninstalled since the event was recorded) overrides the kind tone
 // to a destructive warning + TriangleAlert glyph + "no longer exists"
@@ -12,7 +15,7 @@
 // readable, the registry only enriches it).
 
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
-import { Plug, TriangleAlert, Unplug, type LucideIcon } from "lucide-react";
+import { Plug, TriangleAlert, Unplug, Zap, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import type {
@@ -51,6 +54,14 @@ function skillMarkerText(
           { name },
         ),
       };
+    case "Activate":
+      return {
+        Icon: Zap,
+        text: intl.formatMessage(
+          { id: "thread.skill.activate", defaultMessage: "Activated skill \"{name}\"" },
+          { name },
+        ),
+      };
     default: {
       const unhandled: never = kind;
       throw new Error(`unhandled skill lifecycle kind: ${JSON.stringify(unhandled)}`);
@@ -79,14 +90,16 @@ export function SkillMarker({
   // Each branch is a literal utility so the Tailwind scanner keeps the class;
   // a computed `border-l-${x}` string would be tree-shaken away. Missing
   // overrides the kind tone (destructive > kind) so drift is unmistakable.
+  // Mount and Activate share the primary present-tense tier; Unmount is the
+  // weakened one (exhaustive over SkillLifecycleKind).
   const borderTone = missing
     ? "border-l-destructive"
-    : event.kind === "Mount"
-      ? "border-l-primary"
-      : "border-l-muted-foreground"; // Unmount (exhaustive over SkillLifecycleKind).
+    : event.kind === "Unmount"
+      ? "border-l-muted-foreground"
+      : "border-l-primary"; // Mount | Activate.
   // The MCP declaration is registry state, not carried by the event.
   // Disclosed only on a Mount whose skill is still carried -- the declaration
-  // is operative only while the skill is active; an Unmount's declaration is
+  // is operative only while the skill is mounted; an Unmount's declaration is
   // no longer in force, and a missing skill has no declaration to read.
   // (The `skill` truthiness check covers both "not wired" and "wired but
   // missing" -- either way `skill` is undefined and the guard short-circuits.)
