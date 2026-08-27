@@ -46,7 +46,10 @@ import type { SkillEntry } from "../../types/skills";
 // success cascades the activation cache in the same synchronous delta. Draft
 // mode renders no activation affordance at all -- activation is
 // session-scoped (user here, agent via the gateway tool in #701), so the
-// draft stage has no face for it.
+// draft stage has no face for it. Every successful skill mutation also
+// invalidates the thread query so the lifecycle marker refetches (the server
+// timeline is the marker's source; nothing else refreshes the thread after a
+// skill mutation).
 
 const ROW_CLASS =
   "composer-skill-row focus-visible:outline-ring flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2";
@@ -160,13 +163,28 @@ export function ComposerSkillsSection({
     });
   }
 
+  // Every skill mutation appends a lifecycle event to the server timeline;
+  // the thread cache must re-read or the marker never appears (staleTime is
+  // Infinity, so nothing else refetches it). Unlike the turn flow's "thread
+  // stays un-invalidated" rule (ADR-0051 -- a refetch there would wipe the
+  // optimistic append), the skill mutations only run OUTSIDE a turn (the
+  // loading gate and the backend's reject_if_in_flight agree), so there is
+  // no optimistic thread state to protect.
+  function refreshThread() {
+    void queryClient.invalidateQueries({
+      queryKey: sessionKeys.thread(sessionId as string),
+    });
+  }
+
   const mountMutation = useMutation({
     mutationFn: (name: string) => mountSkill(sessionId as string, name),
     onMutate: (name) => markPending(name),
-    onSuccess: (_data, name) =>
+    onSuccess: (_data, name) => {
       applyMountDelta((prev) =>
         prev?.includes(name) ? prev : [...(prev ?? []), name],
-      ),
+      );
+      refreshThread();
+    },
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({
@@ -186,6 +204,7 @@ export function ComposerSkillsSection({
       // badge drops without a stale one-beat flash; invalidate-only would
       // leave the old state visible until the refetch lands.
       applyActivationDelta((prev) => prev?.filter((n) => n !== name) ?? []);
+      refreshThread();
     },
     onError: (e) => {
       setError(fmtError(e, intl));
@@ -199,10 +218,12 @@ export function ComposerSkillsSection({
   const activateMutation = useMutation({
     mutationFn: (name: string) => activateSkill(sessionId as string, name),
     onMutate: (name) => markPending(name),
-    onSuccess: (_data, name) =>
+    onSuccess: (_data, name) => {
       applyActivationDelta((prev) =>
         prev?.includes(name) ? prev : [...(prev ?? []), name],
-      ),
+      );
+      refreshThread();
+    },
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({

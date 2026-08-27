@@ -2,16 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { IntlProvider } from "react-intl";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 
 import { ComposerSkillsSection } from "../ComposerSkillsSection";
 import {
   activateSkill,
+  conversation,
   listActivatedSkills,
   listMountedSkills,
   listSkills,
   unmountSkill,
 } from "../../../api";
+import { sessionKeys } from "../../../session/queryKeys";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { SkillEntry } from "../../../types/skills";
 
@@ -30,6 +32,7 @@ vi.mock("../../../api", async (importOriginal) => {
     listSkills: vi.fn(),
     listMountedSkills: vi.fn(),
     listActivatedSkills: vi.fn(),
+    conversation: vi.fn(),
     unmountSkill: vi.fn(async () => {}),
     activateSkill: vi.fn(async () => {}),
   };
@@ -235,6 +238,76 @@ describe("ComposerSkillsSection activation affordance (issue #699)", () => {
     );
     await waitFor(() =>
       expect(screen.getByRole("alert")).toBeInTheDocument(),
+    );
+  });
+
+  it("refetches the thread after a skill mutation so the marker appears", async () => {
+    // The mutation appends a lifecycle event to the SERVER timeline; the
+    // thread cache is the marker's only channel and staleTime is Infinity,
+    // so without an explicit invalidation the marker never shows. Pin the
+    // refetch by mounting a real observer of the thread key next to the
+    // section (an active observer turns the invalidation into a refetch).
+    const state = {
+      mounted: ["charting", "cleaning"],
+      activated: [] as string[],
+    };
+    vi.mocked(listMountedSkills).mockImplementation(async () => [
+      ...state.mounted,
+    ]);
+    vi.mocked(listActivatedSkills).mockImplementation(async () => [
+      ...state.activated,
+    ]);
+    vi.mocked(activateSkill).mockImplementation(async (_sid, name) => {
+      state.activated = [...state.activated, name];
+    });
+    vi.mocked(unmountSkill).mockImplementation(async (_sid, name) => {
+      state.mounted = state.mounted.filter((n) => n !== name);
+      state.activated = state.activated.filter((n) => n !== name);
+    });
+    vi.mocked(conversation).mockResolvedValue([]);
+    function ThreadObserver() {
+      useQuery({
+        queryKey: sessionKeys.thread("sess-1"),
+        queryFn: () => conversation("sess-1"),
+      });
+      return null;
+    }
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          <TooltipProvider delayDuration={0}>
+            <ThreadObserver />
+            <ComposerSkillsSection sessionId="sess-1" {...PROPS} />
+          </TooltipProvider>
+        </IntlProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("button", { name: "Activate skill charting" });
+    await waitFor(() => expect(conversation).toHaveBeenCalled());
+    const beforeActivate = vi.mocked(conversation).mock.calls.length;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Activate skill charting" }),
+    );
+    await screen.findByText("Active");
+    await waitFor(() =>
+      expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
+        beforeActivate,
+      ),
+    );
+    // The unmount cascade rides the same thread refresh (its Unmount marker
+    // has the same channel).
+    const beforeUnmount = vi.mocked(conversation).mock.calls.length;
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Mount skill cleaning" }),
+    );
+    await waitFor(() => expect(unmountSkill).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
+        beforeUnmount,
+      ),
     );
   });
 });
