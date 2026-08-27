@@ -33,7 +33,7 @@ use crate::model::{TraceEntryView, TurnPhase};
 use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
-use crate::session::agent_loop::{
+use crate::session::loop_contract::{
     truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
 

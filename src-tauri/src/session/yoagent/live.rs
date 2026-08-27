@@ -35,7 +35,7 @@ use crate::provider::tool_calling::{
     ToolTurnRequest, ToolUse,
 };
 use crate::provider::{Provider, ProviderError, TurnModelFacts};
-use crate::session::agent_loop::Termination;
+use crate::session::loop_contract::Termination;
 
 use super::model_config::{resolve_yoagent_model, thought_level_id, ResolvedYoagentModel};
 use super::{YoagentLoop, INVALID_CONFIG_PREFIX};
@@ -314,7 +314,6 @@ fn bridge_error(err: ProviderError) -> UpstreamError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ProviderReply, ProviderRequest};
     use yoagent::provider::ApiProtocol;
 
     /// A profile-backed provider double: reports fixed facts (the factory
@@ -324,9 +323,6 @@ mod tests {
     }
 
     impl Provider for FactsProvider {
-        fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
-            Err(ProviderError::NotWired)
-        }
         fn turn_model_facts(&self) -> Option<TurnModelFacts> {
             Some(self.facts.clone())
         }

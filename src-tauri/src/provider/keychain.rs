@@ -44,7 +44,7 @@ pub trait ProviderConfigSource: Send + Sync {
     /// (reading the OS locale), so the provider stays free of that concern.
     fn locale(&self) -> ResponseLocale;
     /// The active profile's wire protocol (ADR-0064, issue #152). Drives the
-    /// per-turn adapter routing in [`crate::provider::LiveProvider`] -- read
+    /// per-turn facts reads in [`crate::provider::LiveProvider`] -- read
     /// fresh each turn so a protocol switch on the active profile lands the
     /// next turn on the new adapter.
     fn protocol(&self) -> Protocol;

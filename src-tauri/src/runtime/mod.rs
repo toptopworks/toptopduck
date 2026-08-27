@@ -1,7 +1,7 @@
 //! External runtime (ADR-0076 / ADR-0081, issue #299).
 //!
 //! The external runtime is the second of the two并存 runtimes (the built-in is
-//! [`crate::session::agent_loop::AgentLoop`]). The app spawns a third-party CLI
+//! the yoagent loop, [`crate::session::yoagent`]). The app spawns a third-party CLI
 //! agent process and drives it over stdio: the ACP adapters (gemini-cli,
 //! qwen-code, opencode) speak ACP v1 JSON-RPC; codex speaks its native
 //! `exec --json` event stream (ADR-0094). The engine here is the **generic,

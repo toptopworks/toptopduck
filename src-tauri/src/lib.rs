@@ -6,7 +6,7 @@
 //!
 //! Query loop (PRD #1, ADR-0077/0081): ask -> outcome. The session facade
 //! (session::Session::ask) drives the native agent loop
-//! (session::agent_loop) over the provider abstraction (provider::Provider,
+//! (session::yoagent) over the provider abstraction (provider::Provider,
 //! ADR-0007): tool-calling round-trips (explore / materialize / describe /
 //! sample) dispatched on the session DuckDB, tool-level errors routed back to
 //! the model for self-correction, and one ADR-0028 outcome (result / textual
@@ -63,15 +63,13 @@ pub use persistence::{
     DuckPath, LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
     SessionsRoot, SourceSummary,
 };
-pub use provider::anthropic::AnthropicProvider;
 pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
 pub use provider::live_config::LiveProviderConfig;
-pub use provider::openai::OpenaiProvider;
-pub use provider::prompt::{build_system_prompt, ResponseLocale};
+pub use provider::prompt::ResponseLocale;
 pub use provider::{
-    ColumnRef, DatasetRef, LiveProvider, Provider, ProviderError, ProviderReply, ProviderRequest,
-    ResponsePayload, TurnPayload, UnwiredProvider,
+    ColumnRef, DatasetRef, LiveProvider, Provider, ProviderError, ProviderRequest, ResponsePayload,
+    TurnPayload, UnwiredProvider,
 };
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
@@ -99,7 +97,7 @@ use tauri::Manager;
 /// own per-session cancel token (ADR-0021), and its own `Mutex<Session>` (the
 /// single-flight gate); the store lock is held only for the brief lookup, so a
 /// long turn never blocks another session's `close_session` / `create_session`
-/// (ADR-0056 concurrency model). The real LLM provider (AnthropicProvider, #29)
+/// (ADR-0056 concurrency model). The live provider carrier ([`LiveProvider`])
 /// is wired per session at `create_session` -- it reads the API key from the OS
 /// keychain per turn and the endpoint config (`{base_url, model}`) from the
 /// app-config file (ADR-0038 / issue #53), via a single [`LiveProviderConfig`]

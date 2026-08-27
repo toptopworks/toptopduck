@@ -37,11 +37,9 @@ use crate::mcp::aggregator::{self, McpAggregator};
 use crate::mcp::meta_tools;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
-use crate::session::agent_loop::{
-    classify_with_cli_tool, truncate_trace_excerpt, ResolvedClassification, TraceEntry,
-    TRACE_EXCERPT_MAX,
-};
+use crate::session::loop_contract::{truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX};
 use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::turn_dispatch::{classify_with_cli_tool, ResolvedClassification};
 use crate::tools::{builtin_table, dispatch};
 
 use super::framing;

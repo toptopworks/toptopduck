@@ -2,7 +2,7 @@
 //!
 //! [`AcpEngine::run`] drives one agent turn against an external CLI over ACP v1
 //! (stdio JSON-RPC). It is the external-runtime counterpart to
-//! [`crate::session::agent_loop::AgentLoop::run`]: it takes a windowed turn
+//! built-in runner ([`crate::session::yoagent`]): it takes a windowed turn
 //! input and returns the SAME [`LoopOutcome`] shape, so the wiring seam
 //! (`Session::ask_with_phase`, slice 9c) maps either runtime's outcome onto
 //! `TurnOutcome` identically.
@@ -55,7 +55,7 @@ use crate::runtime::acp::wire::{
     Request, RequestId, RequestPermissionOutcome, RequestPermissionParams, RequestPermissionResult,
     Response, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus,
 };
-use crate::session::agent_loop::{
+use crate::session::loop_contract::{
     truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, DEFAULT_STEP_CAP,
     DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
 };
@@ -807,7 +807,7 @@ enum PromptEnd {
 // ---------------------------------------------------------------------------
 
 /// The mutable per-turn state the pump accumulates. Mirrors the built-in
-/// loop's `CallOutputs` (round-grouped trace); promotions stay empty (gateway
+/// core's round-grouped trace accumulation; promotions stay empty (gateway
 /// side, slice 9c) so only the rounds + terminal text live here.
 struct Pump {
     /// The round bookkeeping + terminal-text fallback shared with the other

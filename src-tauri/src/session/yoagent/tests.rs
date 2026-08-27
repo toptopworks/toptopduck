@@ -27,8 +27,8 @@ use crate::model::{DatasetDescriptor, TurnPhase};
 use crate::provider::tool_calling::{
     ThinkingBlock, ToolDefinition, ToolResult, ToolTurnMessage, ToolTurnRequest, ToolUse,
 };
-use crate::session::agent_loop::{LoopOutcome, Termination};
 use crate::session::engine::AdminEngine;
+use crate::session::loop_contract::{LoopOutcome, Termination};
 use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
 use crate::session::yoagent::model_config::{resolve_yoagent_model, ResolvedYoagentModel};
 use crate::session::yoagent::YoagentLoop;

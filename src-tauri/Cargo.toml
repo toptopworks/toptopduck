@@ -292,7 +292,7 @@ rust_xlsxwriter = "0.92"
 # HTTP mock for the real-provider unit tests (issue #29): AnthropicProvider is
 # exercised against a local mockito server instead of the network -- the turn
 # orchestrator's offline test base stays on FakeProvider; this tests the HTTP +
-# auth + parse path deterministically, no real key, no real Anthropic.
+# auth paths deterministically, no real key, no real endpoint.
 mockito = "1"
 
 [profile.dev]

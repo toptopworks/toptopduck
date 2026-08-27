@@ -556,7 +556,7 @@ fn step_cap_exhaustion_lands_a_failed_turn() {
     // (keeps exploring) is aborted by the step cap (default 24) as a Failed
     // turn carrying an honest non-convergence detail. The wall-clock watchdog
     // (Cancelled) shares the cancel path; its deterministic coverage lives at
-    // the agent-loop unit seam (the 120s default is not tunable through the
+    // the yoagent offline seam (the 120s default is not tunable through the
     // Session facade).
     //
     // Under the yoagent loop (ADR-0107, issue #669) the trajectory must

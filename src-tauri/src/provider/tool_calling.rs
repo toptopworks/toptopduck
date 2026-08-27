@@ -1,21 +1,15 @@
 //! Protocol-neutral tool-calling types (ADR-0081, issue #291).
 //!
 //! These types carry one round of a native tool-calling conversation between
-//! the app and the LLM, independent of the wire protocol. The agent loop
-//! (issue #295) assembles a [`ToolTurnRequest`] from the windowed context plus
-//! the active tool table; [`crate::provider::LiveProvider`] routes it to the
-//! matching adapter ([`super::anthropic::AnthropicProvider`] /
-//! [`super::openai::OpenaiProvider`]), which translates it into its own
-//! native tool-calling wire shape (anthropic `tools` + `tool_use` /
-//! `tool_result` blocks; openai `tools` + `tool_calls` / `tool` role). The
-//! reply is either a batch of tool invocations to execute or the model's
-//! final text answer.
-//!
-//! Coexists with the single-shot SQL contract (ADR-0009): the legacy
-//! [`super::Provider::generate`] path and its [`super::ProviderRequest`] /
-//! [`super::ProviderReply`] types are unchanged. ADR-0077 retires the
-//! single-SQL contract in favor of tool-calling turns; this module is the
-//! tool-calling foundation the agent loop (issue #295) will drive.
+//! the app and the LLM, independent of the wire protocol. The wiring seam
+//! assembles a [`ToolTurnRequest`] from the windowed context plus the active
+//! tool table. This is the app's shared vocabulary -- the `Provider` trait's
+//! round-trip face, the window assembler, the CLI tool table, the MCP
+//! aggregator, and the gateway all speak these types (the self-written
+//! protocol adapters that consumed them retired with the built-in loop,
+//! ADR-0107 Decision 1, issue #670; the upstream provider construction now
+//! lives sealed inside `session::yoagent`). The reply is either a batch of
+//! tool invocations to execute or the model's final text answer.
 //!
 //! ADR-0029 invariant 3 holds: the request never carries the API key -- the
 //! adapter reads it from the config source in the Rust core, same as the

@@ -51,10 +51,10 @@ use crate::provider::tool_calling::ToolUse;
 use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
-use crate::session::agent_loop::{
-    classify_call, truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry,
-    TRACE_EXCERPT_MAX,
+use crate::session::loop_contract::{
+    truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
+use crate::session::turn_dispatch::classify_call;
 
 use super::engine::{RoundTracker, RowEnd, UNOBSERVED_EXCERPT};
 
