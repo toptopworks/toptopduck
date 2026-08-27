@@ -325,9 +325,13 @@ pub struct TurnRecord {
     pub question: String,
     pub outcome: TurnOutcome,
     pub trace: Vec<TraceRound>,
-    /// The turn's skill provenance (issue #381): each mounted skill at assembly
-    /// time, with its `content_hash` for drift comparison against the registry.
-    /// Empty for turns that mounted no skill and for v3->v4 migrated turns.
+    /// The turn's skill provenance (issue #381; semantics per issue #700,
+    /// ADR-0110): each skill whose body was injected into the turn's prompt,
+    /// with its `content_hash` for drift comparison against the registry.
+    /// The activated subset for built-in turns (mounting injects metadata
+    /// only); the full mounted set for external turns until #702 switches
+    /// the ACP injection to disclosure. Empty for turns that injected no
+    /// skill body and for v3->v4 migrated turns.
     pub provenance: TurnProvenance,
     /// When the user submitted the question (Unix epoch ms, ADR-0103).
     /// `None` for turns recorded before v5 -- the frontend renders no

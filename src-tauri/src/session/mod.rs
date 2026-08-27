@@ -695,10 +695,21 @@ pub struct TurnInputs<'a> {
     /// Borrow of the OS keychain (ADR-0029). The gateway reads each server's
     /// secret env values at spawn; the values never cross IPC back out.
     pub keychain: &'a KeychainStore,
-    /// The mounted-skill prompt fragments (ADR-0086, issue #364). Each
-    /// fragment's body rides the system prompt; its `content_hash` snapshots
-    /// into the turn's provenance for resume-time drift detection.
+    /// The mounted-skill prompt fragments (ADR-0086, issue #364). On the
+    /// built-in path, each fragment's metadata + body ride the system prompt
+    /// split by disclosure level (ADR-0110) and the activated fragments'
+    /// `content_hash` snapshots into the turn's provenance for resume-time
+    /// drift detection; the ACP path injects every body full-text and
+    /// records the full mounted set until #702 switches it to disclosure
+    /// (see `activated`).
     pub skills: &'a [SkillPromptFragment],
+    /// The session's activated-skill names (ADR-0110, issue #700) -- the
+    /// L1/L2 sort key. Two consumers sort by the same list: the built-in
+    /// system prompt renders mounted-but-not-activated names as index
+    /// entries + activated names as bodies, and the built-in turn's
+    /// provenance records only the activated fragments (the ones whose
+    /// bodies the model actually saw). The ACP path ignores it until #702.
+    pub activated: &'a [String],
     /// The effective CLI tool registrations for this turn (the config-level
     /// enabled slice, ADR-0106 single axis -- issue #671, ADR-0108). The
     /// turn direct-lists them into the tool table and dispatches their
@@ -716,6 +727,7 @@ impl<'a> TurnInputs<'a> {
             mcp_servers: &[],
             keychain,
             skills: &[],
+            activated: &[],
             cli_tools: &[],
         }
     }
@@ -1224,20 +1236,6 @@ impl Session {
         // orchestration -- ADR-0053 Decision 2).
         let turns = self.turns();
         let locale = self.provider.response_locale();
-        // ADR-0086 (issue #364): the mounted-skill fragments both ride the
-        // system prompt (base prompt + skill bodies + locale + schema) and
-        // snapshot into the turn's provenance (name + content_hash) for resume.
-        // Computed once here so both branches see the same assembly-time
-        // snapshot; an empty slice stays empty end-to-end (no skill section in
-        // the prompt, no skills in the provenance -- the pre-skill path).
-        let skill_provenance: Vec<SkillProvenance> = inputs
-            .skills
-            .iter()
-            .map(|f| SkillProvenance {
-                name: f.name.clone(),
-                content_hash: f.content_hash.clone(),
-            })
-            .collect();
         // ADR-0101: the turn's runtime attribution, snapshotted at the turn
         // top -- the same dispatch the match below reads, taken BEFORE it so
         // the recorded attribution is the turn's own even if the selector
@@ -1252,6 +1250,30 @@ impl Session {
             },
             None => TurnRuntime::BuiltIn,
         };
+        // ADR-0086 (issue #364) + ADR-0110 (issue #700): the mounted-skill
+        // fragments snapshot into the turn's provenance (name + content_hash)
+        // for resume, computed once here so both dispatch branches below see
+        // the same assembly-time snapshot. WHICH set the provenance records
+        // follows the injection surface (honest bookkeeping -- the drift badge
+        // must reflect the skills whose bodies the model actually read): a
+        // built-in turn records the activated subset (disclosure -- only
+        // activated bodies ride the system prompt); an external ACP turn
+        // records the full mounted set until #702 switches the ACP injection
+        // to disclosure. The fork keys off the same runtime attribution.
+        let skill_provenance: Vec<SkillProvenance> = inputs
+            .skills
+            .iter()
+            .filter(|f| match &attribution {
+                TurnRuntime::BuiltIn => inputs.activated.contains(&f.name),
+                // Until #702, the external injection surface stays full-text
+                // over the full mounted set.
+                TurnRuntime::External { .. } => true,
+            })
+            .map(|f| SkillProvenance {
+                name: f.name.clone(),
+                content_hash: f.content_hash.clone(),
+            })
+            .collect();
         // ADR-0103 (issue #608): the turn's asked-at timestamp, captured at
         // submit (before any round-trip starts) so the recorded value marks
         // the user's ask, not the first provider reply. Stamped onto the
@@ -1283,6 +1305,7 @@ impl Session {
                     &turns,
                     locale,
                     inputs.skills,
+                    inputs.activated,
                 );
                 // ADR-0103 (issue #614): the session posture's thought-level
                 // rides the built-in turn's provider request. Read from the

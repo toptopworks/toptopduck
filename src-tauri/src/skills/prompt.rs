@@ -1,18 +1,23 @@
 //! Per-turn skill resolution for prompt injection + provenance (issue #364,
-//! ADR-0086).
+//! ADR-0086; disclosure levels per ADR-0110, issue #700).
 //!
 //! The mounted-skills set lives on the session timeline; at turn assembly time
 //! the engine resolves each mounted name against the registry root to produce a
-//! [`SkillPromptFragment`] carrying (a) the verbatim Markdown body that rides
-//! the system prompt and (b) the SHA-256 of the WHOLE `SKILL.md` bytes that
+//! [`SkillPromptFragment`] carrying (a) the frontmatter `description` that
+//! rides the built-in prompt's metadata index (L1 -- mounted, not activated),
+//! (b) the verbatim Markdown body that rides the prompt once the skill is
+//! activated (L2), and (c) the SHA-256 of the WHOLE `SKILL.md` bytes that
 //! anchors resume's stale-degrade check. A skill that left the registry (or
-//! whose `SKILL.md` is unreadable) degrades honestly -- empty body, empty hash,
-//! a warn log -- so the turn still proceeds and the provenance records the name
-//! for resume's "gone" signal.
+//! whose `SKILL.md` is unreadable) degrades honestly -- empty description,
+//! empty body, empty hash, a warn log -- so the turn still proceeds. Its
+//! provenance fate follows the disclosure fork: a built-in turn records only
+//! the ACTIVATED subset, so an unactivated (even vanished) skill no longer
+//! enters the provenance at all; an activated one records the name + empty
+//! hash, which is resume's "gone" signal.
 
 use std::path::Path;
 
-use super::frontmatter::{cli_tools, mcp_servers, split_frontmatter};
+use super::frontmatter::{cli_tools, get_string, mcp_servers, split_frontmatter};
 use super::model::is_valid_skill_name;
 use crate::util::sha256_hex;
 
@@ -34,9 +39,18 @@ const SKILL_MD: &str = "SKILL.md";
 pub struct SkillPromptFragment {
     /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
     pub name: String,
+    /// The frontmatter `description`, verbatim (ADR-0110 Decision 1: mounting
+    /// injects metadata only -- this is the discovery-index entry's payload).
+    /// Empty when the `SKILL.md` degraded below the key (unreadable, broken
+    /// fence, malformed YAML, the key absent/wrong-typed, or a non-spec
+    /// name that never reaches the filesystem) -- the index entry stays
+    /// with an empty description so the skill never silently disappears
+    /// from the discoverable set.
+    pub description: String,
     /// The Markdown body after the frontmatter -- verbatim, the prompt fragment
-    /// injected on mount. Empty when the `SKILL.md` was unreadable at turn time
-    /// (honest degrade -- nothing to inject).
+    /// injected on activation (ADR-0110 Decision 2). Empty when the `SKILL.md`
+    /// was unreadable at turn time, or the name failed the spec check so the
+    /// file was never read (honest degrade -- nothing to inject).
     pub body: String,
     /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at the
     /// turn's assembly time. Empty string when no baseline exists (unreadable
@@ -67,11 +81,12 @@ pub struct SkillPromptFragment {
 /// non-spec name) is treated as unreadable -- it never reaches the filesystem
 /// (the join stays traversal-safe). A spec-shaped name whose `SKILL.md` is
 /// missing or unreadable (deleted after mounting, permissions, IO error)
-/// degrades honestly: empty body + empty hash + a warn log. The body, when
-/// readable, is split out of the frontmatter verbatim -- a malformed YAML
-/// mapping still yields its body (the fence split is structural, not semantic),
-/// so an externally corrupted skill keeps injecting its prose until the user
-/// repairs or unmounts it.
+/// degrades honestly: empty description + empty body + empty hash + a warn
+/// log. The body, when readable, is split out of the frontmatter verbatim --
+/// a malformed YAML mapping still yields its body (the fence split is
+/// structural, not semantic), so an externally corrupted skill keeps injecting
+/// its prose until the user repairs or unmounts it; only its description
+/// degrades to empty in that case.
 pub fn resolve_prompt_fragments(root: &Path, mounted: &[String]) -> Vec<SkillPromptFragment> {
     mounted.iter().map(|name| resolve_one(root, name)).collect()
 }
@@ -93,6 +108,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
         );
         return SkillPromptFragment {
             name: name.to_string(),
+            description: String::new(),
             body: String::new(),
             content_hash: String::new(),
             mcp_servers: Vec::new(),
@@ -111,6 +127,7 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
             );
             return SkillPromptFragment {
                 name: name.to_string(),
+                description: String::new(),
                 body: String::new(),
                 content_hash: String::new(),
                 mcp_servers: Vec::new(),
@@ -125,23 +142,34 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     // structural (fence lines), not semantic (YAML parse), so a body is still
     // recoverable when an externally edited frontmatter is malformed YAML --
     // the user's prompt fragment stays live until they repair or unmount.
-    // ONE YAML parse feeds both extension keys (MCP server ids, issue #369;
-    // CLI tool names, issue #674): a malformed YAML logs a single degrade
-    // line and contributes no references, but the body is still injected.
+    // ONE YAML parse feeds the description + both extension keys (MCP server
+    // ids, issue #369; CLI tool names, issue #674): a malformed YAML logs a
+    // single degrade line and contributes no metadata, but the body is still
+    // injected.
     let raw = String::from_utf8_lossy(&bytes);
-    let (body, mcp_servers, cli_tools) = match split_frontmatter(&raw) {
+    let (description, body, mcp_servers, cli_tools) = match split_frontmatter(&raw) {
         Ok((yaml, body)) => match serde_yaml::from_str::<serde_yaml::Value>(&yaml) {
             Ok(serde_yaml::Value::Mapping(mapping)) => {
-                (body, mcp_servers(&mapping), cli_tools(&mapping))
+                // The description degrade (absent/wrong-typed key -> empty)
+                // is silent by design: the index entry stays renderable with
+                // an empty description (ADR-0110 -- a skill never silently
+                // disappears from the discoverable set), so there is no
+                // operator-visible failure to log.
+                (
+                    get_string(&mapping, "description").unwrap_or_default(),
+                    body,
+                    mcp_servers(&mapping),
+                    cli_tools(&mapping),
+                )
             }
             _ => {
                 log::warn!(
                     target: "skills",
                     "mounted skill `{name}` has unparseable frontmatter YAML -- \
-                     extension-key declarations contribute nothing (the body is \
-                     still injected)",
+                     description + extension-key declarations contribute nothing \
+                     (the body is still injected)",
                 );
-                (body, Vec::new(), Vec::new())
+                (String::new(), body, Vec::new(), Vec::new())
             }
         },
         Err(reason) => {
@@ -150,11 +178,12 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
                 "mounted skill `{name}` has a malformed SKILL.md fence ({reason}) \
                  -- injecting no body, recording hash only",
             );
-            (String::new(), Vec::new(), Vec::new())
+            (String::new(), String::new(), Vec::new(), Vec::new())
         }
     };
     SkillPromptFragment {
         name: name.to_string(),
+        description,
         body,
         content_hash,
         mcp_servers,
@@ -198,12 +227,73 @@ mod tests {
         assert_eq!(fragments.len(), 1);
         let f = &fragments[0];
         assert_eq!(f.name, "sql-coach");
+        // The helper writes `description: Test skill sql-coach.` -- the
+        // frontmatter description rides the fragment verbatim (ADR-0110).
+        assert_eq!(f.description, "Test skill sql-coach.");
         assert_eq!(f.body, "Always name the method you used.\n");
         // The hash is the SHA-256 of the WHOLE file (frontmatter + body),
         // recomputed here from the bytes actually on disk.
         let raw = std::fs::read(root.join("sql-coach").join(SKILL_MD)).unwrap();
         assert_eq!(f.content_hash, sha256_hex(&raw));
         assert!(!f.content_hash.is_empty());
+    }
+
+    #[test]
+    fn description_degrades_to_empty_when_the_key_is_absent() {
+        // ADR-0110: the discovery-index entry must stay renderable -- a
+        // missing (or wrong-typed) `description` key degrades to an empty
+        // string, never dropping the skill from the discoverable set.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("no-desc")).unwrap();
+        std::fs::write(
+            root.join("no-desc").join(SKILL_MD),
+            "---\nname: no-desc\n---\nBody without a description.\n",
+        )
+        .unwrap();
+        let fragments = resolve_prompt_fragments(root, &["no-desc".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].description, "");
+        assert_eq!(fragments[0].body, "Body without a description.\n");
+    }
+
+    #[test]
+    fn malformed_yaml_yields_empty_description_but_keeps_body() {
+        // The fence split is structural: a malformed YAML mapping still
+        // yields the body, but the description (a semantic read) degrades
+        // to empty alongside the extension keys.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("bad-yaml")).unwrap();
+        std::fs::write(
+            root.join("bad-yaml").join(SKILL_MD),
+            "---\nname: bad-yaml\ndescription: [unclosed\n---\nBody survives.\n",
+        )
+        .unwrap();
+        let fragments = resolve_prompt_fragments(root, &["bad-yaml".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].description, "");
+        assert_eq!(fragments[0].body, "Body survives.\n");
+    }
+
+    #[test]
+    fn wrong_typed_description_key_degrades_to_empty_but_keeps_body() {
+        // The ladder's wrong-typed rung: the YAML parses into a mapping but
+        // `description` is a sequence, so the semantic read (`get_string`'s
+        // `as_str`) yields None and the description degrades to empty --
+        // distinct from the malformed-YAML arm above, which never parses.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("seq-desc")).unwrap();
+        std::fs::write(
+            root.join("seq-desc").join(SKILL_MD),
+            "---\nname: seq-desc\ndescription: [a, b]\n---\nBody survives.\n",
+        )
+        .unwrap();
+        let fragments = resolve_prompt_fragments(root, &["seq-desc".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].description, "");
+        assert_eq!(fragments[0].body, "Body survives.\n");
     }
 
     #[test]
@@ -233,6 +323,10 @@ mod tests {
         let fragments = resolve_prompt_fragments(tmp.path(), &["ghost".to_string()]);
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0].name, "ghost");
+        assert!(
+            fragments[0].description.is_empty(),
+            "missing skill yields no description"
+        );
         assert!(
             fragments[0].body.is_empty(),
             "missing skill injects no body"
@@ -270,6 +364,10 @@ mod tests {
         let fragments = resolve_prompt_fragments(root, &["broken".to_string()]);
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0].name, "broken");
+        assert!(
+            fragments[0].description.is_empty(),
+            "a broken fence yields no description"
+        );
         assert!(
             fragments[0].body.is_empty(),
             "unparseable body is not injected"

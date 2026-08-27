@@ -728,19 +728,23 @@ pub async fn ask(
         s.set_external_runtime(external_runtime);
         s.set_external_model_config(external_posture);
         // Issue #364 (ADR-0086): resolve the session's mounted skills into
-        // prompt fragments (name + verbatim body + whole-file SHA-256) here
-        // at the command boundary, where the registry root lives, so the
-        // session stays I/O-free for skill content (it consumes fragments,
-        // mirroring the mcp_servers "data passed in" pattern). The session
-        // lock is held, so the mounted set cannot change between this read
-        // and the turn.
+        // prompt fragments (name + description + verbatim body + whole-file
+        // SHA-256) here at the command boundary, where the registry root
+        // lives, so the session stays I/O-free for skill content (it consumes
+        // fragments, mirroring the mcp_servers "data passed in" pattern). The
+        // session lock is held, so neither set can change between this read
+        // and the turn. The activated names (ADR-0110, issue #700) ride the
+        // same lock -- the L1/L2 sort key for the disclosure rendering and
+        // the built-in provenance fork.
         let mounted = s.mounted_skills();
+        let activated = s.activated_skills();
         let skill_fragments = resolve_prompt_fragments(&skills_root, &mounted);
         let cli_tools = live.enabled_cli_tools();
         let inputs = TurnInputs {
             mcp_servers: &mcp_servers,
             keychain: live.keychain(),
             skills: &skill_fragments,
+            activated: &activated,
             cli_tools: &cli_tools,
         };
         let outcome = s.ask_with_phase(
