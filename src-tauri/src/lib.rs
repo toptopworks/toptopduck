@@ -67,10 +67,7 @@ pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
 pub use provider::live_config::LiveProviderConfig;
 pub use provider::prompt::ResponseLocale;
-pub use provider::{
-    ColumnRef, DatasetRef, LiveProvider, Provider, ProviderError, ProviderRequest, ResponsePayload,
-    TurnPayload, UnwiredProvider,
-};
+pub use provider::{LiveProvider, Provider, ProviderError, UnwiredProvider};
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
     ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceResolution, TurnInputs,

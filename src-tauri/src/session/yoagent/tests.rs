@@ -494,7 +494,6 @@ fn multi_step_success_groups_rounds_and_promotes() {
     // monotonic naming, unchanged through the adapter.
     assert_eq!(outcome.promotions.len(), 1);
     assert_eq!(outcome.promotions[0].dataset.reference_name, "result_2");
-    assert_eq!(outcome.round_trips, 3);
 }
 
 /// Multi-call batch (ADR-0103 round grouping + ADR-0022 monotonic
@@ -543,7 +542,6 @@ fn multi_call_batch_groups_into_one_round_in_dispatch_order() {
     );
     assert_eq!(outcome.promotions[0].dataset.reference_name, "result_2");
     assert_eq!(outcome.promotions[1].dataset.reference_name, "result_3");
-    assert_eq!(outcome.round_trips, 2);
 }
 
 /// Self-correction (ADR-0077): a tool-level error routes back to the model

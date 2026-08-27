@@ -37,7 +37,9 @@ use crate::mcp::aggregator::{self, McpAggregator};
 use crate::mcp::meta_tools;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
-use crate::session::loop_contract::{truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX};
+use crate::session::loop_contract::{
+    truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
+};
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::session::turn_dispatch::{classify_with_cli_tool, ResolvedClassification};
 use crate::tools::{builtin_table, dispatch};
@@ -459,15 +461,14 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
         Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
         Ok(GateOutcome::Denied) => {
-            outcome.trace.push(TraceEntry::failed(
+            outcome.trace.push(TraceEntry::denied(
                 call.id.clone(),
                 call.name.clone(),
                 operation_kind,
                 summary,
-                "denied by approval gateway",
             ));
             Response::Result(json!({
-                "content": [{"type": "text", "text": "tool call denied by the approval gateway"}],
+                "content": [{"type": "text", "text": DENIED_BY_GATEWAY_CONTENT}],
                 "isError": true,
             }))
         }
@@ -481,6 +482,12 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             // dispatch whose promotion rides the side-effect channel. Either
             // way exactly one trace row lands, naming the call's final
             // identity.
+            // The routing + trace assembly in this arm is the gateway-side
+            // counterpart the dispatch core's module doc calls out as the
+            // documented per-side divergence (envelope relayed verbatim here
+            // vs flattened to the first text block on the core path, issue
+            // #696): the shared pieces are the classification, the meta-tool
+            // resolution, and the `result_N` numbering.
             // NOTE: the namespaced check here re-reads `call.name` rather
             // than hoisting one `is_external` above the trio match -- the
             // `mcp_invoke` fall-through REPLACES the name with the resolved

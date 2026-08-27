@@ -332,7 +332,7 @@ pub(super) fn run_claude_stream_json(
     // Wall-clock watchdog (same as the other paths): fire cancel on expiry.
     if let Some(timeout) = wall_clock {
         spawn_wall_clock_watchdog(
-            guard.watchdog_alive(),
+            guard.generation(),
             Arc::clone(&cancel),
             timeout,
             "toptopduck::acp",
@@ -363,7 +363,6 @@ pub(super) fn run_claude_stream_json(
                     adapter.id
                 )),
                 Vec::new(),
-                1,
                 None,
             )
         }
@@ -379,7 +378,6 @@ pub(super) fn run_claude_stream_json(
                 let result = outcome(
                     Termination::Transient(format!("stdin write failed: {e}")),
                     Vec::new(),
-                    1,
                     None,
                 );
                 super::process::kill_and_reap(&mut child);
@@ -485,7 +483,7 @@ pub(super) fn run_claude_stream_json(
     // actually ran -- the honest-rendering catalog (the probe channel owns
     // the full directory; the turn never re-discovers).
     let discovered = pump.current_model.map(|model| {
-        let mut d = crate::runtime::acp::adapter::DiscoveredRuntime::empty();
+        let mut d = crate::session::loop_contract::DiscoveredRuntime::empty();
         d.current_model = Some(model);
         // Issue #529 semantics: the wire carries no adapter identity.
         d.adapter_id = Some(adapter.id.to_string());
@@ -493,7 +491,7 @@ pub(super) fn run_claude_stream_json(
     });
 
     let rounds = pump.tracker.settle_rounds(&term);
-    outcome(term, rounds, 1, discovered)
+    outcome(term, rounds, discovered)
 }
 
 /// A `tool_use` awaiting its `tool_result` (live-phase bookkeeping). Carries
@@ -687,8 +685,7 @@ impl ClaudePump {
 fn outcome(
     termination: Termination,
     rounds: Vec<LoopRound>,
-    round_trips: u32,
-    discovered: Option<crate::runtime::acp::adapter::DiscoveredRuntime>,
+    discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
 ) -> LoopOutcome {
     LoopOutcome {
         termination,
@@ -701,7 +698,6 @@ fn outcome(
         // shell here -- a bare shell (no prose, no thinking) drops at the
         // wiring merge's empty-round pass; one that carried prose survives.
         trace: rounds,
-        round_trips,
         discovered_runtime: discovered,
     }
 }

@@ -46,14 +46,14 @@ use crate::approval::{
 use crate::cancel::CancelToken;
 use crate::model::{ThinkingTrace, TraceEntryView, TurnPhase};
 use crate::runtime::acp::adapter::{
-    extract_discovered_runtime, AdapterSpec, DiscoveredRuntime, StreamFormat, MODEL_CATEGORY,
-    THOUGHT_LEVEL_CATEGORY,
+    extract_discovered_runtime, AdapterSpec, StreamFormat, MODEL_CATEGORY, THOUGHT_LEVEL_CATEGORY,
 };
 use crate::runtime::acp::wire::{
     self, CancelParams, ContentBlock, InitializeParams, McpServer, NewSessionParams, PromptParams,
     Request, RequestId, RequestPermissionOutcome, RequestPermissionParams, RequestPermissionResult,
     Response, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus,
 };
+use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::loop_contract::{
     truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, DEFAULT_STEP_CAP,
     DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
@@ -232,7 +232,7 @@ impl AcpEngine {
         // pump notices via cancel.is_requested() and sends session/cancel.
         if let Some(timeout) = self.wall_clock {
             spawn_wall_clock_watchdog(
-                guard.watchdog_alive(),
+                guard.generation(),
                 Arc::clone(&cancel),
                 timeout,
                 "toptopduck::acp",
@@ -242,9 +242,7 @@ impl AcpEngine {
         // (the engine never panics into the host).
         let mut child = match spawn(binary, &self.adapter) {
             Ok(c) => c,
-            Err(detail) => {
-                return self.outcome(Termination::Transient(detail), Vec::new(), 1, None)
-            }
+            Err(detail) => return self.outcome(Termination::Transient(detail), Vec::new(), None),
         };
         let stdout = child.inner.stdout.take().expect("piped stdout");
         let stdin = child.inner.stdin.take().expect("piped stdin");
@@ -255,7 +253,7 @@ impl AcpEngine {
         let hs = match handshake(&mut io, &self.cancel, input, &self.adapter) {
             Ok(hs) => hs,
             Err(term) => {
-                let outcome = self.outcome(term, Vec::new(), 1, None);
+                let outcome = self.outcome(term, Vec::new(), None);
                 child.kill_and_wait();
                 return outcome;
             }
@@ -303,7 +301,7 @@ impl AcpEngine {
             );
             match io.request_roundtrip::<SetConfigOptionParams, Value>(&self.cancel, req) {
                 Err(term) => {
-                    let outcome = self.outcome(term, Vec::new(), 1, discovered);
+                    let outcome = self.outcome(term, Vec::new(), discovered);
                     child.kill_and_wait();
                     return outcome;
                 }
@@ -318,7 +316,6 @@ impl AcpEngine {
                                 e.message
                             )),
                             Vec::new(),
-                            1,
                             discovered,
                         );
                         child.kill_and_wait();
@@ -330,7 +327,7 @@ impl AcpEngine {
 
         // Loop-top cancel check (mirrors the built-in loop's pre-step check).
         if self.cancel.is_requested() {
-            let outcome = self.outcome(Termination::Cancelled, Vec::new(), 1, discovered);
+            let outcome = self.outcome(Termination::Cancelled, Vec::new(), discovered);
             child.kill_and_wait();
             return outcome;
         }
@@ -351,7 +348,6 @@ impl AcpEngine {
             let outcome = self.outcome(
                 Termination::Transient("session/prompt: broken pipe before send".into()),
                 Vec::new(),
-                1,
                 discovered,
             );
             child.kill_and_wait();
@@ -401,7 +397,7 @@ impl AcpEngine {
             PromptEnd::Failed(reason) => Termination::Transient(reason),
         };
         let rounds = pump.tracker.settle_rounds(&termination);
-        let outcome = self.outcome(termination, rounds, 1, discovered);
+        let outcome = self.outcome(termination, rounds, discovered);
         child.kill_and_wait();
         outcome
     }
@@ -410,7 +406,6 @@ impl AcpEngine {
         &self,
         termination: Termination,
         rounds: Vec<LoopRound>,
-        round_trips: u32,
         discovered: Option<DiscoveredRuntime>,
     ) -> LoopOutcome {
         LoopOutcome {
@@ -423,7 +418,6 @@ impl AcpEngine {
             // boundary, with per-round thinking + prose slots; the built-in
             // loop's flat wrap no longer funnels through here.
             trace: rounds,
-            round_trips,
             // ADR-0095: the handshake's extracted catalog rides every
             // post-handshake exit (None before / on handshake failure).
             discovered_runtime: discovered,

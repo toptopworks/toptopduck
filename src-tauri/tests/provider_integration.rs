@@ -650,3 +650,93 @@ fn a_protocol_switch_between_turns_reroutes_the_next_turn() {
     anthropic_mock.assert();
     openai_mock.assert();
 }
+
+// --- cross-host redirect credential pins (issue #696) -----------------------
+//
+// The probe path has its own redirect pin (`egress_agent_does_not_follow_
+// cross_host_redirect` in provider::http, the shared ureq agent with
+// redirects disabled). The PRODUCTION turn path instead rides the upstream
+// yoagent HTTP client, whose redirect policy belongs to the upstream
+// dependency and is tracked by the 0.18 minor pin -- these tests pin the
+// security-relevant OBSERVABLE from this repo: whatever the client does with
+// a 3xx, the credential must not reach a second host, and the turn must end
+// in an honest failure. `127.0.0.1` and `localhost` are distinct hosts for
+// the client's cross-origin judgment, so two mockito servers + a rewritten
+// Location give a true cross-host hop without a network.
+
+/// Wire the two mockito hosts for one protocol's API path (`/v1/messages`
+/// for anthropic, `/chat/completions` for openai-compat): `first` 301-
+/// redirects that endpoint to `second` under the `localhost` host name, and
+/// `second` carries the two leak sentinels -- mocks that match ONLY when the
+/// named credential header is present, each expecting zero hits. Returns the
+/// redirect mock (assert `>= 1` hit after the turn, so the pin cannot go
+/// vacuous -- a redirect never served pins nothing) plus the sentinels.
+fn redirect_hosts(
+    api_path: &str,
+) -> (
+    mockito::ServerGuard,
+    mockito::ServerGuard,
+    mockito::Mock,
+    mockito::Mock,
+    mockito::Mock,
+) {
+    let mut first = mockito::Server::new();
+    let mut second = mockito::Server::new();
+    // Same port, different host name: a genuine cross-host redirect target.
+    let cross_host = second.url().replacen("127.0.0.1", "localhost", 1);
+    let redirect = first
+        .mock("POST", api_path)
+        .expect_at_least(1)
+        .with_status(301)
+        .with_header("Location", &format!("{cross_host}{api_path}"))
+        .create();
+    let bearer_leak = second
+        .mock("POST", api_path)
+        .match_header("authorization", mockito::Matcher::Any)
+        .expect(0)
+        .with_status(200)
+        .with_body("{}")
+        .create();
+    let api_key_leak = second
+        .mock("POST", api_path)
+        .match_header("x-api-key", mockito::Matcher::Any)
+        .expect(0)
+        .with_status(200)
+        .with_body("{}")
+        .create();
+    (first, second, redirect, bearer_leak, api_key_leak)
+}
+
+/// The anthropic face (the app's default protocol): a cross-host 301 on the
+/// turn path must not deliver `x-api-key` / `authorization` to the redirect
+/// target, and the turn fails honestly (no silent success off-host).
+#[test]
+fn anthropic_turn_path_cross_host_redirect_does_not_leak_the_key() {
+    let (first, _second, redirect, bearer_leak, api_key_leak) = redirect_hosts("/v1/messages");
+    let provider = anthropic_live_provider(first.url(), Some("sk-secret-redirect"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    match session.ask("redirect probe") {
+        TurnOutcome::Failed(_) => {}
+        other => panic!("expected an honest Failed, got {other:?}"),
+    }
+    redirect.assert(); // the 301 was actually served -- the pin is live
+    bearer_leak.assert();
+    api_key_leak.assert();
+}
+
+/// The openai face (Bearer auth): same pin through the openai-compat stream
+/// client (`/chat/completions` wire) -- the bearer token must not reach the
+/// redirect target.
+#[test]
+fn openai_turn_path_cross_host_redirect_does_not_leak_the_key() {
+    let (first, _second, redirect, bearer_leak, api_key_leak) = redirect_hosts("/chat/completions");
+    let provider = openai_live_provider(first.url(), Some("sk-secret-redirect"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    match session.ask("redirect probe") {
+        TurnOutcome::Failed(_) => {}
+        other => panic!("expected an honest Failed, got {other:?}"),
+    }
+    redirect.assert(); // the 301 was actually served -- the pin is live
+    bearer_leak.assert();
+    api_key_leak.assert();
+}

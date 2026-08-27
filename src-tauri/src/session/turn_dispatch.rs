@@ -1,14 +1,18 @@
 //! The shared gated-dispatch core + execution safety net (ADR-0080 / ADR-0107).
 //!
 //! [`dispatch_gated_call`] routes one model-emitted tool call through the
-//! approval gateway and the executor: meta-tool trio resolution, gate
-//! classification, external MCP / registered-CLI / built-in-DuckDB routing,
-//! `result_N` numbering, and the trace-entry shape all live HERE so they
-//! cannot drift between the runtimes that dispatch tools (the yoagent
-//! integration layer's gateway adapter calls THIS, never a re-assembly --
-//! issue #668, ADR-0107). The dispatch panic guard (issue #321) is sunk into
-//! the core so every runtime gets the snapshot + ghost-rollback ritual by
-//! construction.
+//! approval gateway and the executor. What lives HERE, and therefore cannot
+//! drift between the runtimes that dispatch tools, is the meta-tool trio
+//! resolution, the gate classification ([`classify_with_cli_tool`], which
+//! the gateway's `tools/call` arm also consumes), the `result_N` numbering,
+//! and the dispatch panic guard (issue #321, sunk into the core so every
+//! runtime gets the snapshot + ghost-rollback ritual by construction). The
+//! routing arms and the trace-entry assembly are NOT single-sourced: the
+//! gateway's `tools/call` arm rebuilds them beside this core on the same
+//! shared helpers, with one documented divergence (the gateway relays the
+//! JSON-RPC envelope verbatim; this core path flattens to the first text
+//! block) -- the cannot-drift claim covers the classification / resolution
+//! / numbering, not those two per-side shapes (issue #696).
 //!
 //! The wall-clock watchdog and the panic-detail helpers are runtime-agnostic
 //! (ADR-0107's replaceability review): they hold no loop-specific state and
@@ -20,7 +24,6 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -39,36 +42,33 @@ use crate::model::{Promotion, TraceEntryView, TurnPhase};
 use crate::persistence::recipe::truncate_trace_summary;
 use crate::provider::tool_calling::{ToolResult, ToolUse};
 use crate::session::loop_contract::{
-    truncate_trace_excerpt, Termination, TraceEntry, TRACE_EXCERPT_MAX,
+    truncate_trace_excerpt, Termination, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::tools;
 use crate::tools::definitions;
 
-/// Arm the wall-clock watchdog (ADR-0081): a DETACHED thread (the alive flag
-/// is its only tie to the turn -- sleeping out the full timeout inside the
-/// caller's scope would hold the join) that fires the app token on expiry.
-/// Shared by the yoagent runner and the three ACP turn paths (issue #668) so
-/// the posture lives once.
-/// KNOWN RACE: if the watchdog reads alive=true and then the turn ends and a
-/// new turn begins before request() runs, the cancel lands on the new turn.
-/// The window is a handful of instructions between the load and request(),
-/// only reachable when the timeout ~= the prior turn's runtime; the 120s
-/// default makes production exposure near zero. A generation/turn-id guard
-/// closes it fully (deferred). catch_unwind keeps the detached thread
-/// self-sufficient (the issue #321 posture): a panicking request() is logged,
+/// Arm the wall-clock watchdog (ADR-0081): a DETACHED thread (sleeping out
+/// the full timeout inside the caller's scope would hold the join) that
+/// fires the app token on expiry, guarded by the turn's generation. Shared
+/// by the yoagent runner and the three ACP turn paths (issue #668) so the
+/// posture lives once. The generation is the watchdog's turn identity: a
+/// timeout that expires after its turn ended (and a successor began) stands
+/// down via [`CancelToken::request_if`] instead of cancelling the successor
+/// -- there is no check-then-act window, because the generation and the
+/// request flag share one atomic word (issue #696; the retired `alive` flag
+/// left this race open). catch_unwind keeps the detached thread
+/// self-sufficient (the issue #321 posture): a panicking cancel is logged,
 /// never silently eaten.
 pub(crate) fn spawn_wall_clock_watchdog(
-    alive: Arc<std::sync::atomic::AtomicBool>,
+    generation: crate::cancel::TurnGeneration,
     token: Arc<CancelToken>,
     timeout: Duration,
     log_target: &'static str,
 ) {
     thread::spawn(move || {
         thread::sleep(timeout);
-        if alive.load(Ordering::SeqCst)
-            && catch_unwind(AssertUnwindSafe(|| token.request())).is_err()
-        {
+        if catch_unwind(AssertUnwindSafe(|| token.request_if(generation))).is_err() {
             log::error!(
                 target: log_target,
                 "wall-clock watchdog panicked firing cancel; timeout path may be impaired"
@@ -100,6 +100,26 @@ pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send
     Termination::Transient(detail)
 }
 
+/// The `result_N` numbering snapshot the issue #321 dispatch guard pairs
+/// with its rollback: captured by [`GhostSnapshot::take`] BEFORE the guarded
+/// dispatch, consumed by [`rollback_ghost_result`] after a panic. A newtype
+/// so the snapshot / rollback pairing is a signature fact, not a caller
+/// discipline -- the rollback cannot accidentally receive a bare counter
+/// (or the wrong turn's number).
+struct GhostSnapshot {
+    next: u64,
+}
+
+impl GhostSnapshot {
+    /// Capture the working set's current `next_result_number` -- the value
+    /// the ghost detection diffs against after a panicked dispatch.
+    fn take(deps: &TurnDeps) -> Self {
+        Self {
+            next: deps.working_set.next_result_number(),
+        }
+    }
+}
+
 /// Roll back a ghost `result_N` left by a panic mid-dispatch (issue #321).
 /// `try_materialize` registers `result_N` partway through its body; a panic in
 /// any subsequent step (record_provenance, gc_stale_results, apply_display_label,
@@ -114,7 +134,8 @@ pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send
 /// safer than rewinding the number and clashing on reuse. The ghost was never
 /// user-visible, so ADR-0022's no-reuse constraint does not apply to the
 /// rollback itself.
-pub(crate) fn rollback_ghost_result(deps: &mut TurnDeps, prev_next: u64) {
+fn rollback_ghost_result(deps: &mut TurnDeps, snapshot: GhostSnapshot) {
+    let prev_next = snapshot.next;
     let curr_next = deps.working_set.next_result_number();
     if curr_next <= prev_next {
         return;
@@ -161,13 +182,15 @@ pub(crate) enum DispatchAbort {
 
 /// Route one tool call through the approval gateway + dispatch (ADR-0080 /
 /// ADR-0076): the shared dispatch core behind the yoagent integration layer's
-/// gateway tool adapter (issue #668, ADR-0107). One implementation so gate
-/// classification, meta-tool resolution, external routing, `result_N`
-/// numbering, and the trace-entry shape cannot drift between the runtimes --
-/// the adapter calls THIS, never a re-assembly. Returns the model-facing
-/// result, the call's trace entry (`None` for a meta-tool resolution failure
-/// that never reached a tool, ADR-0105 Decision 4), and any promotion. Emits
-/// the ADR-0078 phase pair through `on_phase`.
+/// gateway tool adapter (issue #668, ADR-0107). The gate classification,
+/// meta-tool resolution, and `result_N` numbering cannot drift between the
+/// runtimes -- the adapter calls THIS, never a re-assembly -- while the
+/// routing arms and the trace-entry assembly stay per-side (the gateway's
+/// `tools/call` arm rebuilds them on the same shared helpers; see the module
+/// doc for the documented envelope asymmetry, issue #696). Returns the
+/// model-facing result, the call's trace entry (`None` for a meta-tool
+/// resolution failure that never reached a tool, ADR-0105 Decision 4), and
+/// any promotion. Emits the ADR-0078 phase pair through `on_phase`.
 ///
 /// The issue #321 dispatch panic guard lives HERE: the `result_N` snapshot +
 /// ghost rollback runs for every dispatch by construction, and a panic
@@ -190,12 +213,12 @@ pub(crate) fn dispatch_gated_call(
     // leave a ghost result_N. The snapshot + diff in rollback_ghost_result
     // detects + reverts any orphan so the working_set <-> history invariant
     // holds (ADR-0084).
-    let prev_next = deps.working_set.next_result_number();
+    let snapshot = GhostSnapshot::take(deps);
     match catch_unwind(AssertUnwindSafe(|| {
         dispatch_gated_call_inner(call, deps, materializer, mcp, cli, gate, on_phase)
     })) {
         Err(payload) => {
-            rollback_ghost_result(deps, prev_next);
+            rollback_ghost_result(deps, snapshot);
             let site = format!("tool dispatch `{}`", call.name);
             Err(DispatchAbort::Panic(panic_to_transient(&site, &*payload)))
         }
@@ -267,13 +290,8 @@ fn dispatch_gated_call_inner(
             // to the user. The denied call never dispatches, so only the
             // completion event fires (success: false) -- the frontend's
             // pending approval card flips to its resolved-deny row in place.
-            let entry = TraceEntry::failed(
-                call.id.clone(),
-                call.name.clone(),
-                operation_kind,
-                summary,
-                "denied by approval gateway",
-            );
+            let entry =
+                TraceEntry::denied(call.id.clone(), call.name.clone(), operation_kind, summary);
             // The completed event carries the persisted-shape view (a failure
             // keeps its message -- here the denial -- so the resolved card
             // and the recorded trace show the same why).
@@ -281,7 +299,7 @@ fn dispatch_gated_call_inner(
             return Ok((
                 ToolResult {
                     tool_use_id: call.id.clone(),
-                    content: "tool call denied by the approval gateway".to_string(),
+                    content: DENIED_BY_GATEWAY_CONTENT.to_string(),
                     is_error: true,
                 },
                 Some(entry),
@@ -1521,6 +1539,106 @@ mod tests {
                 assert_eq!(
                     view.name, "mcp__live__echo",
                     "the deny row names the resolved handle, never mcp_invoke"
+                );
+                assert!(!view.success);
+            }
+            other => panic!("expected ToolCallCompleted, got {other:?}"),
+        }
+    }
+
+    /// The allow-path mirror of the deny pin above (ADR-0105 Decision 4; the
+    /// issue #696 gap): with the backend handle's trust key seeded, a
+    /// resolved `mcp_invoke` passes the gate and dispatches through the
+    /// external routing arm -- here against the unreachable test transport,
+    /// so the dispatch lands as an honest route failure -- and EVERY surface
+    /// (the trace entry, the phase pair, the model-facing error) names the
+    /// backend handle, never "mcp_invoke". The full resolved -> allow ->
+    /// dispatch -> trace chain in one offline pin.
+    #[test]
+    fn allowed_invoke_dispatches_and_traces_under_the_resolved_handle() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let cancel = CancelToken::new();
+        let call = ToolUse {
+            id: "tu_1".into(),
+            name: "mcp_invoke".into(),
+            input: json!({"tool": "mcp__live__echo"}),
+        };
+        // A live catalog entry (dead-port transport: the dispatch genuinely
+        // attempts the route and fails honestly). Display "Live" slugifies
+        // to "live".
+        let mut mcp = McpAggregator::catalog_server_for_test(
+            "Live",
+            vec![json!({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}})],
+        );
+        let approval = ApprovalState::new();
+        // The backend handle's trust key skips the card (the gate consumes
+        // the RESOLVED identity, so the seeded key is the backend's, not
+        // mcp_invoke's).
+        approval.seed_trust(&ToolKey::external("live", "mcp__live__echo"));
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let (result, entry, promotion) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut mcp,
+            &[],
+            &gate,
+            &mut on_phase,
+        )
+        .expect("an allowed call dispatches");
+        // The unreachable transport is a route failure -- a tool-level error
+        // naming the backend tool, not a turn abort.
+        assert!(
+            result.is_error,
+            "the dead transport is an honest route failure"
+        );
+        assert!(
+            result.content.contains("mcp__live__echo"),
+            "the model-facing error names the backend handle: {}",
+            result.content
+        );
+        assert!(promotion.is_none(), "external tools never promote");
+        let entry = entry.expect("the dispatch records one trace row");
+        assert_eq!(
+            entry.name, "mcp__live__echo",
+            "the trace row names the resolved handle, never mcp_invoke"
+        );
+        assert!(!entry.success, "the route failure lands as a failed call");
+        assert!(
+            entry.result_excerpt.contains("mcp__live__echo"),
+            "the failure anchor names the backend handle: {}",
+            entry.result_excerpt
+        );
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(phases.len(), 2, "started + completed around the dispatch");
+        match &phases[0] {
+            TurnPhase::ToolCallStarted { name, .. } => {
+                assert_eq!(name, "mcp__live__echo", "started names the backend handle");
+            }
+            other => panic!("expected ToolCallStarted, got {other:?}"),
+        }
+        match &phases[1] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert_eq!(
+                    view.name, "mcp__live__echo",
+                    "completed names the backend handle"
                 );
                 assert!(!view.success);
             }

@@ -171,7 +171,7 @@ impl YoagentLoop {
             // Cancelled (the ADR-0021 timeout -> cancel mapping).
             if let Some(timeout) = self.wall_clock {
                 spawn_wall_clock_watchdog(
-                    guard.watchdog_alive(),
+                    guard.generation(),
                     Arc::clone(&cancel),
                     timeout,
                     "toptopduck::yoagent",
@@ -438,7 +438,6 @@ fn finish(
             &mut *state.promotions.lock().expect("promotions lock poisoned"),
         ),
         trace: fold.rounds,
-        round_trips: fold.round_trips,
         discovered_runtime: None,
     }
 }

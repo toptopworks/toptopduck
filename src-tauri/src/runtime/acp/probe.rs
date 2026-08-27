@@ -32,10 +32,11 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::runtime::acp::adapter::{AdapterSpec, DiscoveredRuntime, StreamFormat};
+use crate::runtime::acp::adapter::{AdapterSpec, StreamFormat};
 use crate::runtime::acp::wire::{
     self, InitializeParams, NewSessionParams, NewSessionResult, Request, RequestId, Response,
 };
+use crate::session::loop_contract::DiscoveredRuntime;
 
 /// The probe's wall-clock ceiling (ADR-0096, implementation-time calibration):
 /// generous for the slowest real cold start (node CLIs take seconds to tens

@@ -23,8 +23,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::runtime::acp::adapter::DiscoveredRuntime;
 use crate::runtime::acp::probe::{CatalogModel, ModelCatalogOutcome};
+use crate::session::loop_contract::DiscoveredRuntime;
 
 /// The file name under the OS app-data directory.
 pub const CATALOGS_FILE_NAME: &str = "adapter-catalogs.json";

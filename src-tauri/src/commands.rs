@@ -44,12 +44,11 @@ use crate::persistence::{
     SessionsRoot,
 };
 use crate::provider::live_config::{ActiveKeyError, LiveProviderConfig};
-use crate::runtime::acp::adapter::{
-    detect_adapter, v1_adapters, AdapterSpec, DiscoveredRuntime, StreamFormat,
-};
+use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec, StreamFormat};
 use crate::runtime::acp::catalog_store::{
     now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
 };
+use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::{
     PosturePair, RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts,
     TurnInputs,
