@@ -184,7 +184,13 @@ impl super::Session {
     /// builtins auto-mount but never pre-activate (discovery is free,
     /// body-injection is not -- ADR-0110 Decision 7), and a pre-activation
     /// (v5) recipe carries no `Activate` events, so it folds empty -- the
-    /// honest post-resume posture, no degrade.
+    /// honest post-resume posture, no degrade. The fold ends with the
+    /// activated accumulator clamped to the mounted one: an activation
+    /// whose mount basis evaporated (an auto-include builtin disabled since
+    /// the last run, a dangling `Activate` in an imported recipe) degrades
+    /// away with its mount, because nothing else could ever clear it
+    /// (unmount refuses `NotMounted`, no deactivate exists -- ADR-0110
+    /// Decision 2).
     pub fn seed_initial_skills(&mut self, initial: Vec<String>) {
         let mut mounted: Vec<String> = Vec::new();
         let mut activated: Vec<String> = Vec::new();
@@ -215,6 +221,9 @@ impl super::Session {
                 }
             }
         }
+        // Decision 2's subset clamp: an activation whose mount basis
+        // evaporated degrades away with its mount (see the doc above).
+        activated.retain(|n| mounted.iter().any(|m| m == n));
         self.mounted_skills = mounted;
         self.activated_skills = activated;
     }
@@ -530,5 +539,55 @@ mod tests {
             vec!["auto-a".to_string(), "auto-c".to_string()]
         );
         assert_eq!(session.activated_skills(), vec!["auto-a".to_string()]);
+    }
+
+    /// The subset clamp: an auto-include builtin seeds mounted with no Mount
+    /// event, so a recorded Activate can outlive its mount basis once the
+    /// tool is disabled before a resume -- the refold drops the activation
+    /// with its evaporated mount (ADR-0110 Decision 2) instead of leaving an
+    /// un-clearable phantom (unmount would refuse NotMounted, and no
+    /// deactivate exists).
+    #[test]
+    fn seed_refold_drops_an_activation_whose_mount_basis_evaporated() {
+        let mut session = Session::new().expect("session");
+        // The auto-include posture at creation: pandoc seeds mounted (no
+        // Mount event) and the user activates it.
+        session.seed_initial_skills(vec!["pandoc".to_string()]);
+        session.activate_skill("pandoc").expect("activate");
+        assert_eq!(session.activated_skills(), vec!["pandoc".to_string()]);
+        // The tool is disabled before the resume: the initial set is empty
+        // now, and the recorded Activate has no mount backing left.
+        session.seed_initial_skills(Vec::new());
+        assert!(session.mounted_skills().is_empty());
+        assert!(
+            session.activated_skills().is_empty(),
+            "the activation degrades away with its evaporated mount basis",
+        );
+    }
+
+    /// A remount after the cascade does NOT resurrect the activation: unmount
+    /// is the sole activation exit, so the fresh mount starts
+    /// discoverable-but-inactive (ADR-0110 Decision 4) -- on the live caches
+    /// and on both recipe folds.
+    #[test]
+    fn remount_after_unmount_does_not_resurrect_the_activation() {
+        let mut session = Session::new().expect("session");
+        session.mount_skill("a").expect("mount");
+        session.activate_skill("a").expect("activate");
+        session.unmount_skill("a").expect("unmount");
+        session.mount_skill("a").expect("remount");
+        assert_eq!(session.mounted_skills(), vec!["a".to_string()]);
+        assert!(
+            session.activated_skills().is_empty(),
+            "the remount is discovery-only; only an explicit Activate re-enters",
+        );
+        assert_eq!(
+            session.conversation().len(),
+            4,
+            "Mount, Activate, Unmount, Mount -- no deactivate anywhere",
+        );
+        let recipe = session.build_recipe();
+        assert_eq!(recipe.mounted_skills(), vec!["a".to_string()]);
+        assert!(recipe.activated_skills().is_empty());
     }
 }

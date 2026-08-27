@@ -882,6 +882,13 @@ impl Recipe {
     ///
     /// A `mount -> activate -> unmount` sequence yields `[]` -- the AC pinned
     /// in tests.
+    ///
+    /// The fold finally clamps to [`Recipe::mounted_skills`]: the write path
+    /// guarantees every `Activate` a live `Mount`, but the read path also
+    /// folds hand-edited or imported recipes -- a dangling `Activate` (no
+    /// `Mount` anywhere before it, a shape the write path never produces)
+    /// degrades away rather than surviving as an activation no mount backs
+    /// and nothing could ever clear (ADR-0110 Decision 2).
     pub fn activated_skills(&self) -> Vec<String> {
         let mut activated: Vec<String> = Vec::new();
         for entry in &self.history {
@@ -900,6 +907,10 @@ impl Recipe {
                 }
             }
         }
+        // Decision 2's subset clamp (see the doc above): a dangling
+        // Activate degrades away instead of outliving its mount basis.
+        let mounted = self.mounted_skills();
+        activated.retain(|n| mounted.iter().any(|m| m == n));
         activated
     }
 }
@@ -1958,6 +1969,54 @@ mod tests {
             back.activated_skills(),
             vec!["sql-coach".to_string()],
             "the fold survives the round trip",
+        );
+        assert_eq!(
+            back.mounted_skills(),
+            vec!["sql-coach".to_string()],
+            "the Activate is invisible to the mounted fold",
+        );
+    }
+
+    #[test]
+    fn activated_skills_drops_a_dangling_activate_without_a_mount() {
+        // Subset clamp (ADR-0110 Decision 2): a hand-edited or imported
+        // recipe may carry an Activate with no Mount anywhere before it --
+        // a shape the write path never produces. The fold degrades the
+        // dangling activation away while keeping every backed one, rather
+        // than surfacing an activation no mount backs and nothing could
+        // clear (unmount refuses NotMounted, no deactivate exists).
+        let recipe = Recipe {
+            format_version: RECIPE_FORMAT_VERSION,
+            session_name: "dangling-activate".into(),
+            sources: Vec::new(),
+            history: vec![
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "ghost".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Mount,
+                    name: "real".into(),
+                    actor: None,
+                }),
+                RecipeEntry::Skill(SkillLifecycleEvent {
+                    kind: SkillLifecycleKind::Activate,
+                    name: "real".into(),
+                    actor: Some(SkillLifecycleActor::User),
+                }),
+            ],
+            active: None,
+            model: None,
+            thought_level: None,
+            cached_discovered: None,
+            last_runtime: None,
+        };
+        assert_eq!(recipe.mounted_skills(), vec!["real".to_string()]);
+        assert_eq!(
+            recipe.activated_skills(),
+            vec!["real".to_string()],
+            "the dangling ghost degrades away; the backed real activation stays",
         );
     }
 

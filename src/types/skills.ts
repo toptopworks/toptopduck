@@ -122,10 +122,11 @@ export type SkillError =
   | { kind: "FsFailure"; data: string };
 
 // Which kind of skill lifecycle mutation produced an event (ADR-0086, issue
-// #363; ADR-0110, issue #698). Three-state straight-line machine with unmount
-// as the sole exit: Mounted into the session's mounted (discoverable) set,
-// optionally Activated from it into the persistent activated subset
-// (activated set ⊆ mounted set), and Unmounted out of both in one cascade. A
+// #363; ADR-0110, issue #698). Straight-line machine of three transitions --
+// Mount, Activate, Unmount -- with unmount as the sole exit: Mounted into the
+// session's mounted (discoverable) set, optionally Activated from it into the
+// persistent activated subset (activated set ⊆ mounted set), and Unmounted
+// out of both in one cascade. A
 // content change is NOT a lifecycle event -- it is captured per-turn by each
 // SkillProvenance's content_hash. Mirrors the Rust SkillLifecycleKind as a
 // bare variant string.

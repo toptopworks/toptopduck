@@ -43,15 +43,16 @@ pub struct SourceLifecycleEvent {
 }
 
 /// Which kind of skill lifecycle mutation produced an event (ADR-0086, issue
-/// #363; ADR-0110, issue #698). The lifecycle is a three-state straight-line
-/// machine with unmount as the sole exit: a skill is Mounted into the
-/// session's mounted (discoverable) set, MAY be Activated from it into the
-/// persistent activated subset (activated set ⊆ mounted set), and is Unmounted
-/// out of both in one cascade. A skill CONTENT change is NOT a lifecycle
+/// #363; ADR-0110, issue #698). The lifecycle is a straight-line machine of
+/// three transitions -- Mount, Activate, Unmount -- with unmount as the sole
+/// exit: a skill is Mounted into the session's mounted (discoverable) set,
+/// MAY be Activated from it into the persistent activated subset (activated
+/// set ⊆ mounted set), and is Unmounted out of both in one cascade. A skill
+/// CONTENT change is NOT a lifecycle
 /// event -- it is captured per-turn by each
 /// [`crate::model::SkillProvenance`]'s `content_hash`, so the
 /// timeline stays free of content churn (only membership changes are events).
-/// Mirrors the spec's three-state identity (Mount/Unmount/Activate); the
+/// Mirrors the spec's three-kind identity (Mount/Unmount/Activate); the
 /// frontend narrows on the bare variant string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillLifecycleKind {

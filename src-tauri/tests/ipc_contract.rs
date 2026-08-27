@@ -813,7 +813,9 @@ fn thread_entry_skill_wraps_a_lifecycle_event_with_the_actor_mark() {
     // the bare variant string on an Activate. Pin the exact shape
     // src/types/skills.ts mirrors as a REQUIRED `actor` field: a future
     // skip_serializing_if would silently make it optional on the wire and
-    // break the TS mirror's non-optional contract.
+    // break the TS mirror's non-optional contract. Both actor variants are
+    // pinned: the Agent half has no construction site until #701, so only
+    // this pin holds its serde spelling to the TS union.
     use toptopduck_lib::model::{
         SkillLifecycleActor, SkillLifecycleEvent, SkillLifecycleKind, ThreadEntry,
     };
@@ -840,6 +842,14 @@ fn thread_entry_skill_wraps_a_lifecycle_event_with_the_actor_mark() {
             actor: Some(SkillLifecycleActor::User),
         }),
         r#"{"entry":"Skill","data":{"kind":"Activate","name":"sql-coach","actor":"User"}}"#,
+    );
+    assert_wire(
+        &ThreadEntry::Skill(SkillLifecycleEvent {
+            kind: SkillLifecycleKind::Activate,
+            name: "sql-coach".into(),
+            actor: Some(SkillLifecycleActor::Agent),
+        }),
+        r#"{"entry":"Skill","data":{"kind":"Activate","name":"sql-coach","actor":"Agent"}}"#,
     );
 }
 

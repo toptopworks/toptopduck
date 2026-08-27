@@ -609,11 +609,11 @@ export async function importSkills(
 // from the SkillLifecycleEvent sequence (Mount in / Unmount out); these
 // commands append the event + atomically persist the recipe. Session-scoped
 // (ADR-0056): every command takes sessionId first. The loading gate lives on
-// the backend -- both write commands refuse during resume / an in-flight turn
-// (reject_if_resuming + reject_if_in_flight), so the toggle the frontend
+// the backend -- all three write commands refuse during resume / an in-flight
+// turn (reject_if_resuming + reject_if_in_flight), so the toggle the frontend
 // renders is also disabled under the same `loading` gate the composer already
 // honors (issue #365 AC #5). Rejects ride SessionError.SkillMount (typed
-// AlreadyMounted / NotMounted).
+// AlreadyMounted / NotMounted / NotMountedForActivation).
 
 // The session's currently-mounted skill names, in first-mount insertion order
 // (issue #363). Read-only; the composer "+" panel + the badge both derive the
