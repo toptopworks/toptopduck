@@ -40,7 +40,7 @@ pub struct ToolDefinition {
 /// value the model supplied; both protocols carry it as JSON (anthropic
 /// `tool_use.input` object, openai `tool_calls.function.arguments` string
 /// that the adapter parses back into a value), so it is held protocol-neutral
-/// here and each adapter serializes it for its wire shape.
+/// here; the upstream client serializes it for its wire shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolUse {
     /// The id the model assigned; the matching [`ToolResult`] cites it so the
@@ -212,8 +212,9 @@ impl ToolTurnReply {
     }
 
     /// Construct a tool-call batch with its connective prose, normalizing an
-    /// empty string to `None` (issue #617): the adapters' parse points route
-    /// through here so the empty-text -> no-prose contract lives once -- a
+    /// empty string to `None` (issue #617): the conversion points (the yoagent
+    /// bridge's outcome mapping) route through here so the empty-text ->
+    /// no-prose contract lives once -- a
     /// later construction site passing a parsed `Some("")` cannot emit an
     /// empty `RoundText` event and persist `"text": ""` in the recipe round.
     pub fn tool_calls_with(text: Option<String>, calls: Vec<ToolUse>) -> Self {

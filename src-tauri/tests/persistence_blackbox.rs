@@ -1321,8 +1321,8 @@ fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
         after.is_empty(),
         "no entries after the breakpoint, got {after:?}"
     );
-    // AC7 (no cloud LLM): resume succeeded with UnwiredProvider, which would
-    // have returned NotWired on any provider.generate() call. The whole
+    // AC7 (no cloud LLM): resume succeeded with UnwiredProvider, which
+    // refuses every `generate_tool_turn` round-trip with NotWired. The whole
     // productive chain replayed LLM-free.
 }
 

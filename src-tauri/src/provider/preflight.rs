@@ -22,17 +22,17 @@
 //! keychain by profile id.
 //!
 //! Why a dedicated HTTP path instead of reusing `LiveProvider::generate`:
-//! `generate` parses the ADR-0009 SQL contract and treats a non-contract reply
-//! as `Unavailable`, which would let a weak model that answers the ping with
-//! plain prose masquerade as "incompatible". The preflight only cares whether
+//! A SQL-contract parse (the way the retired single-shot `generate` path did)
+//! would treat a plain-prose ping answer as `Unavailable`, letting a weak model
+//! masquerade as "incompatible". The preflight only cares whether
 //! the endpoint is reachable + the key is valid + the chat/messages shape is
 //! served -- it must not couple to the SQL contract, so it owns its own minimal
 //! HTTP exchange. The POST paths (`/v1/messages`, `/chat/completions`), the
 //! per-protocol auth headers (`x-api-key` + `anthropic-version` vs `Bearer`),
 //! and the `base_url` join mirror the turn's upstream calls verbatim;
 //! the `/models` GET path is probe-only (the upstream loop has no model-list
-//! API -- it
-//! is the ADR-0070 "list models main path" probe added by this module).
+//! API -- it is the ADR-0070 "list models main path" probe added by this
+//! module).
 
 use std::time::Duration;
 

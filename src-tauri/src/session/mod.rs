@@ -2008,10 +2008,7 @@ fn merge_outcomes(
     for entry in &gateway.trace {
         *gateway_served.entry(entry.name.clone()).or_default() += 1;
     }
-    let mut rounds = Vec::new();
-    if !gateway.trace.is_empty() {
-        rounds.push(LoopRound::flat(gateway.trace));
-    }
+    let mut rounds = LoopRound::flat_wrap(gateway.trace);
     for mut round in std::mem::take(&mut acp.trace) {
         // A name the gateway SERVES is the gateway's to report: a built-in
         // name (issue #299 slice 9c -- the external CLI routes those

@@ -21,7 +21,6 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -36,6 +35,7 @@ use crate::runtime::acp::wire::McpServer;
 use crate::session::loop_contract::{
     truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
+use crate::session::turn_dispatch::spawn_wall_clock_watchdog;
 
 // ---------------------------------------------------------------------------
 // Event parser (pure)
@@ -282,14 +282,12 @@ pub(super) fn run_codex_event_stream(
 
     // Wall-clock watchdog (same as ACP): fire cancel on expiry.
     if let Some(timeout) = wall_clock {
-        let alive = guard.watchdog_alive();
-        let token = Arc::clone(&cancel);
-        thread::spawn(move || {
-            thread::sleep(timeout);
-            if alive.load(std::sync::atomic::Ordering::SeqCst) {
-                token.request();
-            }
-        });
+        spawn_wall_clock_watchdog(
+            guard.watchdog_alive(),
+            Arc::clone(&cancel),
+            timeout,
+            "toptopduck::acp",
+        );
     }
 
     // Spawn codex exec --json with the bridge injected via -c overrides +
@@ -468,22 +466,22 @@ impl JsonPump {
                 self.tool_call_count += 1;
                 // codex command_execution events carry no success/failure
                 // status (unlike ACP ToolCall); success defaults to true.
-                let entry = TraceEntry {
-                    tool_use_id: call_id,
-                    name: command.clone(),
-                    operation_kind: OperationKind::Execute,
-                    summary: truncate_trace_excerpt(&command, TRACE_EXCERPT_MAX),
-                    success: true,
-                    result_excerpt: String::new(),
-                };
+                let summary = truncate_trace_excerpt(&command, TRACE_EXCERPT_MAX);
+                let entry = TraceEntry::succeeded(
+                    call_id,
+                    command.clone(),
+                    OperationKind::Execute,
+                    summary.clone(),
+                    String::new(),
+                );
                 // The round's first call fires its prose prelude BEFORE the
                 // batch's ToolCallStarted (the ADR-0103 live order the
                 // frontend's round grouping relies on).
                 let round = self.tracker.call_round(on_phase);
                 on_phase(TurnPhase::ToolCallStarted {
-                    name: entry.name.clone(),
-                    operation_kind: entry.operation_kind,
-                    summary: entry.summary.clone(),
+                    name: command,
+                    operation_kind: OperationKind::Execute,
+                    summary,
                 });
                 on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
                 self.tracker.land_call(round, entry);

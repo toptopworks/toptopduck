@@ -44,8 +44,8 @@ pub(crate) fn validate_http_base_url(base_url: &str) -> Result<(), InvalidBaseUr
 }
 
 /// Test-only construction counter for [`EGRESS_AGENT`] (issue #278): proves the
-/// singleton is built at most once across the process, so every call site
-/// (anthropic / openai / preflight) draws from one shared connection pool.
+/// singleton is built at most once across the process, so every call site (the
+/// preflight probes) draws from one shared connection pool.
 /// Read by `egress_agent_builds_only_once_across_calls`; compiled out of
 /// release builds.
 #[cfg(test)]
@@ -100,8 +100,8 @@ pub(crate) fn egress_agent() -> ureq::Agent {
 /// model replies / gateway error bodies (and the errors built from them) are
 /// routinely CJK -- so this path, of all paths, must not panic on multi-byte
 /// text. (`floor_char_boundary` needs 1.91, so the floor is manual.) Shared
-/// across the adapters so both the reply-text path and the HTTP-error-body path
-/// stay panic-free from one source.
+/// across the preflight + HTTP-error-body paths so both stay panic-free from
+/// one source.
 pub(crate) fn truncate(s: &str) -> String {
     const LIMIT: usize = 200;
     if s.len() <= LIMIT {

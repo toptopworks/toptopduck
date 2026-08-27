@@ -289,10 +289,11 @@ tempfile = "3"
 # black-box ingest seam -- no binary fixtures committed (mirrors the parquet
 # fixture helper).
 rust_xlsxwriter = "0.92"
-# HTTP mock for the real-provider unit tests (issue #29): AnthropicProvider is
-# exercised against a local mockito server instead of the network -- the turn
-# orchestrator's offline test base stays on FakeProvider; this tests the HTTP +
-# auth paths deterministically, no real key, no real endpoint.
+# HTTP mock for the provider-path tests (issue #29): the preflight probes and
+# the upstream-streamer wire suites run against a local mockito server instead
+# of the network -- the turn orchestrator's offline test base stays on
+# FakeProvider; this tests the HTTP + auth paths deterministically, no real
+# key, no real endpoint.
 mockito = "1"
 
 [profile.dev]

@@ -36,7 +36,6 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -59,6 +58,7 @@ use crate::session::loop_contract::{
     truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, DEFAULT_STEP_CAP,
     DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
 };
+use crate::session::turn_dispatch::spawn_wall_clock_watchdog;
 
 /// Grace period after the engine sends `session/cancel` for the agent to return
 /// the prompt response before the engine kills the process. Generous for a
@@ -231,14 +231,12 @@ impl AcpEngine {
         // Wall-clock watchdog (ADR-0081): fires the shared token on expiry; the
         // pump notices via cancel.is_requested() and sends session/cancel.
         if let Some(timeout) = self.wall_clock {
-            let alive = guard.watchdog_alive();
-            let token = Arc::clone(&cancel);
-            thread::spawn(move || {
-                thread::sleep(timeout);
-                if alive.load(std::sync::atomic::Ordering::SeqCst) {
-                    token.request();
-                }
-            });
+            spawn_wall_clock_watchdog(
+                guard.watchdog_alive(),
+                Arc::clone(&cancel),
+                timeout,
+                "toptopduck::acp",
+            );
         }
         // Spawn the CLI. Any spawn failure lands as a transient turn failure
         // (the engine never panics into the host).
@@ -1201,13 +1199,22 @@ impl Pump {
             // keeps it distinguishable from a real completion in the trace.
             RowEnd::Unobserved => (false, UNOBSERVED_EXCERPT.to_string()),
         };
-        let entry = TraceEntry {
-            tool_use_id: tool_use_id.to_string(),
-            name: name.to_string(),
-            operation_kind,
-            summary: summary.to_string(),
-            success,
-            result_excerpt,
+        let entry = if success {
+            TraceEntry::succeeded(
+                tool_use_id.to_string(),
+                name.to_string(),
+                operation_kind,
+                summary.to_string(),
+                result_excerpt,
+            )
+        } else {
+            TraceEntry::failed(
+                tool_use_id.to_string(),
+                name.to_string(),
+                operation_kind,
+                summary.to_string(),
+                result_excerpt,
+            )
         };
         on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
         self.tracker.land_call(round, entry);

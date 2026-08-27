@@ -264,7 +264,11 @@ impl std::fmt::Debug for TurnModelFacts {
 pub trait Provider: Send + Sync {
     /// Default [`ProviderError::NotWired`] so a provider that does not
     /// implement the face (e.g. [`UnwiredProvider`]) refuses the turn
-    /// permanently -- the same surface as an unwired turn.
+    /// permanently -- the same surface as an unwired turn. DEAD CODE on the
+    /// live track: the wiring seam routes a provider whose
+    /// [`Self::turn_model_facts`] returns `Some` to the upstream streamer and
+    /// never calls this face -- the two faces are mutually exclusive by
+    /// convention (only the scripted fake + [`UnwiredProvider`] answer it).
     fn generate_tool_turn(
         &self,
         _request: &tool_calling::ToolTurnRequest,
@@ -274,8 +278,7 @@ pub trait Provider: Send + Sync {
 
     /// The resolved response locale for prompt assembly (ADR-0052). The
     /// tool-calling wiring seam (`Session::ask_with_phase`) owns the system
-    /// prompt -- unlike the single-shot path, where each adapter builds it
-    /// internally -- so it reads the locale off the provider per turn. Read
+    /// prompt, so it reads the locale off the provider per turn. Read
     /// per turn (not cached) so a locale-preference change takes effect the
     /// next turn, mirroring [`LiveProvider`]'s per-turn protocol re-read. The
     /// default is the ADR-0052 fallback locale: providers without a config
@@ -331,10 +334,10 @@ impl<C: ProviderConfigSource + 'static> LiveProvider<C> {
 
 impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
     fn response_locale(&self) -> ResponseLocale {
-        // Per-turn read off the config source, same freshness as the adapters'
-        // internal prompt assembly on the single-shot path: a "system"
-        // preference re-resolves the OS locale here, an explicit override maps
-        // directly (ADR-0052).
+        // Per-turn read off the config source (the same freshness
+        // [`Self::turn_model_facts`] applies): a "system" preference
+        // re-resolves the OS locale here, an explicit override maps directly
+        // (ADR-0052).
         self.config.locale()
     }
 

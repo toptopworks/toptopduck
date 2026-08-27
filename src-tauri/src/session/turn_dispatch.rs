@@ -48,7 +48,8 @@ use crate::tools::definitions;
 /// Arm the wall-clock watchdog (ADR-0081): a DETACHED thread (the alive flag
 /// is its only tie to the turn -- sleeping out the full timeout inside the
 /// caller's scope would hold the join) that fires the app token on expiry.
-/// Shared by the yoagent runner (issue #668) so the posture lives once.
+/// Shared by the yoagent runner and the three ACP turn paths (issue #668) so
+/// the posture lives once.
 /// KNOWN RACE: if the watchdog reads alive=true and then the turn ends and a
 /// new turn begins before request() runs, the cancel lands on the new turn.
 /// The window is a handful of instructions between the load and request(),
@@ -94,7 +95,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// single-sources the detail format + the log target so the two guard
 /// sites stay consistent.
 pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
-    let detail = format!("agent loop panicked in {site}: {}", panic_message(payload));
+    let detail = format!("panicked in {site}: {}", panic_message(payload));
     log::error!(target: "toptopduck::turn_dispatch", "{detail}");
     Termination::Transient(detail)
 }
@@ -266,14 +267,13 @@ fn dispatch_gated_call_inner(
             // to the user. The denied call never dispatches, so only the
             // completion event fires (success: false) -- the frontend's
             // pending approval card flips to its resolved-deny row in place.
-            let entry = TraceEntry {
-                tool_use_id: call.id.clone(),
-                name: call.name.clone(),
+            let entry = TraceEntry::failed(
+                call.id.clone(),
+                call.name.clone(),
                 operation_kind,
                 summary,
-                success: false,
-                result_excerpt: "denied by approval gateway".to_string(),
-            };
+                "denied by approval gateway",
+            );
             // The completed event carries the persisted-shape view (a failure
             // keeps its message -- here the denial -- so the resolved card
             // and the recorded trace show the same why).
@@ -345,13 +345,23 @@ fn dispatch_gated_call_inner(
     // tool-agnostic: it carries `outcome.promotion` without naming any tool
     // (issue #336).
     let promotion = outcome.promotion;
-    let entry = TraceEntry {
-        tool_use_id: call.id.clone(),
-        name: call.name.clone(),
-        operation_kind,
-        summary,
-        success,
-        result_excerpt: truncate_trace_excerpt(&result.content, TRACE_EXCERPT_MAX),
+    let excerpt = truncate_trace_excerpt(&result.content, TRACE_EXCERPT_MAX);
+    let entry = if success {
+        TraceEntry::succeeded(
+            call.id.clone(),
+            call.name.clone(),
+            operation_kind,
+            summary,
+            excerpt,
+        )
+    } else {
+        TraceEntry::failed(
+            call.id.clone(),
+            call.name.clone(),
+            operation_kind,
+            summary,
+            excerpt,
+        )
     };
     // ADR-0078: complete the live row with the persisted-shape view (success
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the
@@ -380,16 +390,15 @@ fn local_meta_call(
         operation_kind: OperationKind::Read,
         summary: summary.to_string(),
     });
-    let entry = TraceEntry {
-        tool_use_id: call.id.clone(),
-        name: call.name.clone(),
-        operation_kind: OperationKind::Read,
-        summary: summary.to_string(),
-        success: true,
-        // A success is emptied at the persisted mapping; the in-memory form
-        // keeps nothing here either -- the payload itself rides the result.
-        result_excerpt: String::new(),
-    };
+    // A success is emptied at the persisted mapping; the in-memory form
+    // keeps nothing here either -- the payload itself rides the result.
+    let entry = TraceEntry::succeeded(
+        call.id.clone(),
+        call.name.clone(),
+        OperationKind::Read,
+        summary.to_string(),
+        String::new(),
+    );
     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
     (
         ToolResult {

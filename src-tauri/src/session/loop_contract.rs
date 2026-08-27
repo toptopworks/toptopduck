@@ -74,6 +74,10 @@ pub enum Termination {
 /// (call count + failure summary), never the full trace verbatim. Mapped to
 /// its persisted recipe form ([`RecipeTraceEntry`]) when the turn is recorded
 /// (issue #319) -- the mapping drops the ephemeral [`tool_use_id`](Self::tool_use_id).
+/// Construction convention: every production producer builds the entry
+/// through the [`TraceEntry::succeeded`] / [`TraceEntry::failed`] pair, which
+/// owns the failure-anchor invariant at the construction point (fields stay
+/// `pub` -- the integration test suites read them directly).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceEntry {
     pub tool_use_id: String,
@@ -88,6 +92,59 @@ pub struct TraceEntry {
     /// emptied -- see [`RecipeTraceEntry::result_excerpt`]); the in-memory
     /// form keeps the success payload for the loop's own next-turn context.
     pub result_excerpt: String,
+}
+
+/// Placeholder a failed call degrades to when its dispatch site produced no
+/// message: the excerpt is the cross-turn failure anchor, so it is never
+/// empty -- [`reduced_trace`]'s debug guard (issue #316) is compiled out of
+/// release builds, so the constructor enforces the floor itself.
+const FAILURE_ANCHOR_FALLBACK: &str = "<no failure message>";
+
+impl TraceEntry {
+    /// A completed call's entry: `result_excerpt` carries the bounded success
+    /// payload (the loop's own next-turn context; the projections empty it).
+    pub fn succeeded(
+        tool_use_id: impl Into<String>,
+        name: impl Into<String>,
+        operation_kind: OperationKind,
+        summary: impl Into<String>,
+        result_excerpt: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_use_id: tool_use_id.into(),
+            name: name.into(),
+            operation_kind,
+            summary: summary.into(),
+            success: true,
+            result_excerpt: result_excerpt.into(),
+        }
+    }
+
+    /// A failed call's entry: `message` is the bounded failure anchor the
+    /// cross-turn retrospection surface renders (ADR-0078); an empty message
+    /// degrades to [`FAILURE_ANCHOR_FALLBACK`] so the anchor is never empty
+    /// (the constructor-form of the issue #316 guard).
+    pub fn failed(
+        tool_use_id: impl Into<String>,
+        name: impl Into<String>,
+        operation_kind: OperationKind,
+        summary: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        Self {
+            tool_use_id: tool_use_id.into(),
+            name: name.into(),
+            operation_kind,
+            summary: summary.into(),
+            success: false,
+            result_excerpt: if message.is_empty() {
+                FAILURE_ANCHOR_FALLBACK.to_string()
+            } else {
+                message
+            },
+        }
+    }
 }
 
 /// Project an in-memory [`TraceEntry`] to its reduced form (ADR-0078): the

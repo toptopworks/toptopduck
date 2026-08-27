@@ -302,8 +302,8 @@ fn render_column(col: &ColumnRef) -> String {
 
 /// Render the far-window turn note (ADR-0039): a Summary turn ships only the
 /// verbatim question excerpt plus whether it produced a result -- no SQL, no
-/// schema. Shared by both adapters' `build_messages` so the Chinese wording
-/// cannot drift between protocols.
+/// schema. Shared by the window renderers so the Chinese wording cannot drift
+/// between call sites.
 pub(crate) fn render_summary_turn_note(result: &Option<String>) -> String {
     match result {
         Some(name) => format!("（该轮已生成结果 {name}）"),
@@ -369,9 +369,9 @@ pub fn render_response(r: &ResponsePayload) -> String {
 /// ([`render_summary_turn_note`]) pair. The asking question is the final `user`
 /// entry.
 ///
-/// Shared by the three typed-message consumers — the tool-calling loop's
-/// [`crate::window::tool_turn_messages`] and the two adapters' `build_messages`
-/// (anthropic, openai) — so the per-turn rendering sequence stays in one place.
+/// Shared by the typed-message consumers — the tool-calling loop's
+/// [`crate::window::tool_turn_messages`] — so the per-turn rendering sequence
+/// stays in one place.
 /// Each consumer maps the neutral pairs into its own wire shape; none
 /// re-derives the role sequence or the per-turn rendering. The ACP flat-text
 /// path ([`crate::window::assemble_acp_turn`]) re-derives the same sequence
@@ -918,8 +918,8 @@ mod tests {
     // --- shared history-to-messages renderer (ADR-0023/0039, issue #322) -----
     //
     // render_history_messages is the single source of truth for the windowed
-    // conversation → (role, content) sequence. The three consumers (tool-calling
-    // tool_turn_messages + the two adapters' build_messages) delegate to it, so
+    // conversation → (role, content) sequence. The consumers
+    // (tool-calling tool_turn_messages) delegate to it, so
     // these tests pin the two rendering shapes (Full vs. Summary) + the asking-
     // question closer + turn ordering + the empty-history edge case. The
     // adapter wire-shape assertions stay in their own test modules.
