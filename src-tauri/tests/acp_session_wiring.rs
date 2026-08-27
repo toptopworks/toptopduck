@@ -282,6 +282,14 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
 /// computes provenance once before the built-in / external branch and passes it
 /// to record_turn after; this test pins the external branch so a future change
 /// cannot silently drop the skill provenance on the ACP path.
+///
+/// ADR-0110 (issue #700): the ACP provenance fork records the FULL mounted
+/// set regardless of the activated list -- the external injection surface
+/// stays full-text until #702, so the provenance names every skill whose body
+/// the CLI actually received. The activated list deliberately covers only one
+/// of the two mounts, so sorting BOTH fork arms by the activated list -- the
+/// exact mutation the fork exists to prevent -- drops pdf-tools and reddens
+/// this test.
 #[test]
 fn external_turn_with_skill_records_provenance() {
     let skills_root = tempfile::tempdir().unwrap();
@@ -293,25 +301,31 @@ fn external_turn_with_skill_records_provenance() {
         "Coach honest SQL reporting.",
         body,
     );
-    let skill_md_bytes = fs::read(skills_root.join("sql-coach").join("SKILL.md")).unwrap();
-    let expected_hash = sha256_hex(&skill_md_bytes);
+    put_skill(
+        &skills_root,
+        "pdf-tools",
+        "Extract tables before querying.",
+        "Extract the tables first.\n",
+    );
+    let sql_coach_bytes = fs::read(skills_root.join("sql-coach").join("SKILL.md")).unwrap();
+    let pdf_tools_bytes = fs::read(skills_root.join("pdf-tools").join("SKILL.md")).unwrap();
+    let sql_coach_hash = sha256_hex(&sql_coach_bytes);
+    let pdf_tools_hash = sha256_hex(&pdf_tools_bytes);
 
     let (mut session, old_path, _guard) = external_session("text_reply");
     session.mount_skill("sql-coach").expect("mount");
+    session.mount_skill("pdf-tools").expect("mount");
     let mounted = session.mounted_skills();
     let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
-    assert_eq!(fragments.len(), 1);
-    assert_eq!(fragments[0].content_hash, expected_hash);
+    assert_eq!(fragments.len(), 2);
+    assert_eq!(fragments[0].content_hash, sql_coach_hash);
+    assert_eq!(fragments[1].content_hash, pdf_tools_hash);
 
     let approval = ApprovalState::new();
     let sink = NullSink;
     let keychain = KeychainStore::new();
-    // ADR-0110 (issue #700): the ACP provenance fork records the FULL mounted
-    // set regardless of the activated list -- the external injection surface
-    // stays full-text until #702, so the provenance names every skill whose
-    // body the CLI actually received. Passing a NON-EMPTY activated list here
-    // (a legal state: the skill is both mounted and activated) pins that the
-    // external path does not sort by it.
+    // Only one of the two mounts is activated -- the fork's discriminating
+    // case (see the doc comment).
     let activated = vec!["sql-coach".to_string()];
     let outcome = session.ask_with_phase(
         "what is the answer?",
@@ -344,11 +358,17 @@ fn external_turn_with_skill_records_provenance() {
         .expect("at least one turn in the recipe");
     assert_eq!(
         last_turn.provenance.skills,
-        vec![SkillProvenance {
-            name: "sql-coach".into(),
-            content_hash: expected_hash,
-        }],
-        "external path provenance must snapshot skill name + hash"
+        vec![
+            SkillProvenance {
+                name: "sql-coach".into(),
+                content_hash: sql_coach_hash,
+            },
+            SkillProvenance {
+                name: "pdf-tools".into(),
+                content_hash: pdf_tools_hash,
+            },
+        ],
+        "the external turn records the FULL mounted set, not the activated subset"
     );
     // ADR-0101: the turn-top snapshot must record the turn's real runtime --
     // the pre-#588 `TurnAudit::builtin` hardcoded BuiltIn here, mislabeling

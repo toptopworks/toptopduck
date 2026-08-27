@@ -695,10 +695,13 @@ pub struct TurnInputs<'a> {
     /// Borrow of the OS keychain (ADR-0029). The gateway reads each server's
     /// secret env values at spawn; the values never cross IPC back out.
     pub keychain: &'a KeychainStore,
-    /// The mounted-skill prompt fragments (ADR-0086, issue #364). Each
-    /// fragment's metadata + body ride the system prompt split by disclosure
-    /// level (ADR-0110); the activated fragments' `content_hash` snapshots
-    /// into the turn's provenance for resume-time drift detection.
+    /// The mounted-skill prompt fragments (ADR-0086, issue #364). On the
+    /// built-in path, each fragment's metadata + body ride the system prompt
+    /// split by disclosure level (ADR-0110) and the activated fragments'
+    /// `content_hash` snapshots into the turn's provenance for resume-time
+    /// drift detection; the ACP path injects every body full-text and
+    /// records the full mounted set until #702 switches it to disclosure
+    /// (see `activated`).
     pub skills: &'a [SkillPromptFragment],
     /// The session's activated-skill names (ADR-0110, issue #700) -- the
     /// L1/L2 sort key. Two consumers sort by the same list: the built-in

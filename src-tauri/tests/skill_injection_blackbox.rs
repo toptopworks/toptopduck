@@ -390,7 +390,7 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     }
 }
 
-/// AC #4 (negative space): with no skills mounted, the system prompt carries no
+/// AC #3 (negative space): with no skills mounted, the system prompt carries no
 /// skill section at all (the base prompt's tool-selection section is always
 /// present), and the provenance skills vec is empty. Every existing black-box
 /// test also exercises this via `&[]`; pinned here for locality.

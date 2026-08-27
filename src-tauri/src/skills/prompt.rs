@@ -42,13 +42,15 @@ pub struct SkillPromptFragment {
     /// The frontmatter `description`, verbatim (ADR-0110 Decision 1: mounting
     /// injects metadata only -- this is the discovery-index entry's payload).
     /// Empty when the `SKILL.md` degraded below the key (unreadable, broken
-    /// fence, malformed YAML, or the key is absent/wrong-typed) -- the index
-    /// entry stays with an empty description so the skill never silently
-    /// disappears from the discoverable set.
+    /// fence, malformed YAML, the key absent/wrong-typed, or a non-spec
+    /// name that never reaches the filesystem) -- the index entry stays
+    /// with an empty description so the skill never silently disappears
+    /// from the discoverable set.
     pub description: String,
     /// The Markdown body after the frontmatter -- verbatim, the prompt fragment
     /// injected on activation (ADR-0110 Decision 2). Empty when the `SKILL.md`
-    /// was unreadable at turn time (honest degrade -- nothing to inject).
+    /// was unreadable at turn time, or the name failed the spec check so the
+    /// file was never read (honest degrade -- nothing to inject).
     pub body: String,
     /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at the
     /// turn's assembly time. Empty string when no baseline exists (unreadable
@@ -164,8 +166,8 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
                 log::warn!(
                     target: "skills",
                     "mounted skill `{name}` has unparseable frontmatter YAML -- \
-                     extension-key declarations contribute nothing (the body is \
-                     still injected)",
+                     description + extension-key declarations contribute nothing \
+                     (the body is still injected)",
                 );
                 (String::new(), body, Vec::new(), Vec::new())
             }
@@ -269,6 +271,26 @@ mod tests {
         )
         .unwrap();
         let fragments = resolve_prompt_fragments(root, &["bad-yaml".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].description, "");
+        assert_eq!(fragments[0].body, "Body survives.\n");
+    }
+
+    #[test]
+    fn wrong_typed_description_key_degrades_to_empty_but_keeps_body() {
+        // The ladder's wrong-typed rung: the YAML parses into a mapping but
+        // `description` is a sequence, so the semantic read (`get_string`'s
+        // `as_str`) yields None and the description degrades to empty --
+        // distinct from the malformed-YAML arm above, which never parses.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("seq-desc")).unwrap();
+        std::fs::write(
+            root.join("seq-desc").join(SKILL_MD),
+            "---\nname: seq-desc\ndescription: [a, b]\n---\nBody survives.\n",
+        )
+        .unwrap();
+        let fragments = resolve_prompt_fragments(root, &["seq-desc".to_string()]);
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0].description, "");
         assert_eq!(fragments[0].body, "Body survives.\n");
