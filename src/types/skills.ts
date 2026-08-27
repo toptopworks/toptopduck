@@ -122,22 +122,35 @@ export type SkillError =
   | { kind: "FsFailure"; data: string };
 
 // Which kind of skill lifecycle mutation produced an event (ADR-0086, issue
-// #363). Two-state only: a skill is either Mounted into the session's active
-// set or Unmounted from it. A content change is NOT a lifecycle event -- it is
-// captured per-turn by each SkillProvenance's content_hash. Mirrors the Rust
-// SkillLifecycleKind as a bare variant string.
-export type SkillLifecycleKind = "Mount" | "Unmount";
+// #363; ADR-0110, issue #698). Three-state straight-line machine with unmount
+// as the sole exit: Mounted into the session's mounted (discoverable) set,
+// optionally Activated from it into the persistent activated subset
+// (activated set ⊆ mounted set), and Unmounted out of both in one cascade. A
+// content change is NOT a lifecycle event -- it is captured per-turn by each
+// SkillProvenance's content_hash. Mirrors the Rust SkillLifecycleKind as a
+// bare variant string.
+export type SkillLifecycleKind = "Mount" | "Unmount" | "Activate";
 
-// A skill lifecycle event (ADR-0086, issue #363): first-class timeline slot,
-// never a turn. Carries only the spec `name` (the stable identity) -- the
+// Who initiated a lifecycle event (ADR-0110 Decision 4). Mount / unmount are
+// user-only; activation may be user- or agent-initiated. Mirrors the Rust
+// SkillLifecycleActor as a bare variant string.
+export type SkillLifecycleActor = "User" | "Agent";
+
+// A skill lifecycle event (ADR-0086, issue #363; ADR-0110, issue #698):
+// first-class timeline slot, never a turn. Carries only the spec `name`
+// (the stable identity) plus, for an Activate, the initiation actor -- the
 // prompt fragment / MCP references live in the registry and are looked up at
 // assembly time, never snapshotted into the timeline. Mirrors the Rust
-// SkillLifecycleEvent. The active skill set is folded from the Mount/Unmount
-// sequence, never stored as a snapshot.
+// SkillLifecycleEvent. The mounted and activated sets are folded from the
+// event sequence, never stored as snapshots.
 export interface SkillLifecycleEvent {
   kind: SkillLifecycleKind;
   // The skill's spec name (kebab-case identity, equal to the directory name).
   name: string;
+  // The initiation actor, present IFF kind is "Activate" (mount / unmount
+  // are user-only by definition). `| null` per the project's no-skip
+  // convention -- the backend serializes None as JSON null.
+  actor: SkillLifecycleActor | null;
 }
 
 // One skill recorded on a turn's provenance (ADR-0086, issue #363). Mirrors
@@ -151,12 +164,14 @@ export interface SkillProvenance {
   content_hash: string;
 }
 
-// Typed reject for skill mount / unmount (issue #363, ADR-0086). Wraps under
-// SessionError.SkillMount (adjacently tagged) so the frontend narrows on
-// `data.kind`. Mirrors the Rust SkillMountError.
+// Typed reject for skill mount / unmount / activate (issue #363, ADR-0086;
+// issue #698, ADR-0110). Wraps under SessionError.SkillMount (adjacently
+// tagged) so the frontend narrows on `data.kind`. Mirrors the Rust
+// SkillMountError.
 export type SkillMountError =
   | { kind: "AlreadyMounted"; data: { name: string } }
-  | { kind: "NotMounted"; data: { name: string } };
+  | { kind: "NotMounted"; data: { name: string } }
+  | { kind: "NotMountedForActivation"; data: { name: string } };
 
 // --- Skill import (issue #367, ADR-0086) -----------------------------------
 //

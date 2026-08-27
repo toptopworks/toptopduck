@@ -541,6 +541,15 @@ pub struct Session {
     /// unique, in first-mount insertion order (mirrors
     /// [`crate::persistence::recipe::Recipe::mounted_skills`]).
     mounted_skills: Vec<String>,
+    /// The session's currently-ACTIVATED skills (ADR-0110, issue #698): the
+    /// persistent activation subset, always ⊆ [`Self::mounted_skills`]. A
+    /// live memoization of the timeline's Activate/Unmount fold
+    /// ([`crate::persistence::recipe::Recipe::activated_skills`]); seeded
+    /// empty for a pre-activation (v5) recipe at resume -- the honest
+    /// post-resume posture, never a degrade. Mutated only by `activate_skill`
+    /// (idempotent) and cascaded by `unmount_skill` (the sole exit). Read by
+    /// the `list_activated_skills` IPC command.
+    activated_skills: Vec<String>,
 }
 
 /// One entry in the session's unified timeline (issue #325). Replaces the
@@ -881,6 +890,7 @@ impl Session {
             last_discovered_runtime: None,
             runtime_facts: SessionRuntimeFacts::default(),
             mounted_skills: Vec::new(),
+            activated_skills: Vec::new(),
         })
     }
 

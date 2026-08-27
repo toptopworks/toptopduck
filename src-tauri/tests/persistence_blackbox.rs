@@ -383,6 +383,67 @@ fn resume_rebuilds_mounted_skills_from_timeline_fold() {
 }
 
 #[test]
+fn resume_rebuilds_activated_skills_from_timeline_fold() {
+    // AC#5 (ADR-0110, issue #698): the live `Session.activated_skills` cache
+    // re-seeds from `Recipe::activated_skills()` -- the fold over the same
+    // timeline (Activate in / Unmount cascades out / Mount invisible) -- NOT
+    // from a stored snapshot. A session that mounts two skills, activates
+    // both, then unmounts the first (the cascade) must, after close + resume,
+    // yield the same single-skill mounted AND activated set.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let mut session = build_session(&duck);
+    session.mount_skill("sql-coach").expect("mount sql-coach");
+    session
+        .mount_skill("chart-helper")
+        .expect("mount chart-helper");
+    session
+        .activate_skill("sql-coach")
+        .expect("activate sql-coach");
+    session
+        .activate_skill("chart-helper")
+        .expect("activate chart-helper");
+    // The unmount cascades sql-coach's activation out (the sole exit).
+    session.unmount_skill("sql-coach").expect("unmount");
+    let before_mounted = session.mounted_skills();
+    let before_activated = session.activated_skills();
+    assert_eq!(
+        before_mounted,
+        vec!["chart-helper".to_string()],
+        "mounted fold drops the unmounted name",
+    );
+    assert_eq!(
+        before_activated,
+        vec!["chart-helper".to_string()],
+        "the unmount cascaded sql-coach's activation out",
+    );
+    drop(session);
+
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+
+    assert_eq!(
+        resumed.mounted_skills(),
+        before_mounted,
+        "the mounted fold survives resume",
+    );
+    assert_eq!(
+        resumed.activated_skills(),
+        before_activated,
+        "resume rebuilds the activated cache from the fold, not a snapshot",
+    );
+    let after_skill_events = resumed
+        .conversation()
+        .iter()
+        .filter(|e| matches!(e, ThreadEntry::Skill(_)))
+        .count();
+    assert_eq!(
+        after_skill_events, 5,
+        "Mount + Mount + Activate + Activate + Unmount restored verbatim",
+    );
+}
+
+#[test]
 fn duck_file_carries_no_secrets_or_materialized_data() {
     // AC: the .duck is a recipe text; assert it carries no API key, no
     // materialized result columns / sample / row-count, and no viz spec

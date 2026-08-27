@@ -3297,6 +3297,46 @@ pub fn list_mounted_skills(
     Ok(s.mounted_skills())
 }
 
+/// Activate a MOUNTED skill into the session's activated subset (issue #698,
+/// ADR-0110 Decision 2). Appends an `Activate` event (carrying the user
+/// actor) + atomically persists. A name not in the mounted set is a typed
+/// refuse (`NotMountedForActivation`, no event); a repeat activation is
+/// idempotent success with no second event (Decision 3). Rejects during
+/// resume / an in-flight turn -- the same loading gate as the mount
+/// commands. This ticket exposes the channel only; the user-visible
+/// affordance rides #699, the agent channel + body-return semantics #701.
+#[tauri::command]
+pub fn activate_skill(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    name: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    reject_if_in_flight(&handle)?;
+    let mut s = handle.session_lock()?;
+    s.activate_skill(&name).map_err(SessionError::SkillMount)?;
+    Ok(())
+}
+
+/// The session's currently-ACTIVATED skill names, in first-activation
+/// insertion order (issue #698, ADR-0110). Read-only mirror of
+/// [`list_mounted_skills`]'s write/read split; the timeline fold is the
+/// source of truth, this returns the live memoization (always a subset of
+/// the mounted set).
+#[tauri::command]
+pub fn list_activated_skills(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Vec<String>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    reject_if_resuming(&handle)?;
+    let s = handle.session_lock()?;
+    Ok(s.activated_skills())
+}
+
 /// Warn for MCP server ids declared by a skill that are not in the globally
 /// configured registry (issue #369 AC#5). Called after a successful mount so
 /// the user sees immediate feedback; the mount itself is not affected (the
@@ -4420,6 +4460,40 @@ mod tests {
                 ) if name == "ghost"
             ),
             "expected SessionError::SkillMount(NotMounted), got {err:?}",
+        );
+    }
+
+    /// `activate_skill`'s command body routes `Session::activate_skill`'s
+    /// typed refusal through the same `.map_err(SessionError::SkillMount)`
+    /// wrapping (issue #698): an activation can only name a MOUNTED skill.
+    /// The loading-gate posture is identical to the mount commands (pinned
+    /// by the tests above); the repeat-activation idempotence is pinned in
+    /// `session::skills`.
+    #[test]
+    fn activate_skill_command_maps_not_mounted_for_activation_to_session_skill_mount_error() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle");
+        let mut s = handle.session_lock().expect("lock");
+        let err = s
+            .activate_skill("ghost")
+            .map_err(SessionError::SkillMount)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SessionError::SkillMount(
+                    crate::session::skills::SkillMountError::NotMountedForActivation {
+                        ref name
+                    }
+                ) if name == "ghost"
+            ),
+            "expected SessionError::SkillMount(NotMountedForActivation), got {err:?}",
         );
     }
 

@@ -640,6 +640,23 @@ export async function unmountSkill(sessionId: string, name: string): Promise<voi
   await invoke<void>("unmount_skill", { sessionId, name });
 }
 
+// Activate a MOUNTED skill into the session's activated subset (issue #698,
+// ADR-0110). Appends an Activate lifecycle event (user actor) + persists; a
+// name not in the mounted set is a typed refuse (NotMountedForActivation) and
+// a repeat activation is idempotent success (no second event). Rejects during
+// resume / an in-flight turn, same gate as the mount commands. Channel only
+// in this ticket -- the user affordance rides #699.
+export async function activateSkill(sessionId: string, name: string): Promise<void> {
+  await invoke<void>("activate_skill", { sessionId, name });
+}
+
+// The session's currently-activated skill names, in first-activation
+// insertion order (issue #698). Read-only mirror of listMountedSkills; always
+// a subset of the mounted set. Lock-light server-side.
+export async function listActivatedSkills(sessionId: string): Promise<string[]> {
+  return invoke<string[]>("list_activated_skills", { sessionId });
+}
+
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------
 //
 // The IPC contract for the in-flow approval card (ADR-0083) + the

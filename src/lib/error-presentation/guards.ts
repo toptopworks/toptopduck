@@ -59,16 +59,18 @@ export function isSessionError(e: unknown): e is SessionError {
   }
 }
 
-// Narrow an unknown IPC reject to a SkillMountError (issue #363). Rides
-// SessionError.SkillMount -- the typed refuse for mount_skill / unmount_skill.
-// Defensive L1 shape: verify data.kind + data.data.name before promising the
-// shape, so fmtError / errorDetail never read an unverified field.
+// Narrow an unknown IPC reject to a SkillMountError (issue #363; issue #698,
+// ADR-0110). Rides SessionError.SkillMount -- the typed refuse for
+// mount_skill / unmount_skill / activate_skill. Defensive L1 shape: verify
+// data.kind + data.data.name before promising the shape, so fmtError /
+// errorDetail never read an unverified field.
 export function isSkillMountError(e: unknown): e is SkillMountError {
   if (typeof e !== "object" || e === null) return false;
   const kind = (e as { kind?: unknown }).kind;
   switch (kind) {
     case "AlreadyMounted":
-    case "NotMounted": {
+    case "NotMounted":
+    case "NotMountedForActivation": {
       const d = (e as { data?: unknown }).data;
       return (
         typeof d === "object" &&

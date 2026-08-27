@@ -14,6 +14,8 @@ const intl = createIntl({
   messages: {
     "error.skillMount.alreadyMounted": "Skill \"{name}\" is already mounted",
     "error.skillMount.notMounted": "Skill \"{name}\" is not mounted",
+    "error.skillMount.notMountedForActivation":
+      "Skill \"{name}\" is not mounted; mount it before activating",
   },
 });
 
@@ -25,6 +27,7 @@ describe("isSkillMountError", () => {
     const cases: SkillMountError[] = [
       { kind: "AlreadyMounted", data: { name: "sql-coach" } },
       { kind: "NotMounted", data: { name: "sql-coach" } },
+      { kind: "NotMountedForActivation", data: { name: "sql-coach" } },
     ];
     for (const value of cases) {
       expect(isSkillMountError(value), value.kind).toBe(true);
@@ -96,5 +99,14 @@ describe("fmtError via SessionError.SkillMount", () => {
         intl,
       ),
     ).toBe("Skill \"chart-helper\" is not mounted");
+    expect(
+      fmtError(
+        {
+          kind: "SkillMount",
+          data: { kind: "NotMountedForActivation", data: { name: "chart-helper" } },
+        },
+        intl,
+      ),
+    ).toBe("Skill \"chart-helper\" is not mounted; mount it before activating");
   });
 });
