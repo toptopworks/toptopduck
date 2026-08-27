@@ -1,7 +1,7 @@
 //! Shared HTTP egress helpers for the provider adapters (issue #244).
 //!
 //! Two security invariants live here, applied to every outbound LLM call
-//! (preflight + anthropic + openai) so the three paths cannot drift:
+//! (preflight and the yoagent model-config resolution) so the paths cannot drift:
 //!
 //! 1. **base_url scheme is http/https** -- see [`validate_http_base_url`].
 //!    Rejects `file:`, `data:`, and scheme-less strings at the boundary,
@@ -44,8 +44,8 @@ pub(crate) fn validate_http_base_url(base_url: &str) -> Result<(), InvalidBaseUr
 }
 
 /// Test-only construction counter for [`EGRESS_AGENT`] (issue #278): proves the
-/// singleton is built at most once across the process, so every call site
-/// (anthropic / openai / preflight) draws from one shared connection pool.
+/// singleton is built at most once across the process, so every call site (the
+/// preflight probes) draws from one shared connection pool.
 /// Read by `egress_agent_builds_only_once_across_calls`; compiled out of
 /// release builds.
 #[cfg(test)]
@@ -94,57 +94,24 @@ pub(crate) fn egress_agent() -> ureq::Agent {
     EGRESS_AGENT.clone()
 }
 
-/// Classify a ureq send result into either a 2xx [`ureq::Response`] or a
-/// [`ProviderError`](crate::provider::ProviderError), applying the ADR-0044
-/// status mapping shared by every outbound LLM call:
-///
-/// - HTTP 401/403 -> [`NotWired`](crate::provider::ProviderError::NotWired)
-///   (permanent for the turn: the stored key was rejected; not retried --
-///   three identical auth failures would only burn time).
-/// - Any other HTTP status, any transport error, and the 3xx that surfaces
-///   as `Ok` under [`egress_agent`]'s `redirects(0)` ->
-///   [`Unavailable`](crate::provider::ProviderError::Unavailable)
-///   (transient/retryable). The upstream body rides the message (bounded by
-///   [`reply::truncate`](crate::provider::reply::truncate)) so the user sees
-///   WHY instead of a bare status code.
-///
-/// Used by the tool-calling adapters (issue #291). The single-shot adapters
-/// retain their inline classification unchanged (zero behavior change to the
-/// legacy path); ADR-0077 retires the single-SQL contract, after which the
-/// single-shot path can route onto this helper.
-pub(crate) fn classify_send_result(
-    result: Result<ureq::Response, ureq::Error>,
-) -> Result<ureq::Response, crate::provider::ProviderError> {
-    use crate::provider::ProviderError;
-    match result {
-        // Under redirects(0) a 3xx surfaces as Ok (only >= 400 becomes
-        // Error::Status). Without this guard the 3xx body would reach
-        // into_json and surface as a misleading "response read failed"
-        // parse fault; map any non-2xx to the same transient Unavailable so
-        // the diagnosis names the status.
-        Ok(r) if !(200..300).contains(&r.status()) => {
-            let status = r.status();
-            let body = r.into_string().unwrap_or_default();
-            Err(ProviderError::Unavailable(format!(
-                "LLM call failed (HTTP {status}): {}",
-                crate::provider::reply::truncate(&body)
-            )))
-        }
-        Ok(r) => Ok(r),
-        Err(ureq::Error::Status(status, resp)) => {
-            if status == 401 || status == 403 {
-                Err(ProviderError::NotWired)
-            } else {
-                let body = resp.into_string().unwrap_or_default();
-                Err(ProviderError::Unavailable(format!(
-                    "LLM call failed (HTTP {status}): {}",
-                    crate::provider::reply::truncate(&body)
-                )))
-            }
-        }
-        // Transport error (DNS / TCP / TLS / timeout): transient/retryable.
-        Err(e) => Err(ProviderError::Unavailable(format!("LLM call failed: {e}"))),
+/// Truncate a string for an error message (avoid flooding the user / log with a
+/// long malformed model reply or upstream HTTP body). Floors to a UTF-8 char
+/// boundary: a naive `&s[..LIMIT]` panics when the cut lands mid-character, and
+/// model replies / gateway error bodies (and the errors built from them) are
+/// routinely CJK -- so this path, of all paths, must not panic on multi-byte
+/// text. (`floor_char_boundary` needs 1.91, so the floor is manual.) Shared
+/// across the preflight + HTTP-error-body paths so both stay panic-free from
+/// one source.
+pub(crate) fn truncate(s: &str) -> String {
+    const LIMIT: usize = 200;
+    if s.len() <= LIMIT {
+        return s.to_string();
     }
+    let mut end = LIMIT;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]
@@ -265,80 +232,23 @@ mod tests {
         );
     }
 
-    use crate::provider::ProviderError;
-
-    /// Send a no-op POST via the shared egress agent and classify the result,
-    /// so the ADR-0044 status mapping is pinned at [`classify_send_result`]
-    /// itself, not only via the adapters (which exercise just the 401 + 503
-    /// branches indirectly). Returns the small [`ProviderError`] (not the
-    /// 272-byte `ureq::Error`) so the Err variant stays cheap.
-    fn send_and_classify(url: &str) -> Result<ureq::Response, ProviderError> {
-        let result = egress_agent().post(url).send_json(serde_json::json!({}));
-        classify_send_result(result)
-    }
-
     #[test]
-    fn classify_2xx_passes_response_through() {
-        // A 2xx is the only Ok branch that returns the response unchanged;
-        // the caller then reads the JSON body. Pins the happy path so a
-        // future guard broadening the non-2xx arm cannot swallow 200.
-        let mut server = mockito::Server::new();
-        server
-            .mock("POST", "/v1/messages")
-            .with_status(200)
-            .with_body("{\"ok\":true}")
-            .create();
-        let resp = send_and_classify(&format!("{}/v1/messages", server.url()))
-            .expect("2xx passes through");
-        assert_eq!(resp.status(), 200);
-    }
+    fn truncate_floors_to_char_boundary_for_cjk_replies() {
+        // 120 CJK chars = 360 bytes; byte 200 (the LIMIT) lands mid-character.
+        // A naive `&s[..200]` would panic on the char boundary; truncate floors.
+        let reply = "中".repeat(120);
+        let out = truncate(&reply);
+        assert!(
+            out.ends_with('…'),
+            "truncated output should end with ellipsis"
+        );
+        // The head must hold only whole '中' chars -- the floor dropped no halves.
+        let head: String = out.chars().filter(|&c| c != '…').collect();
+        assert!(head.chars().all(|c| c == '中'));
+        assert!(head.chars().count() < 120);
 
-    #[test]
-    fn classify_3xx_under_redirects_zero_is_unavailable_with_status() {
-        // Under redirects(0) a 3xx surfaces as Ok (only >= 400 becomes Err);
-        // the classify guard maps it to Unavailable naming the status, not a
-        // misleading body-parse fault on the 3xx body.
-        let mut server = mockito::Server::new();
-        server
-            .mock("POST", "/v1/messages")
-            .with_status(302)
-            .with_header("Location", "https://evil.test")
-            .with_body("302 here")
-            .create();
-        match send_and_classify(&format!("{}/v1/messages", server.url())) {
-            Err(ProviderError::Unavailable(msg)) => assert!(
-                msg.contains("HTTP 302"),
-                "3xx surfaces with its status, got: {msg}"
-            ),
-            other => panic!("expected Unavailable for 3xx, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_403_is_not_wired() {
-        // ADR-0044: 403 joins 401 in the auth-rejected set -> NotWired
-        // (permanent, not retried). Distinct from the generic 4xx -> Available
-        // path so a regression dropping 403 from the guard fails here.
-        let mut server = mockito::Server::new();
-        server
-            .mock("POST", "/v1/messages")
-            .with_status(403)
-            .with_body(r#"{"error":{"message":"forbidden"}}"#)
-            .create();
-        assert!(matches!(
-            send_and_classify(&format!("{}/v1/messages", server.url())),
-            Err(ProviderError::NotWired)
-        ));
-    }
-
-    #[test]
-    fn classify_transport_error_is_unavailable() {
-        // An unroutable host produces a transport error (connection refused),
-        // mapped to Unavailable -- transient/retryable. Pins the catch-all
-        // Err arm distinct from the auth/status arms.
-        assert!(matches!(
-            send_and_classify("http://127.0.0.1:1/v1/messages"),
-            Err(ProviderError::Unavailable(_))
-        ));
+        // Short input passes through verbatim (no ellipsis added).
+        assert_eq!(truncate("短回复"), "短回复");
+        assert_eq!(truncate(""), "");
     }
 }

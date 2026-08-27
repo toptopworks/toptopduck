@@ -232,7 +232,7 @@ pub struct PromptParams {
 }
 
 /// `session/prompt` result. `stop_reason` is the agent's terminal verdict on
-/// this turn; the engine maps it onto [`crate::session::agent_loop::Termination`].
+/// this turn; the engine maps it onto [`crate::session::loop_contract::Termination`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptResult {
@@ -619,7 +619,7 @@ impl ToolCallContent {
                 }
             }
         }
-        crate::session::agent_loop::truncate_trace_excerpt(&buf, max)
+        crate::session::loop_contract::truncate_trace_excerpt(&buf, max)
     }
 }
 

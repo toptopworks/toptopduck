@@ -22,29 +22,29 @@
 //! keychain by profile id.
 //!
 //! Why a dedicated HTTP path instead of reusing `LiveProvider::generate`:
-//! `generate` parses the ADR-0009 SQL contract and treats a non-contract reply
-//! as `Unavailable`, which would let a weak model that answers the ping with
-//! plain prose masquerade as "incompatible". The preflight only cares whether
+//! A SQL-contract parse (the way the retired single-shot `generate` path did)
+//! would treat a plain-prose ping answer as `Unavailable`, letting a weak model
+//! masquerade as "incompatible". The preflight only cares whether
 //! the endpoint is reachable + the key is valid + the chat/messages shape is
 //! served -- it must not couple to the SQL contract, so it owns its own minimal
 //! HTTP exchange. The POST paths (`/v1/messages`, `/chat/completions`), the
 //! per-protocol auth headers (`x-api-key` + `anthropic-version` vs `Bearer`),
-//! and the `base_url` join mirror the anthropic and openai adapters verbatim;
-//! the `/models` GET path is preflight-only (neither adapter lists models -- it
-//! is the ADR-0070 "list models main path" probe added by this module).
+//! and the `base_url` join mirror the turn's upstream calls verbatim;
+//! the `/models` GET path is probe-only (the upstream loop has no model-list
+//! API -- it is the ADR-0070 "list models main path" probe added by this
+//! module).
 
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::model::{ProfileTestOutcome, Protocol};
-use crate::provider::reply::truncate;
+use crate::provider::http::truncate;
 
 /// Anthropic Messages API protocol version header (ADR-0019 native protocol).
-/// Mirrors `anthropic::ANTHROPIC_VERSION` verbatim -- that const is private to
-/// keep the adapter self-contained, and the preflight needs the same value to
-/// authenticate the `/v1/models` + `/v1/messages` probes; a version bump must
-/// update both (kept in sync by this comment).
+/// The preflight probes carry the same header value the upstream provider
+/// construction uses, so a probe authenticates exactly like a turn would; a
+/// version bump must update both (kept in sync by this comment).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Wall-clock ceiling on one preflight HTTP call. Tighter than the turn
@@ -102,12 +102,12 @@ pub(crate) fn probe(
         None => return ProfileTestOutcome::KeyRejected,
     };
     // AC #244 / #279: reject a non-http/https base_url (file:, data:,
-    // scheme-less) before any probe fires. Mirrors the anthropic/openai adapter
+    // scheme-less) before any probe fires. Mirrors the turn's upstream
     // boundary check. Classified as InvalidEndpoint -- the endpoint is not a
     // reachable http(s) target by construction (a CONFIGURATION error), distinct
     // from EndpointUnreachable (a transport fault on a VALID url). The detail
     // rides the shared validate_http_base_url Display verbatim, matching the
-    // turn adapters' TurnFailure::InvalidConfig mapping so one root cause
+    // turn's TurnFailure::InvalidConfig mapping so one root cause
     // yields one diagnosis at either surface (see provider::http).
     if let Err(e) = super::http::validate_http_base_url(base_url) {
         return ProfileTestOutcome::InvalidEndpoint {
@@ -148,7 +148,7 @@ fn list_models(protocol: Protocol, base_url: &str, key: &str) -> ModelsOutcome {
     let url = join_url(base_url, models_path(protocol));
     // AC #244: shared egress agent disables redirect-following, so x-api-key
     // (anthropic) and Authorization (openai) cannot reach a second host via a
-    // 3xx Location -- uniform with the turn adapters.
+    // 3xx Location -- uniform with the turn path.
     let agent = super::http::egress_agent();
     let request = match protocol {
         Protocol::Anthropic => agent
@@ -200,7 +200,7 @@ enum PingOutcome {
 fn ping(protocol: Protocol, base_url: &str, model: &str, key: &str) -> PingOutcome {
     let url = join_url(base_url, chat_path(protocol));
     // AC #244: shared egress agent disables redirect-following (mirrors
-    // list_models and the turn adapters).
+    // list_models and the turn path).
     let agent = super::http::egress_agent();
     let request = match protocol {
         Protocol::Anthropic => agent

@@ -352,10 +352,10 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
 
 #[test]
 fn real_openai_provider_end_to_end_materializes_result() {
-    // End-to-end on the OpenAI protocol (issue #160): LiveProvider routes to
-    // OpenaiProvider via protocol(), the adapter POSTs {base}/chat/completions
-    // with Bearer auth (matched here -- an anthropic dispatch would hit
-    // /v1/messages with x-api-key, miss the mock, 404), the model emits a
+    // End-to-end on the OpenAI protocol (issue #160): the facts feed the
+    // upstream construction, which POSTs {base}/chat/completions with Bearer
+    // auth (matched here -- an anthropic dispatch would hit /v1/messages with
+    // x-api-key, miss the mock, 404), the model emits a
     // materialize function call, the loop dispatches it, and result_1
     // materializes on the terminal text round-trip. `match_header` +
     // `assert()` are the routing proof; the row_count / sample assertions are

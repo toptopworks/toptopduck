@@ -2,11 +2,11 @@
 //! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
 //! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
-pub mod agent_loop;
 pub mod derived_source;
 pub(crate) mod engine;
 pub mod ingest;
 pub mod inline_materialize;
+pub mod loop_contract;
 pub mod materializer;
 pub mod recipe_persister;
 pub mod resume;
@@ -14,6 +14,7 @@ pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
+pub(crate) mod turn_dispatch;
 pub mod yoagent;
 
 use std::collections::{BTreeMap, HashMap};
@@ -48,7 +49,7 @@ use crate::runtime::acp::adapter::{detect_adapter, AdapterSpec};
 use crate::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx, GatewayOutcome};
-use crate::session::agent_loop::{LoopOutcome, LoopRound, Termination};
+use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
@@ -506,7 +507,7 @@ pub struct Session {
     /// `send` return Err, which Drop swallows (Drop must not panic).
     drop_signal: Option<std::sync::mpsc::Sender<()>>,
     /// The per-session external-runtime selector (issue #299 slice 9c). `None`
-    /// drives the built-in agent loop; `Some(spec)` drives the external ACP
+    /// drives the built-in (yoagent) loop; `Some(spec)` drives the external ACP
     /// engine for one CLI on the next turn. Issue #353 wired this to the
     /// composer runtime picker: the command layer mirrors the session's
     /// handle-held runtime choice into this field at each turn top (see the
@@ -1264,7 +1265,7 @@ impl Session {
                 // is the app's), then drive the UPSTREAM stateless loop with
                 // the shared session state and map the structured LoopOutcome
                 // onto TurnOutcome. Single track by decision: the self-written
-                // `AgentLoop` is out of the execution path (its retirement is
+                // the self-written loop is retired (the yoagent loop is the
                 // #670); there is no runtime switch and no fallback.
                 let mut request = window::assemble_tool_turn(
                     question,
@@ -2007,10 +2008,7 @@ fn merge_outcomes(
     for entry in &gateway.trace {
         *gateway_served.entry(entry.name.clone()).or_default() += 1;
     }
-    let mut rounds = Vec::new();
-    if !gateway.trace.is_empty() {
-        rounds.push(LoopRound::flat(gateway.trace));
-    }
+    let mut rounds = LoopRound::flat_wrap(gateway.trace);
     for mut round in std::mem::take(&mut acp.trace) {
         // A name the gateway SERVES is the gateway's to report: a built-in
         // name (issue #299 slice 9c -- the external CLI routes those
@@ -2164,7 +2162,7 @@ mod tests {
     use crate::approval::OperationKind;
     use crate::model::ThinkingTrace;
     use crate::runtime::gateway::server::GatewayOutcome;
-    use crate::session::agent_loop::{LoopOutcome, LoopRound, Termination, TraceEntry};
+    use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination, TraceEntry};
 
     // Issue #617: the settle stamp reads the wall clock a second time after
     // the ask stamp, so a backward clock correction (NTP, a manual change)

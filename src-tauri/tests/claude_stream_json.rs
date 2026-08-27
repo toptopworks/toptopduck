@@ -25,7 +25,7 @@ use toptopduck_lib::model::TurnPhase;
 use toptopduck_lib::runtime::acp::adapter::claude_code;
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
-use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
+use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination};
 
 /// Resolve the claude fake-CLI binary path.
 fn fake_cli() -> PathBuf {

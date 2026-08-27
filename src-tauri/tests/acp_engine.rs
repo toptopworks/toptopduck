@@ -20,7 +20,7 @@ use toptopduck_lib::runtime::acp::adapter::{
 };
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
-use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
+use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination};
 
 /// Resolve the fake-CLI binary path (cargo sets `CARGO_BIN_EXE_acp-fake-cli`
 /// for integration tests of the same package).

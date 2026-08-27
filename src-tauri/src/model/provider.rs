@@ -29,12 +29,12 @@ pub const DEFAULT_PROVIDER_MODEL: &str = "claude-sonnet-4-6";
 pub enum Protocol {
     #[default]
     Anthropic,
-    /// OpenAI Chat Completions wire protocol (ADR-0064). A pure HTTP
-    /// translation layer: Chat Completions request shape, Bearer auth, reads
-    /// `choices[0].message.content`, reuses the shared `parse_reply`. Covers
+    /// OpenAI Chat Completions wire protocol (ADR-0064). The upstream client
+    /// is a pure HTTP translation layer: Chat Completions request shape,
+    /// Bearer auth, reads `choices[0].message.content`. Covers
     /// OpenAI direct / DeepSeek / GLM / Qwen / Ollama compatible endpoints --
     /// the user points `base_url` at the endpoint (incl. its version path
-    /// segment, e.g. `/v1`); the adapter appends `/chat/completions`.
+    /// segment, e.g. `/v1`); the upstream client appends `/chat/completions`.
     Openai,
 }
 

@@ -21,7 +21,7 @@ use toptopduck_lib::model::TurnPhase;
 use toptopduck_lib::runtime::acp::adapter::codex;
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
-use toptopduck_lib::session::agent_loop::{LoopOutcome, Termination};
+use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination};
 
 /// Resolve the codex fake-CLI binary path.
 fn fake_cli() -> PathBuf {

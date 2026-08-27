@@ -17,7 +17,7 @@ use std::sync::Arc;
 use yoagent::types::{AgentEvent, AgentMessage, Content, Message};
 
 use crate::model::{ThinkingTrace, TurnPhase};
-use crate::session::agent_loop::{push_call, LoopRound};
+use crate::session::loop_contract::{push_call, LoopRound};
 
 use super::adapter::{emit_phase, PhaseSink, SharedTurnState};
 

@@ -9,7 +9,7 @@
 //! at the gateway aggregation layer in a later slice.
 //!
 //! The [`Materializer`] trait the `materialize` tool delegates to is the SAME
-//! trait the live-turn agent loop ([`crate::session::agent_loop::AgentLoop`],
+//! trait the turn runtimes' shared dispatch core ([`crate::session::turn_dispatch`],
 //! ADR-0081) and the resume replay drive, so numbering, caps, provenance, and
 //! stale-GC are inherited byte-for-byte -- no parallel materialize
 //! implementation. The single-SQL turn contract (ADR-0009) was retired by

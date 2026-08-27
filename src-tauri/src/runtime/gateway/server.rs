@@ -37,11 +37,9 @@ use crate::mcp::aggregator::{self, McpAggregator};
 use crate::mcp::meta_tools;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
-use crate::session::agent_loop::{
-    classify_with_cli_tool, truncate_trace_excerpt, ResolvedClassification, TraceEntry,
-    TRACE_EXCERPT_MAX,
-};
+use crate::session::loop_contract::{truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX};
 use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::turn_dispatch::{classify_with_cli_tool, ResolvedClassification};
 use crate::tools::{builtin_table, dispatch};
 
 use super::framing;
@@ -461,14 +459,13 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
         Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
         Ok(GateOutcome::Denied) => {
-            outcome.trace.push(TraceEntry {
-                tool_use_id: call.id.clone(),
-                name: call.name.clone(),
+            outcome.trace.push(TraceEntry::failed(
+                call.id.clone(),
+                call.name.clone(),
                 operation_kind,
                 summary,
-                success: false,
-                result_excerpt: "denied by approval gateway".to_string(),
-            });
+                "denied by approval gateway",
+            ));
             Response::Result(json!({
                 "content": [{"type": "text", "text": "tool call denied by the approval gateway"}],
                 "isError": true,
@@ -510,14 +507,25 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 }
                 result_envelope(dispatched.result)
             };
-            outcome.trace.push(TraceEntry {
-                tool_use_id: call.id.clone(),
-                name: call.name.clone(),
-                operation_kind,
-                summary,
-                success: !is_error,
-                result_excerpt: truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
-            });
+            let excerpt = truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX);
+            let entry = if is_error {
+                TraceEntry::failed(
+                    call.id.clone(),
+                    call.name.clone(),
+                    operation_kind,
+                    summary,
+                    excerpt,
+                )
+            } else {
+                TraceEntry::succeeded(
+                    call.id.clone(),
+                    call.name.clone(),
+                    operation_kind,
+                    summary,
+                    excerpt,
+                )
+            };
+            outcome.trace.push(entry);
             response
         }
     }
@@ -535,14 +543,13 @@ fn local_meta_result(
     outcome: &mut GatewayOutcome,
 ) -> Response {
     let excerpt = payload.to_string();
-    outcome.trace.push(TraceEntry {
-        tool_use_id: call.id.clone(),
-        name: call.name.clone(),
-        operation_kind: OperationKind::Read,
-        summary: summary.to_string(),
-        success: true,
-        result_excerpt: truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
-    });
+    outcome.trace.push(TraceEntry::succeeded(
+        call.id.clone(),
+        call.name.clone(),
+        OperationKind::Read,
+        summary.to_string(),
+        truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
+    ));
     Response::Result(json!({
         "content": [{"type": "text", "text": excerpt}],
         "isError": false,

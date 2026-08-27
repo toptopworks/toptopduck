@@ -3,7 +3,7 @@
 //! "Execute provider SQL on a sandboxed instance + install result_N onto
 //! admin + derive its shape + register the working set" is the promotion
 //! mechanism behind the `materialize` built-in tool (ADR-0077): the agent
-//! loop ([`crate::session::agent_loop::AgentLoop`]) dispatches the tool here,
+//! runtimes' shared dispatch core ([`crate::session::turn_dispatch`]) routes the tool here,
 //! and a tool-level [`ExecErrorKind`] routes back to the model for
 //! self-correction rather than failing the turn. Splitting the step behind
 //! [`Materializer`] lets a unit test inject a scripted [`ExecErrorKind`]

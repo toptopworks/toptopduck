@@ -39,7 +39,6 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -51,10 +50,10 @@ use crate::provider::tool_calling::ToolUse;
 use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
-use crate::session::agent_loop::{
-    classify_call, truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry,
-    TRACE_EXCERPT_MAX,
+use crate::session::loop_contract::{
+    truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
+use crate::session::turn_dispatch::{classify_call, spawn_wall_clock_watchdog};
 
 use super::engine::{RoundTracker, RowEnd, UNOBSERVED_EXCERPT};
 
@@ -332,14 +331,12 @@ pub(super) fn run_claude_stream_json(
 
     // Wall-clock watchdog (same as the other paths): fire cancel on expiry.
     if let Some(timeout) = wall_clock {
-        let alive = guard.watchdog_alive();
-        let token = Arc::clone(&cancel);
-        thread::spawn(move || {
-            thread::sleep(timeout);
-            if alive.load(std::sync::atomic::Ordering::SeqCst) {
-                token.request();
-            }
-        });
+        spawn_wall_clock_watchdog(
+            guard.watchdog_alive(),
+            Arc::clone(&cancel),
+            timeout,
+            "toptopduck::acp",
+        );
     }
 
     // Spawn claude --print with the bridge injected via --mcp-config +
@@ -643,22 +640,32 @@ impl ClaudePump {
         end: RowEnd,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
-        let entry = TraceEntry {
-            tool_use_id: row.tool_use_id,
-            name: row.name.clone(),
-            operation_kind: row.operation_kind,
-            summary: row.summary.clone(),
-            success: matches!(end, RowEnd::Completed),
-            // The claude wire carries no per-call result text on the
-            // tool_result frame; a failure still needs its bounded anchor
-            // (ADR-0078) -- the ACP pump's honest "failed" marker. A row
-            // the agent never reported on carries the unobserved marker
-            // instead (issue #630).
-            result_excerpt: match end {
-                RowEnd::Completed => String::new(),
-                RowEnd::Failed => "failed".to_string(),
-                RowEnd::Unobserved => UNOBSERVED_EXCERPT.to_string(),
-            },
+        // The claude wire carries no per-call result text on the tool_result
+        // frame; a failure still needs its bounded anchor (ADR-0078) -- the
+        // ACP pump's honest "failed" marker. A row the agent never reported
+        // on carries the unobserved marker instead (issue #630).
+        let entry = match end {
+            RowEnd::Completed => TraceEntry::succeeded(
+                row.tool_use_id,
+                row.name.clone(),
+                row.operation_kind,
+                row.summary.clone(),
+                String::new(),
+            ),
+            RowEnd::Failed => TraceEntry::failed(
+                row.tool_use_id,
+                row.name.clone(),
+                row.operation_kind,
+                row.summary.clone(),
+                "failed",
+            ),
+            RowEnd::Unobserved => TraceEntry::failed(
+                row.tool_use_id,
+                row.name.clone(),
+                row.operation_kind,
+                row.summary.clone(),
+                UNOBSERVED_EXCERPT,
+            ),
         };
         on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
         if !row.gateway_routed {

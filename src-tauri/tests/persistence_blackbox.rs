@@ -23,8 +23,8 @@ use toptopduck_lib::provider::tool_calling::{
 };
 use toptopduck_lib::{
     is_resuming, ActiveAbandoned, ActiveResolution, CancelToken, FakeProvider, LoadOutcome,
-    PendingConflict, Provider, ProviderError, ProviderReply, ProviderRequest, ResumeError,
-    ResumeEvent, Session, SourceIssue, SourceResolution, ThreadEntry, TurnOutcome, UnwiredProvider,
+    PendingConflict, Provider, ProviderError, ResumeError, ResumeEvent, Session, SourceIssue,
+    SourceResolution, ThreadEntry, TurnOutcome, UnwiredProvider,
 };
 
 /// Resume with default Abort callbacks for the issue #49 interactive decision
@@ -1321,8 +1321,8 @@ fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
         after.is_empty(),
         "no entries after the breakpoint, got {after:?}"
     );
-    // AC7 (no cloud LLM): resume succeeded with UnwiredProvider, which would
-    // have returned NotWired on any provider.generate() call. The whole
+    // AC7 (no cloud LLM): resume succeeded with UnwiredProvider, which
+    // refuses every `generate_tool_turn` round-trip with NotWired. The whole
     // productive chain replayed LLM-free.
 }
 
@@ -2862,11 +2862,6 @@ struct CountingProvider {
 }
 
 impl Provider for CountingProvider {
-    fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(ProviderError::NotWired)
-    }
-
     fn generate_tool_turn(
         &self,
         _request: &ToolTurnRequest,
@@ -3376,10 +3371,6 @@ struct WriteProbeProvider {
 }
 
 impl Provider for WriteProbeProvider {
-    fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
-        Err(ProviderError::NotWired)
-    }
-
     fn generate_tool_turn(
         &self,
         _request: &ToolTurnRequest,

@@ -1,28 +1,21 @@
-//! LLM provider abstraction (ADR-0007): a thin trait behind which the real
-//! Claude client ships (issue #29: `anthropic::AnthropicProvider`). The turn
-//! orchestrator depends on this trait, never on a concrete client, so every
-//! turn is testable offline against a scripted fake (the v1 shared test base).
-//! v1 ships one real implementation behind the trait; multi-provider is a
-//! future config point, not pre-built.
-//!
-//! The [`ProviderRequest`] handed to a provider each turn is the *assembled LLM
-//! payload* -- the windowed conversation history plus every working-set dataset
-//! pruned by the privacy controls (issue #24, ADR-0023/0026/0039/0011). The
-//! window assembler (`crate::window`) is the single place that builds it; the
-//! types below are just its shape.
+//! LLM provider abstraction (ADR-0007, recalibrated by ADR-0107): the trait
+//! the wiring seam reads per turn to drive the built-in runtime -- live
+//! construction facts (`turn_model_facts`) for the upstream loop, or a
+//! `generate_tool_turn` face for providers without live facts (the scripted
+//! test fake, bridged onto the loop as-is). The self-written protocol adapters
+//! retired with the built-in loop (ADR-0107 Decision 1, issue #670); the
+//! windowed payload vocabulary below stays -- the window assembler
+//! (`crate::window`) builds it for both the built-in and ACP turn paths.
 
-pub mod anthropic;
 pub mod fake;
 pub mod http;
 pub mod keychain;
 pub mod live_config;
-pub mod openai;
 pub mod preflight;
 pub mod prompt;
-pub mod reply;
 pub mod tool_calling;
 
-use crate::model::{Protocol, TextKind};
+use crate::model::TextKind;
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::prompt::ResponseLocale;
 
@@ -184,37 +177,6 @@ pub struct ProviderRequest {
     pub active: Option<String>,
 }
 
-/// One turn LLM output contract (ADR-0009, calibrated by ADR-0028/0033): either
-/// one SQL to execute (+ optional viz spec + optional assumption note), or a
-/// textual response with no SQL -- a disambiguation question (ADR-0018) or an
-/// out-of-scope refusal (ADR-0017). Slice #23 widens #22's SQL-only reply to
-/// the full contract; #26 structures the viz as a typed [`VizSpec`] (chart kind
-/// from the v1 whitelist + Vega-Lite JSON, ADR-0016/0033). `assumption` carries
-/// the natural-language side note for both branches (the method name behind a
-/// refusal, the interpretation behind a clarify, or the assumption behind a SQL).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProviderReply {
-    /// One SQL to execute, with an optional viz spec and assumption note.
-    Sql {
-        sql: String,
-        /// Optional viz spec (ADR-0016/0033): the LLM-decided chart for this
-        /// result, or `None` for a plain table turn (the default). Carried
-        /// verbatim to the frontend, which renders it or degrades to a table
-        /// with a disclosure when the spec is malformed or fails to render.
-        viz: Option<crate::model::VizSpec>,
-        assumption: Option<String>,
-    },
-    /// A textual response (no SQL): a clarify question or an out-of-scope
-    /// refusal. `body` is the text shown to the user; `assumption` is the
-    /// optional side note (e.g. which method the refusal is steering away
-    /// from).
-    Text {
-        kind: crate::model::TextKind,
-        body: String,
-        assumption: Option<String>,
-    },
-}
-
 /// Why a provider call did not yield a reply. All three variants fail the
 /// turn at the wiring seam (ADR-0044/0077/0081): transport-level faults never
 /// reach the model for self-correction (that channel is tool-level errors
@@ -248,10 +210,11 @@ pub enum ProviderError {
     #[error("LLM provider configuration is invalid: {0}")]
     InvalidConfig(String),
     /// The provider call failed or its output violated the contract (network /
-    /// quota / malformed output). Transient/recoverable: the retry loop
-    /// re-feeds it up to the budget, then yields a failed turn (ADR-0028).
-    /// Auth failures (HTTP 401/403) are permanent, not transient -- they map
-    /// to [`NotWired`] and skip the retry loop (ADR-0044).
+    /// quota / malformed output). Transient/recoverable at the turn level:
+    /// maps to a failed turn honestly (ADR-0077/0081) -- transport-level
+    /// faults never reach the model for self-correction (that channel is
+    /// tool-level errors only). Auth failures (HTTP 401/403) are permanent,
+    /// not transient -- they map to [`NotWired`] (ADR-0044).
     #[error("LLM provider call failed: {0}")]
     Unavailable(String),
 }
@@ -287,35 +250,25 @@ impl std::fmt::Debug for TurnModelFacts {
     }
 }
 
-/// The provider abstraction (ADR-0007). Two methods: the single-shot
-/// [`Self::generate`] (turn a schema-aware request into the one-SQL reply
-/// contract, ADR-0009) and the native tool-calling [`Self::generate_tool_turn`]
-/// (ADR-0081, issue #291). Concrete implementations: the real
-/// Anthropic client (anthropic::AnthropicProvider, #29), the OpenAI-compatible
-/// client (openai::OpenaiProvider), the scripted test fake
-/// (fake::FakeProvider), and the default UnwiredProvider. Send so the session
-/// can hold it behind an Arc<Mutex> and run turns on a blocking thread.
+/// The provider abstraction (ADR-0007, recalibrated by ADR-0107). The face
+/// the wiring seam drives the built-in turn through: one native tool-calling
+/// round-trip (ADR-0081, issue #291) -- send the active tool table plus the
+/// in-progress conversation, get back either the model's tool invocations to
+/// execute or its terminal text answer, alongside any reasoning blocks the
+/// runtime emitted (issue #614 -- empty for every thinking-disabled turn).
+/// Concrete implementations: the scripted test fake
+/// (fake::FakeProvider, bridged onto the yoagent loop) and the default
+/// [`UnwiredProvider`]; [`LiveProvider`] carries live construction facts
+/// instead and never answers a round-trip itself. Send so the session can
+/// hold it behind an Arc<Mutex> and run turns on a blocking thread.
 pub trait Provider: Send + Sync {
-    fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError>;
-
-    /// One native tool-calling round-trip (ADR-0081, issue #291):
-    /// send the active tool table plus the in-progress conversation, get back
-    /// either the model's tool invocations to execute or its terminal text
-    /// answer, alongside any reasoning blocks the runtime emitted (issue
-    /// #614 -- empty for every thinking-disabled turn and the openai
-    /// protocol's honest degrade). The two adapters translate the
-    /// protocol-neutral [`tool_calling::ToolTurnRequest`] onto their native
-    /// wire shapes (anthropic `tools` / `tool_use` / `tool_result`; openai
-    /// `tools` / `tool_calls` / `tool` role). ADR-0029 invariant 3 holds:
-    /// the request never carries the key; the adapter reads it from the
-    /// config source. ADR-0044 classification is unchanged.
-    ///
-    /// Coexists with [`Self::generate`] (zero behavior change to the
-    /// single-shot path; ADR-0077 retires the single-SQL contract for
-    /// tool-calling turns). Default [`ProviderError::NotWired`] so a provider that
-    /// does not implement native tool-calling (e.g. [`UnwiredProvider`],
-    /// [`fake::FakeProvider`] until #295 extends it) refuses the turn
-    /// permanently -- the same surface as an unwired single-shot turn.
+    /// Default [`ProviderError::NotWired`] so a provider that does not
+    /// implement the face (e.g. [`UnwiredProvider`]) refuses the turn
+    /// permanently -- the same surface as an unwired turn. DEAD CODE on the
+    /// live track: the wiring seam routes a provider whose
+    /// [`Self::turn_model_facts`] returns `Some` to the upstream streamer and
+    /// never calls this face -- the two faces are mutually exclusive by
+    /// convention (only the scripted fake + [`UnwiredProvider`] answer it).
     fn generate_tool_turn(
         &self,
         _request: &tool_calling::ToolTurnRequest,
@@ -325,8 +278,7 @@ pub trait Provider: Send + Sync {
 
     /// The resolved response locale for prompt assembly (ADR-0052). The
     /// tool-calling wiring seam (`Session::ask_with_phase`) owns the system
-    /// prompt -- unlike the single-shot path, where each adapter builds it
-    /// internally -- so it reads the locale off the provider per turn. Read
+    /// prompt, so it reads the locale off the provider per turn. Read
     /// per turn (not cached) so a locale-preference change takes effect the
     /// next turn, mirroring [`LiveProvider`]'s per-turn protocol re-read. The
     /// default is the ADR-0052 fallback locale: providers without a config
@@ -352,65 +304,40 @@ pub trait Provider: Send + Sync {
 /// silently doing nothing or inventing SQL.
 pub struct UnwiredProvider;
 
-impl Provider for UnwiredProvider {
-    fn generate(&self, _request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
-        Err(ProviderError::NotWired)
-    }
-}
+impl Provider for UnwiredProvider {}
 
-/// Per-turn protocol router (ADR-0064, issue #152). Holds a
-/// [`ProviderConfigSource`] and, on each [`Provider::generate`] call, reads the
-/// active profile's [`Protocol`] fresh and dispatches to the matching adapter
-/// ([`anthropic::AnthropicProvider`] or [`openai::OpenaiProvider`]). Reading
-/// per-turn (not caching at construction) honors the protocol-switch-takes-
-/// effect-next-turn AC: a profile switch / protocol edit lands the next turn
-/// on the new adapter.
+/// The live per-turn facts carrier (ADR-0064 -> ADR-0107). Holds a
+/// [`ProviderConfigSource`] and answers [`Provider::turn_model_facts`] /
+/// [`Provider::response_locale`] from it, read fresh each turn: a profile
+/// switch / protocol edit lands the next turn (the protocol-switch-takes-
+/// effect-next-turn AC). The adapter dispatch this type used to perform
+/// retired with the self-written adapters (ADR-0107 Decision 1); the facts
+/// feed the upstream provider construction sealed inside `session::yoagent`.
 ///
 /// Generic over `C` so production wires [`crate::LiveProviderConfig`] (reads
 /// app-config + keychain fresh each turn) while tests inject
 /// [`crate::StaticConfig`] (or a flipping double for the per-turn assertion).
-/// `C` is NOT required to be `Clone` (issue #159): each dispatch borrows
-/// `&self.config` for the duration of the adapter call -- the adapter is a
-/// stateless translator that reads the source per turn and never stores it,
-/// so no ownership transfer (and no clone) is needed.
+/// `C` is NOT required to be `Clone` (issue #159): each read borrows
+/// `&self.config`.
 pub struct LiveProvider<C: ProviderConfigSource + 'static> {
     config: C,
 }
 
 impl<C: ProviderConfigSource + 'static> LiveProvider<C> {
-    /// Wire the router with the live config source. The source's `protocol()`
-    /// is read on each `generate`, so a protocol change in the underlying store
-    /// takes effect the next turn without re-booting the session.
+    /// Wire the facts carrier with the live config source. The source is
+    /// read on each turn, so a change in the underlying store takes effect
+    /// the next turn without re-booting the session.
     pub fn new(config: C) -> Self {
         Self { config }
     }
 }
 
 impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
-    fn generate(&self, request: &ProviderRequest) -> Result<ProviderReply, ProviderError> {
-        match self.config.protocol() {
-            Protocol::Anthropic => anthropic::AnthropicProvider::generate(&self.config, request),
-            Protocol::Openai => openai::OpenaiProvider::generate(&self.config, request),
-        }
-    }
-
-    fn generate_tool_turn(
-        &self,
-        request: &tool_calling::ToolTurnRequest,
-    ) -> Result<tool_calling::ToolTurnOutcome, ProviderError> {
-        match self.config.protocol() {
-            Protocol::Anthropic => {
-                anthropic::AnthropicProvider::generate_tool_turn(&self.config, request)
-            }
-            Protocol::Openai => openai::OpenaiProvider::generate_tool_turn(&self.config, request),
-        }
-    }
-
     fn response_locale(&self) -> ResponseLocale {
-        // Per-turn read off the config source, same freshness as the adapters'
-        // internal prompt assembly on the single-shot path: a "system"
-        // preference re-resolves the OS locale here, an explicit override maps
-        // directly (ADR-0052).
+        // Per-turn read off the config source (the same freshness
+        // [`Self::turn_model_facts`] applies): a "system" preference
+        // re-resolves the OS locale here, an explicit override maps directly
+        // (ADR-0052).
         self.config.locale()
     }
 
@@ -434,8 +361,6 @@ impl<C: ProviderConfigSource + 'static> Provider for LiveProvider<C> {
 mod tests {
     use super::*;
     use crate::model::Protocol;
-    use crate::provider::prompt::ResponseLocale;
-    use std::sync::{Arc, Mutex};
 
     /// The key never rides a Debug render: a present key prints as the
     /// redaction marker (ADR-0029, mirroring the upstream `StreamConfig`'s
@@ -453,211 +378,5 @@ mod tests {
         let rendered = format!("{facts:?}");
         assert!(!rendered.contains("sk-secret"), "got {rendered}");
         assert!(rendered.contains("[redacted]"), "got {rendered}");
-    }
-
-    /// A minimal request with no history / datasets -- the routing tests only
-    /// care which HTTP endpoint the dispatch hit, not the body shape.
-    fn bare_request() -> ProviderRequest {
-        ProviderRequest {
-            question: "q".into(),
-            history: Vec::new(),
-            datasets: Vec::new(),
-            active: None,
-        }
-    }
-
-    /// A config source whose `protocol` can be flipped between turns (via the
-    /// shared `Arc<Mutex>`), to prove `LiveProvider` re-reads `protocol()` per
-    /// turn rather than caching it at construction. All other fields are fixed.
-    /// Derives `Clone` (shares the protocol cell) so the test can hand a copy
-    /// to `LiveProvider` and still mutate the shared cell afterward -- a test
-    /// convenience, not a router requirement (`LiveProvider<C>` does not
-    /// require `Clone`, issue #159).
-    #[derive(Clone)]
-    struct FlippableConfig {
-        key: String,
-        base_url: String,
-        model: String,
-        locale: ResponseLocale,
-        protocol: Arc<Mutex<Protocol>>,
-    }
-
-    impl ProviderConfigSource for FlippableConfig {
-        fn api_key(&self) -> Option<String> {
-            Some(self.key.clone())
-        }
-        fn base_url(&self) -> String {
-            self.base_url.clone()
-        }
-        fn model(&self) -> String {
-            self.model.clone()
-        }
-        fn locale(&self) -> ResponseLocale {
-            self.locale
-        }
-        fn protocol(&self) -> Protocol {
-            *self
-                .protocol
-                .lock()
-                .expect("flippable protocol mutex poisoned")
-        }
-    }
-
-    fn flippable(url: &str, protocol: Protocol) -> FlippableConfig {
-        FlippableConfig {
-            key: "sk-test".into(),
-            base_url: url.into(),
-            model: "m".into(),
-            locale: ResponseLocale::EnUS,
-            protocol: Arc::new(Mutex::new(protocol)),
-        }
-    }
-
-    #[test]
-    fn routes_anthropic_protocol_to_messages_endpoint() {
-        // AC: protocol=Anthropic dispatches to the anthropic adapter -- the
-        // request lands at /v1/messages with x-api-key auth.
-        let mut server = mockito::Server::new();
-        let _mock = server
-            .mock("POST", "/v1/messages")
-            .match_header("x-api-key", "sk-test")
-            .with_status(200)
-            .with_body(
-                serde_json::json!({
-                    "content": [{"type":"text","text":
-                        r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#}]
-                })
-                .to_string(),
-            )
-            .create();
-        let p = LiveProvider::new(flippable(&server.url(), Protocol::Anthropic));
-        p.generate(&bare_request()).expect("anthropic reply");
-        _mock.assert();
-    }
-
-    #[test]
-    fn routes_openai_protocol_to_chat_completions_endpoint() {
-        // AC: protocol=Openai dispatches to the openai adapter -- the request
-        // lands at /chat/completions with Bearer auth.
-        let mut server = mockito::Server::new();
-        let _mock = server
-            .mock("POST", "/chat/completions")
-            .match_header("authorization", "Bearer sk-test")
-            .with_status(200)
-            .with_body(
-                serde_json::json!({
-                    "choices": [{"message": {"role":"assistant","content":
-                        r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#}}]
-                })
-                .to_string(),
-            )
-            .create();
-        let p = LiveProvider::new(flippable(&server.url(), Protocol::Openai));
-        p.generate(&bare_request()).expect("openai reply");
-        _mock.assert();
-    }
-
-    #[test]
-    fn re_reads_protocol_per_turn_not_cached_at_construction() {
-        // AC "re-read active_profile each turn": a protocol switch between two
-        // turns of the SAME LiveProvider routes the second turn to the new
-        // adapter. The
-        // flippable config's protocol (shared via Arc<Mutex> across the clone
-        // the LiveProvider holds) is mutated AFTER construction; if the router
-        // cached the protocol at construction, both turns would hit the same
-        // endpoint. One server mocks BOTH protocol paths so base_url stays
-        // constant -- the protocol flip alone reroutes.
-        let mut server = mockito::Server::new();
-        let openai_mock = server
-            .mock("POST", "/chat/completions")
-            .with_status(200)
-            .with_body(
-                serde_json::json!({
-                    "choices": [{"message": {"role":"assistant","content":
-                        r#"{"type":"sql","sql":"SELECT 1","viz":null,"assumption":null}"#}}]
-                })
-                .to_string(),
-            )
-            .create();
-        let anthropic_mock = server
-            .mock("POST", "/v1/messages")
-            .with_status(200)
-            .with_body(
-                serde_json::json!({
-                    "content": [{"type":"text","text":
-                        r#"{"type":"sql","sql":"SELECT 2","viz":null,"assumption":null}"#}]
-                })
-                .to_string(),
-            )
-            .create();
-
-        // Start in Openai mode. The test clones cfg (FlippableConfig derives
-        // Clone -- the protocol Arc<Mutex> is shared across the clone) so it
-        // can hand a copy to LiveProvider and keep cfg to flip its protocol
-        // below. LiveProvider<C> itself does not require Clone (issue #159);
-        // the clone here is a test convenience, not a router requirement.
-        let cfg = flippable(&server.url(), Protocol::Openai);
-        let p = LiveProvider::new(cfg.clone());
-
-        // Turn 1: Openai -> /chat/completions.
-        p.generate(&bare_request()).expect("turn 1 openai");
-        openai_mock.assert(); // hit exactly once
-
-        // Flip the shared protocol cell to Anthropic -- NO re-construction of
-        // the LiveProvider. The next turn re-reads protocol() and reroutes.
-        *cfg.protocol
-            .lock()
-            .expect("flippable protocol mutex poisoned") = Protocol::Anthropic;
-
-        // Turn 2: SAME LiveProvider, now Anthropic -> /v1/messages.
-        p.generate(&bare_request()).expect("turn 2 anthropic");
-        anthropic_mock.assert(); // hit exactly once
-    }
-
-    #[test]
-    fn accepts_a_non_clone_config_source() {
-        // AC #159: LiveProvider must not require Clone on its config source.
-        // The router borrows &self.config per turn (stateless adapter reads it
-        // in-call and never stores it), so a source without Clone compiles and
-        // routes. If the Clone bound were ever re-added, this test would fail
-        // to compile -- a regression guard for the ownership-to-borrow refactor.
-        #[derive(Default)]
-        struct NonCloneSource;
-        impl ProviderConfigSource for NonCloneSource {
-            fn api_key(&self) -> Option<String> {
-                None
-            }
-            fn base_url(&self) -> String {
-                String::new()
-            }
-            fn model(&self) -> String {
-                String::new()
-            }
-            fn locale(&self) -> ResponseLocale {
-                ResponseLocale::EnUS
-            }
-            fn protocol(&self) -> Protocol {
-                Protocol::Anthropic
-            }
-        }
-
-        let provider = LiveProvider::new(NonCloneSource);
-        // The compile-pass is the load-bearing guard: NonCloneSource has no
-        // Clone impl, so re-adding `+ Clone` to LiveProvider<C>'s bound would
-        // fail this test to compile. The runtime assert is a cheap sanity
-        // check that dispatch still reaches the matching adapter branch
-        // (redundant with the borrow-path coverage in
-        // re_reads_protocol_per_turn_not_cached_at_construction).
-        //
-        // Scope: this guards the BOUND, not the production wiring. Production
-        // (commands.rs) still clones LiveProviderConfig at LiveProvider::new;
-        // the per-turn clone was removed only INSIDE LiveProvider::generate
-        // (which now borrows &self.config). The bound removal keeps the router
-        // source-agnostic -- it does not require any concrete source to
-        // forgo Clone.
-        assert_eq!(
-            provider.generate(&bare_request()).unwrap_err(),
-            ProviderError::NotWired
-        );
     }
 }

@@ -1,9 +1,6 @@
-//! The yoagent integration layer (ADR-0107 Decision 1-5, issue #668): the
-//! in-process agent-loop runtime that replaces the self-written loop +
-//! protocol adapters in #669/#670. This slice lands the layer itself --
-//! construction, dispatch, mapping, and offline pins -- WITHOUT wiring it
-//! into turn execution (app behavior is unchanged; `Session::ask` still
-//! drives `AgentLoop`).
+//! The yoagent integration layer (ADR-0107): the in-process agent-loop
+//! runtime behind the built-in turn (wired by #669; the self-written loop +
+//! protocol adapters it replaced are deleted, issue #670).
 //!
 //! Integration shape (ADR-0107 Decision 2): every turn is a stateless
 //! `agent_loop()` call fed the app-assembled full windowed context -- no
@@ -12,7 +9,7 @@
 //! loader, no MCP client, no sub-agents, no tool middleware (the app gateway
 //! is the single enforcement point). Safety net (Decision 4): the step cap
 //! (24) + wall clock (120s, ADR-0081) map onto `ExecutionLimits` and the
-//! caller-thread watchdog exactly as `AgentLoop` applies them; cancellation
+//! caller-thread watchdog (ADR-0081 values); cancellation
 //! maps the app's `CancelToken` onto the upstream task token; loop detection
 //! is ON (consecutive identical calls steer, then stop). Retries for
 //! rate-limit / transient network faults ride the upstream backoff; a
@@ -24,11 +21,6 @@
 //! shared `dispatch_gated_call` core) while a scoped driver thread runs the
 //! async loop on a dedicated single-threaded runtime. Only owned data
 //! crosses (channels + shared state).
-
-// The layer is wired into turn execution (issue #669): `Session::ask` routes
-// every built-in turn through `turn_loop_for` below. The retired self-written
-// loop (`AgentLoop`) carries the dead-code allowances now, until #670 deletes
-// it.
 
 mod adapter;
 mod fold;
@@ -58,11 +50,13 @@ use crate::cancel::CancelToken;
 use crate::mcp::aggregator::McpAggregator;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::{ThinkingBlock, ToolTurnMessage, ToolTurnRequest};
-use crate::session::agent_loop::{
-    dispatch_gated_call, panic_to_transient, retain_landed_rounds, spawn_wall_clock_watchdog,
-    DispatchAbort, GateCtx, LoopOutcome, Termination, DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK,
+use crate::session::loop_contract::{
+    retain_landed_rounds, LoopOutcome, Termination, DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::turn_dispatch::{
+    dispatch_gated_call, panic_to_transient, spawn_wall_clock_watchdog, DispatchAbort, GateCtx,
+};
 
 use adapter::{DispatchOutcome, DispatchRequest, GatewayToolAdapter, PhaseSink, SharedTurnState};
 use fold::EventFold;
@@ -91,7 +85,7 @@ const AUTH_ERROR_PREFIX: &str = "Auth error"; // ProviderError::Auth Display
 const INVALID_CONFIG_PREFIX: &str = "Invalid config";
 
 /// The per-turn yoagent runner -- the layer's mirror of
-/// [`crate::session::agent_loop::AgentLoop`]. Built per turn (cheap): the
+/// the retired built-in loop. Built per turn (cheap): the
 /// resolved model + key, the provider, and the two execution-level caps.
 pub(crate) struct YoagentLoop {
     provider: Arc<dyn StreamProvider>,
@@ -101,8 +95,7 @@ pub(crate) struct YoagentLoop {
 }
 
 impl YoagentLoop {
-    /// Default caps (step cap 24, wall clock 120s, ADR-0081) -- the same
-    /// defaults `AgentLoop::new` applies.
+    /// Default caps (step cap 24, wall clock 120s, ADR-0081).
     pub(crate) fn new(provider: Arc<dyn StreamProvider>, model: ResolvedYoagentModel) -> Self {
         Self {
             provider,
@@ -112,9 +105,8 @@ impl YoagentLoop {
         }
     }
 
-    /// Override the caps (the test seam mirroring `AgentLoop::with_caps`).
-    /// Test-only at the call sites: the production wiring always runs the
-    /// ADR-0081 defaults.
+    /// Override the caps (the test seam). Test-only at the call sites: the
+    /// production wiring always runs the ADR-0081 defaults.
     #[allow(dead_code)]
     pub(crate) fn with_caps(mut self, step_cap: u32, wall_clock: Option<Duration>) -> Self {
         self.step_cap = step_cap;
@@ -122,12 +114,11 @@ impl YoagentLoop {
         self
     }
 
-    /// Drive one agent turn through the upstream loop (the layer's mirror of
-    /// `AgentLoop::run`): serve gateway dispatches on this thread while the
-    /// driver thread runs the loop, then fold the event stream into the
-    /// round-grouped trace and derive the termination. The same
-    /// single-in-flight + watchdog + panic-guard contract `AgentLoop::run`
-    /// upholds (ADR-0021/0081, issue #321).
+    /// Drive one agent turn through the upstream loop: serve gateway
+    /// dispatches on this thread while the driver thread runs the loop, then
+    /// fold the event stream into the round-grouped trace and derive the
+    /// termination -- the single-in-flight + watchdog + panic-guard contract
+    /// (ADR-0021/0081, issue #321).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run(
         &self,
@@ -141,9 +132,8 @@ impl YoagentLoop {
         cancel: Arc<CancelToken>,
         on_phase: impl FnMut(TurnPhase) + Send + 'static,
     ) -> LoopOutcome {
-        // In-flight + stale-request reset (ADR-0021): same contract as
-        // AgentLoop::run, same guard lifetime (every exit drops it, which
-        // invalidates the watchdog).
+        // In-flight + stale-request reset (ADR-0021): every exit drops the
+        // guard, which invalidates the watchdog.
         let guard = cancel.begin_turn();
         let phases: PhaseSink = Arc::new(Mutex::new(on_phase));
         let state = Arc::new(SharedTurnState::new());
@@ -249,9 +239,7 @@ impl YoagentLoop {
                 cancel: &cancel,
             };
             for DispatchRequest { call, resp } in req_rx {
-                // Mid-batch stop check -- the per-call cancel check the
-                // built-in loop's batch loop makes (`run`'s
-                // `if cancel.is_requested() { break }`), mirrored here:
+                // Mid-batch stop check -- the per-call cancel gate:
                 // upstream's executor checks neither cancel nor steering
                 // BETWEEN the calls of one batch, so once the turn is over
                 // (a user cancel, a gate cancel, or a dispatch panic) the
@@ -259,8 +247,7 @@ impl YoagentLoop {
                 // GateCancelled answer routes the adapter onto its cancel
                 // path (fires the upstream token, feeds an error result
                 // back) so the executor stops at the next loop-top without
-                // anything dispatching for real -- the built-in loop's
-                // break-on-cancel semantics.
+                // anything dispatching for real -- break-on-cancel semantics.
                 let turn_over = cancel.is_requested()
                     || state.gate_cancelled.load(Ordering::SeqCst)
                     || state

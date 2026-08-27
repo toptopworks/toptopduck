@@ -1,9 +1,8 @@
 //! Offline path pins for the yoagent integration layer (issue #668 item 7):
 //! every termination + dispatch path driven by a scripted offline
-//! `StreamProvider` -- no network, no key, no `Session`. Mirrors the agent
-//! loop's own test posture (scripted trajectory + the real materializer +
-//! an in-memory DuckDB engine), asserting the SAME `LoopOutcome` shapes the
-//! built-in loop's tests pin, so the trace equivalence the AC demands is
+//! `StreamProvider` -- no network, no key, no `Session`. Scripted trajectory + the
+//! real materializer + an in-memory DuckDB engine, asserting the SAME
+//! `LoopOutcome` shapes the behavior contracts pin, so the trace equivalence the AC demands is
 //! enforced against a concrete trajectory rather than asserted in prose.
 
 use std::collections::VecDeque;
@@ -27,8 +26,8 @@ use crate::model::{DatasetDescriptor, TurnPhase};
 use crate::provider::tool_calling::{
     ThinkingBlock, ToolDefinition, ToolResult, ToolTurnMessage, ToolTurnRequest, ToolUse,
 };
-use crate::session::agent_loop::{LoopOutcome, Termination};
 use crate::session::engine::AdminEngine;
+use crate::session::loop_contract::{LoopOutcome, Termination};
 use crate::session::materializer::{Materializer, RealMaterializer, TurnDeps};
 use crate::session::yoagent::model_config::{resolve_yoagent_model, ResolvedYoagentModel};
 use crate::session::yoagent::YoagentLoop;
@@ -46,13 +45,16 @@ use tempfile::TempDir;
 /// fault paths: `fire_cancel_on` fires the app token mid-stream (the
 /// user-cancel path), `stream_delay` parks each turn long enough for the
 /// watchdog to fire, and `fail_with` raises a provider-level error on the
-/// given turn (auth / api, the terminal fault classification). Every
+/// given turn (auth / api, the terminal fault classification), and `panic_on`
+/// raises a provider panic on the given turn (the issue #321 provider-panic
+/// guard). Every
 /// received `StreamConfig`'s message list is captured, so the full-window
 /// feed is pinnable.
 struct ScriptedProvider {
     script: Mutex<VecDeque<Message>>,
     fire_cancel_on: Option<(usize, Arc<CancelToken>)>,
     fail_with: Option<(usize, FailKind)>,
+    fire_panic_on: Option<usize>,
     stream_delay: Option<Duration>,
     seen_windows: Mutex<Vec<Vec<Message>>>,
 }
@@ -72,6 +74,7 @@ impl ScriptedProvider {
             script: Mutex::new(script.into()),
             fire_cancel_on: None,
             fail_with: None,
+            fire_panic_on: None,
             stream_delay: None,
             seen_windows: Mutex::new(Vec::new()),
         }
@@ -84,6 +87,14 @@ impl ScriptedProvider {
 
     fn with_failure_on(mut self, turn: usize, kind: FailKind) -> Self {
         self.fail_with = Some((turn, kind));
+        self
+    }
+
+    /// Raise a provider panic on the given turn's stream call (the issue
+    /// #321 provider-panic guard pin: the panic must land an honest
+    /// transient, never a silent success).
+    fn with_panic_on(mut self, turn: usize) -> Self {
+        self.fire_panic_on = Some(turn);
         self
     }
 
@@ -128,6 +139,11 @@ impl StreamProvider for ScriptedProvider {
                     FailKind::Auth(detail) => ProviderError::Auth(detail.clone()),
                     FailKind::Api(detail) => ProviderError::Api(detail.clone()),
                 });
+            }
+        }
+        if let Some(fire_at) = self.fire_panic_on {
+            if fire_at == turn_index {
+                panic!("scripted provider panic (issue #321 pin)");
             }
         }
         if let Some((fire_at, token)) = &self.fire_cancel_on {
@@ -723,7 +739,7 @@ fn mid_batch_cancel_stops_dispatching_the_rest() {
     );
     assert_eq!(outcome.termination, Termination::Cancelled);
     assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        outcome.trace.is_empty(),
         "nothing in the batch dispatches after the cancel: {:?}",
         outcome.trace
     );
@@ -935,10 +951,54 @@ fn dispatch_panic_aborts_the_batch_and_rolls_back_ghost_result() {
         "ghost rolled back; the next materialize reuses result_2"
     );
     assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        outcome.trace.is_empty(),
         "the queued second call never dispatches: {:?}",
         outcome.trace
     );
+}
+
+/// A panicking provider lands an honest transient, never a silent success
+/// (issue #321): the panic crosses the spawned loop task's join as a
+/// JoinError and maps through the panic guard into `Transient` with no ghost
+/// round -- the successor of the retired corpus's provider-panic pin.
+#[test]
+fn provider_panic_lands_an_honest_transient_turn() {
+    let mut h = Harness::new();
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            thinking_and_batch(
+                "",
+                None,
+                vec![call("tu_1", "explore", json!({"sql": "SELECT 1"}))],
+            ),
+            text_reply("unreachable"),
+        ])
+        .with_panic_on(1),
+    );
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request("panic provider"),
+        offline_loop(Arc::clone(&provider)),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+    );
+    match &outcome.termination {
+        Termination::Transient(detail) => {
+            assert!(
+                detail.contains("panicked"),
+                "the detail surfaces the panic: {detail}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
+    assert!(
+        outcome.trace.is_empty(),
+        "a provider panic leaves no ghost round: {:?}",
+        outcome.trace
+    );
+    assert!(outcome.promotions.is_empty());
 }
 
 /// External routing (ADR-0105): an un-denied namespaced call routes to the
@@ -975,7 +1035,7 @@ fn external_call_routes_the_aggregator() {
     // own error result routed back -- no trace entry, no dispatch (ADR-0105
     // Decision 4: the call never reached a tool).
     assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        outcome.trace.is_empty(),
         "an unresolved handle never dispatches: {:?}",
         outcome.trace
     );
@@ -1076,7 +1136,7 @@ fn upstream_builtin_tools_are_not_registered() {
     // No call ever dispatched: the empty round the batch opened is dropped
     // by the outcome assembly, so the trace carries no entry at all.
     assert!(
-        outcome.trace.iter().all(|r| r.calls.is_empty()),
+        outcome.trace.is_empty(),
         "bash never dispatches: {:?}",
         outcome.trace
     );

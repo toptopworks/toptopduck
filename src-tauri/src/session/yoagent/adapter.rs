@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::model::{Promotion, TurnPhase};
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
-use crate::session::agent_loop::Termination;
+use crate::session::loop_contract::Termination;
 
 /// One dispatch request crossing from the async loop to the caller thread's
 /// dispatch server: the call to route, plus the response channel for its
@@ -47,7 +47,7 @@ pub(crate) enum DispatchOutcome {
     /// any promotion.
     Done {
         result: ToolResult,
-        entry: Option<crate::session::agent_loop::TraceEntry>,
+        entry: Option<crate::session::loop_contract::TraceEntry>,
         promotion: Option<Promotion>,
     },
     /// The approval gate was cancelled mid-call -- the whole turn aborts
@@ -67,7 +67,7 @@ pub(crate) enum DispatchOutcome {
 pub(crate) struct SharedTurnState {
     /// Trace entries keyed by tool-call id, recorded by the adapter as each
     /// dispatch lands.
-    pub(crate) entries: Mutex<HashMap<String, crate::session::agent_loop::TraceEntry>>,
+    pub(crate) entries: Mutex<HashMap<String, crate::session::loop_contract::TraceEntry>>,
     /// Promotions in dispatch order (sequential strategy makes dispatch
     /// order == promotion order, ADR-0022 monotonic `result_N`).
     pub(crate) promotions: Mutex<Vec<Promotion>>,

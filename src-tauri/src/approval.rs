@@ -121,7 +121,7 @@ impl ToolKey {
     /// production code must use [`Self::try_external`] instead. The only
     /// non-test production use is with a compile-time constant guaranteed to
     /// differ from `BUILTIN_SERVER` (e.g. [`Self::RESERVED_SPOOF_SERVER`] in
-    /// the agent-loop spoof fallback). `server` is the user-configured MCP
+    /// the dispatch-core spoof fallback). `server` is the user-configured MCP
     /// server name (ADR-0076); `tool` is the tool name that server advertises.
     pub fn external(server: impl Into<String>, tool: impl Into<String>) -> Self {
         let server = server.into();
