@@ -44,6 +44,13 @@ export const sessionKeys = {
    *  invalidate this key so the badge re-reads without a remount. Lives under
    *  the session prefix so a close's removeQueries drops it with the rest. */
   mountedSkills: (sessionId: string) => ["session", sessionId, "mountedSkills"] as const,
+  /** Per-session activated-skill names (issue #699, ADR-0110) -- the composer
+   *  skills section's activation-state read (the Active badge source).
+   *  Session-prefixed like `mountedSkills` so a close's removeQueries drops
+   *  it with the rest; the activate mutation and unmount's cascade write it
+   *  via setQueryData in the same ritual as the mount delta. */
+  activatedSkills: (sessionId: string) =>
+    ["session", sessionId, "activatedSkills"] as const,
   /** Cold-start placeholder (ADR-0092): the shell-level bar has no session id
    *  before the first submit. The query is always enabled:false so the queryFn
    *  never runs -- the key exists only to satisfy useQuery's queryKey

@@ -30,6 +30,8 @@
   "composer.contextPanel.clearPendingFiles": "Clear queued files",
   "composer.contextPanel.filesTitle": "Add files",
   "composer.contextPanel.pendingFilesLabel": "{count} files queued for the next session",
+  "composer.contextPanel.skillActivateAria": "Activate skill {name}",
+  "composer.contextPanel.skillActiveBadge": "Active",
   "composer.contextPanel.skillToggleAria": "Mount skill {name}",
   "composer.contextPanel.skillsEmpty": "No skills",
   "composer.contextPanel.skillsNoMatches": "No skills match your search.",
