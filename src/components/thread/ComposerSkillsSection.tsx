@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { Plus, Zap } from "lucide-react";
 
 import { Input } from "../ui/input";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import {
+  activateSkill,
+  listActivatedSkills,
   listMountedSkills,
   listSkills,
   mountSkill,
@@ -35,6 +37,16 @@ import type { SkillEntry } from "../../types/skills";
 // an in-flight turn (reject_if_resuming + reject_if_in_flight), so the visual
 // gate and the IPC gate agree (AC #5). The "Add skill" footer hops to the
 // settings SkillsSection via the parent's onOpenSettingsSkills callback.
+//
+// Activation (issue #699, ADR-0110 Decision 5): a mounted unactivated row
+// carries a row-tail activate action -- a second control OUTSIDE the mount
+// label so clicking it cannot toggle the mount; an activated row shows the
+// Active badge instead (same primary token as the thread's Activate marker).
+// There is no deactivation action: unmount is activation's sole exit, and its
+// success cascades the activation cache in the same synchronous delta. Draft
+// mode renders no activation affordance at all -- activation is
+// session-scoped (user here, agent via the gateway tool in #701), so the
+// draft stage has no face for it.
 
 const ROW_CLASS =
   "composer-skill-row focus-visible:outline-ring flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2";
@@ -108,6 +120,16 @@ export function ComposerSkillsSection({
     [sessionId, pendingSkills, mounted],
   );
 
+  // The activation state read (issue #699): session-mode only, like the
+  // mounted query above. Draft mode leaves it disabled -- no IPC, no
+  // affordance, an empty set.
+  const { data: activated, error: activatedQueryError } = useQuery({
+    queryKey: sessionKeys.activatedSkills(sessionId ?? ""),
+    queryFn: () => listActivatedSkills(sessionId as string),
+    enabled: sessionId !== null,
+  });
+  const activatedSet = useMemo(() => new Set(activated ?? []), [activated]);
+
   // Session-mode-only mutation machinery below: toggle() routes null-sessionId
   // rows to the pending-list path, so none of these ever run in draft mode.
   // The `as string` casts carry that invariant (the same pattern the
@@ -120,6 +142,21 @@ export function ComposerSkillsSection({
     );
     void queryClient.invalidateQueries({
       queryKey: sessionKeys.mountedSkills(sessionId as string),
+    });
+  }
+
+  // The activation-set twin of applyMountDelta (issue #699): same ritual, the
+  // activated key.
+  function applyActivationDelta(
+    delta: (prev: string[] | undefined) => string[],
+  ) {
+    setError(null);
+    queryClient.setQueryData<string[]>(
+      sessionKeys.activatedSkills(sessionId as string),
+      delta,
+    );
+    void queryClient.invalidateQueries({
+      queryKey: sessionKeys.activatedSkills(sessionId as string),
     });
   }
 
@@ -142,12 +179,34 @@ export function ComposerSkillsSection({
   const unmountMutation = useMutation({
     mutationFn: (name: string) => unmountSkill(sessionId as string, name),
     onMutate: (name) => markPending(name),
-    onSuccess: (_data, name) =>
-      applyMountDelta((prev) => prev?.filter((n) => n !== name) ?? []),
+    onSuccess: (_data, name) => {
+      applyMountDelta((prev) => prev?.filter((n) => n !== name) ?? []);
+      // Cascade (ADR-0110 Decision 4: unmount is activation's sole exit) --
+      // subtract from the activated cache in the same synchronous step so the
+      // badge drops without a stale one-beat flash; invalidate-only would
+      // leave the old state visible until the refetch lands.
+      applyActivationDelta((prev) => prev?.filter((n) => n !== name) ?? []);
+    },
     onError: (e) => {
       setError(fmtError(e, intl));
       void queryClient.invalidateQueries({
         queryKey: sessionKeys.mountedSkills(sessionId as string),
+      });
+    },
+    onSettled: (_d, _e, name) => clearPending(name),
+  });
+
+  const activateMutation = useMutation({
+    mutationFn: (name: string) => activateSkill(sessionId as string, name),
+    onMutate: (name) => markPending(name),
+    onSuccess: (_data, name) =>
+      applyActivationDelta((prev) =>
+        prev?.includes(name) ? prev : [...(prev ?? []), name],
+      ),
+    onError: (e) => {
+      setError(fmtError(e, intl));
+      void queryClient.invalidateQueries({
+        queryKey: sessionKeys.activatedSkills(sessionId as string),
       });
     },
     onSettled: (_d, _e, name) => clearPending(name),
@@ -200,7 +259,8 @@ export function ComposerSkillsSection({
   const displayError =
     error ??
     (listingQueryError ? fmtError(listingQueryError, intl) : null) ??
-    (mountedQueryError ? fmtError(mountedQueryError, intl) : null);
+    (mountedQueryError ? fmtError(mountedQueryError, intl) : null) ??
+    (activatedQueryError ? fmtError(activatedQueryError, intl) : null);
 
   return (
     <div className="composer-skill-section grid gap-1.5">
@@ -227,11 +287,16 @@ export function ComposerSkillsSection({
       <ul className="grid max-h-44 min-h-0 grid-cols-[minmax(0,1fr)] gap-0.5 overflow-x-hidden overflow-y-auto pr-0.5">
         {filtered.map((skill) => {
           const isMounted = mountedSet.has(skill.name);
+          const isActivated = activatedSet.has(skill.name);
           const pending = pendingNames.has(skill.name);
           const disabled = loading || pending;
           return (
-            <li key={skill.name}>
-              <label className={ROW_CLASS}>
+            // The li is the row's flex container; the mount label is narrowed
+            // to checkbox + name + builtin badge (flex-1 keeps the row-tail
+            // control right-aligned) so clicking the activation control
+            // cannot toggle the mount.
+            <li key={skill.name} className="flex items-center gap-1">
+              <label className={`${ROW_CLASS} min-w-0 flex-1`}>
                 <input
                   type="checkbox"
                   checked={isMounted}
@@ -258,6 +323,37 @@ export function ComposerSkillsSection({
                   </span>
                 )}
               </label>
+              {/* Session-mode row tail (issue #699): mounted+unactivated gets
+                  the activate action (same loading/pendingNames gate as the
+                  checkbox); activated gets the badge-primary pill -- the same
+                  primary token as the thread Activate marker, so one domain
+                  concept reads one color. Nothing here renders in draft mode
+                  and an activated row gets no second action (no deactivate). */}
+              {sessionId !== null && isMounted && !isActivated && (
+                <button
+                  type="button"
+                  onClick={() => activateMutation.mutate(skill.name)}
+                  disabled={disabled}
+                  aria-label={intl.formatMessage(
+                    {
+                      id: "composer.contextPanel.skillActivateAria",
+                      defaultMessage: "Activate skill {name}",
+                    },
+                    { name: skill.name },
+                  )}
+                  className="text-muted-foreground hover:bg-accent hover:text-primary focus-visible:outline-ring shrink-0 cursor-pointer rounded-md p-1.5 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Zap className="size-3.5" aria-hidden />
+                </button>
+              )}
+              {sessionId !== null && isMounted && isActivated && (
+                <span className="bg-primary text-primary-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+                  <FormattedMessage
+                    id="composer.contextPanel.skillActiveBadge"
+                    defaultMessage="Active"
+                  />
+                </span>
+              )}
             </li>
           );
         })}

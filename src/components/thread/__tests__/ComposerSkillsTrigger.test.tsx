@@ -5,7 +5,7 @@ import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ComposerSkillsTrigger } from "../ComposerSkillsTrigger";
-import { listMountedSkills, listSkills, mountSkill, unmountSkill } from "../../../api";
+import { listActivatedSkills, listMountedSkills, listSkills, mountSkill, unmountSkill } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { SkillEntry } from "../../../types/skills";
 
@@ -22,8 +22,10 @@ vi.mock("../../../api", async (importOriginal) => {
     ...actual,
     listSkills: vi.fn(),
     listMountedSkills: vi.fn(),
+    listActivatedSkills: vi.fn(),
     mountSkill: vi.fn(async () => {}),
     unmountSkill: vi.fn(async () => {}),
+    activateSkill: vi.fn(async () => {}),
   };
 });
 
@@ -65,6 +67,7 @@ describe("ComposerSkillsTrigger draft mode (ADR-0092 / #500)", () => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue({ skills: [skill("charting"), skill("cleaning")], ignored: [], root_error: null });
     vi.mocked(listMountedSkills).mockResolvedValue([]);
+    vi.mocked(listActivatedSkills).mockResolvedValue([]);
   });
 
   it("does not call listMountedSkills when sessionId is null", async () => {
