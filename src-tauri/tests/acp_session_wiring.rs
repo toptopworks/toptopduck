@@ -160,6 +160,7 @@ fn external_cli_tool_call_routes_through_the_gateway() {
         mcp_servers: &[],
         keychain: &keychain,
         skills: &[],
+        activated: &[],
         cli_tools: std::slice::from_ref(&tool),
     };
     // An approval sink that answers allow-once from inside emit_request: the
@@ -305,6 +306,13 @@ fn external_turn_with_skill_records_provenance() {
     let approval = ApprovalState::new();
     let sink = NullSink;
     let keychain = KeychainStore::new();
+    // ADR-0110 (issue #700): the ACP provenance fork records the FULL mounted
+    // set regardless of the activated list -- the external injection surface
+    // stays full-text until #702, so the provenance names every skill whose
+    // body the CLI actually received. Passing a NON-EMPTY activated list here
+    // (a legal state: the skill is both mounted and activated) pins that the
+    // external path does not sort by it.
+    let activated = vec!["sql-coach".to_string()];
     let outcome = session.ask_with_phase(
         "what is the answer?",
         &approval,
@@ -314,6 +322,7 @@ fn external_turn_with_skill_records_provenance() {
             mcp_servers: &[],
             keychain: &keychain,
             skills: &fragments,
+            activated: &activated,
             cli_tools: &[],
         },
     );

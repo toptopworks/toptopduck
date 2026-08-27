@@ -1,16 +1,18 @@
 //! Integration test: mounted-skill prompt injection + provenance (issue #364,
-//! ADR-0086).
+//! ADR-0086; recalibrated for progressive disclosure by issue #700, ADR-0110).
 //!
-//! Drives the built-in agent loop end-to-end with a skill mounted, then asserts
-//! the two surfaces issue #364 wires:
-//!   1. The skill's body lands in the system prompt the provider receives
-//!      (framed per ADR-0086, mount order, verbatim) -- AC #1.
-//!   2. The turn's persisted provenance records `{name, content_hash}` with the
-//!      SHA-256 of the whole `SKILL.md` -- AC #3.
+//! Drives the built-in agent loop end-to-end with skills mounted, then asserts
+//! the disclosure surfaces issue #700 wires:
+//!   1. A mounted-but-not-activated skill lands as a metadata index entry
+//!      (name + description, no body) in the system prompt.
+//!   2. An activated skill's body lands verbatim in the 【激活技能】 frame,
+//!      and the turn's persisted provenance records the ACTIVATED subset's
+//!      `{name, content_hash}` (SHA-256 of the whole `SKILL.md`).
+//!   3. Unmounting cascades a skill out of both blocks.
 //!
-//! The empty-mount case (AC #4) is covered by every existing black-box test --
+//! The empty-mount case is covered by every existing black-box test --
 //! they pass `&[]` for skills and see no skill section -- so this file focuses
-//! on the positive path.
+//! on the disclosure-positive paths.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -43,10 +45,12 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
     fs::write(dir.join("SKILL.md"), content).unwrap();
 }
 
-/// AC #1 + AC #3: a mounted skill's body rides the system prompt and its
-/// `{name, content_hash}` rides the turn's provenance.
+/// AC #2 (activated bodies) + AC #6 (built-in provenance): an ACTIVATED
+/// skill's body rides the system prompt in the 【激活技能】 frame and its
+/// `{name, content_hash}` rides the turn's provenance -- the built-in turn
+/// records the activated subset (ADR-0110 Decision 5; issue #700).
 #[test]
-fn mounted_skill_body_in_prompt_and_provenance() {
+fn activated_skill_body_in_prompt_and_provenance() {
     let skills_root = tempfile::tempdir().unwrap();
     let skills_root = skills_root.path().to_path_buf();
     let body = "When you use a native statistical method, name it in your answer.\n";
@@ -69,10 +73,13 @@ fn mounted_skill_body_in_prompt_and_provenance() {
         FakeProvider::new().scripted_tool_turn("查询", ToolTurnReply::Text("done".into()));
     let captured = provider.captured_tool_turns();
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
-    // Mount the skill on the session timeline, then resolve its body + hash
-    // from the registry root at the command boundary (mirroring `commands::ask`).
+    // Mount + activate the skill on the session timeline, then resolve its
+    // fragments + the activated list at the command boundary (mirroring
+    // `commands::ask`).
     session.mount_skill("sql-coach").expect("mount");
+    session.activate_skill("sql-coach").expect("activate");
     let mounted = session.mounted_skills();
+    let activated = session.activated_skills();
     let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
     assert_eq!(fragments.len(), 1);
     assert_eq!(fragments[0].name, "sql-coach");
@@ -89,6 +96,7 @@ fn mounted_skill_body_in_prompt_and_provenance() {
             mcp_servers: &[],
             keychain: &KeychainStore::new(),
             skills: &fragments,
+            activated: &activated,
             cli_tools: &[],
         },
     );
@@ -98,8 +106,8 @@ fn mounted_skill_body_in_prompt_and_provenance() {
         "got {outcome:?}"
     );
 
-    // AC #1: the skill body + its ADR-0086 frame landed in the system prompt
-    // the provider received (captured on the first / only round-trip).
+    // The activated body + its ADR-0110 frame landed in the system prompt the
+    // provider received (captured on the first / only round-trip).
     let guard = captured.lock().expect("capture lock");
     assert_eq!(
         guard.len(),
@@ -108,12 +116,16 @@ fn mounted_skill_body_in_prompt_and_provenance() {
     );
     let system = &guard[0].system;
     assert!(
-        system.contains("【挂载技能】技能 `sql-coach`："),
-        "skill frame missing from system prompt"
+        system.contains("【激活技能】技能 `sql-coach`："),
+        "activated skill frame missing from system prompt"
     );
     assert!(
         system.contains(body.trim()),
-        "skill body must be verbatim in the system prompt"
+        "activated skill body must be verbatim in the system prompt"
+    );
+    assert!(
+        !system.contains("【可用技能】"),
+        "no index block when the only mount is activated"
     );
     // The tool-selection section (ADR-0087) rides the base prompt, guiding
     // the agent to use matching external tools regardless of source.
@@ -121,7 +133,7 @@ fn mounted_skill_body_in_prompt_and_provenance() {
     assert!(system.contains("不区分工具来源"));
     drop(guard);
 
-    // AC #3: the turn's provenance records {name, content_hash}. The recipe is
+    // The turn's provenance records {name, content_hash}. The recipe is
     // the persisted form -- its last turn entry carries the audit's provenance.
     let recipe = session.build_recipe();
     let last_turn = recipe
@@ -139,12 +151,247 @@ fn mounted_skill_body_in_prompt_and_provenance() {
             name: "sql-coach".into(),
             content_hash: expected_hash,
         }],
-        "provenance must snapshot the skill's name + whole-file hash"
+        "provenance must snapshot the activated skill's name + whole-file hash"
     );
 }
 
+/// AC #1 + AC #3 (index shape): a mounted-but-not-activated skill lands as a
+/// metadata index entry -- name + description, no body -- and the built-in
+/// turn's provenance records the EMPTY activated set (nothing shaped the
+/// answer). The index wording is the locked transitional contract from issue
+/// #700's brief.
+#[test]
+fn mounted_not_activated_lands_index_entry_not_body() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    let body = "When you use a native statistical method, name it in your answer.\n";
+    put_skill(
+        &skills_root,
+        "sql-coach",
+        "Coach the user on honest SQL reporting.",
+        body,
+    );
+
+    let provider =
+        FakeProvider::new().scripted_tool_turn("查询", ToolTurnReply::Text("done".into()));
+    let captured = provider.captured_tool_turns();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session.mount_skill("sql-coach").expect("mount");
+    let mounted = session.mounted_skills();
+    let activated = session.activated_skills();
+    assert!(activated.is_empty(), "mounting alone never activates");
+    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let outcome = session.ask_with_phase(
+        "查询",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &KeychainStore::new(),
+            skills: &fragments,
+            activated: &activated,
+            cli_tools: &[],
+        },
+    );
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let guard = captured.lock().expect("capture lock");
+    let system = &guard[0].system;
+    // The index block, word-for-word per the locked contract.
+    assert!(
+        system.contains(
+            "\n\n【可用技能】\n以下技能已挂载，完整说明尚未加载：\n\
+             - `sql-coach` — Coach the user on honest SQL reporting.\n"
+        ),
+        "index entry must match the locked transitional wording, got:\n{system}"
+    );
+    // No body, no activated frame.
+    assert!(
+        !system.contains("【激活技能】"),
+        "an unactivated skill injects no body frame"
+    );
+    assert!(
+        !system.contains(body.trim()),
+        "an unactivated skill injects no body"
+    );
+    drop(guard);
+
+    // The built-in provenance records the (empty) activated set.
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn");
+    assert!(
+        last_turn.provenance.skills.is_empty(),
+        "an unactivated mount contributes nothing to the built-in provenance"
+    );
+}
+
+/// AC #2/#3 tails + the both-present block order: with one skill mounted and
+/// another activated, the index block precedes the activated body; unmounting
+/// the activated skill cascades it out of BOTH blocks (and the index-only
+/// skill leaves the index when unmounted) -- ADR-0110 Decision 2.
+#[test]
+fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(&skills_root, "alpha", "Alpha skill.", "Alpha body.\n");
+    put_skill(&skills_root, "beta", "Beta skill.", "Beta body.\n");
+
+    // Four scripted questions -- one per turn of the timeline.
+    let provider = FakeProvider::new()
+        .scripted_tool_turn("第一轮", ToolTurnReply::Text("one".into()))
+        .scripted_tool_turn("第二轮", ToolTurnReply::Text("two".into()))
+        .scripted_tool_turn("第三轮", ToolTurnReply::Text("three".into()))
+        .scripted_tool_turn("第四轮", ToolTurnReply::Text("four".into()));
+    let captured = provider.captured_tool_turns();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session.mount_skill("alpha").expect("mount alpha");
+    session.mount_skill("beta").expect("mount beta");
+    session.activate_skill("beta").expect("activate beta");
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let ask = |session: &mut Session, question: &str, skills_root: &Path| {
+        let mounted = session.mounted_skills();
+        let activated = session.activated_skills();
+        let fragments = resolve_prompt_fragments(skills_root, &mounted);
+        session.ask_with_phase(
+            question,
+            &approval,
+            &sink,
+            |_| {},
+            &TurnInputs {
+                mcp_servers: &[],
+                keychain: &KeychainStore::new(),
+                skills: &fragments,
+                activated: &activated,
+                cli_tools: &[],
+            },
+        )
+    };
+    // The provenance names of the recipe's nth Turn entry (0-based).
+    let provenance_names = |session: &Session, n: usize| -> Vec<String> {
+        let recipe = session.build_recipe();
+        let turns: Vec<_> = recipe
+            .history
+            .iter()
+            .filter_map(|e| match e {
+                RecipeEntry::Turn(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        turns[n]
+            .provenance
+            .skills
+            .iter()
+            .map(|s| s.name.clone())
+            .collect()
+    };
+
+    // Turn 1: index (alpha) precedes the activated body (beta); each skill
+    // appears on exactly its own level.
+    let outcome = ask(&mut session, "第一轮", &skills_root);
+    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    {
+        let guard = captured.lock().expect("capture lock");
+        let system = &guard[0].system;
+        let index_pos = system.find("【可用技能】").expect("index block present");
+        let body_pos = system
+            .find("【激活技能】技能 `beta`")
+            .expect("activated body present");
+        assert!(
+            index_pos < body_pos,
+            "index block precedes activated bodies"
+        );
+        assert!(system.contains("- `alpha` — Alpha skill.\n"));
+        assert!(!system.contains("Alpha body."), "inactive body absent");
+        assert!(!system.contains("- `beta`"), "activated skill not indexed");
+        drop(guard);
+    }
+    // The same turn's provenance records exactly the activated subset -- the
+    // render fork and the provenance fork live in different files, so pinning
+    // both here catches them diverging.
+    assert_eq!(
+        provenance_names(&session, 0),
+        vec!["beta".to_string()],
+        "the mixed turn's provenance records exactly the activated set"
+    );
+
+    // Turn 2 (nothing changed): the activated body keeps injecting turn over
+    // turn -- activation is a persistent state, not a one-shot (ADR-0110
+    // Decision 3).
+    let outcome = ask(&mut session, "第二轮", &skills_root);
+    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    {
+        let guard = captured.lock().expect("capture lock");
+        let system = &guard[1].system;
+        assert!(system.contains("【激活技能】技能 `beta`："));
+        assert!(system.contains("Beta body."));
+        drop(guard);
+    }
+    assert_eq!(
+        provenance_names(&session, 1),
+        vec!["beta".to_string()],
+        "an unchanged activation keeps recording in the provenance"
+    );
+
+    // Unmount the ACTIVATED skill: it leaves both the activated set (cascade)
+    // and the mounted set, so turn 3 shows beta nowhere and alpha still
+    // indexed.
+    session.unmount_skill("beta").expect("unmount beta");
+    let outcome = ask(&mut session, "第三轮", &skills_root);
+    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    {
+        let guard = captured.lock().expect("capture lock");
+        let system = &guard[2].system;
+        assert!(
+            !system.contains("beta"),
+            "an unmounted skill is gone entirely"
+        );
+        assert!(system.contains("- `alpha` — Alpha skill.\n"));
+        drop(guard);
+    }
+    assert!(
+        provenance_names(&session, 2).is_empty(),
+        "the unmounted skill's activation leaves the provenance too"
+    );
+
+    // Unmount the INDEX-ONLY skill: it leaves the index; with no mount and no
+    // activation left, turn 4 renders neither block at all.
+    session.unmount_skill("alpha").expect("unmount alpha");
+    let outcome = ask(&mut session, "第四轮", &skills_root);
+    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    {
+        let guard = captured.lock().expect("capture lock");
+        let system = &guard[3].system;
+        assert!(
+            !system.contains("alpha"),
+            "the last unmount clears the index"
+        );
+        assert!(
+            !system.contains("【可用技能】") && !system.contains("【激活技能】"),
+            "an empty mount set renders neither block"
+        );
+        drop(guard);
+    }
+}
+
 /// AC #4 (negative space): with no skills mounted, the system prompt carries no
-/// skill-body section (the base prompt's tool-selection section is always
+/// skill section at all (the base prompt's tool-selection section is always
 /// present), and the provenance skills vec is empty. Every existing black-box
 /// test also exercises this via `&[]`; pinned here for locality.
 #[test]
@@ -170,8 +417,12 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
     let guard = captured.lock().expect("capture lock");
     let system = &guard[0].system;
     assert!(
-        !system.contains("【挂载技能】"),
-        "no skill-body section when nothing is mounted"
+        !system.contains("【可用技能】"),
+        "no index block when nothing is mounted"
+    );
+    assert!(
+        !system.contains("【激活技能】"),
+        "no body block when nothing is mounted"
     );
     // The tool-selection section is always present in the base prompt
     // (ADR-0087) -- it names DuckDB as the default tool without injecting

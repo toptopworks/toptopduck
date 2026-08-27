@@ -63,7 +63,11 @@ pub fn assemble(
 /// datasets / samples / privacy pruning the model sees.
 ///
 /// `skills` is the session's resolved mounted-skill fragments (issue #364);
-/// an empty slice adds nothing, preserving the pre-skill prompt shape.
+/// `activated` is the session's activated-skill name list -- the L1/L2 sort
+/// key that splits the fragments into a metadata index (mounted, not
+/// activated) and verbatim bodies (activated) inside the system prompt
+/// (ADR-0110, issue #700). An empty mounted set adds nothing, preserving
+/// the pre-skill prompt shape.
 ///
 /// The agent loop owns the request for the whole turn: each round-trip re-sends
 /// this system + tool table with the conversation extended by the prior tool
@@ -74,10 +78,11 @@ pub fn assemble_tool_turn(
     history: &[TurnRecord],
     locale: ResponseLocale,
     skills: &[SkillPromptFragment],
+    activated: &[String],
 ) -> ToolTurnRequest {
     let request = assemble(question, working_set, history);
     ToolTurnRequest {
-        system: build_tool_system_prompt(&request, locale, skills),
+        system: build_tool_system_prompt(&request, locale, skills, activated),
         messages: tool_turn_messages(&request),
         tools: crate::tools::builtin_table(),
         max_tokens: MAX_REPLY_TOKENS,
@@ -975,6 +980,7 @@ mod tests {
     fn acp_fragment(name: &str, body: &str) -> SkillPromptFragment {
         SkillPromptFragment {
             name: name.into(),
+            description: String::new(),
             body: body.into(),
             content_hash: "deadbeef".into(),
             mcp_servers: Vec::new(),
