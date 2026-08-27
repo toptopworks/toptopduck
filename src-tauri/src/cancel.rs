@@ -5,7 +5,8 @@
 //! command must reach the signal through a separate `Arc`.
 //!
 //! Two cooperating pieces:
-//! 1. A cooperative `requested` flag ([`AtomicBool`]), checked by the
+//! 1. A cooperative `requested` flag (bit 0 of the packed `AtomicU64` state,
+//!    shared with the turn generation), checked by the
 //!    orchestrator between phases (before the provider call, after it, after the
 //!    SQL execution). A cancel sets it; the orchestrator short-circuits to a
 //!    [`crate::model::TurnOutcome::Cancelled`] the next time it checks.
@@ -174,9 +175,10 @@ impl CancelToken {
     /// Begin a turn: clear any stale request from the prior turn and mark a
     /// query as in-flight. Returns an [`InFlightGuard`] whose `Drop` clears the
     /// in-flight flag and the interrupt slot (RAII -- every exit from `ask`,
-    /// including early Cancelled, drops the guard). The guard also exposes a
-    /// liveness flag for the optional timeout watchdog: dropping the guard
-    /// invalidates it so a slow timer cannot fire into the next turn.
+    /// including early Cancelled, drops the guard). The guard also carries the
+    /// turn's generation for the optional timeout watchdog: a slow timer's
+    /// cancel is generation-guarded (`request_if`) so it cannot fire into the
+    /// next turn.
     pub fn begin_turn(self: &Arc<Self>) -> InFlightGuard {
         // Advance to the next generation with the flag cleared in ONE swap so
         // the new turn starts unrequested: a stale `requested=1` from a prior

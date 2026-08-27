@@ -53,10 +53,9 @@ use crate::runtime::acp::wire::{
     Request, RequestId, RequestPermissionOutcome, RequestPermissionParams, RequestPermissionResult,
     Response, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus,
 };
-use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::loop_contract::{
-    truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, DEFAULT_STEP_CAP,
-    DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
+    truncate_trace_excerpt, DiscoveredRuntime, LoopOutcome, LoopRound, Termination, TraceEntry,
+    DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
 };
 use crate::session::turn_dispatch::spawn_wall_clock_watchdog;
 

@@ -10,6 +10,16 @@ use sha2::{Digest, Sha256};
 /// Shared by the skill-provenance content hash (ADR-0086: SHA-256 of a skill's
 /// whole `SKILL.md` bytes) and the session's file-change baseline. Hex-encoded
 /// so the digest is a comparable string.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Truncate a string to `max` chars, appending an ellipsis when cut. The ONE
 /// char-level implementation shared by the trace surfaces -- the persisted
 /// summary (`persistence::recipe::truncate_trace_summary`) and the live
@@ -24,14 +34,4 @@ pub(crate) fn truncate_chars_with_ellipsis(s: &str, max: usize) -> String {
         let head: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{head}…")
     }
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }

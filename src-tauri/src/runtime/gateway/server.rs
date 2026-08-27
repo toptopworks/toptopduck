@@ -41,8 +41,10 @@ use crate::session::loop_contract::{
     truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
-use crate::session::turn_dispatch::{classify_with_cli_tool, ResolvedClassification};
-use crate::tools::{builtin_table, dispatch};
+use crate::session::turn_dispatch::{
+    classify_with_cli_tool, guarded_dispatch, ResolvedClassification,
+};
+use crate::tools::{builtin_table, dispatch, ToolOutcome};
 
 use super::framing;
 
@@ -487,7 +489,8 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             // documented per-side divergence (envelope relayed verbatim here
             // vs flattened to the first text block on the core path, issue
             // #696): the shared pieces are the classification, the meta-tool
-            // resolution, and the `result_N` numbering.
+            // resolution, the `result_N` numbering, and the #321 panic
+            // guard (`guarded_dispatch`).
             // NOTE: the namespaced check here re-reads `call.name` rather
             // than hoisting one `is_external` above the trio match -- the
             // `mcp_invoke` fall-through REPLACES the name with the resolved
@@ -508,7 +511,25 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                     crate::cli_tools::executor::execute(tool, call, ctx.deps.temp_path, ctx.cancel);
                 result_envelope(executed.result)
             } else {
-                let dispatched = dispatch(call, &mut ctx.deps, ctx.cancel, ctx.materializer);
+                // The builtin dispatch runs under the shared issue #321
+                // guard (snapshot + ghost rollback, the same ritual the
+                // dispatch core path gets) -- a panic mid-dispatch rolls its
+                // orphan `result_N` back and surfaces as this call's error
+                // result instead of unwinding the server task.
+                let site = format!("tool dispatch `{}`", call.name);
+                let dispatched = match guarded_dispatch(&mut ctx.deps, &site, |deps| {
+                    dispatch(call, deps, ctx.cancel, ctx.materializer)
+                }) {
+                    Ok(dispatched) => dispatched,
+                    Err(detail) => ToolOutcome {
+                        result: ToolResult {
+                            tool_use_id: call.id.clone(),
+                            content: detail,
+                            is_error: true,
+                        },
+                        promotion: None,
+                    },
+                };
                 if let Some(promotion) = dispatched.promotion {
                     outcome.promotions.push(promotion);
                 }
@@ -640,6 +661,9 @@ fn generate_token() -> String {
 mod tests {
     use super::*;
     use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ToolKey};
+    use crate::guardrail::ExecError;
+    use crate::ingest::schema::quote_ident;
+    use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
     use crate::provider::keychain::KeychainStore;
     use crate::session::engine::AdminEngine;
     use crate::session::materializer::FakeMaterializer;
@@ -700,6 +724,19 @@ mod tests {
         approval: &'static ApprovalState,
         sink: &'static dyn ApprovalSink,
     ) -> GatewayCtx<'static> {
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        gate_ctx_with_materializer(fake, cli, approval, sink)
+    }
+
+    /// [`gate_ctx`] with a caller-chosen materializer -- the #321 panic pin
+    /// drives a register-then-panic fixture through the builtin arm.
+    fn gate_ctx_with_materializer(
+        materializer: &'static mut dyn Materializer,
+        cli: Vec<crate::cli_tools::config::CliToolConfig>,
+        approval: &'static ApprovalState,
+        sink: &'static dyn ApprovalSink,
+    ) -> GatewayCtx<'static> {
         let cli: &'static [crate::cli_tools::config::CliToolConfig] =
             Box::leak(cli.into_boxed_slice());
         let engine: &'static Engine = Box::leak(Box::new(Engine::new()));
@@ -707,18 +744,56 @@ mod tests {
         let sources: &'static mut HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
         let refs: &'static mut HashMap<String, crate::session::materializer::CachedDerivedRef> =
             Box::leak(Box::new(HashMap::new()));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
         let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
         let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
         GatewayCtx {
             deps,
-            materializer: fake,
+            materializer,
             approval,
             sink,
             cancel,
             mcp: McpAggregator::default(),
             cli,
+        }
+    }
+
+    /// A materializer that registers `result_N` then panics in the return
+    /// window -- the gateway-side twin of turn_dispatch's fixture, driving
+    /// the shared #321 ghost-rollback ritual through the builtin arm.
+    struct GhostThenPanicMaterializer;
+    impl Materializer for GhostThenPanicMaterializer {
+        fn try_materialize(
+            &self,
+            _sql: &str,
+            _cancel: &CancelToken,
+            result_name: String,
+            deps: &mut TurnDeps,
+        ) -> Result<DatasetDescriptor, ExecError> {
+            // Create the physical table first (mirrors RealMaterializer's
+            // install_result step) so the ghost rollback exercises the DROP
+            // TABLE success path.
+            let create_sql = format!(
+                "CREATE TABLE {} AS SELECT 1 AS x",
+                quote_ident(&result_name)
+            );
+            deps.engine
+                .conn()
+                .execute_batch(&create_sql)
+                .expect("fixture CREATE TABLE");
+            let descriptor = DatasetDescriptor {
+                reference_name: result_name.clone(),
+                display_name: result_name,
+                source_path: String::new(),
+                columns: Vec::new(),
+                row_count: 0,
+                sample: Vec::new(),
+                fingerprint: String::new(),
+                rectify: RectifyProvenance::NotApplicable,
+                privacy: DatasetPrivacy::default(),
+                stale: None,
+            };
+            deps.working_set.register_result(descriptor);
+            panic!("simulated post-register panic in tool dispatch")
         }
     }
 
@@ -1531,6 +1606,59 @@ mod tests {
         assert!(
             outcome.promotions.is_empty(),
             "explore produces no promotion"
+        );
+    }
+
+    /// Issue #321 on the gateway face: a builtin dispatch that registers
+    /// `result_N` then panics rolls the ghost back via the shared
+    /// `guarded_dispatch` ritual this arm picked up (issue #696) and
+    /// surfaces as the call's error result -- not an unwind into the server
+    /// task -- with one failed trace row naming the site.
+    #[test]
+    fn handle_tools_call_panic_mid_dispatch_rolls_back_ghost_result() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
+        let ghost: &'static mut GhostThenPanicMaterializer =
+            Box::leak(Box::new(GhostThenPanicMaterializer));
+        let mut ctx = gate_ctx_with_materializer(ghost, Vec::new(), approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "materialize", "arguments": {"sql": "SELECT 1 AS x"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "a panicked dispatch is an error result");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("panicked in tool dispatch"),
+                    "detail names the panic site: {text}"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("panic path returns Result, got error {code}: {m}")
+            }
+            Response::None => panic!("panic path returns Result, got None"),
+        }
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "one trace row for the panicked call"
+        );
+        assert!(
+            !outcome.trace[0].success,
+            "the trace row records the failure"
+        );
+        assert!(
+            !ctx.deps.working_set.is_result("result_1"),
+            "ghost result_1 unregistered from the working set"
+        );
+        assert_eq!(
+            ctx.deps.working_set.next_result_number(),
+            1,
+            "next_result_number back to 1 after the rollback"
         );
     }
 

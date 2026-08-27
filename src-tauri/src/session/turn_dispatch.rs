@@ -94,10 +94,17 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Build the `Transient` termination for a caught panic (issue #321):
 /// single-sources the detail format + the log target so the two guard
 /// sites stay consistent.
-pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
+/// The "panicked in ..." detail line both panic consumers render: logged at
+/// error level and returned so the caller picks the envelope (a
+/// `Termination` on the loop paths, a tool-error result on the gateway).
+pub(crate) fn panic_detail(site: &str, payload: &(dyn std::any::Any + Send)) -> String {
     let detail = format!("panicked in {site}: {}", panic_message(payload));
     log::error!(target: "toptopduck::turn_dispatch", "{detail}");
-    Termination::Transient(detail)
+    detail
+}
+
+pub(crate) fn panic_to_transient(site: &str, payload: &(dyn std::any::Any + Send)) -> Termination {
+    Termination::Transient(panic_detail(site, payload))
 }
 
 /// The `result_N` numbering snapshot the issue #321 dispatch guard pairs
@@ -157,6 +164,28 @@ fn rollback_ghost_result(deps: &mut TurnDeps, snapshot: GhostSnapshot) {
     deps.working_set.remove(&ghost);
 }
 
+/// The issue #321 snapshot + ghost-rollback ritual as one reusable guard:
+/// capture the `result_N` numbering, run `body` under `catch_unwind`, and on
+/// a panic roll any orphan `result_N` back before returning the
+/// "panicked in ..." detail. Both routing faces wrap their builtin executor
+/// in this -- the dispatch core ([`dispatch_gated_call`]) and the gateway's
+/// `tools/call` builtin arm -- so every runtime gets the ritual by
+/// construction.
+pub(crate) fn guarded_dispatch<R>(
+    deps: &mut TurnDeps,
+    site: &str,
+    body: impl FnOnce(&mut TurnDeps) -> R,
+) -> Result<R, String> {
+    let snapshot = GhostSnapshot::take(deps);
+    match catch_unwind(AssertUnwindSafe(|| body(deps))) {
+        Err(payload) => {
+            rollback_ghost_result(deps, snapshot);
+            Err(panic_detail(site, &*payload))
+        }
+        Ok(result) => Ok(result),
+    }
+}
+
 /// The approval-gateway context [`dispatch_gated_call`] routes every call
 /// through (ADR-0080): the session's gate state + the event sink + the cancel
 /// token the gate suspends on. Bundled so the call signature stays under
@@ -210,18 +239,14 @@ pub(crate) fn dispatch_gated_call(
     // registers result_N partway through try_materialize; a panic in any
     // subsequent step (record_provenance, gc_stale_results,
     // apply_display_label, descriptor_json, ToolOutcome construction) can
-    // leave a ghost result_N. The snapshot + diff in rollback_ghost_result
-    // detects + reverts any orphan so the working_set <-> history invariant
-    // holds (ADR-0084).
-    let snapshot = GhostSnapshot::take(deps);
-    match catch_unwind(AssertUnwindSafe(|| {
+    // leave a ghost result_N. The shared `guarded_dispatch` ritual detects +
+    // reverts any orphan so the working_set <-> history invariant holds
+    // (ADR-0084).
+    let site = format!("tool dispatch `{}`", call.name);
+    match guarded_dispatch(deps, &site, |deps| {
         dispatch_gated_call_inner(call, deps, materializer, mcp, cli, gate, on_phase)
-    })) {
-        Err(payload) => {
-            rollback_ghost_result(deps, snapshot);
-            let site = format!("tool dispatch `{}`", call.name);
-            Err(DispatchAbort::Panic(panic_to_transient(&site, &*payload)))
-        }
+    }) {
+        Err(detail) => Err(DispatchAbort::Panic(Termination::Transient(detail))),
         Ok(result) => result.map_err(|GateCancelled| DispatchAbort::Gate),
     }
 }

@@ -656,87 +656,117 @@ fn a_protocol_switch_between_turns_reroutes_the_next_turn() {
 // The probe path has its own redirect pin (`egress_agent_does_not_follow_
 // cross_host_redirect` in provider::http, the shared ureq agent with
 // redirects disabled). The PRODUCTION turn path instead rides the upstream
-// yoagent HTTP client, whose redirect policy belongs to the upstream
-// dependency and is tracked by the 0.18 minor pin -- these tests pin the
-// security-relevant OBSERVABLE from this repo: whatever the client does with
-// a 3xx, the credential must not reach a second host, and the turn must end
-// in an honest failure. `127.0.0.1` and `localhost` are distinct hosts for
-// the client's cross-origin judgment, so two mockito servers + a rewritten
-// Location give a true cross-host hop without a network.
+// yoagent HTTP client (reqwest + tower-http), whose redirect behavior this
+// repo cannot configure -- `Client::new()` is constructed inside yoagent and
+// the versions are held by the 0.18 minor pin. What the locked stack
+// actually does on a 301, verified against its sources and pinned here,
+// splits by credential header: `authorization` is stripped on a cross-host
+// hop (reqwest's `remove_sensitive_headers`), so the openai bearer face is
+// safe and pinned as such; `x-api-key` is NOT on the strip list, and
+// tower-http rewrites a 301'd POST into a GET (RFC 7231), so the
+// anthropic face's key IS delivered to the redirect host as a GET. That
+// exposure is inherent to the pinned upstream versions; the anthropic pin
+// asserts the delivery so an upstream fix flips it red and the assertion
+// can tighten back to zero. Both faces additionally pin the honest turn
+// failure, and each redirect mock matches only when the first hop actually
+// carried the credential -- a redirect served without the key on board pins
+// nothing. `127.0.0.1` and `localhost` are distinct hosts for the client's
+// cross-origin judgment, so two mockito servers + a rewritten Location give
+// a true cross-host hop without a network.
 
 /// Wire the two mockito hosts for one protocol's API path (`/v1/messages`
 /// for anthropic, `/chat/completions` for openai-compat): `first` 301-
-/// redirects that endpoint to `second` under the `localhost` host name, and
-/// `second` carries the two leak sentinels -- mocks that match ONLY when the
-/// named credential header is present, each expecting zero hits. Returns the
-/// redirect mock (assert `>= 1` hit after the turn, so the pin cannot go
-/// vacuous -- a redirect never served pins nothing) plus the sentinels.
+/// redirects that endpoint to `second` under the `localhost` host name.
+/// The redirect mock matches only when the request carries the face's
+/// credential header -- the falsifiable premise that the first hop had the
+/// key on board, without which the sentinels below would pin nothing.
+/// Returns `second` unmocked; each caller registers the sentinels its face
+/// can genuinely violate.
 fn redirect_hosts(
     api_path: &str,
-) -> (
-    mockito::ServerGuard,
-    mockito::ServerGuard,
-    mockito::Mock,
-    mockito::Mock,
-    mockito::Mock,
-) {
+    credential_header: &str,
+) -> (mockito::ServerGuard, mockito::ServerGuard, mockito::Mock) {
     let mut first = mockito::Server::new();
-    let mut second = mockito::Server::new();
+    let second = mockito::Server::new();
     // Same port, different host name: a genuine cross-host redirect target.
     let cross_host = second.url().replacen("127.0.0.1", "localhost", 1);
     let redirect = first
         .mock("POST", api_path)
+        .match_header(credential_header, mockito::Matcher::Any)
         .expect_at_least(1)
         .with_status(301)
         .with_header("Location", &format!("{cross_host}{api_path}"))
         .create();
-    let bearer_leak = second
-        .mock("POST", api_path)
-        .match_header("authorization", mockito::Matcher::Any)
-        .expect(0)
-        .with_status(200)
-        .with_body("{}")
-        .create();
-    let api_key_leak = second
-        .mock("POST", api_path)
-        .match_header("x-api-key", mockito::Matcher::Any)
-        .expect(0)
-        .with_status(200)
-        .with_body("{}")
-        .create();
-    (first, second, redirect, bearer_leak, api_key_leak)
+    (first, second, redirect)
 }
 
-/// The anthropic face (the app's default protocol): a cross-host 301 on the
-/// turn path must not deliver `x-api-key` / `authorization` to the redirect
-/// target, and the turn fails honestly (no silent success off-host).
+/// One leak sentinel on `second`: a mock that matches ONLY when a request
+/// spelled with `method` carries the named credential header. tower-http
+/// rewrites the 301'd POST into a GET, so both method spellings must be
+/// watched separately -- mockito's method match is exact and takes no
+/// wildcard. The caller sets `expect` (or `expect_at_least`) and `create`s.
+fn leak_sentinel(
+    second: &mut mockito::ServerGuard,
+    method: &str,
+    api_path: &str,
+    header: &str,
+) -> mockito::Mock {
+    second
+        .mock(method, api_path)
+        .match_header(header, mockito::Matcher::Any)
+        .with_status(200)
+        .with_body("{}")
+}
+
+/// The anthropic face (the app's default protocol): the cross-host 301
+/// delivery is pinned as the locked upstream stack actually behaves. The
+/// key rides `x-api-key`, which reqwest does not strip cross-host, and
+/// tower-http rewrites the POST into a GET -- so the GET sentinel asserts
+/// the delivery (an accepted exposure inherent to the pinned versions; an
+/// upstream fix flips this red and the assertion tightens back to zero),
+/// while the POST sentinel asserts the delivery stays GET-shaped. The turn
+/// fails honestly either way.
 #[test]
-fn anthropic_turn_path_cross_host_redirect_does_not_leak_the_key() {
-    let (first, _second, redirect, bearer_leak, api_key_leak) = redirect_hosts("/v1/messages");
+fn anthropic_turn_path_cross_host_redirect_x_api_key_delivery_is_pinned() {
+    let (first, mut second, redirect) = redirect_hosts("/v1/messages", "x-api-key");
+    let api_key_get = leak_sentinel(&mut second, "GET", "/v1/messages", "x-api-key")
+        .expect_at_least(1)
+        .create();
+    let api_key_post = leak_sentinel(&mut second, "POST", "/v1/messages", "x-api-key")
+        .expect(0)
+        .create();
     let provider = anthropic_live_provider(first.url(), Some("sk-secret-redirect"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     match session.ask("redirect probe") {
         TurnOutcome::Failed(_) => {}
         other => panic!("expected an honest Failed, got {other:?}"),
     }
-    redirect.assert(); // the 301 was actually served -- the pin is live
-    bearer_leak.assert();
-    api_key_leak.assert();
+    // The 301 was actually served with the key on board -- the pin is live.
+    redirect.assert();
+    api_key_get.assert();
+    api_key_post.assert();
 }
 
-/// The openai face (Bearer auth): same pin through the openai-compat stream
-/// client (`/chat/completions` wire) -- the bearer token must not reach the
-/// redirect target.
+/// The openai face (Bearer auth): the bearer token rides `authorization`,
+/// which reqwest strips on the cross-host hop -- neither method spelling of
+/// the redirect target may ever see it, and the turn fails honestly.
 #[test]
 fn openai_turn_path_cross_host_redirect_does_not_leak_the_key() {
-    let (first, _second, redirect, bearer_leak, api_key_leak) = redirect_hosts("/chat/completions");
+    let (first, mut second, redirect) = redirect_hosts("/chat/completions", "authorization");
+    let bearer_get = leak_sentinel(&mut second, "GET", "/chat/completions", "authorization")
+        .expect(0)
+        .create();
+    let bearer_post = leak_sentinel(&mut second, "POST", "/chat/completions", "authorization")
+        .expect(0)
+        .create();
     let provider = openai_live_provider(first.url(), Some("sk-secret-redirect"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     match session.ask("redirect probe") {
         TurnOutcome::Failed(_) => {}
         other => panic!("expected an honest Failed, got {other:?}"),
     }
-    redirect.assert(); // the 301 was actually served -- the pin is live
-    bearer_leak.assert();
-    api_key_leak.assert();
+    // The 301 was actually served with the token on board -- the pin is live.
+    redirect.assert();
+    bearer_get.assert();
+    bearer_post.assert();
 }

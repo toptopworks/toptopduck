@@ -157,7 +157,7 @@ impl TraceEntry {
     }
 
     /// The approval-gateway denial row: the failed entry whose bounded anchor
-    /// is [`DENIED_BY_GATEWAY_EXCERPT`] -- the why the resolved-deny row (the
+    /// is `DENIED_BY_GATEWAY_EXCERPT` -- the why the resolved-deny row (the
     /// flipped approval card) and the recorded trace both render, single-
     /// sourced across the dispatch core and the gateway's `tools/call` arm.
     pub fn denied(

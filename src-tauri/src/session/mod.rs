@@ -1974,7 +1974,7 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// calling its own same-named tool and stays -- registration validation
 /// cannot see the external runtime's namespace, so a name match alone is
 /// not proof the gateway served the call. Promotions are gateway-only (the ACP engine leaves
-/// them empty by design, slice 9a); termination + `round_trips` are ACP-only
+/// them empty by design, slice 9a); termination is ACP-only
 /// (the gateway serves tools, it does not produce a turn termination).
 ///
 /// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may prefix MCP tool names
@@ -2433,11 +2433,11 @@ mod tests {
         assert_eq!(r1.calls[0].tool_use_id, "a1");
     }
 
-    /// Termination + round_trips are ACP-only (the gateway serves tools, it
-    /// does not produce a turn termination). The merge preserves the ACP
-    /// values verbatim.
+    /// Termination is ACP-only (the gateway serves tools, it does not
+    /// produce a turn termination). The merge preserves the ACP value
+    /// verbatim.
     #[test]
-    fn merge_outcomes_termination_and_round_trips_from_acp() {
+    fn merge_outcomes_termination_from_acp() {
         let gateway = gateway_outcome(Vec::new());
         let acp = LoopOutcome {
             discovered_runtime: None,
