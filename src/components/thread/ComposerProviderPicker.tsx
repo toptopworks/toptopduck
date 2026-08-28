@@ -16,7 +16,6 @@ import {
   listProviderProfiles,
   setSessionPosture,
   setSessionRuntime,
-  type SetPosturePersistOutcome,
 } from "../../api";
 import { adapterKeys, sessionKeys } from "../../session/queryKeys";
 import type { ModelPosture } from "../../types/app-config";
@@ -90,12 +89,12 @@ const EMPTY_POSTURE: ModelPosture = { model: null, thought_level: null };
 // backend did not grant.
 //
 // Posture ownership (ADR-0095/0099/0100): in-session the model / thought
-// level read via `getSessionModelConfig` and write through the two set IPCs
+// level read via `getSessionModelConfig` and write through the set IPC
 // (next-turn effective; the successful set also lands the pair on the
 // adapter's app-config backfill entry server-side -- the single write
 // point). On the cold-start bar (null sessionId) the displayed posture is
 // the caller-held pendingModelPosture seeded from the adapter's backfill
-// entry (`getLastModelPosture`); an explicit pick patches the pending pair
+// entry (`getLastModelPosture`); an explicit pick replaces the pending pair
 // and the first submit applies it to the minted session, the same
 // pending-runtime wiring as #572. The clear row additionally wipes the
 // backfill entry via `clearLastModelPosture` (ADR-0100 Decision 3: without
@@ -137,12 +136,12 @@ export type ComposerProviderPickerProps = {
   // not a picker-side read.
   pendingRuntime?: SessionRuntimeChoice | null;
   // Cold-start posture channel (ADR-0099/0100, issue #574): a cascade-menu
-  // pick on the cold-start bar patches the shell-held pending pair via this
-  // callback. null means untouched -- the picker displays the adapter's
-  // backfill entry, and the first submit lets the backend's create_session
-  // startup posture apply (no set IPC). A non-null pair is EXPLICIT --
-  // null fields are real clears -- and lands on the minted session via the
-  // two set IPCs.
+  // pick on the cold-start bar submits the full pair to the shell-held
+  // pending posture via this callback. null means untouched -- the picker
+  // displays the adapter's backfill entry, and the first submit lets the
+  // backend's create_session startup posture apply (no set IPC). A non-null
+  // pair is EXPLICIT -- null fields are real clears -- and lands on the
+  // minted session via the set IPC.
   onPendingModelPostureChange?: (posture: ModelPosture) => void;
   pendingModelPosture?: ModelPosture | null;
 };
@@ -380,20 +379,21 @@ export function ComposerProviderPicker({
 
   // Guards the posture set IPC (the menu is disabled while a write is in
   // flight). In-session only -- the cold-start channel is a synchronous
-  // pending patch.
-  const [modelSwitching, setModelSwitching] = useState(false);
-  // Inline failure line for the posture set IPC (issue #529). Holds the raw
+  // pending write.
+  const [postureSwitching, setPostureSwitching] = useState(false);
+  // Inline failure line for posture writes (issue #529): the in-session set
+  // IPC reject and the cold-start backfill-clear reject. Holds the raw
   // reject and formats at render so a locale switch re-renders the wording.
   // Cleared on the next attempt.
-  const [modelSetError, setModelSetError] = useState<unknown>(null);
+  const [postureSetError, setPostureSetError] = useState<unknown>(null);
   // A set that resolved but whose persist-now leg did not land (issue #529):
   // the verdict rides the set command's return (in-process, read in the same
   // critical section), so "set means persisted" (ADR-0095 Decision 6) cannot
   // break silently nor be swallowed by the shared banner error channel.
-  const [modelPersistFault, setModelPersistFault] = useState<SaveError | null>(null);
+  const [posturePersistFault, setPosturePersistFault] = useState<SaveError | null>(null);
   // True when the persist was withheld on a pending ADR-0035 conflict (the
   // .duck changed externally; the auto-write refuses to clobber it).
-  const [modelPersistSuspended, setModelPersistSuspended] = useState(false);
+  const [posturePersistSuspended, setPosturePersistSuspended] = useState(false);
 
   // The posture the bar displays: the session's model config in-session, or
   // the cold-start pending pair seeded from the backfill entry (pending
@@ -430,17 +430,18 @@ export function ComposerProviderPicker({
   // value check alone cannot distinguish from "no later gesture".
   const postureGestureSeqRef = useRef(0);
 
-  // Cold-start posture writes (ADR-0099/0100, issue #574): a pick patches the
-  // shell-held pending pair, seeded from the DISPLAYED posture so the first
-  // edit starts from what the bar shows (backfill or a prior pick). The
-  // clear row additionally wipes the backfill entry via the #581 IPC so the
-  // clear survives even when the user never submits (otherwise the next
-  // cold-start visit re-seeds the cleared posture -- the backfill defeating
-  // an explicit clear, ADR-0100 Decision 3). In-session clears do NOT wipe
-  // the entry separately: the set IPC's server-side record already lands the
-  // post-set pair there (the single write point).
+  // Cold-start posture writes (ADR-0099/0100, issue #574): a pick submits a
+  // FULL pair to the shell-held pending posture -- the caller builds it from
+  // the DISPLAYED posture (backfill or a prior pick) so an untouched field
+  // carries the displayed value and the first edit starts from what the bar
+  // shows. The clear row additionally wipes the backfill entry via the #581
+  // IPC so the clear survives even when the user never submits (otherwise
+  // the next cold-start visit re-seeds the cleared posture -- the backfill
+  // defeating an explicit clear, ADR-0100 Decision 3). In-session clears do
+  // NOT wipe the entry separately: the set IPC's server-side record already
+  // lands the post-set pair there (the single write point).
   function pendingPostureWrite(
-    patch: Partial<ModelPosture>,
+    next: ModelPosture,
     clearsBackfill: boolean,
   ): void {
     if (!onPendingModelPostureChange) {
@@ -451,13 +452,12 @@ export function ComposerProviderPicker({
       return;
     }
     const prevPosture = posture;
-    const clearedPosture: ModelPosture = { ...posture, ...patch };
     const gestureSeq = ++postureGestureSeqRef.current;
     // A new gesture is a fresh write attempt: clear any fault a previous
-    // rejected one left on the set-fault slot (the applyModelConfig
+    // rejected one left on the set-fault slot (the applyPosture
     // symmetry on the in-session side).
-    setModelSetError(null);
-    onPendingModelPostureChange(clearedPosture);
+    setPostureSetError(null);
+    onPendingModelPostureChange(next);
     if (clearsBackfill && activeAdapterId !== null) {
       const adapterId = activeAdapterId;
       clearLastModelPosture(adapterId)
@@ -474,7 +474,7 @@ export function ComposerProviderPicker({
           //
           // Lost-update guard (issue #592): the rollback restores
           // prevPosture only while the pending pair still equals THIS
-          // clear's patch AND no later posture gesture has fired (the
+          // clear's submitted pair AND no later posture gesture has fired (the
           // counter; a same-value repeat would slip past the value check
           // alone). A later gesture (or the caller's runtime-switch reset
           // to null) means a newer intent -- restoring the pre-clear
@@ -483,8 +483,8 @@ export function ComposerProviderPicker({
           const stillThisClear =
             gestureSeq === postureGestureSeqRef.current &&
             current != null &&
-            current.model === clearedPosture.model &&
-            current.thought_level === clearedPosture.thought_level;
+            current.model === next.model &&
+            current.thought_level === next.thought_level;
           if (stillThisClear) {
             onPendingModelPostureChange(prevPosture);
           }
@@ -493,7 +493,7 @@ export function ComposerProviderPicker({
           // entry with no explanation; skipped, the optimistic clear stays
           // displayed while the backfill entry survived -- the failure would
           // surface only at the NEXT cold start as the posture "coming back".
-          setModelSetError(e);
+          setPostureSetError(e);
           log.warn(
             "ComposerProviderPicker",
             stillThisClear
@@ -510,17 +510,14 @@ export function ComposerProviderPicker({
   // verdict onto the two fault slots. On reject: keep the server posture
   // (refetch off the reject) + show the failure. Never rejects -- every
   // failure lands on the fault slots instead.
-  async function applyModelConfig(
-    write: () => Promise<SetPosturePersistOutcome>,
-    next: ModelPosture,
-  ): Promise<void> {
-    if (sessionId === null || modelSwitching || postureReadUnsettled) return;
-    setModelSwitching(true);
-    setModelSetError(null);
-    setModelPersistFault(null);
-    setModelPersistSuspended(false);
+  async function applyPosture(next: ModelPosture): Promise<void> {
+    if (sessionId === null || postureSwitching || postureReadUnsettled) return;
+    setPostureSwitching(true);
+    setPostureSetError(null);
+    setPosturePersistFault(null);
+    setPosturePersistSuspended(false);
     try {
-      const outcome = await write();
+      const outcome = await setSessionPosture(sessionId, next);
       // Functional update: a later selection in the same menu session must
       // patch the CURRENT cache, not the snapshot this closure captured at
       // render -- two rapid selections (e.g. a model pick that auto-clears
@@ -532,8 +529,8 @@ export function ComposerProviderPicker({
           ...next,
         }),
       );
-      setModelPersistFault(outcome.persist_error);
-      setModelPersistSuspended(outcome.persist_suspended);
+      setPosturePersistFault(outcome.persist_error);
+      setPosturePersistSuspended(outcome.persist_suspended);
       // The set lands the post-set pair in the startup backfill entry
       // server-side (record_last_model_posture, the single write point).
       // Invalidate so the NEXT return to cold start refetches the post-set
@@ -545,7 +542,7 @@ export function ComposerProviderPicker({
         });
       }
     } catch (e) {
-      setModelSetError(e);
+      setPostureSetError(e);
       log.warn(
         "ComposerProviderPicker",
         "set session posture failed; resyncing from the session",
@@ -555,7 +552,7 @@ export function ComposerProviderPicker({
         queryKey: sessionKeys.modelConfig(sessionId),
       });
     } finally {
-      setModelSwitching(false);
+      setPostureSwitching(false);
     }
   }
 
@@ -574,28 +571,26 @@ export function ComposerProviderPicker({
         posture.thought_level,
       );
     const thoughtLevel = mustClearLevel ? null : posture.thought_level;
+    // Both channels submit the same full pair: the cold-start pending
+    // write (no IPCs) and the in-session set IPC.
+    const next: ModelPosture = { model, thought_level: thoughtLevel };
     if (sessionId === null) {
-      // Cold start: the linkage is part of the pending patch (no IPCs).
-      pendingPostureWrite(
-        mustClearLevel ? { model, thought_level: null } : { model },
-        model === null,
-      );
+      pendingPostureWrite(next, model === null);
       return;
     }
-    const next: ModelPosture = { model, thought_level: thoughtLevel };
-    return applyModelConfig(() => setSessionPosture(sessionId, next), next);
+    return applyPosture(next);
   };
 
   const selectThoughtLevel = (thoughtLevel: string | null) => {
+    // The full pair rides one submit (issue #603): the held model is sent
+    // as its current value -- an untouched field is never derived
+    // server-side (the pending write on the cold-start bar included).
+    const next: ModelPosture = { model: posture.model, thought_level: thoughtLevel };
     if (sessionId === null) {
-      pendingPostureWrite({ thought_level: thoughtLevel }, thoughtLevel === null);
+      pendingPostureWrite(next, thoughtLevel === null);
       return;
     }
-    // The full pair rides one wire submit (issue #603): the held model is
-    // sent as its current value -- an untouched field is never derived
-    // server-side.
-    const next: ModelPosture = { model: posture.model, thought_level: thoughtLevel };
-    return applyModelConfig(() => setSessionPosture(sessionId, next), next);
+    return applyPosture(next);
   };
 
   // Per-model helper (issue #537, codex + claude-code): the thought-level
@@ -828,11 +823,11 @@ export function ComposerProviderPicker({
         onSelectModel={(m) => void selectModel(m)}
         onSelectThoughtLevel={(l) => void selectThoughtLevel(l)}
         configFault={modelConfigFault}
-        setFault={modelSetError}
-        persistFault={modelPersistFault}
-        persistSuspended={modelPersistSuspended}
+        setFault={postureSetError}
+        persistFault={posturePersistFault}
+        persistSuspended={posturePersistSuspended}
         catalogNote={catalogNote}
-        disabled={modelSwitching || postureReadUnsettled}
+        disabled={postureSwitching || postureReadUnsettled}
       />
       {runtimeError != null ? (
         // Honest read failure (issue #600): a rejected runtime read must not
