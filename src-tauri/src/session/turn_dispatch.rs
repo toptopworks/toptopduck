@@ -3,7 +3,8 @@
 //! [`dispatch_gated_call`] routes one model-emitted tool call through the
 //! approval gateway and the executor. What lives HERE, and therefore cannot
 //! drift between the runtimes that dispatch tools, is the meta-tool trio
-//! resolution, the gate classification ([`classify_with_cli_tool`], which
+//! resolution, the skill-activation interception beside it (issue #701),
+//! the gate classification ([`classify_with_cli_tool`], which
 //! the gateway's `tools/call` arm also consumes), the `result_N` numbering,
 //! and the dispatch panic guard (issue #321, sunk into the core so every
 //! runtime gets the snapshot + ghost-rollback ritual by construction). The
@@ -45,6 +46,8 @@ use crate::session::loop_contract::{
     truncate_trace_excerpt, Termination, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::skills::SkillActivationCtx;
+use crate::skills::activation;
 use crate::tools;
 use crate::tools::definitions;
 
@@ -232,6 +235,7 @@ pub(crate) fn dispatch_gated_call(
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
+    skills: &mut SkillActivationCtx<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), DispatchAbort> {
@@ -244,7 +248,7 @@ pub(crate) fn dispatch_gated_call(
     // (ADR-0084).
     let site = format!("tool dispatch `{}`", call.name);
     match guarded_dispatch(deps, &site, |deps| {
-        dispatch_gated_call_inner(call, deps, materializer, mcp, cli, gate, on_phase)
+        dispatch_gated_call_inner(call, deps, materializer, mcp, cli, skills, gate, on_phase)
     }) {
         Err(detail) => Err(DispatchAbort::Panic(Termination::Transient(detail))),
         Ok(result) => result.map_err(|GateCancelled| DispatchAbort::Gate),
@@ -259,6 +263,7 @@ fn dispatch_gated_call_inner(
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
+    skills: &mut SkillActivationCtx<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
@@ -287,6 +292,31 @@ fn dispatch_gated_call_inner(
         }
         meta_tools::MetaDispatch::Fallthrough(call) => call,
     };
+    // The skill-activation meta-tool (ADR-0110 Decision 3, issue #701):
+    // intercepted BESIDE the trio match, ahead of any classification / gate
+    // -- activation is approval-free by design (mounting is the only trust
+    // gate). The resolver lands the `Activate` transition + persists
+    // immediately; this site maps its two variants exactly as it maps the
+    // trio's (a Local call gets the started / completed phase pair + trace
+    // row, a Refused call is the bare error result with no trace entry).
+    if call.name == activation::ACTIVATE_SKILL {
+        return Ok(
+            match activation::resolve_skill_activation(
+                call,
+                skills,
+                deps.working_set,
+                deps.temp_path,
+            ) {
+                activation::SkillActivationOutcome::Local { summary, payload } => {
+                    let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+                    (result, Some(entry), None)
+                }
+                activation::SkillActivationOutcome::Refused(message) => {
+                    (meta_failure(call, &message), None, None)
+                }
+            },
+        );
+    }
     // A registered CLI tool classifies under its own reserved server
     // (ADR-0108 Decision 7): the trust key is the registration name, the
     // badge is Execute, and the summary renders the full argv the approval
@@ -446,7 +476,7 @@ fn local_meta_call(
     (
         ToolResult {
             tool_use_id: call.id.clone(),
-            content: payload.to_string(),
+            content: meta_tools::meta_payload_text(payload),
             is_error: false,
         },
         entry,
@@ -1141,6 +1171,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1187,6 +1218,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1264,6 +1296,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut forward,
         )
@@ -1347,6 +1380,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1460,6 +1494,7 @@ mod tests {
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1540,6 +1575,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut forward,
         )
@@ -1624,6 +1660,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -1750,6 +1787,7 @@ mod tests {
             &mut materializer,
             &mut McpAggregator::empty(),
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut |_| {},
         )
@@ -1994,6 +2032,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )
@@ -2012,6 +2051,137 @@ mod tests {
         assert_eq!(phases.len(), 2, "started + completed");
         assert!(matches!(phases[0], TurnPhase::ToolCallStarted { .. }));
         assert!(matches!(phases[1], TurnPhase::ToolCallCompleted(_)));
+    }
+
+    /// The `activate_skill` arm on THIS face serves the skill's body as the
+    /// model-facing content VERBATIM (issue #701): a plain-string payload
+    /// must not come back JSON-quoted -- exact equality, not `contains`,
+    /// because the quoted form would still contain the body. The trace row
+    /// rides the shared Local mapping (name = the tool, summary = the
+    /// skill name), and the transition lands on the channel's state with
+    /// the Agent actor.
+    #[test]
+    fn activate_skill_serves_body_verbatim_with_a_trace_row() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let mut fx = crate::session::skills::SkillActivationFixture::new(vec![
+            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL."),
+        ]);
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "tu_s".into(),
+            name: "activate_skill".into(),
+            input: json!({"name": "sql-coach"}),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let (result, entry, promotion) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut fx.ctx(),
+            &gate,
+            &mut on_phase,
+        )
+        .expect("the activation serves");
+        assert!(!result.is_error, "an activation is a success");
+        assert_eq!(
+            result.content, "Coach the SQL.",
+            "the body rides the content verbatim, never JSON-quoted"
+        );
+        assert!(promotion.is_none(), "meta-tools never promote");
+        let entry = entry.expect("a served activation records one row");
+        assert_eq!(entry.name, "activate_skill");
+        assert!(entry.success);
+        assert_eq!(entry.summary, "sql-coach", "the summary is the skill name");
+        assert!(
+            sink.request_ids.lock().unwrap().is_empty(),
+            "activation is approval-free -- the intercept sits ahead of the gate"
+        );
+        let events = fx.skill_events();
+        assert_eq!(events.len(), 1, "a fresh activation lands one event");
+        assert_eq!(
+            events[0].actor,
+            Some(crate::model::SkillLifecycleActor::Agent),
+            "the mid-turn channel records the Agent actor"
+        );
+    }
+
+    /// A malformed `activate_skill` input fails traceless with the fixed
+    /// message: the resolver's classification is pinned at its unit level;
+    /// THIS pin is the site mapping -- the bare error result, no phase
+    /// events, no trace row, nothing landed (the trio's malformed posture
+    /// one match up).
+    #[test]
+    fn malformed_activate_skill_input_fails_traceless() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let mut fx = crate::session::skills::SkillActivationFixture::new(vec![
+            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL."),
+        ]);
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "tu_s".into(),
+            name: "activate_skill".into(),
+            input: json!({}),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let (result, entry, promotion) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut fx.ctx(),
+            &gate,
+            &mut on_phase,
+        )
+        .expect("a malformed activation still resolves to a result");
+        assert!(result.is_error, "a malformed input is refused");
+        assert_eq!(
+            result.content,
+            "activate_skill failed: parameter `name`: expected a non-empty string"
+        );
+        assert!(entry.is_none(), "a refused activation records no trace row");
+        assert!(promotion.is_none());
+        assert!(phases.into_inner().unwrap().is_empty(), "no phase events");
+        assert!(fx.skill_events().is_empty(), "nothing lands");
+        assert!(fx.activated.is_empty());
     }
 
     /// A malformed meta-tool input fails traceless with the shared message
@@ -2057,6 +2227,7 @@ mod tests {
             &mut RealMaterializer,
             &mut mcp,
             &[],
+            &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
             &gate,
             &mut on_phase,
         )

@@ -17,8 +17,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
+use toptopduck_lib::model::SkillLifecycleActor;
 use toptopduck_lib::model::SkillProvenance;
 use toptopduck_lib::persistence::recipe::RecipeEntry;
 use toptopduck_lib::provider::tool_calling::ToolTurnReply;
@@ -77,7 +79,9 @@ fn activated_skill_body_in_prompt_and_provenance() {
     // fragments + the activated list at the command boundary (mirroring
     // `commands::ask`).
     session.mount_skill("sql-coach").expect("mount");
-    session.activate_skill("sql-coach").expect("activate");
+    session
+        .activate_skill("sql-coach", SkillLifecycleActor::User)
+        .expect("activate");
     let mounted = session.mounted_skills();
     let activated = session.activated_skills();
     let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
@@ -158,7 +162,7 @@ fn activated_skill_body_in_prompt_and_provenance() {
 /// AC #1 + AC #3 (index shape): a mounted-but-not-activated skill lands as a
 /// metadata index entry -- name + description, no body -- and the built-in
 /// turn's provenance records the EMPTY activated set (nothing shaped the
-/// answer). The index wording is the locked transitional contract from issue
+/// answer). The index wording is the locked terminal contract from issue
 /// #700's brief.
 #[test]
 fn mounted_not_activated_lands_index_entry_not_body() {
@@ -207,10 +211,10 @@ fn mounted_not_activated_lands_index_entry_not_body() {
     // The index block, word-for-word per the locked contract.
     assert!(
         system.contains(
-            "\n\n【可用技能】\n以下技能已挂载，完整说明尚未加载：\n\
+            "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，调用 activate_skill 工具加载其完整说明：\n\
              - `sql-coach` — Coach the user on honest SQL reporting.\n"
         ),
-        "index entry must match the locked transitional wording, got:\n{system}"
+        "index entry must match the locked terminal wording, got:\n{system}"
     );
     // No body, no activated frame.
     assert!(
@@ -261,7 +265,9 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     session.mount_skill("alpha").expect("mount alpha");
     session.mount_skill("beta").expect("mount beta");
-    session.activate_skill("beta").expect("activate beta");
+    session
+        .activate_skill("beta", SkillLifecycleActor::User)
+        .expect("activate beta");
 
     let approval = ApprovalState::new();
     let sink = NullSink;
@@ -320,6 +326,12 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
         assert!(system.contains("- `alpha` — Alpha skill.\n"));
         assert!(!system.contains("Alpha body."), "inactive body absent");
         assert!(!system.contains("- `beta`"), "activated skill not indexed");
+        // The built-in face's mount-conditional surface (issue #701): a
+        // non-empty mounted set advertises the activation channel.
+        assert!(
+            guard[0].tools.iter().any(|t| t.name == "activate_skill"),
+            "a non-empty mounted set mounts activate_skill on the tool table"
+        );
         drop(guard);
     }
     // The same turn's provenance records exactly the activated subset -- the
@@ -428,6 +440,12 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
     // (ADR-0087) -- it names DuckDB as the default tool without injecting
     // a skill body.
     assert!(system.contains("默认工具"));
+    // The mount-conditional surface (issue #701): an EMPTY mounted set pays
+    // no standing tool cost -- the trio's posture (ADR-0105 D6).
+    assert!(
+        !guard[0].tools.iter().any(|t| t.name == "activate_skill"),
+        "an empty mounted set must not mount activate_skill"
+    );
     drop(guard);
 
     let recipe = session.build_recipe();
@@ -493,4 +511,160 @@ fn skill_declaring_disabled_server_mounts_and_stays_declarative() {
             .all(|s| s.id.as_str() != "off-b"),
         "a skill declaration never re-arms a disabled server"
     );
+}
+
+/// The mid-turn persistence probe (issue #701): round 1 emits the
+/// `activate_skill` call; round 2 -- after the dispatch has returned, before
+/// the turn has ended -- reads the bound `.duck` off the disk, records
+/// whether the `Activate` event is already there, and fails the turn
+/// (permanent NotWired). A batched-at-turn-end persist would miss the read.
+struct ProbeThenFailProvider {
+    duck_path: std::path::PathBuf,
+    calls: std::sync::atomic::AtomicUsize,
+    midturn_activate_on_disk: std::sync::atomic::AtomicBool,
+}
+
+impl toptopduck_lib::Provider for ProbeThenFailProvider {
+    fn generate_tool_turn(
+        &self,
+        _request: &toptopduck_lib::provider::tool_calling::ToolTurnRequest,
+    ) -> Result<
+        toptopduck_lib::provider::tool_calling::ToolTurnOutcome,
+        toptopduck_lib::ProviderError,
+    > {
+        use std::sync::atomic::Ordering;
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
+                thinking: Vec::new(),
+                reply: ToolTurnReply::tool_calls(vec![
+                    toptopduck_lib::provider::tool_calling::ToolUse {
+                        id: "tu_s".into(),
+                        name: "activate_skill".into(),
+                        input: serde_json::json!({"name": "sql-coach"}),
+                    },
+                ]),
+            })
+        } else {
+            let text = fs::read_to_string(&self.duck_path).unwrap_or_default();
+            self.midturn_activate_on_disk.store(
+                text.contains("\"Activate\"") && text.contains("sql-coach"),
+                Ordering::SeqCst,
+            );
+            Err(toptopduck_lib::ProviderError::NotWired)
+        }
+    }
+}
+
+/// AC (issue #701, the session-level pin): an agent activation lands on the
+/// timeline AND persists to the bound recipe INSIDE the dispatch call
+/// (real-time, atomic), the `Activate` marker precedes the turn's own entry
+/// (fact-order rendering), and a turn that FAILS afterwards keeps the
+/// activation on disk + on resume (the exit is unmount, never a failed
+/// turn).
+#[test]
+fn agent_activation_persists_midturn_and_survives_turn_failure() {
+    use std::sync::atomic::Ordering;
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(&skills_root, "sql-coach", "Coach SQL.", "Coach the SQL.\n");
+
+    let duck_dir = tempfile::tempdir().unwrap();
+    let duck_path = duck_dir.path().join("mid.duck");
+
+    let provider = ProbeThenFailProvider {
+        duck_path: duck_path.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        midturn_activate_on_disk: std::sync::atomic::AtomicBool::new(false),
+    };
+    let probe = Arc::new(provider);
+    let mut session = Session::with_provider(Box::new(ProbeHandle {
+        inner: Arc::clone(&probe),
+    }))
+    .expect("session");
+    session.mount_skill("sql-coach").expect("mount");
+    session
+        .bind_duck(duck_path.clone(), "mid".into())
+        .expect("bind");
+    let fragments = resolve_prompt_fragments(&skills_root, &session.mounted_skills());
+
+    let approval = ApprovalState::new();
+    let outcome = session.ask_with_phase(
+        "查询",
+        &approval,
+        &NullSink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &KeychainStore::new(),
+            skills: &fragments,
+            activated: &[],
+            cli_tools: &[],
+        },
+    );
+    // The turn itself failed (the probe's round 2 is a permanent fault)...
+    assert!(
+        matches!(outcome, TurnOutcome::Failed { .. }),
+        "got {outcome:?}"
+    );
+    // ...but the activation had already crossed to disk INSIDE the dispatch.
+    assert!(
+        probe.midturn_activate_on_disk.load(Ordering::SeqCst),
+        "the Activate event must be on disk before the turn ends"
+    );
+    // ...and it survives the failed turn on the live session state.
+    assert_eq!(session.activated_skills(), vec!["sql-coach".to_string()]);
+    // Fact-order rendering: the Activate marker precedes the turn's own
+    // entry in the persisted history (the event happened mid-turn).
+    let recipe = session.build_recipe();
+    let activate_pos = recipe
+        .history
+        .iter()
+        .position(|e| matches!(e, RecipeEntry::Skill(ev) if ev.name == "sql-coach"))
+        .expect("an Activate entry in history");
+    let last_turn_pos = recipe
+        .history
+        .iter()
+        .rposition(|e| matches!(e, RecipeEntry::Turn(_)))
+        .expect("the failed turn in history");
+    assert!(
+        activate_pos < last_turn_pos,
+        "the Activate marker precedes the failed turn's entry"
+    );
+
+    // Resume rebuilds the activated set off the persisted events -- the
+    // activation outlives the failed turn across a restart. The live
+    // session must drop first: it owns the canonical key.
+    drop(session);
+    let resumed = Session::open_duck(
+        &duck_path,
+        Arc::new(toptopduck_lib::CancelToken::new()),
+        Box::new(toptopduck_lib::UnwiredProvider),
+        |_| {},
+        |_| toptopduck_lib::SourceResolution::Abort,
+        |_| toptopduck_lib::ActiveResolution::Abort,
+    )
+    .expect("resume");
+    assert_eq!(
+        resumed.activated_skills(),
+        vec!["sql-coach".to_string()],
+        "the activation survives the restart"
+    );
+}
+
+/// The Arc-backed handle so the session owns a `Box<dyn Provider>` while
+/// the test keeps read access to the probe's atomics.
+struct ProbeHandle {
+    inner: Arc<ProbeThenFailProvider>,
+}
+
+impl toptopduck_lib::Provider for ProbeHandle {
+    fn generate_tool_turn(
+        &self,
+        request: &toptopduck_lib::provider::tool_calling::ToolTurnRequest,
+    ) -> Result<
+        toptopduck_lib::provider::tool_calling::ToolTurnOutcome,
+        toptopduck_lib::ProviderError,
+    > {
+        self.inner.generate_tool_turn(request)
+    }
 }

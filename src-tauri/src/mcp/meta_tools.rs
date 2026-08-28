@@ -234,6 +234,18 @@ pub(crate) fn parse_invoke_input(input: &Value) -> Result<(String, Value), Strin
     Ok((handle, arguments))
 }
 
+/// Flatten one locally-served meta payload to its model-facing text -- the
+/// `content` / excerpt string both dispatch faces serve. JSON objects
+/// serialize to their string form; a PLAIN string payload (the
+/// `activate_skill` body return, issue #701) rides verbatim -- a body must
+/// not come back JSON-quoted / escaped.
+pub(crate) fn meta_payload_text(payload: Value) -> String {
+    match payload {
+        Value::String(text) => text,
+        other => other.to_string(),
+    }
+}
+
 /// One dispatch-site-agnostic classification of a tool call against the meta
 /// surface: the arm order, the parse-first invoke resolution, and the
 /// direct-handle refusal previously lived as mirrored ~45-line skeletons at

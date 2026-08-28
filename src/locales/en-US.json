@@ -493,6 +493,7 @@
   "thread.runtime.externalUnrecorded": "External (not recorded)",
   "thread.skill.declaresMcp": "Declares MCP: {servers}",
   "thread.skill.activate": "Activated skill \"{name}\"",
+  "thread.skill.activateAgent": "Agent activated skill \"{name}\"",
   "thread.skill.missingSuffix": " · no longer exists",
   "thread.skill.modifiedSuffix": " · modified since this answer",
   "thread.skill.mount": "Mounted skill \"{name}\"",

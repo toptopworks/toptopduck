@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
+use toptopduck_lib::model::SkillLifecycleActor;
 use toptopduck_lib::persistence::SaveError;
 use toptopduck_lib::provider::tool_calling::{
     ToolTurnOutcome, ToolTurnReply, ToolTurnRequest, ToolUse,
@@ -398,10 +399,10 @@ fn resume_rebuilds_activated_skills_from_timeline_fold() {
         .mount_skill("chart-helper")
         .expect("mount chart-helper");
     session
-        .activate_skill("sql-coach")
+        .activate_skill("sql-coach", SkillLifecycleActor::User)
         .expect("activate sql-coach");
     session
-        .activate_skill("chart-helper")
+        .activate_skill("chart-helper", SkillLifecycleActor::User)
         .expect("activate chart-helper");
     // The unmount cascades sql-coach's activation out (the sole exit).
     session.unmount_skill("sql-coach").expect("unmount");

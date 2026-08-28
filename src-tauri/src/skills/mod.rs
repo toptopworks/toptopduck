@@ -29,6 +29,7 @@
 //!   (issue #364) -- resolves each mounted skill into its verbatim body + the
 //!   SHA-256 of the whole `SKILL.md`.
 
+pub mod activation;
 pub mod builtin;
 pub mod frontmatter;
 pub mod import;

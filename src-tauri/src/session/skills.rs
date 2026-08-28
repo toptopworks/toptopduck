@@ -16,10 +16,13 @@
 //! descendant module add methods to a type defined in the ancestor and reach
 //! its private fields and helpers (`persist_if_bound`). The reverse direction
 //! is NOT allowed: the parent cannot call [`Session::append_skill_event`], so
-//! it stays private to this module (today mount/unmount/activate are the sole
-//! callers, and no ancestor path records Skill events -- contrast [`Session::
-//! append_source_event`], which IS `pub(super)` because the add-path helpers
-//! in `session/mod.rs` call it from the parent).
+//! it stays private to this module (today mount/unmount are the sole callers;
+//! the activation paths go through [`land_skill_activation`] because their
+//! persistence borrows differ -- the method persists through `&mut self`, the
+//! mid-turn [`SkillActivationCtx`] through the field-split
+//! [`super::persist_snapshot`] -- contrast [`Session::append_source_event`],
+//! which IS `pub(super)` because the add-path helpers in `session/mod.rs`
+//! call it from the parent).
 //!
 //! [`Recipe::mounted_skills`]: crate::persistence::recipe::Recipe::mounted_skills
 //! [`Recipe::activated_skills`]: crate::persistence::recipe::Recipe::activated_skills
@@ -138,9 +141,10 @@ impl super::Session {
 
     /// Activate a MOUNTED skill into the session's activated subset
     /// (ADR-0110, issue #698). Appends an `Activate` event carrying the
-    /// initiation actor (the user, in this ticket -- the agent channel rides
-    /// #701 and will reuse this same transition), mutates the live
-    /// activated-skills cache, and persists the recipe atomically.
+    /// initiation actor (the user on this IPC entry; the agent rides the same
+    /// transition through [`SkillActivationCtx::land`], issue #701 -- one
+    /// body, [`land_skill_activation`]), mutates the live activated-skills
+    /// cache, and persists the recipe atomically.
     ///
     /// Two postures, both ADR-0110 decisions and deliberately asymmetric
     /// with the mount family:
@@ -152,21 +156,19 @@ impl super::Session {
     ///   approval-free and zero-friction, so a duplicate is not an error the
     ///   timeline needs to record (contrast [`Self::mount_skill`], which
     ///   refuses a redundant mount so no-op Mount events never land).
-    pub fn activate_skill(&mut self, name: &str) -> Result<(), SkillMountError> {
+    pub fn activate_skill(
+        &mut self,
+        name: &str,
+        actor: SkillLifecycleActor,
+    ) -> Result<(), SkillMountError> {
         if !self.mounted_skills.iter().any(|n| n == name) {
             return Err(SkillMountError::NotMountedForActivation {
                 name: name.to_string(),
             });
         }
-        if self.activated_skills.iter().any(|n| n == name) {
-            return Ok(());
+        if land_skill_activation(&mut self.activated_skills, &mut self.timeline, name, actor) {
+            self.persist_if_bound();
         }
-        self.activated_skills.push(name.to_string());
-        self.append_skill_event(SkillLifecycleEvent {
-            kind: SkillLifecycleKind::Activate,
-            name: name.to_string(),
-            actor: Some(SkillLifecycleActor::User),
-        });
         Ok(())
     }
 
@@ -239,6 +241,178 @@ impl super::Session {
         // to the recipe atomically (the timeline IS the source of truth for
         // the skill sets, so changing it is a recipe mutation).
         self.persist_if_bound();
+    }
+}
+
+/// The single activation transition body (ADR-0110 Decisions 4/5, issue
+/// #701): push the name onto the live activated cache and append the
+/// `Activate` event to the timeline, carrying the initiation actor. Returns
+/// whether a FRESH event landed -- a repeat activation lands nothing
+/// (idempotent, the deliberately asymmetric posture
+/// [`Session::activate_skill`] documents). The persistence pairing lives
+/// with the caller: the IPC method persists through `&mut self`, the
+/// mid-turn [`SkillActivationCtx`] through the field-split
+/// [`super::persist_snapshot`] -- one transition, two borrow shapes, zero
+/// duplicated body.
+fn land_skill_activation(
+    activated: &mut Vec<String>,
+    timeline: &mut Vec<super::TimelineEntry>,
+    name: &str,
+    actor: SkillLifecycleActor,
+) -> bool {
+    if activated.iter().any(|n| n == name) {
+        return false;
+    }
+    activated.push(name.to_string());
+    timeline.push(super::TimelineEntry::Skill(SkillLifecycleEvent {
+        kind: SkillLifecycleKind::Activate,
+        name: name.to_string(),
+        actor: Some(actor),
+    }));
+    true
+}
+
+/// The mid-turn skill-activation channel the dispatch layer serves the
+/// `activate_skill` meta-tool through (ADR-0110 Decision 3, issue #701):
+/// field-disjoint borrows off one locked [`Session`] -- the activated cache,
+/// the timeline, the persister, the runtime facts -- plus the turn's mounted
+/// prompt fragments. Mirrors [`super::materializer::TurnDeps`]'s
+/// disjoint-borrow construction: built at the turn boundary while the other
+/// session fields are lent to `TurnDeps`, moved into the dispatch layer (the
+/// yoagent dispatch server / the bridge gateway -- both runtimes share one
+/// channel by construction), dropped before `record_turn` re-borrows the
+/// session. The fragments are the TURN-START resolution: mounts are
+/// turn-external (the agent channel is activation-only), so the snapshot is
+/// the mounted set for the whole turn, and the body the tool returns is the
+/// same body the system prompt would inject -- one source.
+pub(crate) struct SkillActivationCtx<'a> {
+    /// The turn's mounted-skill fragments, in mount order. Public read so
+    /// the tool-surface assembly can mount `activate_skill` only when the
+    /// set is non-empty (the trio's conditional-mounting posture,
+    /// ADR-0105 Decision 6).
+    pub(crate) fragments: &'a [crate::skills::SkillPromptFragment],
+    activated: &'a mut Vec<String>,
+    timeline: &'a mut Vec<super::TimelineEntry>,
+    persister: &'a mut super::recipe_persister::RecipePersister,
+    runtime_facts: &'a super::SessionRuntimeFacts,
+}
+
+impl<'a> SkillActivationCtx<'a> {
+    /// Production constructor: the turn boundary's field-disjoint borrows
+    /// off one locked session (the fields stay private -- only this module
+    /// and its descendants may name them).
+    pub(super) fn from_session(
+        fragments: &'a [crate::skills::SkillPromptFragment],
+        activated: &'a mut Vec<String>,
+        timeline: &'a mut Vec<super::TimelineEntry>,
+        persister: &'a mut super::recipe_persister::RecipePersister,
+        runtime_facts: &'a super::SessionRuntimeFacts,
+    ) -> Self {
+        Self {
+            fragments,
+            activated,
+            timeline,
+            persister,
+            runtime_facts,
+        }
+    }
+
+    /// Land the agent-side activation + persist immediately (issue #701):
+    /// real-time by contract -- the event reaches the timeline and the
+    /// recipe atomically BEFORE the tool result returns, so a turn that
+    /// later fails or is cancelled keeps the activation (the tool result
+    /// already crossed into the trajectory; the exit is unmount). The actor
+    /// is always `Agent` on this channel -- the user channel is the IPC
+    /// command, which routes [`Session::activate_skill`] instead. The
+    /// working set + temp path are the two pieces the field-split persist
+    /// borrows that live inside `TurnDeps` on both dispatch faces.
+    pub(crate) fn land(
+        &mut self,
+        name: &str,
+        working_set: &mut crate::workingset::WorkingSet,
+        temp_path: &std::path::Path,
+    ) {
+        if !land_skill_activation(
+            self.activated,
+            self.timeline,
+            name,
+            SkillLifecycleActor::Agent,
+        ) {
+            return;
+        }
+        super::persist_snapshot(
+            self.persister,
+            working_set,
+            temp_path,
+            self.timeline,
+            self.runtime_facts,
+        );
+    }
+}
+
+/// Test scaffolding for the activation channel (issue #701): owns the state
+/// a [`SkillActivationCtx`] borrows, so any crate test (not just this
+/// module's descendants, which alone can name `RecipePersister`) can build a
+/// channel and then read the post-state. `cfg(test)` -- production builds
+/// the ctx directly at the turn boundary.
+#[cfg(test)]
+pub(crate) struct SkillActivationFixture {
+    pub fragments: Vec<crate::skills::SkillPromptFragment>,
+    pub activated: Vec<String>,
+    pub timeline: Vec<super::TimelineEntry>,
+    pub(super) persister: super::recipe_persister::RecipePersister,
+    pub facts: super::SessionRuntimeFacts,
+}
+
+#[cfg(test)]
+impl SkillActivationFixture {
+    pub(crate) fn new(fragments: Vec<crate::skills::SkillPromptFragment>) -> Self {
+        Self {
+            fragments,
+            activated: Vec::new(),
+            timeline: Vec::new(),
+            persister: super::recipe_persister::RecipePersister::new(),
+            facts: super::SessionRuntimeFacts::default(),
+        }
+    }
+
+    /// Borrow the fixture as the channel the dispatch layer takes. The
+    /// borrow lasts as long as the returned ctx -- inline it in the call:
+    /// `resolve_skill_activation(call, &mut fx.ctx(), ...)`.
+    pub(crate) fn ctx(&mut self) -> SkillActivationCtx<'_> {
+        SkillActivationCtx {
+            fragments: &self.fragments,
+            activated: &mut self.activated,
+            timeline: &mut self.timeline,
+            persister: &mut self.persister,
+            runtime_facts: &self.facts,
+        }
+    }
+
+    /// A minimal mounted fragment for skill-surface tests: generated
+    /// description / content-hash (no test asserts on their text), empty
+    /// MCP/CLI sets -- the seed every activation test builds from.
+    pub(crate) fn fragment(name: &str, body: &str) -> crate::skills::SkillPromptFragment {
+        crate::skills::SkillPromptFragment {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            body: body.to_string(),
+            content_hash: format!("{name}-hash"),
+            mcp_servers: Vec::new(),
+            cli_tools: Vec::new(),
+        }
+    }
+
+    /// The landed skill-lifecycle events on the channel's timeline, in
+    /// order -- the assertion shape every channel test shares.
+    pub(crate) fn skill_events(&self) -> Vec<&SkillLifecycleEvent> {
+        self.timeline
+            .iter()
+            .filter_map(|e| match e {
+                super::TimelineEntry::Skill(ev) => Some(ev),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -406,7 +580,9 @@ mod tests {
     #[test]
     fn activate_skill_not_mounted_is_refused_without_event() {
         let mut session = Session::new().expect("session");
-        let err = session.activate_skill("sql-coach").unwrap_err();
+        let err = session
+            .activate_skill("sql-coach", SkillLifecycleActor::User)
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -428,7 +604,9 @@ mod tests {
     fn activate_skill_adds_to_live_cache_and_lands_user_actor_event() {
         let mut session = Session::new().expect("session");
         session.mount_skill("sql-coach").expect("mount");
-        session.activate_skill("sql-coach").expect("activate");
+        session
+            .activate_skill("sql-coach", SkillLifecycleActor::User)
+            .expect("activate");
         assert_eq!(session.activated_skills(), vec!["sql-coach".to_string()]);
         match session.conversation().last().expect("event") {
             ThreadEntry::Skill(ev) => {
@@ -447,9 +625,11 @@ mod tests {
     fn activate_skill_repeat_is_idempotent_success_without_second_event() {
         let mut session = Session::new().expect("session");
         session.mount_skill("sql-coach").expect("mount");
-        session.activate_skill("sql-coach").expect("first activate");
         session
-            .activate_skill("sql-coach")
+            .activate_skill("sql-coach", SkillLifecycleActor::User)
+            .expect("first activate");
+        session
+            .activate_skill("sql-coach", SkillLifecycleActor::User)
             .expect("repeat activate succeeds");
         // The timeline still holds exactly Mount + Activate -- no duplicate.
         assert_eq!(session.conversation().len(), 2);
@@ -463,7 +643,9 @@ mod tests {
     fn unmount_cascades_deactivation_live_and_fold() {
         let mut session = Session::new().expect("session");
         session.mount_skill("sql-coach").expect("mount");
-        session.activate_skill("sql-coach").expect("activate");
+        session
+            .activate_skill("sql-coach", SkillLifecycleActor::User)
+            .expect("activate");
         session.unmount_skill("sql-coach").expect("unmount");
         assert!(session.mounted_skills().is_empty());
         assert!(
@@ -485,7 +667,9 @@ mod tests {
     fn mount_activate_unmount_folds_to_empty_activated_set() {
         let mut session = Session::new().expect("session");
         session.mount_skill("sql-coach").expect("mount");
-        session.activate_skill("sql-coach").expect("activate");
+        session
+            .activate_skill("sql-coach", SkillLifecycleActor::User)
+            .expect("activate");
         session.unmount_skill("sql-coach").expect("unmount");
         let recipe = session.build_recipe();
         assert_eq!(
@@ -504,8 +688,12 @@ mod tests {
         let mut session = Session::new().expect("session");
         session.mount_skill("a").expect("mount a");
         session.mount_skill("b").expect("mount b");
-        session.activate_skill("b").expect("activate b");
-        session.activate_skill("a").expect("activate a");
+        session
+            .activate_skill("b", SkillLifecycleActor::User)
+            .expect("activate b");
+        session
+            .activate_skill("a", SkillLifecycleActor::User)
+            .expect("activate a");
         assert_eq!(
             session.activated_skills(),
             vec!["b".to_string(), "a".to_string()],
@@ -526,9 +714,13 @@ mod tests {
     fn seed_initial_skills_seeds_mounts_but_never_activations() {
         let mut session = Session::new().expect("session");
         session.mount_skill("auto-a").expect("mount");
-        session.activate_skill("auto-a").expect("activate");
+        session
+            .activate_skill("auto-a", SkillLifecycleActor::User)
+            .expect("activate");
         session.mount_skill("auto-b").expect("mount b");
-        session.activate_skill("auto-b").expect("activate b");
+        session
+            .activate_skill("auto-b", SkillLifecycleActor::User)
+            .expect("activate b");
         session.unmount_skill("auto-b").expect("unmount b");
         session.seed_initial_skills(vec!["auto-a".to_string(), "auto-c".to_string()]);
         // auto-a: mounted via seed + activated via its recorded event;
@@ -553,7 +745,9 @@ mod tests {
         // The auto-include posture at creation: pandoc seeds mounted (no
         // Mount event) and the user activates it.
         session.seed_initial_skills(vec!["pandoc".to_string()]);
-        session.activate_skill("pandoc").expect("activate");
+        session
+            .activate_skill("pandoc", SkillLifecycleActor::User)
+            .expect("activate");
         assert_eq!(session.activated_skills(), vec!["pandoc".to_string()]);
         // The tool is disabled before the resume: the initial set is empty
         // now, and the recorded Activate has no mount backing left.
@@ -573,7 +767,9 @@ mod tests {
     fn remount_after_unmount_does_not_resurrect_the_activation() {
         let mut session = Session::new().expect("session");
         session.mount_skill("a").expect("mount");
-        session.activate_skill("a").expect("activate");
+        session
+            .activate_skill("a", SkillLifecycleActor::User)
+            .expect("activate");
         session.unmount_skill("a").expect("unmount");
         session.mount_skill("a").expect("remount");
         assert_eq!(session.mounted_skills(), vec!["a".to_string()]);

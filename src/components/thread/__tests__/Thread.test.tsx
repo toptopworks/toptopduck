@@ -516,13 +516,15 @@ describe("Thread", () => {
     expect(unmountBar.className.split(/\s+/)).toContain("border-l-muted-foreground");
   });
 
-  it("renders an Activate marker in the minimal form (issue #698)", () => {
+  it("renders an Activate marker distinguishing the user from the agent actor (issues #698/#701)", () => {
     // ADR-0110: an Activate event renders as the third lifecycle species --
-    // verb + spec name + the primary present-tense tier (same as Mount). The
-    // actor distinction is deliberately NOT rendered in this ticket (the
-    // agent channel rides #701); the marker reads from the event alone.
+    // verb + spec name + the primary present-tense tier (same as Mount).
+    // The copy picks the actor's key (issue #701): the user activation
+    // keeps #698's message verbatim; the agent (the activate_skill
+    // meta-tool channel) gets its own.
     const entries: ThreadEntry[] = [
       { entry: "Skill", data: { kind: "Activate", name: "pdf-tools", actor: "User" } },
+      { entry: "Skill", data: { kind: "Activate", name: "sql-coach", actor: "Agent" } },
     ];
     const skillIndex = new Map([["pdf-tools", skillEntry("pdf-tools")]]);
     const { container } = renderThread(
@@ -534,6 +536,7 @@ describe("Thread", () => {
       />,
     );
     expect(screen.getByText(/激活技能「pdf-tools」/)).toBeInTheDocument();
+    expect(screen.getByText(/Agent 激活技能「sql-coach」/)).toBeInTheDocument();
     const bar = container.querySelector(
       `.skill-entry[data-skill-kind="activate"] .skill-lifecycle`,
     ) as HTMLElement;

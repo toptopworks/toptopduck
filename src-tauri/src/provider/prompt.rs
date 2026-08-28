@@ -105,11 +105,10 @@ fn render_skill_section(skills: &[SkillPromptFragment]) -> String {
 /// L1 -> L2 reading order). An empty mounted set renders the empty string --
 /// no empty block, so the pre-skill assembly shape is preserved.
 ///
-/// The index header is the TRANSITIONAL wording (purely descriptive,
-/// deliberately not naming `activate_skill` -- the gateway meta-tool lands in
-/// #701, and pointing at a tool that does not exist invites hallucinated
-/// calls). #701 swaps in the final header by mechanical replacement; both
-/// header wordings are locked in issue #700's brief.
+/// The index header is the FINAL wording (locked in issue #700's brief,
+/// landed with the `activate_skill` meta-tool in #701): it names the channel
+/// and its two trigger rules, so the index entry and the tool are one
+/// discoverable surface.
 fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String]) -> String {
     let mut out = String::new();
     let index: Vec<&SkillPromptFragment> = skills
@@ -117,7 +116,10 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String])
         .filter(|f| !activated.contains(&f.name))
         .collect();
     if !index.is_empty() {
-        out.push_str("\n\n【可用技能】\n以下技能已挂载，完整说明尚未加载：\n");
+        out.push_str(
+            "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，\
+             调用 activate_skill 工具加载其完整说明：\n",
+        );
         // Description verbatim, no truncation (an index cap policy is a
         // separately deferred ADR-0110 item). A degraded empty description
         // renders as an empty tail -- the entry stays, so a skill never
@@ -832,7 +834,7 @@ mod tests {
     fn disclosure_mounted_only_renders_index_entries_word_for_word() {
         // ADR-0110 L1: mounted-but-not-activated skills render as metadata
         // index entries ONLY -- no body anywhere. The block wording is the
-        // locked transitional contract from issue #700's brief (word-for-word,
+        // locked terminal contract from issue #700's brief (word-for-word,
         // including the em dash and the trailing-newline shape).
         let skills = [
             fragment("alpha", "Alpha skill.", "Alpha body.\n"),
@@ -841,10 +843,10 @@ mod tests {
         let section = render_skill_disclosure(&skills, &[]);
         assert_eq!(
             section,
-            "\n\n【可用技能】\n以下技能已挂载，完整说明尚未加载：\n\
+            "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，调用 activate_skill 工具加载其完整说明：\n\
              - `alpha` — Alpha skill.\n\
              - `beta` — Beta skill.\n",
-            "index block must match the locked transitional wording verbatim"
+            "index block must match the locked terminal wording verbatim"
         );
     }
 
@@ -856,7 +858,7 @@ mod tests {
         let section = render_skill_disclosure(&skills, &[]);
         assert_eq!(
             section,
-            "\n\n【可用技能】\n以下技能已挂载，完整说明尚未加载：\n- `ghost` — \n"
+            "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，调用 activate_skill 工具加载其完整说明：\n- `ghost` — \n"
         );
     }
 
