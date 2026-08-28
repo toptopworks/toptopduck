@@ -2948,10 +2948,12 @@ pub fn get_session_model_config(
 
 /// Set the session's model + thought-level selections for the next
 /// external-runtime turn (ADR-0095; a single full-pair command since issue
-/// #603). The wire IS the complete posture: every field is an explicit
-/// intent value -- `None` is the user's explicit clear (the CLI's own
-/// default) and an untouched field arrives as its current value -- so the
-/// backend never derives off the held slot (two concurrent sets cannot
+/// #603). The pair crosses as ONE struct argument (`PosturePair`, issue
+/// #606) -- field-keyed, so the transposition protection holds at this
+/// boundary too. The wire IS the complete posture: every field is an
+/// explicit intent value -- `None` is the user's explicit clear (the CLI's
+/// own default) and an untouched field arrives as its current value -- so
+/// the backend never derives off the held slot (two concurrent sets cannot
 /// interleave a read-modify-write; the #600 conditional write-back keeps
 /// guarding the set-vs-switch direction). Takes effect at the next turn
 /// boundary. The model id is NOT validated against the discovered catalog
@@ -2990,18 +2992,10 @@ pub fn set_session_posture(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     session_id: String,
-    model: Option<String>,
-    thought_level: Option<String>,
+    posture: PosturePair,
 ) -> Result<SetPosturePersistOutcome, SessionError> {
     let handle = store.get(&SessionId::parse(&session_id)?)?;
-    apply_posture_set(
-        &handle,
-        live.inner(),
-        PosturePair {
-            model,
-            thought_level,
-        },
-    )
+    apply_posture_set(&handle, live.inner(), posture)
 }
 
 /// The set command's body (issue #600, single full-pair command since

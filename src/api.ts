@@ -821,16 +821,16 @@ export interface SetPosturePersistOutcome {
 // external-runtime turn (ADR-0095). The wire IS the complete posture
 // (issue #603): every field is an explicit intent value -- `null` clears
 // (the CLI's own default) and an untouched field arrives as its current
-// value -- so the backend never derives off its held slot. Takes effect at
-// the next turn boundary; rejected while resuming or while a turn is in
-// flight.
+// value -- so the backend never derives off its held slot. The object
+// crosses as ONE argument with keys verbatim -- no translation (issue
+// #606); the wire shape is pinned Rust-side. Takes effect at the next
+// turn boundary; rejected while resuming or while a turn is in flight.
 export async function setSessionPosture(
   sessionId: string,
   posture: ModelPosture,
 ): Promise<SetPosturePersistOutcome> {
   return invoke<SetPosturePersistOutcome>("set_session_posture", {
     sessionId,
-    model: posture.model,
-    thoughtLevel: posture.thought_level,
+    posture,
   });
 }
