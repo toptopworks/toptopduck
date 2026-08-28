@@ -307,18 +307,12 @@ fn dispatch_gated_call_inner(
                 deps.working_set,
                 deps.temp_path,
             ) {
-                meta_tools::MetaDispatch::Local { summary, payload } => {
+                activation::SkillActivationOutcome::Local { summary, payload } => {
                     let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
                     (result, Some(entry), None)
                 }
-                meta_tools::MetaDispatch::Refused(message) => {
+                activation::SkillActivationOutcome::Refused(message) => {
                     (meta_failure(call, &message), None, None)
-                }
-                // The skill resolver only yields Local / Refused; the borrowed
-                // variants exist for the trio's fall-through, not this surface.
-                meta_tools::MetaDispatch::Resolved(_)
-                | meta_tools::MetaDispatch::Fallthrough(_) => {
-                    unreachable!("the skill resolver only yields Local / Refused")
                 }
             },
         );
@@ -2057,6 +2051,137 @@ mod tests {
         assert_eq!(phases.len(), 2, "started + completed");
         assert!(matches!(phases[0], TurnPhase::ToolCallStarted { .. }));
         assert!(matches!(phases[1], TurnPhase::ToolCallCompleted(_)));
+    }
+
+    /// The `activate_skill` arm on THIS face serves the skill's body as the
+    /// model-facing content VERBATIM (issue #701): a plain-string payload
+    /// must not come back JSON-quoted -- exact equality, not `contains`,
+    /// because the quoted form would still contain the body. The trace row
+    /// rides the shared Local mapping (name = the tool, summary = the
+    /// skill name), and the transition lands on the channel's state with
+    /// the Agent actor.
+    #[test]
+    fn activate_skill_serves_body_verbatim_with_a_trace_row() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let mut fx = crate::session::skills::SkillActivationFixture::new(vec![
+            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL."),
+        ]);
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "tu_s".into(),
+            name: "activate_skill".into(),
+            input: json!({"name": "sql-coach"}),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let (result, entry, promotion) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut fx.ctx(),
+            &gate,
+            &mut on_phase,
+        )
+        .expect("the activation serves");
+        assert!(!result.is_error, "an activation is a success");
+        assert_eq!(
+            result.content, "Coach the SQL.",
+            "the body rides the content verbatim, never JSON-quoted"
+        );
+        assert!(promotion.is_none(), "meta-tools never promote");
+        let entry = entry.expect("a served activation records one row");
+        assert_eq!(entry.name, "activate_skill");
+        assert!(entry.success);
+        assert_eq!(entry.summary, "sql-coach", "the summary is the skill name");
+        assert!(
+            sink.request_ids.lock().unwrap().is_empty(),
+            "activation is approval-free -- the intercept sits ahead of the gate"
+        );
+        let events = fx.skill_events();
+        assert_eq!(events.len(), 1, "a fresh activation lands one event");
+        assert_eq!(
+            events[0].actor,
+            Some(crate::model::SkillLifecycleActor::Agent),
+            "the mid-turn channel records the Agent actor"
+        );
+    }
+
+    /// A malformed `activate_skill` input fails traceless with the fixed
+    /// message: the resolver's classification is pinned at its unit level;
+    /// THIS pin is the site mapping -- the bare error result, no phase
+    /// events, no trace row, nothing landed (the trio's malformed posture
+    /// one match up).
+    #[test]
+    fn malformed_activate_skill_input_fails_traceless() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let mut fx = crate::session::skills::SkillActivationFixture::new(vec![
+            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL."),
+        ]);
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "tu_s".into(),
+            name: "activate_skill".into(),
+            input: json!({}),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let (result, entry, promotion) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut fx.ctx(),
+            &gate,
+            &mut on_phase,
+        )
+        .expect("a malformed activation still resolves to a result");
+        assert!(result.is_error, "a malformed input is refused");
+        assert_eq!(
+            result.content,
+            "activate_skill failed: parameter `name`: expected a non-empty string"
+        );
+        assert!(entry.is_none(), "a refused activation records no trace row");
+        assert!(promotion.is_none());
+        assert!(phases.into_inner().unwrap().is_empty(), "no phase events");
+        assert!(fx.skill_events().is_empty(), "nothing lands");
+        assert!(fx.activated.is_empty());
     }
 
     /// A malformed meta-tool input fails traceless with the shared message

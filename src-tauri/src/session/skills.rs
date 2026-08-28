@@ -331,14 +331,14 @@ impl<'a> SkillActivationCtx<'a> {
         name: &str,
         working_set: &mut crate::workingset::WorkingSet,
         temp_path: &std::path::Path,
-    ) -> bool {
+    ) {
         if !land_skill_activation(
             self.activated,
             self.timeline,
             name,
             SkillLifecycleActor::Agent,
         ) {
-            return false;
+            return;
         }
         super::persist_snapshot(
             self.persister,
@@ -347,7 +347,6 @@ impl<'a> SkillActivationCtx<'a> {
             self.timeline,
             self.runtime_facts,
         );
-        true
     }
 }
 
@@ -388,6 +387,32 @@ impl SkillActivationFixture {
             persister: &mut self.persister,
             runtime_facts: &self.facts,
         }
+    }
+
+    /// A minimal mounted fragment for skill-surface tests: generated
+    /// description / content-hash (no test asserts on their text), empty
+    /// MCP/CLI sets -- the seed every activation test builds from.
+    pub(crate) fn fragment(name: &str, body: &str) -> crate::skills::SkillPromptFragment {
+        crate::skills::SkillPromptFragment {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            body: body.to_string(),
+            content_hash: format!("{name}-hash"),
+            mcp_servers: Vec::new(),
+            cli_tools: Vec::new(),
+        }
+    }
+
+    /// The landed skill-lifecycle events on the channel's timeline, in
+    /// order -- the assertion shape every channel test shares.
+    pub(crate) fn skill_events(&self) -> Vec<&SkillLifecycleEvent> {
+        self.timeline
+            .iter()
+            .filter_map(|e| match e {
+                super::TimelineEntry::Skill(ev) => Some(ev),
+                _ => None,
+            })
+            .collect()
     }
 }
 

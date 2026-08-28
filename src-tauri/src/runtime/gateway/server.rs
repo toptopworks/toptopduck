@@ -468,14 +468,11 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             ctx.deps.working_set,
             ctx.deps.temp_path,
         ) {
-            meta_tools::MetaDispatch::Local { summary, payload } => {
+            crate::skills::activation::SkillActivationOutcome::Local { summary, payload } => {
                 local_meta_result(call, &summary, payload, outcome)
             }
-            meta_tools::MetaDispatch::Refused(message) => resolution_failure(message),
-            // The skill resolver only yields Local / Refused; the borrowed
-            // variants exist for the trio's fall-through, not this surface.
-            meta_tools::MetaDispatch::Resolved(_) | meta_tools::MetaDispatch::Fallthrough(_) => {
-                unreachable!("the skill resolver only yields Local / Refused")
+            crate::skills::activation::SkillActivationOutcome::Refused(message) => {
+                resolution_failure(message)
             }
         };
     }
@@ -745,6 +742,18 @@ mod tests {
         fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
     }
 
+    /// A recording sink for the approval-free assertions (issue #701): the
+    /// NoopSink default hides whether the gate was ever asked.
+    struct RecSink {
+        requests: std::sync::Mutex<Vec<String>>,
+    }
+    impl ApprovalSink for RecSink {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            self.requests.lock().unwrap().push(body.summary.clone());
+        }
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+
     /// Build a `GatewayCtx` over leak-boxed 'static resources so the handle_method
     /// cases (which ignore the engine anyway) stay terse. The end-to-end case
     /// reuses the same helper: its ctx moves into `serve_connection` and the
@@ -755,32 +764,20 @@ mod tests {
         gate_ctx(Vec::new(), approval, sink)
     }
 
-    /// A ctx over a SEEDED activation fixture (issue #701): returns the ctx
-    /// plus the leaked fixture so the test asserts the landed state after
-    /// the call. Mirrors `gate_ctx`'s construction with the one difference.
+    /// A ctx over a SEEDED activation fixture (issue #701) -- the skill-arm
+    /// tests' variant of [`fresh_ctx`]: the all-leak defaults of
+    /// `gate_ctx_with_materializer`, differing only in the seeded fixture.
+    /// The NoopSink gate hides whether the gate was ever asked; the
+    /// approval-free assertions go through the recording sink instead.
     fn skill_ctx(fragments: Vec<crate::skills::SkillPromptFragment>) -> GatewayCtx<'static> {
         let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
             crate::session::skills::SkillActivationFixture::new(fragments),
         ));
         let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
         let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
-        let engine: &'static Engine = Box::leak(Box::new(Engine::new()));
-        let ws: &'static mut WorkingSet = Box::leak(Box::new(WorkingSet::default()));
-        let sources: &'static mut HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
-        let refs: &'static mut HashMap<String, crate::session::materializer::CachedDerivedRef> =
-            Box::leak(Box::new(HashMap::new()));
-        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
-        let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
-        GatewayCtx {
-            deps,
-            skills: fx.ctx(),
-            materializer: Box::leak(Box::new(FakeMaterializer::new(vec![]))),
-            approval,
-            sink,
-            cancel,
-            mcp: McpAggregator::default(),
-            cli: Box::leak(Vec::new().into_boxed_slice()),
-        }
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx)
     }
 
     /// The CLI-registration test variant of [`fresh_ctx`]: a caller-chosen
@@ -794,7 +791,15 @@ mod tests {
     ) -> GatewayCtx<'static> {
         let fake: &'static mut FakeMaterializer =
             Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        gate_ctx_with_materializer(fake, cli, approval, sink)
+        gate_ctx_with_materializer(
+            fake,
+            cli,
+            approval,
+            sink,
+            Box::leak(Box::new(
+                crate::session::skills::SkillActivationFixture::new(Vec::new()),
+            )),
+        )
     }
 
     /// [`gate_ctx`] with a caller-chosen materializer -- the #321 panic pin
@@ -804,6 +809,7 @@ mod tests {
         cli: Vec<crate::cli_tools::config::CliToolConfig>,
         approval: &'static ApprovalState,
         sink: &'static dyn ApprovalSink,
+        skills: &'static mut crate::session::skills::SkillActivationFixture,
     ) -> GatewayCtx<'static> {
         let cli: &'static [crate::cli_tools::config::CliToolConfig] =
             Box::leak(cli.into_boxed_slice());
@@ -814,13 +820,9 @@ mod tests {
             Box::leak(Box::new(HashMap::new()));
         let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
         let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
-        let skills_fixture: &'static mut crate::session::skills::SkillActivationFixture =
-            Box::leak(Box::new(
-                crate::session::skills::SkillActivationFixture::new(Vec::new()),
-            ));
         GatewayCtx {
             deps,
-            skills: skills_fixture.ctx(),
+            skills: skills.ctx(),
             materializer,
             approval,
             sink,
@@ -1690,15 +1692,18 @@ mod tests {
     /// -- actor `Agent`.
     #[test]
     fn handle_tools_call_activate_skill_serves_body_and_lands_agent_activation() {
-        let fragment = crate::skills::SkillPromptFragment {
-            name: "sql-coach".to_string(),
-            description: "Coach SQL.".to_string(),
-            body: "Coach the SQL.".to_string(),
-            content_hash: "hash".to_string(),
-            mcp_servers: Vec::new(),
-            cli_tools: Vec::new(),
-        };
-        let mut ctx = skill_ctx(vec![fragment]);
+        let fragment =
+            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL.");
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
+            requests: std::sync::Mutex::new(Vec::new()),
+        }));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
+            crate::session::skills::SkillActivationFixture::new(vec![fragment]),
+        ));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx);
         let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
@@ -1737,6 +1742,69 @@ mod tests {
             }
             Response::None => panic!("the repeat must return Result, got None"),
         }
+        assert!(
+            sink.requests.lock().unwrap().is_empty(),
+            "activation is approval-free on the bridge face too -- the intercept sits ahead of the gate"
+        );
+    }
+
+    /// The bridge face's `activate_skill` Refused arm (issue #701): an
+    /// unknown name is the bare isError envelope carrying the
+    /// self-correcting message (every mounted name), with NO trace row --
+    /// the trio's resolution-failure posture, mirrored for the skill arm.
+    #[test]
+    fn handle_tools_call_activate_skill_unknown_name_refuses_traceless() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
+            requests: std::sync::Mutex::new(Vec::new()),
+        }));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
+            crate::session::skills::SkillActivationFixture::new(vec![
+                crate::session::skills::SkillActivationFixture::fragment(
+                    "sql-coach",
+                    "Coach the SQL.",
+                ),
+                crate::session::skills::SkillActivationFixture::fragment(
+                    "pdf-tools",
+                    "Handle PDFs.",
+                ),
+            ]),
+        ));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {"name": "activate_skill", "arguments": {"name": "ghost"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "an unknown name is refused");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.contains("ghost"), "{text}");
+                assert!(
+                    text.contains("sql-coach") && text.contains("pdf-tools"),
+                    "the refusal lists EVERY mounted name for self-correction: {text}"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("a refused activation is still a Result, got error {code}: {m}")
+            }
+            Response::None => panic!("a refused activation must return Result, got None"),
+        }
+        assert!(
+            outcome.trace.is_empty(),
+            "a refused activation records no trace row"
+        );
+        assert!(
+            sink.requests.lock().unwrap().is_empty(),
+            "the refusal never reaches the gate either"
+        );
+        // Nothing lands on a refused call -- pinned at the resolver's unit
+        // level; this face's contract is the envelope + traceless mapping.
     }
 
     /// The mount-conditional surface (issue #701, ADR-0105 Decision 6): an
@@ -1769,14 +1837,8 @@ mod tests {
             Response::None => panic!("tools/list must return Result, got None"),
         }
 
-        let fragment = crate::skills::SkillPromptFragment {
-            name: "sql-coach".to_string(),
-            description: "Coach SQL.".to_string(),
-            body: "Coach the SQL.".to_string(),
-            content_hash: "hash".to_string(),
-            mcp_servers: Vec::new(),
-            cli_tools: Vec::new(),
-        };
+        let fragment =
+            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL.");
         let mut ctx = skill_ctx(vec![fragment]);
         match handle_method(
             "tools/list",
@@ -1814,7 +1876,15 @@ mod tests {
         let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
         let ghost: &'static mut GhostThenPanicMaterializer =
             Box::leak(Box::new(GhostThenPanicMaterializer));
-        let mut ctx = gate_ctx_with_materializer(ghost, Vec::new(), approval, sink);
+        let mut ctx = gate_ctx_with_materializer(
+            ghost,
+            Vec::new(),
+            approval,
+            sink,
+            Box::leak(Box::new(
+                crate::session::skills::SkillActivationFixture::new(Vec::new()),
+            )),
+        );
         let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",

@@ -1368,17 +1368,12 @@ fn phase_stream_orders_thinking_before_call_events() {
 #[test]
 fn activate_skill_call_serves_body_lands_activation_and_traces() {
     use crate::model::SkillLifecycleActor;
-    use crate::skills::SkillPromptFragment;
 
     let mut h = Harness::new();
-    h.skills.fragments = vec![SkillPromptFragment {
-        name: "sql-coach".to_string(),
-        description: "Coach SQL.".to_string(),
-        body: "Coach the SQL.".to_string(),
-        content_hash: "hash".to_string(),
-        mcp_servers: Vec::new(),
-        cli_tools: Vec::new(),
-    }];
+    h.skills.fragments = vec![crate::session::skills::SkillActivationFixture::fragment(
+        "sql-coach",
+        "Coach the SQL.",
+    )];
     let provider = Arc::new(ScriptedProvider::new(vec![
         thinking_and_batch(
             "the task matches sql-coach",
@@ -1414,15 +1409,7 @@ fn activate_skill_call_serves_body_lands_activation_and_traces() {
     assert_eq!(entry.summary, "sql-coach");
     // The transition landed with the Agent actor, fresh (one event).
     assert_eq!(h.skills.activated, vec!["sql-coach".to_string()]);
-    let events: Vec<_> = h
-        .skills
-        .timeline
-        .iter()
-        .filter_map(|e| match e {
-            crate::session::TimelineEntry::Skill(ev) => Some(ev),
-            _ => None,
-        })
-        .collect();
+    let events = h.skills.skill_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].actor, Some(SkillLifecycleActor::Agent));
 }

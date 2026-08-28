@@ -13,11 +13,13 @@
 //! gateway-local meta call served BEFORE the approval gate: both dispatch
 //! faces (the yoagent dispatch server and the bridge gateway) intercept the
 //! name beside `resolve_meta_call`'s match and map the returned
-//! [`MetaDispatch`] variant onto their own envelope. Unlike the trio, the
-//! classification is NOT pure -- a successful resolution lands a mutable
-//! state transition + an immediate atomic persist (real-time by contract:
-//! the event reaches the timeline before the tool result returns, and a
-//! turn that later fails or is cancelled keeps the activation).
+//! [`SkillActivationOutcome`] onto their own envelope -- the same
+//! Local/Refused mapping they serve the trio's [`crate::mcp::meta_tools::MetaDispatch`] through.
+//! Unlike the trio, the classification is NOT pure -- a successful
+//! resolution lands a mutable state transition + an immediate atomic
+//! persist (real-time by contract: the event reaches the timeline before
+//! the tool result returns, and a turn that later fails or is cancelled
+//! keeps the activation).
 //!
 //! The tool's result is the skill's body -- the SAME turn-start
 //! [`SkillPromptFragment`] the system prompt assembled from, so the channel
@@ -29,7 +31,6 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::mcp::meta_tools::MetaDispatch;
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 use crate::session::skills::SkillActivationCtx;
 use crate::skills::SkillPromptFragment;
@@ -111,6 +112,22 @@ fn degraded_body_note(name: &str) -> String {
     )
 }
 
+/// The resolver's outcome -- exactly the two [`crate::mcp::meta_tools::MetaDispatch`] variants this
+/// surface yields, owned and lifetime-free: the trio's borrowed
+/// `Resolved`/`Fallthrough` arms exist for its fall-through and are
+/// structurally unreachable here, so owning the pair keeps both dispatch
+/// matches total with no panicking arms.
+#[derive(Debug)]
+pub(crate) enum SkillActivationOutcome {
+    /// A served activation: the skill name for the trace summary + the
+    /// model-facing payload (the body, or the degrade note, as a PLAIN
+    /// string).
+    Local { summary: String, payload: Value },
+    /// A refused activation: the self-correcting message, served as the
+    /// bare error result with no trace row.
+    Refused(String),
+}
+
 /// Classify one `activate_skill` call against the skill surface and perform
 /// the transition. The five cases (issue #701's locked contract):
 /// - a mounted name, fresh: land the `Activate` event (actor `Agent`) +
@@ -122,29 +139,29 @@ fn degraded_body_note(name: &str) -> String {
 /// - a mounted name whose body is empty: land the activation + return the
 ///   degrade note (never `Refused`).
 ///
-/// The two site-visible variants are `Local { summary: <skill name>,
-/// payload: <the body verbatim, as a plain JSON string> }` and `Refused`;
-/// the sites' existing Local/Refused mappings serve them exactly as they
-/// serve the trio's (including the trace row: `name` = `activate_skill`,
-/// summary = the skill name). The working set + temp path are the two
-/// pieces the immediate persist borrows that live inside `TurnDeps` on both
-/// dispatch faces.
-pub(crate) fn resolve_skill_activation<'a>(
-    call: &'a ToolUse,
+/// The two outcome variants are `Local { summary: <skill name>, payload:
+/// <the body verbatim, as a plain JSON string> }` and `Refused`; the sites'
+/// existing Local/Refused mappings serve them exactly as they serve the
+/// trio's (including the trace row: `name` = `activate_skill`, summary =
+/// the skill name). The working set + temp path are the two pieces the
+/// immediate persist borrows that live inside `TurnDeps` on both dispatch
+/// faces.
+pub(crate) fn resolve_skill_activation(
+    call: &ToolUse,
     ctx: &mut SkillActivationCtx<'_>,
     working_set: &mut WorkingSet,
     temp_path: &Path,
-) -> MetaDispatch<'a> {
+) -> SkillActivationOutcome {
     let Some(name) = call
         .input
         .get("name")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     else {
-        return MetaDispatch::Refused(missing_name_failure());
+        return SkillActivationOutcome::Refused(missing_name_failure());
     };
     let Some(fragment) = ctx.fragments.iter().find(|f| f.name == name) else {
-        return MetaDispatch::Refused(unknown_skill_failure(name, ctx.fragments));
+        return SkillActivationOutcome::Refused(unknown_skill_failure(name, ctx.fragments));
     };
     // Fresh or idempotent, the result is the body either way -- the landed
     // bool distinguishes them only for the event/persist pairing inside.
@@ -154,7 +171,7 @@ pub(crate) fn resolve_skill_activation<'a>(
     } else {
         fragment.body.clone()
     };
-    MetaDispatch::Local {
+    SkillActivationOutcome::Local {
         summary: name.to_string(),
         payload: Value::String(payload),
     }
@@ -163,58 +180,22 @@ pub(crate) fn resolve_skill_activation<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SkillLifecycleActor, SkillLifecycleEvent, SkillLifecycleKind};
+    use crate::model::{SkillLifecycleActor, SkillLifecycleKind};
     use crate::session::skills::SkillActivationFixture;
-    use crate::session::TimelineEntry;
     use crate::workingset::WorkingSet;
-
-    fn fragment(name: &str, body: &str) -> SkillPromptFragment {
-        SkillPromptFragment {
-            name: name.to_string(),
-            description: format!("{name} description"),
-            body: body.to_string(),
-            content_hash: format!("{name}-hash"),
-            mcp_servers: Vec::new(),
-            cli_tools: Vec::new(),
-        }
-    }
-
-    /// The resolver's two site-visible variants, detached from
-    /// `MetaDispatch`'s borrowed `Fallthrough` lifetime for asserting.
-    #[derive(Debug)]
-    enum Outcome {
-        Local { summary: String, payload: Value },
-        Refused(String),
-    }
 
     /// One resolver call: the fixture owns the channel state; the working
     /// set + temp path the persist borrows are inert (an unbound persister
     /// persists nothing -- `save_if_bound`'s unbound no-op, pinned by its
     /// own unit test).
-    fn resolve(fx: &mut SkillActivationFixture, input: Value) -> Outcome {
+    fn resolve(fx: &mut SkillActivationFixture, input: Value) -> SkillActivationOutcome {
         let call = ToolUse {
             id: "tu_s".to_string(),
             name: ACTIVATE_SKILL.to_string(),
             input,
         };
         let mut ws = WorkingSet::default();
-        match resolve_skill_activation(&call, &mut fx.ctx(), &mut ws, std::path::Path::new("")) {
-            MetaDispatch::Local { summary, payload } => Outcome::Local { summary, payload },
-            MetaDispatch::Refused(message) => Outcome::Refused(message),
-            MetaDispatch::Resolved(_) | MetaDispatch::Fallthrough(_) => {
-                panic!("the skill resolver only yields Local / Refused")
-            }
-        }
-    }
-
-    fn skill_events(fx: &SkillActivationFixture) -> Vec<&SkillLifecycleEvent> {
-        fx.timeline
-            .iter()
-            .filter_map(|e| match e {
-                TimelineEntry::Skill(ev) => Some(ev),
-                _ => None,
-            })
-            .collect()
+        resolve_skill_activation(&call, &mut fx.ctx(), &mut ws, std::path::Path::new(""))
     }
 
     /// A fresh activation lands one `Activate` event (actor `Agent`) and
@@ -223,18 +204,18 @@ mod tests {
     #[test]
     fn fresh_activation_lands_agent_event_and_returns_body() {
         let mut fx = SkillActivationFixture::new(vec![
-            fragment("sql-coach", "Coach the SQL."),
-            fragment("pdf-tools", "Handle PDFs."),
+            SkillActivationFixture::fragment("sql-coach", "Coach the SQL."),
+            SkillActivationFixture::fragment("pdf-tools", "Handle PDFs."),
         ]);
         match resolve(&mut fx, json!({"name": "sql-coach"})) {
-            Outcome::Local { summary, payload } => {
+            SkillActivationOutcome::Local { summary, payload } => {
                 assert_eq!(summary, "sql-coach");
                 assert_eq!(payload, Value::String("Coach the SQL.".to_string()));
             }
             other => panic!("expected Local, got {other:?}"),
         }
         assert_eq!(fx.activated, vec!["sql-coach".to_string()]);
-        let events = skill_events(&fx);
+        let events = fx.skill_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, SkillLifecycleKind::Activate);
         assert_eq!(events[0].name, "sql-coach");
@@ -245,16 +226,19 @@ mod tests {
     /// (the idempotent posture, locked asymmetric with the mount family).
     #[test]
     fn repeat_activation_lands_nothing_and_returns_body_again() {
-        let mut fx = SkillActivationFixture::new(vec![fragment("sql-coach", "Coach the SQL.")]);
+        let mut fx = SkillActivationFixture::new(vec![SkillActivationFixture::fragment(
+            "sql-coach",
+            "Coach the SQL.",
+        )]);
         resolve(&mut fx, json!({"name": "sql-coach"}));
         match resolve(&mut fx, json!({"name": "sql-coach"})) {
-            Outcome::Local { summary, payload } => {
+            SkillActivationOutcome::Local { summary, payload } => {
                 assert_eq!(summary, "sql-coach");
                 assert_eq!(payload, Value::String("Coach the SQL.".to_string()));
             }
             other => panic!("expected Local, got {other:?}"),
         }
-        assert_eq!(skill_events(&fx).len(), 1);
+        assert_eq!(fx.skill_events().len(), 1);
     }
 
     /// An unknown name is refused with EVERY mounted name in the error --
@@ -262,18 +246,18 @@ mod tests {
     #[test]
     fn unknown_name_lists_every_mounted_name() {
         let mut fx = SkillActivationFixture::new(vec![
-            fragment("sql-coach", "Coach the SQL."),
-            fragment("pdf-tools", "Handle PDFs."),
+            SkillActivationFixture::fragment("sql-coach", "Coach the SQL."),
+            SkillActivationFixture::fragment("pdf-tools", "Handle PDFs."),
         ]);
         match resolve(&mut fx, json!({"name": "ghost"})) {
-            Outcome::Refused(message) => {
+            SkillActivationOutcome::Refused(message) => {
                 assert!(message.contains("sql-coach"), "{message}");
                 assert!(message.contains("pdf-tools"), "{message}");
                 assert!(message.contains("ghost"), "{message}");
             }
             other => panic!("expected Refused, got {other:?}"),
         }
-        assert!(skill_events(&fx).is_empty());
+        assert!(fx.skill_events().is_empty());
         assert!(fx.activated.is_empty());
     }
 
@@ -281,7 +265,10 @@ mod tests {
     /// the fixed message, and nothing lands.
     #[test]
     fn malformed_input_is_refused_with_fixed_message() {
-        let mut fx = SkillActivationFixture::new(vec![fragment("sql-coach", "Coach the SQL.")]);
+        let mut fx = SkillActivationFixture::new(vec![SkillActivationFixture::fragment(
+            "sql-coach",
+            "Coach the SQL.",
+        )]);
         for input in [
             json!({}),
             json!({"name": 7}),
@@ -289,14 +276,14 @@ mod tests {
             Value::Null,
         ] {
             match resolve(&mut fx, input) {
-                Outcome::Refused(message) => assert_eq!(
+                SkillActivationOutcome::Refused(message) => assert_eq!(
                     message,
                     "activate_skill failed: parameter `name`: expected a non-empty string"
                 ),
                 other => panic!("expected Refused, got {other:?}"),
             }
         }
-        assert!(skill_events(&fx).is_empty());
+        assert!(fx.skill_events().is_empty());
     }
 
     /// A mounted skill whose turn-start body is empty STILL activates (the
@@ -305,9 +292,10 @@ mod tests {
     /// would invite a retry death loop that cannot fix a file).
     #[test]
     fn unreadable_body_still_lands_and_returns_degrade_note() {
-        let mut fx = SkillActivationFixture::new(vec![fragment("ghost-file", "")]);
+        let mut fx =
+            SkillActivationFixture::new(vec![SkillActivationFixture::fragment("ghost-file", "")]);
         match resolve(&mut fx, json!({"name": "ghost-file"})) {
-            Outcome::Local { summary, payload } => {
+            SkillActivationOutcome::Local { summary, payload } => {
                 assert_eq!(summary, "ghost-file");
                 let text = payload.as_str().expect("string payload");
                 assert!(!text.is_empty());
@@ -316,7 +304,26 @@ mod tests {
             other => panic!("expected Local, got {other:?}"),
         }
         assert_eq!(fx.activated, vec!["ghost-file".to_string()]);
-        assert_eq!(skill_events(&fx).len(), 1);
+        assert_eq!(fx.skill_events().len(), 1);
+    }
+
+    /// An unknown name on an EMPTY mounted surface still refuses with an
+    /// honest message: a hallucinated `activate_skill` call on a turn that
+    /// mounted nothing reaches the intercept (it keys off the name, not
+    /// the advertisement), and the message names the empty surface
+    /// instead of an empty list.
+    #[test]
+    fn unknown_name_with_an_empty_mounted_set_names_the_empty_surface() {
+        let mut fx = SkillActivationFixture::new(Vec::new());
+        match resolve(&mut fx, json!({"name": "ghost"})) {
+            SkillActivationOutcome::Refused(message) => assert_eq!(
+                message,
+                "activate_skill: `ghost` is not mounted. No skills are mounted this turn."
+            ),
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert!(fx.skill_events().is_empty());
+        assert!(fx.activated.is_empty());
     }
 
     /// The definition is well-formed and carries the locked name (the
