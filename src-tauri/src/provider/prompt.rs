@@ -1168,12 +1168,12 @@ mod tests {
     /// the two-block contract.
     #[test]
     fn disclosure_renders_index_before_bodies_in_mount_order() {
-        let skills = vec![
+        let skills = [
             fragment("alpha", "alpha desc.", "alpha body.\n"),
             fragment("beta", "beta desc.", "beta body.\n"),
             fragment("gamma", "gamma desc.", "gamma body.\n"),
         ];
-        let activated = vec!["gamma".to_string(), "alpha".to_string()];
+        let activated = ["gamma".to_string(), "alpha".to_string()];
         let out = render_skill_disclosure(&skills, &activated);
 
         let index_pos = out.find("【可用技能】").expect("index block present");
@@ -1195,7 +1195,7 @@ mod tests {
         // verbatim.
         assert!(
             out.contains("- `beta` — beta desc.\n"),
-            "index entry for beta"
+            "the index lists only the inactive skill"
         );
         assert!(
             !out.contains("- `alpha` —") && !out.contains("- `gamma` —"),

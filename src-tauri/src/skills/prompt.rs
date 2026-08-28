@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use super::frontmatter::{cli_tools, get_string, mcp_servers, split_frontmatter};
+use super::frontmatter::{cli_tools, mcp_servers, split_frontmatter};
 use super::model::is_valid_skill_name;
 use crate::util::sha256_hex;
 
@@ -161,13 +161,27 @@ fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     let (description, body, mcp_servers, cli_tools) = match split_frontmatter(&raw) {
         Ok((yaml, body)) => match serde_yaml::from_str::<serde_yaml::Value>(&yaml) {
             Ok(serde_yaml::Value::Mapping(mapping)) => {
-                // The description degrade (absent/wrong-typed key -> empty)
-                // is silent by design: the index entry stays renderable with
-                // an empty description (ADR-0110 -- a skill never silently
-                // disappears from the discoverable set), so there is no
-                // operator-visible failure to log.
+                // An ABSENT description degrades silently by design: the
+                // index entry stays renderable with an empty description
+                // (ADR-0110 -- a skill never silently disappears from the
+                // discoverable set). A PRESENT-but-wrong-typed one is the
+                // same corruption class as the unparseable-YAML arm below
+                // and logs the same way (review B, issue #707).
+                let description = match mapping.get(serde_yaml::Value::String("description".into()))
+                {
+                    Some(serde_yaml::Value::String(s)) => s.clone(),
+                    Some(_) => {
+                        log::warn!(
+                            target: "skills",
+                            "mounted skill `{name}` has a wrong-typed `description` -- \
+                             the index entry degrades to an empty description",
+                        );
+                        String::new()
+                    }
+                    None => String::new(),
+                };
                 (
-                    get_string(&mapping, "description").unwrap_or_default(),
+                    description,
                     body,
                     mcp_servers(&mapping),
                     cli_tools(&mapping),

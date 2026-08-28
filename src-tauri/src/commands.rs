@@ -732,7 +732,7 @@ pub async fn ask(
         // read and the turn) and wires `TurnInputs` in one seam -- see
         // [`assemble_turn_inputs`].
         let assembled = assemble_turn_inputs(&s, &skills_root, &live);
-        let inputs = assembled.turn_inputs(&live, &mcp_servers);
+        let inputs = assembled.turn_inputs(&mcp_servers);
         let outcome = s.ask_with_phase(
             &question,
             &approval,
@@ -781,12 +781,15 @@ pub async fn ask(
 /// borrowed fields. `commands::ask` calls [`assemble_turn_inputs`] under the
 /// held session lock, then borrows through [`Self::turn_inputs`] -- the
 /// two-step shape exists because a `TurnInputs` borrows its buffers, so the
-/// owning values must be built first and outlive the borrowed view (the pair
-/// cannot be returned as one tuple).
-struct AssembledTurnInputs {
+/// owning values must be built first and outlive the borrowed view: no Rust
+/// signature can return a value and a borrow of that value as one tuple.
+/// The keychain rides here as a borrowed field (taken from `live` at
+/// assembly time) so the projection carries no source-config re-passes.
+struct AssembledTurnInputs<'a> {
     skills: Vec<SkillPromptFragment>,
     activated: Vec<String>,
     cli_tools: Vec<crate::cli_tools::config::CliToolConfig>,
+    keychain: &'a crate::provider::keychain::KeychainStore,
 }
 
 /// Read the session's mounted + activated skill sets and resolve the mounted
@@ -794,18 +797,19 @@ struct AssembledTurnInputs {
 /// whole-file SHA-256) against the registry root, here at the command
 /// boundary where the root lives, so the session stays I/O-free for skill
 /// content (it consumes fragments, mirroring the mcp_servers "data passed in"
-/// pattern). The caller holds the session lock, so neither set can change
-/// between this read and the turn. The activated names (ADR-0110, issue
+/// pattern). The caller must hold the session lock, so neither set can
+/// change between this read and the turn. The activated names (ADR-0110,
+/// issue
 /// #700) are the L1/L2 sort key for the disclosure rendering and the
 /// provenance's activated-subset filter. One seam so neither set read nor the
 /// `TurnInputs` field wiring can silently pass the wrong set (issue #707's
 /// wiring pin) -- the black-box tests hand-assemble their inputs, which left
 /// the command body itself uncovered.
-fn assemble_turn_inputs(
+fn assemble_turn_inputs<'a>(
     session: &Session,
     skills_root: &Path,
-    live: &LiveProviderConfig,
-) -> AssembledTurnInputs {
+    live: &'a LiveProviderConfig,
+) -> AssembledTurnInputs<'a> {
     let mounted = session.mounted_skills();
     let activated = session.activated_skills();
     let skills = resolve_prompt_fragments(skills_root, &mounted);
@@ -814,21 +818,17 @@ fn assemble_turn_inputs(
         skills,
         activated,
         cli_tools,
+        keychain: live.keychain(),
     }
 }
 
-impl AssembledTurnInputs {
-    /// Project the owning buffers (plus the caller's command-level data: the
-    /// effective MCP servers and the keychain) into the turn's borrowed input
-    /// view.
-    fn turn_inputs<'a>(
-        &'a self,
-        live: &'a LiveProviderConfig,
-        mcp_servers: &'a [McpServerConfig],
-    ) -> TurnInputs<'a> {
+impl AssembledTurnInputs<'_> {
+    /// Project the owning buffers (plus the caller's command-level MCP
+    /// servers) into the turn's borrowed input view.
+    fn turn_inputs<'b>(&'b self, mcp_servers: &'b [McpServerConfig]) -> TurnInputs<'b> {
         TurnInputs {
             mcp_servers,
-            keychain: live.keychain(),
+            keychain: self.keychain,
             skills: &self.skills,
             activated: &self.activated,
             cli_tools: &self.cli_tools,
@@ -5217,8 +5217,17 @@ mod tests {
             crate::provider::keychain::KeychainStore::new(),
             tmp.path().join("config.json"),
         );
+        // The non-empty direction of the CLI wiring (review I1, issue #707):
+        // one enabled registration upserted through the real config path, so
+        // the projection is pinned against `cli_tools: &[]` too -- an
+        // empty-only assert is vacuously satisfied by a missing config. This
+        // also makes `load()` read the temp config file instead of the
+        // missing-config path that would query the OS keychain for the
+        // legacy blob (review C).
+        live.upsert_cli_tool(cli_tool("pandoc-guide", true))
+            .expect("upsert one enabled CLI tool");
         let assembled = assemble_turn_inputs(&session, &root, &live);
-        let inputs = assembled.turn_inputs(&live, &[]);
+        let inputs = assembled.turn_inputs(&[]);
 
         // The sort key is the activated subset, NOT the mounted set -- the
         // mirror-drift this pin exists for fails here.
@@ -5247,9 +5256,16 @@ mod tests {
             .expect("beta fragment");
         assert_eq!(beta.description, "Beta description.");
         assert_eq!(beta.body, "Beta body.\n");
-        // The command-level wiring rides the same projection: the empty live
-        // config contributes no MCP servers and no CLI tools.
+        // The command-level wiring rides the same projection: the enabled
+        // CLI registration flows through (an empty-direction assert alone
+        // could not catch `cli_tools: &[]`), and the empty MCP set
+        // contributes nothing.
+        assert_eq!(
+            inputs.cli_tools.len(),
+            1,
+            "the enabled CLI tool rides the seam"
+        );
+        assert_eq!(inputs.cli_tools[0].name, "pandoc-guide");
         assert!(inputs.mcp_servers.is_empty());
-        assert!(inputs.cli_tools.is_empty());
     }
 }

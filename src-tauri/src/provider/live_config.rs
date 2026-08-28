@@ -875,9 +875,12 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    /// A LiveProviderConfig bound to a temp-dir config path (no real keychain
-    /// dependency in tests; the keychain methods that touch the OS entry are not
-    /// exercised here).
+    /// A LiveProviderConfig bound to a temp-dir config path. The keychain
+    /// WRITE path never runs here, but note that `load()` on a MISSING config
+    /// does query the OS keychain for the legacy provider blob
+    /// (`fetch_legacy_provider_blob`) -- without a legacy entry (CI) that
+    /// read degrades to the documented default; on a machine still carrying
+    /// one it would migrate and clear the real entry (review C, issue #707).
     fn live() -> (tempfile::TempDir, LiveProviderConfig) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.json");

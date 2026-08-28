@@ -47,14 +47,24 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
     fs::write(dir.join("SKILL.md"), content).unwrap();
 }
 
-/// The recipe's LAST turn entry, or None when no turn has landed yet. The
-/// single extraction point for the provenance assertions (issue #707: the
-/// reverse `find_map` had been repeated per test).
+/// The recipe's Turn entries in timeline order -- the single extraction
+/// point for the turn-level reads (issue #707: the `RecipeEntry::Turn`
+/// unwrap had been hand-rolled per site). The last entry is the most recent
+/// turn, which the provenance asserts target.
+fn turns(recipe: &Recipe) -> Vec<&RecipeTurn> {
+    recipe
+        .history
+        .iter()
+        .filter_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The recipe's LAST turn entry, or None when no turn has landed yet.
 fn last_turn(recipe: &Recipe) -> Option<&RecipeTurn> {
-    recipe.history.iter().rev().find_map(|e| match e {
-        RecipeEntry::Turn(t) => Some(t),
-        _ => None,
-    })
+    turns(recipe).pop()
 }
 
 /// AC #2 (activated bodies) + AC #6 (built-in provenance): an ACTIVATED
@@ -292,15 +302,8 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     // The provenance names of the recipe's nth Turn entry (0-based).
     let provenance_names = |session: &Session, n: usize| -> Vec<String> {
         let recipe = session.build_recipe();
-        let turns: Vec<_> = recipe
-            .history
-            .iter()
-            .filter_map(|e| match e {
-                RecipeEntry::Turn(t) => Some(t),
-                _ => None,
-            })
-            .collect();
-        turns[n]
+        let entries = turns(&recipe);
+        entries[n]
             .provenance
             .skills
             .iter()
@@ -311,7 +314,10 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     // Turn 1: index (alpha) precedes the activated body (beta); each skill
     // appears on exactly its own level.
     let outcome = ask(&mut session, "第一轮", &skills_root);
-    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
     {
         let guard = captured.lock().expect("capture lock");
         let system = &guard[0].system;
@@ -350,7 +356,10 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     // turn -- activation is a persistent state, not a one-shot (ADR-0110
     // Decision 3).
     let outcome = ask(&mut session, "第二轮", &skills_root);
-    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
     {
         let guard = captured.lock().expect("capture lock");
         let system = &guard[1].system;
@@ -358,7 +367,10 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
             system.contains("【激活技能】技能 `beta`："),
             "activated body frame missing on the unchanged turn"
         );
-        assert!(system.contains("Beta body."), "beta body missing");
+        assert!(
+            system.contains("Beta body."),
+            "the activated body rides the unchanged turn"
+        );
         drop(guard);
     }
     assert_eq!(
@@ -372,7 +384,10 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     // indexed.
     session.unmount_skill("beta").expect("unmount beta");
     let outcome = ask(&mut session, "第三轮", &skills_root);
-    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
     {
         let guard = captured.lock().expect("capture lock");
         let system = &guard[2].system;
@@ -395,7 +410,10 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     // activation left, turn 4 renders neither block at all.
     session.unmount_skill("alpha").expect("unmount alpha");
     let outcome = ask(&mut session, "第四轮", &skills_root);
-    assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
     {
         let guard = captured.lock().expect("capture lock");
         let system = &guard[3].system;
