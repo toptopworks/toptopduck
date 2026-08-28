@@ -103,8 +103,11 @@ pub(crate) static BUILTIN_SKILL_DEFINITIONS: &[BuiltinSkillDefinition] = &[
             (
                 "en-US",
                 BuiltinSkillBody {
-                    description: "Convert documents between formats with the local pandoc \
-                                  (Markdown, HTML, DOCX, PPTX, EPUB, LaTeX, PDF, and more).",
+                    description: "Convert existing documents between formats with the local \
+                                  pandoc — render Markdown to DOCX/HTML/PDF for delivery, or \
+                                  read DOCX/EPUB into Markdown for analysis. Authoring or \
+                                  manipulating Office-file content (tables, templates, \
+                                  reports) belongs to office-cli.",
                     body: "Use the `pandoc` tool whenever a task needs a document converted \
 between formats -- rendering Markdown as DOCX/HTML/PDF for delivery, or reading a \
 DOCX/EPUB source into Markdown for analysis.\n\
@@ -119,8 +122,10 @@ improvising arguments.\n",
             (
                 "zh-CN",
                 BuiltinSkillBody {
-                    description: "用本机 pandoc 在格式之间转换文档（Markdown、HTML、DOCX、\
-                                  PPTX、EPUB、LaTeX、PDF 等）。",
+                    description: "用本机 pandoc 在格式之间转换既有文档——把 Markdown 渲染为 \
+                                  DOCX/HTML/PDF 交付，或把 DOCX/EPUB 整篇读成 Markdown 分析。\
+                                  撰写或操作 Office 文件内容（表格、模板、报告）属于 \
+                                  office-cli。",
                     body: "任务需要在文档格式之间转换时使用 `pandoc` 工具——把 Markdown 渲染成 \
 DOCX/HTML/PDF 交付，或把 DOCX/EPUB 源读成 Markdown 分析。\n\
 \n\
@@ -137,31 +142,38 @@ standalone）时，在回复中说明，而不是自行拼凑参数。\n",
             (
                 "en-US",
                 BuiltinSkillBody {
-                    description: "Clean and transform data with a Python script run by the \
-                                  local interpreter (script text arrives as a file).",
+                    description: "Clean and transform data with a Python script on the local \
+                                  interpreter (stdlib always; user-installed packages usable) \
+                                  — reach for it when the logic is procedural: reshaping, \
+                                  regex massaging, unit fixing, multi-step row logic. Plain \
+                                  projection, filtering, and aggregation belong to SQL.",
                     body: "Use the `python` tool for data cleaning and transformation that SQL \
 alone makes awkward -- melting/pivoting, regex massaging, unit fixing, multi-step \
 row logic. Prefer SQL for plain projection/filter/aggregation; reach for Python \
 when the logic is genuinely procedural.\n\
 \n\
 Pass the full script source as `script`; it runs against the interpreter installed \
-on this machine, so stdlib only -- do not assume third-party packages (no library \
-ecosystem is bundled). Read inputs and write outputs through files the script can \
-address by path, and print results or write an output file the next step consumes.\n",
+on this machine; the stdlib is always available, and packages the user has \
+installed themselves import normally -- nothing is bundled with the app, so do \
+not assume a package exists without checking or asking. Read inputs and write \
+outputs through files the script can address by path, and print results or \
+write an output file the next step consumes.\n",
                 },
             ),
             (
                 "zh-CN",
                 BuiltinSkillBody {
-                    description: "用本机 Python 解释器运行脚本做数据清洗与转换（脚本正文以\
-                                  文件方式传入）。",
+                    description: "用本机解释器运行 Python 脚本做数据清洗与转换（标准库恒可\
+                                  用；用户自装的包也可导入）——逻辑过程化时用它：重塑、正则\
+                                  整理、单位修正、多步行级处理。单纯的投影、过滤、聚合属于 \
+                                  SQL。",
                     body: "SQL 表达起来别扭的数据清洗与转换用 `python` 工具——逆透视/透视、正则\
 批量整理、单位修正、多步行级逻辑。单纯的投影/过滤/聚合仍优先 SQL；逻辑真正过程化时才\
 用 Python。\n\
 \n\
-把完整脚本源码作为 `script` 传入；脚本在本机已安装的解释器上运行，因此只用标准库——\
-不要假设第三方包（不随版捆绑任何库生态）。输入输出都通过脚本可按路径寻址的文件读写，\
-打印结果或写出供下一步消费的输出文件。\n",
+把完整脚本源码作为 `script` 传入；脚本在本机已安装的解释器上运行，标准库恒可用，用户\
+自行安装的包也能正常导入——app 不随版捆绑任何库生态，因此不要未经确认就假设某个包存\
+在。输入输出都通过脚本可按路径寻址的文件读写，打印结果或写出供下一步消费的输出文件。\n",
                 },
             ),
         ],
@@ -172,8 +184,11 @@ address by path, and print results or write an output file the next step consume
             (
                 "en-US",
                 BuiltinSkillBody {
-                    description: "Process and generate Office documents (Word, Excel, \
-                                  PowerPoint) through the local OfficeCLI.",
+                    description: "Work directly on Office-file content with the local \
+                                  OfficeCLI (Word, Excel, PowerPoint): extract text and \
+                                  tables, edit, fill templates, or author a document from \
+                                  scratch. Converting a document that already exists between \
+                                  formats belongs to pandoc.",
                     body: "Use the `office-cli` tool for direct Office document work -- reading \
 or editing DOCX/XLSX/PPTX content, extracting text and tables, filling templates, or \
 generating Office files from scratch. It is the agent-oriented path when the task is \
@@ -189,8 +204,9 @@ say so rather than guessing flags.\n",
             (
                 "zh-CN",
                 BuiltinSkillBody {
-                    description: "通过本机 OfficeCLI 处理与生成 Office 文档（Word、Excel、\
-                                  PowerPoint）。",
+                    description: "用本机 OfficeCLI 直接操作 Office 文件内容（Word、Excel、\
+                                  PowerPoint）：抽取文本与表格、编辑、填充模板、从零撰写文\
+                                  档。既有文档的格式间转换属于 pandoc。",
                     body: "直接操作 Office 文档时使用 `office-cli` 工具——读取或编辑 \
 DOCX/XLSX/PPTX 内容、抽取文本与表格、填充模板、从零生成 Office 文件。任务围绕 Office \
 文件本身时走它；文档格式之间的转换属于 `pandoc`。\n\
@@ -627,6 +643,176 @@ mod tests {
             resolve_materialization_locale(LocalePreference::EnUS),
             "en-US"
         );
+    }
+
+    // --- curated trigger copy --------------------------------------------
+
+    /// The locked trigger copy (curation brief, verbatim): sentence 1 is
+    /// capability + trigger timing, sentence 2 the neighbor-tool boundary.
+    /// With progressive disclosure the metadata index is the only discovery
+    /// surface, so the wording itself is load-bearing -- pinned byte for
+    /// byte.
+    #[test]
+    fn descriptions_carry_the_locked_trigger_copy() {
+        let expected: &[(&str, &str, &str)] = &[
+            (
+                "pandoc",
+                "Convert existing documents between formats with the local \
+                 pandoc — render Markdown to DOCX/HTML/PDF for delivery, or \
+                 read DOCX/EPUB into Markdown for analysis. Authoring or \
+                 manipulating Office-file content (tables, templates, \
+                 reports) belongs to office-cli.",
+                "用本机 pandoc 在格式之间转换既有文档——把 Markdown 渲染为 \
+                 DOCX/HTML/PDF 交付，或把 DOCX/EPUB 整篇读成 Markdown 分析。\
+                 撰写或操作 Office 文件内容（表格、模板、报告）属于 \
+                 office-cli。",
+            ),
+            (
+                "office-cli",
+                "Work directly on Office-file content with the local \
+                 OfficeCLI (Word, Excel, PowerPoint): extract text and \
+                 tables, edit, fill templates, or author a document from \
+                 scratch. Converting a document that already exists between \
+                 formats belongs to pandoc.",
+                "用本机 OfficeCLI 直接操作 Office 文件内容（Word、Excel、\
+                 PowerPoint）：抽取文本与表格、编辑、填充模板、从零撰写文\
+                 档。既有文档的格式间转换属于 pandoc。",
+            ),
+            (
+                "python",
+                "Clean and transform data with a Python script on the local \
+                 interpreter (stdlib always; user-installed packages usable) \
+                 — reach for it when the logic is procedural: reshaping, \
+                 regex massaging, unit fixing, multi-step row logic. Plain \
+                 projection, filtering, and aggregation belong to SQL.",
+                "用本机解释器运行 Python 脚本做数据清洗与转换（标准库恒可\
+                 用；用户自装的包也可导入）——逻辑过程化时用它：重塑、正则\
+                 整理、单位修正、多步行级处理。单纯的投影、过滤、聚合属于 \
+                 SQL。",
+            ),
+        ];
+        for (name, en, zh) in expected {
+            let def = find_skill_definition(name).expect("definition");
+            assert_eq!(def.body_for("en-US").description, *en, "{name} en-US");
+            assert_eq!(def.body_for("zh-CN").description, *zh, "{name} zh-CN");
+        }
+    }
+
+    /// The index entry a model reads is the YAML round-trip of the render,
+    /// not the struct field -- the long prose (em dashes, colons,
+    /// parentheticals) must survive serialization unharmed.
+    #[test]
+    fn render_round_trips_the_curated_descriptions_verbatim() {
+        for def in BUILTIN_SKILL_DEFINITIONS {
+            for (tag, _) in def.locales {
+                let parsed =
+                    frontmatter::parse_skill_md(&def.render(tag).expect("render")).expect("parse");
+                assert_eq!(
+                    frontmatter::get_string(&parsed.frontmatter, "description")
+                        .expect("description"),
+                    def.body_for(tag).description,
+                    "{} {} description survives the render round-trip",
+                    def.name,
+                    tag
+                );
+            }
+        }
+    }
+
+    /// The format/content split is cross-referenced symmetrically through
+    /// the OWNERSHIP sentence ("belongs to X" / 属于 X), not a bare neighbor
+    /// mention: pandoc points at office-cli, office-cli at pandoc, python at
+    /// SQL. The index shows all entries at once, so the boundary sentence is
+    /// what disambiguates them. A re-curation rewrites the verbatim pin and
+    /// the copy together -- asserting the ownership phrase (not just the
+    /// name) is what keeps the boundary exclusive through that rewrite. The
+    /// phrases are locale-specific, so each assertion also catches a locale
+    /// mix-up.
+    #[test]
+    fn boundary_sentences_cross_reference_the_neighbor() {
+        // (skill, en-US ownership phrase, zh-CN ownership phrase)
+        let pairs: &[(&str, &str, &str)] = &[
+            ("pandoc", "belongs to office-cli", "属于 office-cli"),
+            ("office-cli", "belongs to pandoc", "属于 pandoc"),
+            ("python", "belong to SQL", "属于 SQL"),
+        ];
+        for (name, en_phrase, zh_phrase) in pairs {
+            let def = find_skill_definition(name).expect("definition");
+            assert!(
+                def.body_for("en-US").description.contains(*en_phrase),
+                "{} en-US description must keep the boundary phrase {en_phrase:?}",
+                def.name
+            );
+            assert!(
+                def.body_for("zh-CN").description.contains(*zh_phrase),
+                "{} zh-CN description must keep the boundary phrase {zh_phrase:?}",
+                def.name
+            );
+        }
+    }
+
+    /// Python library semantics erratum: "nothing bundled with the app" is
+    /// not "stdlib only" -- user-installed packages import normally, and the
+    /// description's parenthetical and the body must agree on that.
+    #[test]
+    fn python_copy_states_library_semantics_accurately() {
+        let def = find_skill_definition("python").expect("definition");
+        // The stale absolute claim, per locale, must be gone from both the
+        // description and the body.
+        let stale_claims: &[(&str, &str)] = &[("en-US", "stdlib only"), ("zh-CN", "只用标准库")];
+        for (tag, claim) in stale_claims {
+            let prose = def.body_for(tag);
+            assert!(
+                !prose.description.contains(claim),
+                "{tag} description must not claim {claim:?}"
+            );
+            assert!(
+                !prose.body.contains(claim),
+                "{tag} body must not claim {claim:?}"
+            );
+        }
+        assert!(def
+            .body_for("en-US")
+            .body
+            .contains("packages the user has installed themselves import normally"));
+        assert!(def
+            .body_for("zh-CN")
+            .body
+            .contains("用户自行安装的包也能正常导入"));
+    }
+
+    /// Length discipline (curation brief): every en-US description fits two
+    /// sentences and at most 45 words -- the index is re-read every turn, so
+    /// length is a recurring token cost. The bounds are deliberately loose
+    /// upper limits, not exact counts (the brief targets ~40 words). A
+    /// sentence boundary is a `.`, `?`, or `!` followed by whitespace;
+    /// period-bearing abbreviations ("e.g. ") over-count, failing safe.
+    #[test]
+    fn en_us_descriptions_stay_within_the_curated_length_budget() {
+        const MAX_WORDS: usize = 45;
+        for def in BUILTIN_SKILL_DEFINITIONS {
+            let en = def.body_for("en-US").description;
+            let words = en.split_whitespace().count();
+            assert!(
+                words <= MAX_WORDS,
+                "{} en-US description is {words} words (budget {MAX_WORDS})",
+                def.name
+            );
+            // n terminator-then-whitespace boundaries -> n + 1 sentences
+            // (the final terminator ends the last sentence without one).
+            let sentences = en
+                .char_indices()
+                .filter(|(i, c)| {
+                    matches!(c, '.' | '?' | '!') && en[i + c.len_utf8()..].starts_with(' ')
+                })
+                .count()
+                + 1;
+            assert!(
+                sentences <= 2,
+                "{} en-US description has {sentences} sentences",
+                def.name
+            );
+        }
     }
 
     // --- reconcile ----------------------------------------------------------
