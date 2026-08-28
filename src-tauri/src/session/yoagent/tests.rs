@@ -1493,3 +1493,59 @@ fn read_skill_file_call_serves_text_and_traces() {
     assert!(h.skills.activated.is_empty());
     assert!(h.skills.skill_events().is_empty());
 }
+
+/// The refused leg of the same loop (issue #714, ADR-0111): a bad path is
+/// the bare error result with NO trace row on the dispatch face -- the
+/// traceless-refusal asymmetry is pinned per face (the gateway face pins
+/// its own twin), and the self-correcting listing reaches the provider.
+#[test]
+fn read_skill_file_refusal_is_traceless_on_the_dispatch_face() {
+    let root = TempDir::new().unwrap();
+    let dir = root.path().join("sql-coach");
+    std::fs::create_dir_all(dir.join("references")).unwrap();
+    std::fs::write(dir.join("references/notes.md"), b"Use CTEs.\n").unwrap();
+
+    let mut h = Harness::new();
+    h.read_root = root.path().to_path_buf();
+    h.read_fragments = vec![crate::session::skills::SkillActivationFixture::fragment(
+        "sql-coach",
+        "Coach the SQL.",
+    )];
+    h.read_activated = vec!["sql-coach".to_string()];
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        thinking_and_batch(
+            "read a missing file",
+            None,
+            vec![call(
+                "tu_r",
+                "read_skill_file",
+                json!({"name": "sql-coach", "path": "references/missing.md"}),
+            )],
+        ),
+        text_reply("Noted, the file is missing."),
+    ]));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request_with_tools("coach me", &["read_skill_file"]),
+        offline_loop(Arc::clone(&provider)),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("Noted, the file is missing.".into())
+    );
+    // No read trace row: the refusal is the bare error result, traceless.
+    assert!(outcome
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .all(|e| e.name != "read_skill_file"));
+    // The self-correcting signal reached the provider: the tool result in
+    // the follow-up window carries the listing.
+    let window = format!("{:?}", provider.last_window());
+    assert!(window.contains("Readable files"), "{window}");
+}

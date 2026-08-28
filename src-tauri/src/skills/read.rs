@@ -171,35 +171,45 @@ pub(crate) fn resolve_skill_read(call: &ToolUse, gate: &SkillReadGate<'_>) -> Sk
     };
     let target = anchor.join(path.trim_end_matches(['/', '\\']));
     let Some((resolved, is_file)) = canonical_file(&target) else {
-        return SkillReadOutcome::Refused(path_failure(name, path, &readable_listing(&anchor)));
+        return path_refusal(name, path, &anchor);
     };
     if !resolved.starts_with(&anchor) || !is_file {
-        return SkillReadOutcome::Refused(path_failure(name, path, &readable_listing(&anchor)));
+        return path_refusal(name, path, &anchor);
     }
     serve_file(name, path, &resolved, &anchor)
 }
 
 /// Read and classify the resolved file's content (ADR-0111 Decision 6): the
 /// byte cap refuses (never truncates), the NUL sniff refuses binary, and
-/// surviving text is served lossy UTF-8. An IO failure between resolution
-/// and read is the path failure (with the full skill listing) -- the file
-/// that just resolved is already gone.
+/// surviving text is served lossy UTF-8. A NotFound between resolution and
+/// read is the path failure (with the full skill listing) -- the file that
+/// just resolved is already gone. Any OTHER IO failure (permission, sharing
+/// conflict) is its own refusal WITHOUT a listing: the listing is built
+/// without opening files, so it would still name this very path and point
+/// the agent's self-correction at the same file.
 fn serve_file(name: &str, path: &str, resolved: &Path, anchor: &Path) -> SkillReadOutcome {
     let len = match std::fs::metadata(resolved) {
         Ok(meta) => meta.len(),
-        Err(_) => {
-            return SkillReadOutcome::Refused(path_failure(name, path, &readable_listing(anchor)))
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return path_refusal(name, path, anchor)
         }
+        Err(_) => return SkillReadOutcome::Refused(read_failure(name, path)),
     };
     if len > MAX_READ_BYTES {
         return SkillReadOutcome::Refused(over_cap_failure(name, path, len));
     }
     let bytes = match std::fs::read(resolved) {
         Ok(b) => b,
-        Err(_) => {
-            return SkillReadOutcome::Refused(path_failure(name, path, &readable_listing(anchor)))
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return path_refusal(name, path, anchor)
         }
+        Err(_) => return SkillReadOutcome::Refused(read_failure(name, path)),
     };
+    // The cap re-checked on the bytes actually read: a file growing between
+    // the metadata probe and the read would ride over the pre-read check.
+    if bytes.len() as u64 > MAX_READ_BYTES {
+        return SkillReadOutcome::Refused(over_cap_failure(name, path, bytes.len() as u64));
+    }
     if bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0) {
         return SkillReadOutcome::Refused(binary_failure(name, path));
     }
@@ -268,9 +278,11 @@ fn lexical_failure(path: &str) -> String {
 }
 
 /// The path failure (Decision 4): names the three causes and lists the real
-/// readable files, capped with an honest truncation marker.
-fn path_failure(name: &str, path: &str, listing: &[String]) -> String {
-    let files = if listing.is_empty() {
+/// readable files, capped with an honest truncation marker. An incomplete
+/// walk (a read error under the tree) is marked as such -- enumeration
+/// failure is never narrated as an empty or complete set.
+fn path_failure(name: &str, path: &str, listing: &[String], incomplete: bool) -> String {
+    let mut files = if listing.is_empty() {
         "none found".to_string()
     } else if listing.len() > LISTING_ENTRY_CAP {
         format!(
@@ -281,10 +293,32 @@ fn path_failure(name: &str, path: &str, listing: &[String]) -> String {
     } else {
         listing.join(", ")
     };
+    if incomplete {
+        files.push_str(" (listing incomplete: a read error occurred)");
+    }
     format!(
         "read_skill_file: `{path}` does not name a readable file in skill `{name}` \
          (missing, out of bounds, or a directory). Readable files: {files}."
     )
+}
+
+/// The serve-time IO failure (permission, sharing conflict -- the file is
+/// present under the anchor but not readable): its own refusal, WITHOUT the
+/// listing, which would still name this very path and point the agent's
+/// self-correction at the same file.
+fn read_failure(name: &str, path: &str) -> String {
+    format!(
+        "read_skill_file: `{path}` in skill `{name}` could not be read (an IO \
+         error such as a permission or sharing conflict); retrying will not \
+         help until the error clears."
+    )
+}
+
+/// Any path-level refusal (Decision 4): the fixed message plus the skill's
+/// live readable listing (with the walk's incompleteness, when present).
+fn path_refusal(name: &str, path: &str, anchor: &Path) -> SkillReadOutcome {
+    let (listing, incomplete) = readable_listing(anchor);
+    SkillReadOutcome::Refused(path_failure(name, path, &listing, incomplete))
 }
 
 /// The binary refusal (Decision 6): structured error, no binary consumer.
@@ -322,6 +356,13 @@ fn lexical_reject(raw: &str) -> bool {
 /// in depth -- the mount API does not validate, mirroring
 /// [`crate::skills::prompt`]) or the entry no longer resolves on disk.
 fn canonical_anchor(root: &Path, name: &str) -> Option<PathBuf> {
+    // Defense in depth for the `TurnInputs::empty` sentinel root: an empty
+    // path joins into a RELATIVE name that canonicalize would resolve
+    // against the process CWD. Refuse it as a registry miss rather than
+    // trust the sentinel-always-pairs-with-empty-sets convention.
+    if root.as_os_str().is_empty() {
+        return None;
+    }
     if !crate::skills::model::is_valid_skill_name(name) {
         return None;
     }
@@ -343,26 +384,37 @@ fn canonical_file(target: &Path) -> Option<(PathBuf, bool)> {
 /// out-of-bounds symlink never appears; binary and over-cap files DO (they
 /// are refused at read time, not hidden from the listing). Sorted for a
 /// deterministic signal. A visited-set guards in-tree link cycles (a link to
-/// an ancestor would otherwise walk forever).
-fn readable_listing(anchor: &Path) -> Vec<String> {
+/// an ancestor would otherwise walk forever). Returns the listing plus
+/// whether the walk hit a read error (an incomplete listing is marked in
+/// the refusal, never silently shrunk).
+fn readable_listing(anchor: &Path) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     let mut visited = HashSet::from([anchor.to_path_buf()]);
-    walk_tree(anchor, anchor, &mut visited, &mut out);
+    let complete = walk_tree(anchor, anchor, &mut visited, &mut out);
     out.sort();
-    out
+    (out, !complete)
 }
 
 /// One directory level of the listing walk. Recursion descends only into
 /// directories known to sit under the anchor: real subdirectories (a real
 /// directory cannot point elsewhere) and symlinks / junctions whose
 /// canonicalized target is still contained. Everything else -- out-pointing
-/// links, broken links, non-regular types -- is simply absent.
-fn walk_tree(anchor: &Path, dir: &Path, visited: &mut HashSet<PathBuf>, out: &mut Vec<String>) {
+/// links, broken links, non-regular types -- is simply absent. Returns
+/// whether the level enumerated cleanly; a read error marks the walk
+/// incomplete up the chain instead of silently shrinking the listing.
+fn walk_tree(
+    anchor: &Path,
+    dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+    out: &mut Vec<String>,
+) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return false;
     };
+    let mut complete = true;
     for entry in entries.flatten() {
         let Ok(ft) = entry.file_type() else {
+            complete = false;
             continue;
         };
         let path = entry.path();
@@ -382,17 +434,18 @@ fn walk_tree(anchor: &Path, dir: &Path, visited: &mut HashSet<PathBuf>, out: &mu
                 // two links to one directory double-list nothing, and a link
                 // to an ancestor dies on the pre-seeded anchor.
                 if visited.insert(resolved) {
-                    walk_tree(anchor, &path, visited, out);
+                    complete &= walk_tree(anchor, &path, visited, out);
                 }
             } else if meta.is_file() {
                 push_relative(anchor, &path, out);
             }
         } else if ft.is_dir() {
-            walk_tree(anchor, &path, visited, out);
+            complete &= walk_tree(anchor, &path, visited, out);
         } else if ft.is_file() {
             push_relative(anchor, &path, out);
         }
     }
+    complete
 }
 
 /// Record one listing entry as its '/'-joined path relative to the anchor
@@ -737,6 +790,66 @@ mod tests {
         }
     }
 
+    /// A sibling whose name is a STRING prefix of the anchor must not
+    /// satisfy containment -- the component-level comparison is the security
+    /// core (Decision 2). A junction inside the skill pointing at the
+    /// sibling refuses on read and never appears in the listing; a
+    /// string-prefix implementation would serve the sibling's file.
+    #[test]
+    fn sibling_prefix_directory_is_refused_and_absent_from_listing() {
+        let fx = Fixture::new();
+        let dir = fx.put_skill("sql-coach");
+        let sibling = fx.put_skill("sql-coach-2");
+        std::fs::write(sibling.join("secret.md"), b"sibling secret\n").unwrap();
+        link_dir(&sibling, &dir.join("linked"));
+        match read(&fx, "linked/secret.md") {
+            SkillReadOutcome::Refused(message) => {
+                assert!(
+                    message.contains("does not name a readable file"),
+                    "{message}"
+                );
+                let listing = message.split("Readable files: ").nth(1).expect("listing");
+                assert!(!listing.contains("secret"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        match read(&fx, "linked") {
+            SkillReadOutcome::Refused(message) => {
+                assert!(!message.contains("secret"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    /// Mutually-pointing in-tree links terminate at one expansion per
+    /// canonical directory (the visited-set guard): without it the walk
+    /// re-expands the cycle until the OS link-resolution depth cuts it off,
+    /// listing every file once per extra loop. `in-a.md` appears exactly
+    /// twice -- its real path and the one link path the walk legitimately
+    /// descends -- and never a third.
+    #[test]
+    fn link_cycle_expands_each_directory_once() {
+        let fx = Fixture::new();
+        let dir = fx.put_skill("sql-coach");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("in-a.md"), b"a\n").unwrap();
+        link_dir(&b, &a.join("to-b"));
+        link_dir(&a, &b.join("to-a"));
+        match read(&fx, "nope") {
+            SkillReadOutcome::Refused(message) => {
+                assert!(message.contains("Readable files:"), "{message}");
+                let listing = message.split("Readable files: ").nth(1).expect("listing");
+                let count = listing.matches("in-a.md").count();
+                assert_eq!(count, 2, "{message}");
+                assert!(!listing.contains("to-b/to-a/to-b"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
     /// An in-tree symlink to an in-tree file passes the same gate and is
     /// readable (Unix-only: a Windows file symlink needs elevation).
     #[cfg(unix)]
@@ -790,6 +903,30 @@ mod tests {
         }
     }
 
+    /// A NUL at the window's LAST byte still refuses; one at the FIRST byte
+    /// past the window serves -- the exact off-by-one boundary of the sniff.
+    #[test]
+    fn nul_at_sniff_window_boundary() {
+        let fx = Fixture::new();
+        fx.put_skill("sql-coach");
+        let mut last = vec![b'x'; BINARY_SNIFF_BYTES];
+        last[BINARY_SNIFF_BYTES - 1] = 0;
+        fx.put_file("sql-coach", "references/edge-last.md", &last);
+        match read(&fx, "references/edge-last.md") {
+            SkillReadOutcome::Refused(message) => {
+                assert!(message.contains("binary"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        let mut past = vec![b'x'; BINARY_SNIFF_BYTES + 1];
+        past[BINARY_SNIFF_BYTES] = 0;
+        fx.put_file("sql-coach", "references/edge-past.md", &past);
+        match read(&fx, "references/edge-past.md") {
+            SkillReadOutcome::Local { .. } => {}
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
     /// An over-cap file is refused with its exact byte count (never
     /// truncated), and still appears in the listing.
     #[test]
@@ -813,6 +950,20 @@ mod tests {
                 assert!(message.contains("references/big.md"), "{message}");
             }
             other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    /// A file of exactly the cap serves -- the cap refuses only strictly
+    /// over-cap files (Decision 6), pinning the `>` boundary.
+    #[test]
+    fn exactly_cap_file_is_served() {
+        let fx = Fixture::new();
+        fx.put_skill("sql-coach");
+        let exact = vec![b'z'; MAX_READ_BYTES as usize];
+        fx.put_file("sql-coach", "references/exact.md", &exact);
+        match read(&fx, "references/exact.md") {
+            SkillReadOutcome::Local { .. } => {}
+            other => panic!("expected Local, got {other:?}"),
         }
     }
 

@@ -791,6 +791,7 @@ mod tests {
             "pandoc",
             "python",
             "office-cli",
+            "read_skill_file",
         ] {
             let mut t = tool("my-pandoc");
             t.name = reserved.to_string();
