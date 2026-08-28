@@ -645,7 +645,7 @@ mod tests {
         );
     }
 
-    // --- curated trigger copy (issue #703) -------------------------------
+    // --- curated trigger copy --------------------------------------------
 
     /// The locked trigger copy (curation brief, verbatim): sentence 1 is
     /// capability + trigger timing, sentence 2 the neighbor-tool boundary.
@@ -719,26 +719,35 @@ mod tests {
         }
     }
 
-    /// The format/content split is cross-referenced symmetrically ("belongs
-    /// to X"): pandoc points at office-cli, office-cli at pandoc, python at
+    /// The format/content split is cross-referenced symmetrically through
+    /// the OWNERSHIP sentence ("belongs to X" / 属于 X), not a bare neighbor
+    /// mention: pandoc points at office-cli, office-cli at pandoc, python at
     /// SQL. The index shows all entries at once, so the boundary sentence is
-    /// what disambiguates them.
+    /// what disambiguates them. A re-curation rewrites the verbatim pin and
+    /// the copy together -- asserting the ownership phrase (not just the
+    /// name) is what keeps the boundary exclusive through that rewrite. The
+    /// phrases are locale-specific, so each assertion also catches a locale
+    /// mix-up.
     #[test]
     fn boundary_sentences_cross_reference_the_neighbor() {
-        let pairs: &[(&str, &str)] = &[
-            ("pandoc", "office-cli"),
-            ("office-cli", "pandoc"),
-            ("python", "SQL"),
+        // (skill, en-US ownership phrase, zh-CN ownership phrase)
+        let pairs: &[(&str, &str, &str)] = &[
+            ("pandoc", "belongs to office-cli", "属于 office-cli"),
+            ("office-cli", "belongs to pandoc", "属于 pandoc"),
+            ("python", "belong to SQL", "属于 SQL"),
         ];
-        for (name, neighbor) in pairs {
+        for (name, en_phrase, zh_phrase) in pairs {
             let def = find_skill_definition(name).expect("definition");
-            for tag in ["en-US", "zh-CN"] {
-                assert!(
-                    def.body_for(tag).description.contains(neighbor),
-                    "{} {tag} description must name {neighbor}",
-                    def.name
-                );
-            }
+            assert!(
+                def.body_for("en-US").description.contains(*en_phrase),
+                "{} en-US description must keep the boundary phrase {en_phrase:?}",
+                def.name
+            );
+            assert!(
+                def.body_for("zh-CN").description.contains(*zh_phrase),
+                "{} zh-CN description must keep the boundary phrase {zh_phrase:?}",
+                def.name
+            );
         }
     }
 
@@ -773,9 +782,11 @@ mod tests {
     }
 
     /// Length discipline (curation brief): every en-US description fits two
-    /// sentences and roughly 40 words -- the index is re-read every turn, so
-    /// length is a recurring token cost. The bound is deliberately loose
-    /// (an upper limit, not an exact count).
+    /// sentences and at most 45 words -- the index is re-read every turn, so
+    /// length is a recurring token cost. The bounds are deliberately loose
+    /// upper limits, not exact counts (the brief targets ~40 words). A
+    /// sentence boundary is a `.`, `?`, or `!` followed by whitespace;
+    /// period-bearing abbreviations ("e.g. ") over-count, failing safe.
     #[test]
     fn en_us_descriptions_stay_within_the_curated_length_budget() {
         const MAX_WORDS: usize = 45;
@@ -787,7 +798,15 @@ mod tests {
                 "{} en-US description is {words} words (budget {MAX_WORDS})",
                 def.name
             );
-            let sentences = en.matches(". ").count() + 1;
+            // n terminator-then-whitespace boundaries -> n + 1 sentences
+            // (the final terminator ends the last sentence without one).
+            let sentences = en
+                .char_indices()
+                .filter(|(i, c)| {
+                    matches!(c, '.' | '?' | '!') && en[i + c.len_utf8()..].starts_with(' ')
+                })
+                .count()
+                + 1;
             assert!(
                 sentences <= 2,
                 "{} en-US description has {sentences} sentences",
