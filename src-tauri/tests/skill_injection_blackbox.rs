@@ -22,7 +22,7 @@ use std::sync::Arc;
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use toptopduck_lib::model::SkillLifecycleActor;
 use toptopduck_lib::model::SkillProvenance;
-use toptopduck_lib::persistence::recipe::RecipeEntry;
+use toptopduck_lib::persistence::recipe::{Recipe, RecipeEntry, RecipeTurn};
 use toptopduck_lib::provider::tool_calling::ToolTurnReply;
 use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;
@@ -45,6 +45,16 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
     fs::create_dir_all(&dir).unwrap();
     let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
     fs::write(dir.join("SKILL.md"), content).unwrap();
+}
+
+/// The recipe's LAST turn entry, or None when no turn has landed yet. The
+/// single extraction point for the provenance assertions (issue #707: the
+/// reverse `find_map` had been repeated per test).
+fn last_turn(recipe: &Recipe) -> Option<&RecipeTurn> {
+    recipe.history.iter().rev().find_map(|e| match e {
+        RecipeEntry::Turn(t) => Some(t),
+        _ => None,
+    })
 }
 
 /// AC #2 (activated bodies) + AC #6 (built-in provenance): an ACTIVATED
@@ -133,24 +143,22 @@ fn activated_skill_body_in_prompt_and_provenance() {
     );
     // The tool-selection section (ADR-0087) rides the base prompt, guiding
     // the agent to use matching external tools regardless of source.
-    assert!(system.contains("默认工具"));
-    assert!(system.contains("不区分工具来源"));
+    assert!(
+        system.contains("默认工具"),
+        "tool-selection section missing"
+    );
+    assert!(
+        system.contains("不区分工具来源"),
+        "source-agnostic tool guidance missing"
+    );
     drop(guard);
 
     // The turn's provenance records {name, content_hash}. The recipe is
     // the persisted form -- its last turn entry carries the audit's provenance.
     let recipe = session.build_recipe();
-    let last_turn = recipe
-        .history
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            RecipeEntry::Turn(t) => Some(t),
-            _ => None,
-        })
-        .expect("at least one turn in the recipe");
+    let turn = last_turn(&recipe).expect("at least one turn in the recipe");
     assert_eq!(
-        last_turn.provenance.skills,
+        turn.provenance.skills,
         vec![SkillProvenance {
             name: "sql-coach".into(),
             content_hash: expected_hash,
@@ -229,17 +237,9 @@ fn mounted_not_activated_lands_index_entry_not_body() {
 
     // The built-in provenance records the (empty) activated set.
     let recipe = session.build_recipe();
-    let last_turn = recipe
-        .history
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            RecipeEntry::Turn(t) => Some(t),
-            _ => None,
-        })
-        .expect("at least one turn");
+    let turn = last_turn(&recipe).expect("at least one turn");
     assert!(
-        last_turn.provenance.skills.is_empty(),
+        turn.provenance.skills.is_empty(),
         "an unactivated mount contributes nothing to the built-in provenance"
     );
 }
@@ -323,7 +323,10 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
             index_pos < body_pos,
             "index block precedes activated bodies"
         );
-        assert!(system.contains("- `alpha` — Alpha skill.\n"));
+        assert!(
+            system.contains("- `alpha` — Alpha skill.\n"),
+            "alpha index entry missing"
+        );
         assert!(!system.contains("Alpha body."), "inactive body absent");
         assert!(!system.contains("- `beta`"), "activated skill not indexed");
         // The built-in face's mount-conditional surface (issue #701): a
@@ -351,8 +354,11 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
     {
         let guard = captured.lock().expect("capture lock");
         let system = &guard[1].system;
-        assert!(system.contains("【激活技能】技能 `beta`："));
-        assert!(system.contains("Beta body."));
+        assert!(
+            system.contains("【激活技能】技能 `beta`："),
+            "activated body frame missing on the unchanged turn"
+        );
+        assert!(system.contains("Beta body."), "beta body missing");
         drop(guard);
     }
     assert_eq!(
@@ -374,7 +380,10 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
             !system.contains("beta"),
             "an unmounted skill is gone entirely"
         );
-        assert!(system.contains("- `alpha` — Alpha skill.\n"));
+        assert!(
+            system.contains("- `alpha` — Alpha skill.\n"),
+            "alpha still indexed after beta's unmount"
+        );
         drop(guard);
     }
     assert!(
@@ -400,6 +409,11 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
         );
         drop(guard);
     }
+    // The guard[n] indexing throughout assumes exactly one round-trip per
+    // turn (every scripted reply is terminal) -- pinned so a future retry
+    // round-trip cannot silently shift the indices.
+    let guard = captured.lock().expect("capture lock");
+    assert_eq!(guard.len(), 4, "one round-trip per turn");
 }
 
 /// AC #3 (negative space): with no skills mounted, the system prompt carries no
@@ -439,7 +453,10 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
     // The tool-selection section is always present in the base prompt
     // (ADR-0087) -- it names DuckDB as the default tool without injecting
     // a skill body.
-    assert!(system.contains("默认工具"));
+    assert!(
+        system.contains("默认工具"),
+        "tool-selection section missing"
+    );
     // The mount-conditional surface (issue #701): an EMPTY mounted set pays
     // no standing tool cost -- the trio's posture (ADR-0105 D6).
     assert!(
@@ -449,17 +466,9 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
     drop(guard);
 
     let recipe = session.build_recipe();
-    let last_turn = recipe
-        .history
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            RecipeEntry::Turn(t) => Some(t),
-            _ => None,
-        })
-        .expect("at least one turn");
+    let turn = last_turn(&recipe).expect("at least one turn");
     assert!(
-        last_turn.provenance.skills.is_empty(),
+        turn.provenance.skills.is_empty(),
         "no skills in provenance when nothing is mounted"
     );
 }
@@ -500,7 +509,10 @@ fn skill_declaring_disabled_server_mounts_and_stays_declarative() {
     let fragments = resolve_prompt_fragments(skills_root.path(), &["duck-writer".to_string()]);
     assert_eq!(fragments.len(), 1);
     assert_eq!(fragments[0].name, "duck-writer");
-    assert!(fragments[0].body.contains("duck-tools"));
+    assert!(
+        fragments[0].body.contains("duck-tools"),
+        "the declared body resolves undegraded"
+    );
     assert_eq!(fragments[0].mcp_servers, vec!["off-b".to_string()]);
 
     // Effective-set side: the declaration never re-arms the disabled server

@@ -25,6 +25,7 @@
 
 use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::model::TextKind;
+use crate::skills::prompt::is_activated;
 use crate::skills::SkillPromptFragment;
 
 /// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
@@ -97,7 +98,7 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String])
     let mut out = String::new();
     let index: Vec<&SkillPromptFragment> = skills
         .iter()
-        .filter(|f| !activated.contains(&f.name))
+        .filter(|f| !is_activated(&f.name, activated))
         .collect();
     if !index.is_empty() {
         out.push_str(
@@ -109,14 +110,10 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String])
         // renders as an empty tail -- the entry stays, so a skill never
         // silently disappears from the discoverable set.
         for f in index {
-            out.push_str("- `");
-            out.push_str(&f.name);
-            out.push_str("` — ");
-            out.push_str(&f.description);
-            out.push('\n');
+            out.push_str(&format!("- `{}` — {}\n", f.name, f.description));
         }
     }
-    for f in skills.iter().filter(|f| activated.contains(&f.name)) {
+    for f in skills.iter().filter(|f| is_activated(&f.name, activated)) {
         push_body_frame(&mut out, f);
     }
     out
@@ -248,9 +245,7 @@ pub fn build_tool_system_prompt(
 ) -> String {
     let mut out = String::from(TOOL_CALLING_PROMPT);
     let disclosure = render_skill_disclosure(skills, activated);
-    if !disclosure.is_empty() {
-        out.push_str(&disclosure);
-    }
+    out.push_str(&disclosure);
     out.push_str(response_locale_directive(locale));
     out.push_str(&render_schema_context(request));
     out
@@ -1158,5 +1153,55 @@ mod tests {
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0, "user");
         assert_eq!(pairs[0].1, "第一个问题");
+    }
+
+    // --- skill disclosure rendering (ADR-0110, issue #707) ----------------
+
+    /// Issue #707 ordering pin, one interleaved shape covering both gaps:
+    /// mount order alpha(activated) / beta(inactive) / gamma(activated), with
+    /// the activated list reverse-constructed [gamma, alpha]. The reversal is
+    /// the discriminating power: an implementation that rendered bodies in
+    /// ACTIVATED order (gamma first) fails the body-order assert, and one that
+    /// interleaved index entries with bodies fails the strict-precedence
+    /// assert. Neither shape has a pin anywhere else -- the black-box tests
+    /// only exercise mount orders whose single-pass rendering coincides with
+    /// the two-block contract.
+    #[test]
+    fn disclosure_renders_index_before_bodies_in_mount_order() {
+        let skills = vec![
+            fragment("alpha", "alpha desc.", "alpha body.\n"),
+            fragment("beta", "beta desc.", "beta body.\n"),
+            fragment("gamma", "gamma desc.", "gamma body.\n"),
+        ];
+        let activated = vec!["gamma".to_string(), "alpha".to_string()];
+        let out = render_skill_disclosure(&skills, &activated);
+
+        let index_pos = out.find("【可用技能】").expect("index block present");
+        let alpha_body = out
+            .find("【激活技能】技能 `alpha`")
+            .expect("alpha body frame present");
+        let gamma_body = out
+            .find("【激活技能】技能 `gamma`")
+            .expect("gamma body frame present");
+        assert!(
+            index_pos < alpha_body && index_pos < gamma_body,
+            "the index block strictly precedes every body frame"
+        );
+        assert!(
+            alpha_body < gamma_body,
+            "bodies render in mount order, not activated order"
+        );
+        // The index lists only the inactive skill; both activated bodies are
+        // verbatim.
+        assert!(
+            out.contains("- `beta` — beta desc.\n"),
+            "index entry for beta"
+        );
+        assert!(
+            !out.contains("- `alpha` —") && !out.contains("- `gamma` —"),
+            "activated skills are not indexed"
+        );
+        assert!(out.contains("alpha body."), "alpha body verbatim");
+        assert!(out.contains("gamma body."), "gamma body verbatim");
     }
 }

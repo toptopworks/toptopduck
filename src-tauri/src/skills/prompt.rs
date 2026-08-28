@@ -72,6 +72,16 @@ pub struct SkillPromptFragment {
     pub cli_tools: Vec<String>,
 }
 
+/// The single L1/L2 membership predicate (ADR-0110, issue #707): whether
+/// `name` sits in the activated list. The disclosure rendering's index/body
+/// split and the turn provenance's activated-subset filter both sort through
+/// this one predicate -- a hand-rolled `contains` at either consumer could
+/// drift and silently drop provenance for a skill whose body the model
+/// actually read.
+pub(crate) fn is_activated(name: &str, activated: &[String]) -> bool {
+    activated.iter().any(|n| n == name)
+}
+
 /// Resolve the mounted-skill names into prompt fragments for both the system
 /// prompt injection and the turn's skill provenance (issue #364). `mounted` is
 /// the session's mounted set in first-mount insertion order; the returned
