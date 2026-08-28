@@ -53,6 +53,7 @@ use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
 use crate::session::skills::SkillActivationCtx;
 use crate::session_store::ClosingFlag;
+use crate::skills::prompt::is_activated;
 use crate::skills::SkillPromptFragment;
 use crate::tools::definitions::builtin_metadata;
 use crate::window;
@@ -1194,7 +1195,7 @@ impl Session {
         let skill_provenance: Vec<SkillProvenance> = inputs
             .skills
             .iter()
-            .filter(|f| inputs.activated.contains(&f.name))
+            .filter(|f| is_activated(&f.name, inputs.activated))
             .map(|f| SkillProvenance {
                 name: f.name.clone(),
                 content_hash: f.content_hash.clone(),
