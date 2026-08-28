@@ -8,6 +8,7 @@
 //! `ACP_FAKE_SCENARIO` env var.
 //!
 //! Scenarios cover the engine's observable branches: a clean text reply, a
+//! prompt echo (the received blocks made observable to the test), a
 //! multi-step tool-call trajectory, a failed tool call, a stop_reason ceiling,
 //! a cooperative cancel, a permission handshake, a runaway (step-cap trip), and
 //! a mid-turn crash (EOF). Each plays out as a scripted stream of
@@ -276,7 +277,7 @@ fn main() {
                 );
             }
             Some("session/prompt") => {
-                play_scenario(&scenario, &mut out, &id, &mut reader, &mut cancel_seen);
+                play_scenario(&scenario, &mut out, &id, &v, &mut reader, &mut cancel_seen);
             }
             Some("session/set_config_option") => {
                 // ADR-0095: acknowledge the model / thought-level injection.
@@ -359,10 +360,13 @@ fn main() {
 }
 
 /// Play the scripted behavior for `session/prompt` and emit the final response.
+/// `req` is the raw `session/prompt` request value -- only the echo scenario
+/// reads it (the others are blind to the received prompt).
 fn play_scenario(
     scenario: &str,
     out: &mut std::io::Stdout,
     prompt_id: &Option<serde_json::Value>,
+    req: &serde_json::Value,
     reader: &mut BufReader<std::io::StdinLock<'_>>,
     cancel_seen: &mut bool,
 ) {
@@ -370,6 +374,34 @@ fn play_scenario(
     match scenario {
         "text_reply" => {
             notify(out, agent_message("the answer is 42"));
+            respond_prompt(out, &id, StopReason::Success);
+        }
+        // Issue #702 (PR #709 review): echo every text block the engine sent
+        // in the `session/prompt` params back as one agent message,
+        // block-separated. Stdout is the engine's protocol channel, so the
+        // echo is the only way the received blocks become observable -- the
+        // ACP counterpart of the built-in face's provider-side prompt capture.
+        // The integration test asserts on the disclosure mix the CLI received
+        // (index entries + activated bodies, not full-text mounts).
+        "prompt_echo" => {
+            let mut echoed = String::new();
+            if let Some(blocks) = req
+                .get("params")
+                .and_then(|p| p.get("blocks"))
+                .and_then(|b| b.as_array())
+            {
+                for block in blocks {
+                    let text = block
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default();
+                    if !echoed.is_empty() {
+                        echoed.push_str("\n----\n");
+                    }
+                    echoed.push_str(text);
+                }
+            }
+            notify(out, agent_message(&echoed));
             respond_prompt(out, &id, StopReason::Success);
         }
         "tool_calls" => {

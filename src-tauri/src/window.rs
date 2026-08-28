@@ -105,15 +105,18 @@ pub fn assemble_tool_turn(
 /// this assembly.
 ///
 /// Mounted-skill fragments (issue #368) land as a SEPARATE text block right
-/// before the user's question, reusing the internal path's framing +
-/// verbatim-body renderer ([`render_skill_block`]). An empty mount set adds no
-/// block, so the pre-skill block order is preserved.
+/// before the user's question: the progressive-disclosure rendering shared
+/// with the built-in system prompt ([`render_skill_block`] -- index entries
+/// for mounted-but-not-activated skills + verbatim bodies for the activated
+/// set, sorted by `activated`; ADR-0110 Decision 8, issue #702 parity). An
+/// empty mount set adds no block, so the pre-skill block order is preserved.
 pub fn assemble_acp_turn(
     question: &str,
     working_set: &WorkingSet,
     history: &[TurnRecord],
     locale: ResponseLocale,
     skills: &[SkillPromptFragment],
+    activated: &[String],
 ) -> Vec<ContentBlock> {
     let request = assemble(question, working_set, history);
     let mut blocks = Vec::with_capacity(request.history.len() * 2 + 3);
@@ -139,9 +142,11 @@ pub fn assemble_acp_turn(
             }
         }
     }
-    // Mounted-skill fragments as a separate block before the question (#368).
+    // Mounted-skill disclosure as a separate block before the question
+    // (#368; #702: the same sorted rendering the built-in system prompt
+    // embeds -- index entries + activated bodies).
     if !skills.is_empty() {
-        blocks.push(ContentBlock::text(render_skill_block(skills)));
+        blocks.push(ContentBlock::text(render_skill_block(skills, activated)));
     }
     blocks.push(ContentBlock::text(request.question));
     blocks
@@ -973,14 +978,15 @@ mod tests {
     // The external-runtime ACP assembly differs from the built-in path in two
     // ways per ADR-0086: (1) NO capability boundary prompt -- the external CLI
     // brings its own persona and our boundary is enforced at the tool / gateway
-    // surface; (2) mounted-skill fragments land as a SEPARATE text block before
-    // the user's question, not embedded in a system prompt. These tests pin
-    // both invariants + the block ordering.
+    // surface; (2) the skill disclosure lands as a SEPARATE text block before
+    // the user's question, not embedded in a system prompt -- but it is the
+    // SAME disclosure rendering the built-in system prompt embeds (issue
+    // #702 parity). These tests pin both invariants + the block ordering.
 
-    fn acp_fragment(name: &str, body: &str) -> SkillPromptFragment {
+    fn acp_fragment(name: &str, description: &str, body: &str) -> SkillPromptFragment {
         SkillPromptFragment {
             name: name.into(),
-            description: String::new(),
+            description: description.into(),
             body: body.into(),
             content_hash: "deadbeef".into(),
             mcp_servers: Vec::new(),
@@ -994,7 +1000,7 @@ mod tests {
         // The capability boundary landmarks (IN-SCOPE / OUT-SCOPE / refuse)
         // must be absent so they do not compete with the CLI's own persona.
         let (ws, history) = source_plus_turns(1);
-        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[]);
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[], &[]);
         let leading = blocks.first().expect("at least one block");
         let text = leading.as_text().expect("leading block is text");
         assert!(text.contains("【数据上下文】"), "schema context present");
@@ -1006,11 +1012,22 @@ mod tests {
 
     #[test]
     fn assemble_acp_turn_with_skills_places_skill_block_before_question() {
-        // Issue #368 AC#1: mounted-skill fragments land as a separate text
+        // Issue #368 AC#1: the skill disclosure lands as a separate text
         // block right before the user's question (after the history blocks).
         let (ws, history) = source_plus_turns(1);
-        let skills = vec![acp_fragment("sql-coach", "Name the method.\n")];
-        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
+        let skills = vec![acp_fragment(
+            "sql-coach",
+            "Coach SQL.",
+            "Name the method.\n",
+        )];
+        let blocks = assemble_acp_turn(
+            "查询",
+            &ws,
+            &history,
+            ResponseLocale::ZhCN,
+            &skills,
+            &["sql-coach".to_string()],
+        );
         // Last block = the user's question.
         let last = blocks.last().expect("at least one block");
         assert_eq!(last.as_text().unwrap(), "查询");
@@ -1018,8 +1035,8 @@ mod tests {
         let skill_block = &blocks[blocks.len() - 2];
         let skill_text = skill_block.as_text().unwrap();
         assert!(
-            skill_text.contains("【挂载技能】技能 `sql-coach`："),
-            "skill frame in separate block"
+            skill_text.contains("【激活技能】技能 `sql-coach`："),
+            "activated body frame in separate block"
         );
         assert!(
             skill_text.contains("Name the method."),
@@ -1028,7 +1045,7 @@ mod tests {
         // The skill block is NOT the leading block (which holds schema + locale).
         let leading = blocks.first().unwrap().as_text().unwrap();
         assert!(
-            !leading.contains("【挂载技能】"),
+            !leading.contains("【激活技能】"),
             "skill fragments must not be in the leading block"
         );
     }
@@ -1038,14 +1055,15 @@ mod tests {
         // An empty mount set adds no skill block -- the question is the last
         // block and the block count matches the pre-skill shape.
         let (ws, history) = source_plus_turns(1);
-        let blocks_empty = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[]);
+        let blocks_empty = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[], &[]);
         // Last block is the question, second-to-last is a history block (not a
         // skill block).
         assert_eq!(blocks_empty.last().unwrap().as_text().unwrap(), "查询");
         // With skills added, the block count grows by exactly 1 (the skill
         // block); the question stays last.
-        let skills = vec![acp_fragment("a", "Body A.\n")];
-        let blocks_with = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
+        let skills = vec![acp_fragment("a", "A.", "Body A.\n")];
+        let blocks_with =
+            assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills, &[]);
         assert_eq!(
             blocks_with.len(),
             blocks_empty.len() + 1,
@@ -1055,18 +1073,150 @@ mod tests {
     }
 
     #[test]
+    fn assemble_acp_turn_disclosure_block_four_shapes() {
+        // Issue #702 AC: the four disclosure shapes are isomorphic to the
+        // built-in side -- empty mount adds no block; mounted-only renders
+        // the index section alone; activated-only renders bodies alone; both
+        // present puts the index first. All inside ONE block (the block
+        // count never changes with the disclosure mix).
+        let (ws, history) = source_plus_turns(0);
+        let base = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[], &[]);
+        let both = vec![
+            acp_fragment("pdf-tools", "Read PDFs.", "Extract tables first.\n"),
+            acp_fragment("sql-coach", "Coach SQL.", "Name the method.\n"),
+        ];
+
+        // Shape 4 (the discriminating mix): one of two mounted activated --
+        // index section then body section, in a single block.
+        let blocks = assemble_acp_turn(
+            "查询",
+            &ws,
+            &history,
+            ResponseLocale::ZhCN,
+            &both,
+            &["sql-coach".to_string()],
+        );
+        assert_eq!(blocks.len(), base.len() + 1, "exactly one skill block");
+        let text = blocks[blocks.len() - 2].as_text().unwrap();
+        assert!(text.contains("- `pdf-tools` — Read PDFs.\n"), "index entry");
+        assert!(
+            text.contains("【激活技能】技能 `sql-coach`：\nName the method.\n"),
+            "activated body"
+        );
+        assert!(
+            !text.contains("pdf-tools`：\n"),
+            "the inactive skill contributes no body"
+        );
+        assert!(
+            !text.contains("- `sql-coach`"),
+            "the activated skill contributes no index entry"
+        );
+        let index_pos = text.find("【可用技能】").unwrap();
+        let body_pos = text.find("【激活技能】").unwrap();
+        assert!(index_pos < body_pos, "index section precedes bodies");
+
+        // Shape 2: mounted-only -> the index section alone.
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &both, &[]);
+        assert_eq!(blocks.len(), base.len() + 1, "still exactly one block");
+        let text = blocks[blocks.len() - 2].as_text().unwrap();
+        assert!(text.contains("【可用技能】"), "index section present");
+        assert!(
+            !text.contains("【激活技能】"),
+            "no body section without activations"
+        );
+
+        // Shape 3: everything activated -> bodies alone.
+        let blocks = assemble_acp_turn(
+            "查询",
+            &ws,
+            &history,
+            ResponseLocale::ZhCN,
+            &both,
+            &["pdf-tools".to_string(), "sql-coach".to_string()],
+        );
+        assert_eq!(blocks.len(), base.len() + 1, "still exactly one block");
+        let text = blocks[blocks.len() - 2].as_text().unwrap();
+        assert!(text.contains("【激活技能】技能 `pdf-tools`："));
+        assert!(text.contains("【激活技能】技能 `sql-coach`："));
+        assert!(
+            !text.contains("【可用技能】"),
+            "no index section when everything is activated"
+        );
+    }
+
+    #[test]
     fn assemble_acp_turn_skill_block_preserves_mount_order() {
-        // Mount order is preserved in the skill block (not sorted).
+        // Mount order is preserved in the skill block (not sorted) -- within
+        // the index section and within the body section alike.
         let (ws, history) = source_plus_turns(0);
         let skills = vec![
-            acp_fragment("beta", "Body B.\n"),
-            acp_fragment("alpha", "Body A.\n"),
+            acp_fragment("beta", "B.", "Body B.\n"),
+            acp_fragment("alpha", "A.", "Body A.\n"),
         ];
-        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills);
-        let skill_block = &blocks[blocks.len() - 2];
-        let text = skill_block.as_text().unwrap();
+        // Index order: mount order.
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills, &[]);
+        let text = blocks[blocks.len() - 2].as_text().unwrap();
         let b = text.find("beta").unwrap();
         let a = text.find("alpha").unwrap();
-        assert!(b < a, "mount order preserved, not sorted");
+        assert!(b < a, "index entries keep mount order, not sorted");
+        // Body order: mount order too.
+        let blocks = assemble_acp_turn(
+            "查询",
+            &ws,
+            &history,
+            ResponseLocale::ZhCN,
+            &skills,
+            &["beta".to_string(), "alpha".to_string()],
+        );
+        let text = blocks[blocks.len() - 2].as_text().unwrap();
+        let b = text.find("Body B.").unwrap();
+        let a = text.find("Body A.").unwrap();
+        assert!(b < a, "activated bodies keep mount order, not sorted");
+    }
+
+    #[test]
+    fn assemble_acp_turn_unmounted_skill_leaves_index_and_bodies() {
+        // Issue #702 AC: unmount cascades onto the ACP assembly -- after the
+        // session drops a skill from BOTH sets (the unmount's cascade), the
+        // next turn's block carries it in NEITHER section. The assembly is
+        // pure over the post-unmount inputs; the cascade itself is session
+        // state, pinned end-to-end on the built-in surface
+        // (skill_injection_blackbox.rs). This pins the ACP rendering of the
+        // post-cascade shape.
+        let (ws, history) = source_plus_turns(0);
+        // Pre-unmount: pdf-tools indexed, sql-coach's body injected.
+        let before = vec![
+            acp_fragment("pdf-tools", "Read PDFs.", "Extract tables first.\n"),
+            acp_fragment("sql-coach", "Coach SQL.", "Name the method.\n"),
+        ];
+        let blocks = assemble_acp_turn(
+            "查询",
+            &ws,
+            &history,
+            ResponseLocale::ZhCN,
+            &before,
+            &["sql-coach".to_string()],
+        );
+        let text = blocks[blocks.len() - 2].as_text().unwrap();
+        assert!(text.contains("pdf-tools"), "pre-unmount: indexed");
+        assert!(text.contains("sql-coach"), "pre-unmount: body present");
+
+        // Post-unmount of sql-coach: the fragment list AND the activated
+        // list both lose it -- the block shows it nowhere.
+        let after = vec![acp_fragment(
+            "pdf-tools",
+            "Read PDFs.",
+            "Extract tables first.\n",
+        )];
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &after, &[]);
+        let text = blocks[blocks.len() - 2].as_text().unwrap();
+        assert!(
+            text.contains("pdf-tools"),
+            "the surviving mount keeps its index entry"
+        );
+        assert!(
+            !text.contains("sql-coach") && !text.contains("Name the method."),
+            "the unmounted skill left both the index and the bodies"
+        );
     }
 }

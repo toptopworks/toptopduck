@@ -64,51 +64,35 @@ pub fn response_locale_directive(locale: ResponseLocale) -> &'static str {
     }
 }
 
-/// Append one skill's framed body: the `【<frame>】技能 \`<name>\`：` header
-/// plus the body verbatim (trailing whitespace trimmed for clean section
-/// separation -- ADR-0086: injected as-is, never summarized or templated).
-/// The frame word is parametric because two paths share the framing:
-/// 【挂载技能】 on the ACP full-text path ([`render_skill_section`], every
-/// mounted skill's body -- #702 switches that path to disclosure) and
-/// 【激活技能】 on the built-in disclosure path ([`render_skill_disclosure`],
-/// activated bodies only). A skill whose body is empty (unreadable at turn
-/// time, honest degrade) still lands its framed header + name so the model
-/// knows the skill is present even when its prose is unavailable.
-fn push_body_frame(out: &mut String, frame: &str, skill: &SkillPromptFragment) {
-    out.push_str("\n\n【");
-    out.push_str(frame);
-    out.push_str("】技能 `");
+/// Append one activated skill's framed body: the `【激活技能】技能 \`<name>\`：`
+/// header plus the body verbatim (trailing whitespace trimmed for clean
+/// section separation -- ADR-0086: injected as-is, never summarized or
+/// templated). A skill whose body is empty (unreadable at turn time, honest
+/// degrade) still lands its framed header + name so the model knows the
+/// skill is present even when its prose is unavailable.
+fn push_body_frame(out: &mut String, skill: &SkillPromptFragment) {
+    out.push_str("\n\n【激活技能】技能 `");
     out.push_str(&skill.name);
     out.push_str("`：\n");
     out.push_str(skill.body.trim_end());
     out.push('\n');
 }
 
-/// Render the mounted-skills section as FULL TEXT -- every mounted skill's
-/// body, 【挂载技能】-framed, in mount order. This is the external-runtime ACP
-/// path's shape (ADR-0086, issue #368); ADR-0110 keeps it there until #702
-/// switches the ACP assembly to disclosure. The built-in path renders
-/// disclosure instead ([`render_skill_disclosure`]).
-fn render_skill_section(skills: &[SkillPromptFragment]) -> String {
-    let mut out = String::new();
-    for skill in skills {
-        push_body_frame(&mut out, "挂载技能", skill);
-    }
-    out
-}
-
-/// Render the built-in runtime's progressive-disclosure skill section
-/// (ADR-0110 Decisions 1-2, issue #700): mounted-but-not-activated skills
-/// land as a metadata index block (entries of `` `name` — description``, the
-/// discoverable-set surface, L1) and activated skills land their verbatim
-/// bodies (【激活技能】-framed, L2). The index block precedes the bodies (the
-/// L1 -> L2 reading order). An empty mounted set renders the empty string --
-/// no empty block, so the pre-skill assembly shape is preserved.
+/// Render the progressive-disclosure skill section shared by BOTH runtime
+/// surfaces (ADR-0110 Decisions 1-2, issues #700/#702): skills that are
+/// mounted but not activated land as a metadata index block (entries of
+/// `` `name` — description``, the discoverable-set surface, L1) and
+/// activated skills land their verbatim bodies (【激活技能】-framed, L2).
+/// The index block precedes the bodies (the L1 -> L2 reading order). An
+/// empty mounted set renders the empty string -- no empty block, so the
+/// pre-skill assembly shape is preserved.
 ///
 /// The index header is the FINAL wording (locked in issue #700's brief,
 /// landed with the `activate_skill` meta-tool in #701): it names the channel
 /// and its two trigger rules, so the index entry and the tool are one
-/// discoverable surface.
+/// discoverable surface. The built-in system prompt embeds it via
+/// [`build_tool_system_prompt`]; the external-runtime ACP path wraps it
+/// standalone via [`render_skill_block`] (issue #702 parity).
 fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String]) -> String {
     let mut out = String::new();
     let index: Vec<&SkillPromptFragment> = skills
@@ -133,20 +117,24 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String])
         }
     }
     for f in skills.iter().filter(|f| activated.contains(&f.name)) {
-        push_body_frame(&mut out, "激活技能", f);
+        push_body_frame(&mut out, f);
     }
     out
 }
 
-/// Render the mounted-skills section as a standalone text block for the
-/// external-runtime ACP path (ADR-0086, issue #368). Same framing + verbatim
-/// body + mount order as the internal path's [`render_skill_section`], but
-/// trimmed of the leading newlines that the system-prompt embedding adds for
-/// separation. The block lands as a separate [`ContentBlock`] before the
-/// user's question, NOT inside a system prompt -- the external CLI brings its
-/// own persona and does not receive our capability boundary prompt.
-pub fn render_skill_block(skills: &[SkillPromptFragment]) -> String {
-    render_skill_section(skills).trim_start().to_string()
+/// Render the progressive-disclosure skill section as a standalone text
+/// block for the external-runtime ACP path (ADR-0086, issue #368; disclosure
+/// parity per ADR-0110 Decision 8, issue #702): the SAME sorted rendering as
+/// the built-in system prompt's skill section ([`render_skill_disclosure`] --
+/// index entries + activated bodies), trimmed of the leading newlines the
+/// system-prompt embedding adds for separation. The block lands as a single
+/// separate [`ContentBlock`] before the user's question, NOT inside a system
+/// prompt -- the external CLI brings its own persona and does not receive our
+/// capability boundary prompt.
+pub fn render_skill_block(skills: &[SkillPromptFragment], activated: &[String]) -> String {
+    render_skill_disclosure(skills, activated)
+        .trim_start()
+        .to_string()
 }
 
 /// The leading context block for an external-runtime ACP turn (ADR-0086,
@@ -788,43 +776,11 @@ mod tests {
     }
 
     #[test]
-    fn render_skill_section_frames_each_skill_verbatim_in_mount_order() {
-        // ADR-0086: each skill body is wrapped in the 「【挂载技能】技能
-        // `<name>`：」 frame, verbatim (no templating), in mount order. This is
-        // the ACP full-text shape (#702 switches it to disclosure).
-        let skills = [
-            fragment("sql-coach", "Coach SQL.", "Always name the method.\n"),
-            fragment(
-                "pdf-tools",
-                "Read PDFs.",
-                "Extract tables before querying.\n",
-            ),
-        ];
-        let section = render_skill_section(&skills);
-        // Mount order preserved (not sorted).
-        let a = section.find("sql-coach").unwrap();
-        let b = section.find("pdf-tools").unwrap();
-        assert!(a < b, "mount order preserved in the rendered section");
-        // Each skill is framed.
-        assert!(
-            section.contains("【挂载技能】技能 `sql-coach`：\n"),
-            "first skill framed"
-        );
-        assert!(
-            section.contains("【挂载技能】技能 `pdf-tools`：\n"),
-            "second skill framed"
-        );
-        // Bodies are verbatim.
-        assert!(section.contains("Always name the method."));
-        assert!(section.contains("Extract tables before querying."));
-    }
-
-    #[test]
-    fn render_skill_section_trims_trailing_whitespace_only() {
+    fn disclosure_trims_trailing_whitespace_only() {
         // The body is byte-verbatim except for trailing whitespace trimming
         // (clean section separation). Internal content is untouched.
         let skills = [fragment("a", "A.", "Line one.\n\n\n")];
-        let section = render_skill_section(&skills);
+        let section = render_skill_disclosure(&skills, &["a".to_string()]);
         // No triple trailing newline (trimmed to one), but internal lines stand.
         assert!(!section.contains("Line one.\n\n\n"));
         assert!(section.contains("Line one."));
@@ -1005,6 +961,17 @@ mod tests {
         assert!(!block.contains("IN-SCOPE"), "no capability boundary");
         assert!(!block.contains("OUT-OF-SCOPE"), "no capability boundary");
         assert!(!block.contains("绝不冒充"), "no capability boundary");
+        // No skill section in the context block -- pinned on the CURRENT
+        // disclosure markers (and the retired full-text frame word), so a
+        // leak under any wording reddens.
+        assert!(
+            !block.contains("【可用技能】"),
+            "no skill section in the context block"
+        );
+        assert!(
+            !block.contains("【激活技能】"),
+            "no skill section in the context block"
+        );
         assert!(
             !block.contains("【挂载技能】"),
             "no skill section in the context block"
@@ -1027,34 +994,48 @@ mod tests {
     #[test]
     fn render_skill_block_trims_leading_whitespace() {
         // The standalone skill block must not start with the \n\n that the
-        // system-prompt embedding adds for separation.
+        // system-prompt embedding adds for separation -- whichever disclosure
+        // section leads: the index header, or the body frame when everything
+        // mounted is activated.
         let skills = [fragment("sql-coach", "Coach SQL.", "Name the method.\n")];
-        let block = render_skill_block(&skills);
+        let index_led = render_skill_block(&skills, &[]);
         assert!(
-            block.starts_with("【挂载技能】"),
-            "block starts with the frame, not whitespace"
+            index_led.starts_with("【可用技能】"),
+            "index-led block starts with the header, not whitespace"
+        );
+        let body_led = render_skill_block(&skills, &["sql-coach".to_string()]);
+        assert!(
+            body_led.starts_with("【激活技能】"),
+            "body-led block starts with the frame, not whitespace"
         );
     }
 
     #[test]
-    fn render_skill_block_preserves_framing_and_verbatim_body() {
-        // Same framing + verbatim body + mount order as the internal path --
-        // the external block is the same rendering, just standalone.
+    fn render_skill_block_is_disclosure_verbatim_standalone() {
+        // #702 parity: the standalone ACP block IS the disclosure rendering
+        // (index entries + activated bodies, index first) with only the
+        // leading separation newlines trimmed -- byte-identical to what the
+        // built-in system prompt embeds. The wrapper-equality pin keeps the
+        // two surfaces from drifting apart.
         let skills = [
-            fragment("sql-coach", "Coach SQL.", "Always name the method.\n"),
             fragment("pdf-tools", "Read PDFs.", "Extract tables first.\n"),
+            fragment("sql-coach", "Coach SQL.", "Name the method.\n"),
         ];
-        let block = render_skill_block(&skills);
-        // Mount order preserved.
-        let a = block.find("sql-coach").unwrap();
-        let b = block.find("pdf-tools").unwrap();
-        assert!(a < b, "mount order preserved");
-        // Framing.
-        assert!(block.contains("【挂载技能】技能 `sql-coach`：\n"));
-        assert!(block.contains("【挂载技能】技能 `pdf-tools`：\n"));
-        // Verbatim bodies.
-        assert!(block.contains("Always name the method."));
-        assert!(block.contains("Extract tables first."));
+        let activated = vec!["sql-coach".to_string()];
+        let block = render_skill_block(&skills, &activated);
+        assert_eq!(
+            block,
+            render_skill_disclosure(&skills, &activated).trim_start(),
+            "the ACP block is the disclosure rendering, standalone"
+        );
+        // The single-block topology: index section, then the body section.
+        assert!(block.contains("- `pdf-tools` — Read PDFs.\n"));
+        assert!(block.contains("【激活技能】技能 `sql-coach`：\nName the method.\n"));
+        let index_pos = block.find("【可用技能】").unwrap();
+        let body_pos = block.find("【激活技能】").unwrap();
+        assert!(index_pos < body_pos, "index section precedes the bodies");
+        // The retired full-text shape: no mounted-skill frame anywhere.
+        assert!(!block.contains("【挂载技能】"));
     }
 
     // --- shared history-to-messages renderer (ADR-0023/0039, issue #322) -----

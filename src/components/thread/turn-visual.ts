@@ -211,9 +211,9 @@ export function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
   }
 }
 
-// Issue #381 (provenance semantics per issue #700, ADR-0110): the skills whose
-// bodies were injected into the turn's prompt -- the activated set for
-// built-in turns, the mounted set for external turns until #702 -- whose
+// Issue #381 (provenance semantics per issues #700/#702, ADR-0110): the
+// skills whose bodies were injected into the turn's prompt -- the activated
+// set, either runtime -- whose
 // content changed after this turn was recorded. Each provenance skill carries
 // its SKILL.md SHA-256 at assembly time; the registry's current
 // SkillEntry.content_hash is the same hash recomputed at load. A mismatch

@@ -284,12 +284,15 @@ pub enum TurnRuntime {
     },
 }
 
-/// Per-turn provenance crossing IPC (issue #381, ADR-0101): the active skills
-/// at the turn's assembly time, each with its [`SkillProvenance::content_hash`]
-/// so the frontend drift-compares against the registry and surfaces a
-/// "modified" badge for a skill whose content changed after this turn, plus
-/// the turn's executing [`TurnRuntime`]. Empty `skills` for turns that mounted
-/// no skill and for v3->v4 migrated turns (no baseline); absent `runtime` for
+/// Per-turn provenance crossing IPC (issue #381, ADR-0101): the ACTIVATED
+/// skills at the turn's assembly time -- the activated subset for every
+/// runtime (ADR-0110; both injection surfaces render disclosure), so mounting
+/// alone leaves `skills` empty -- each with its
+/// [`SkillProvenance::content_hash`] so the frontend drift-compares against
+/// the registry and surfaces a "modified" badge for a skill whose content
+/// changed after this turn, plus the turn's executing [`TurnRuntime`]. Empty
+/// `skills` for turns that injected no skill body and for v3->v4 migrated
+/// turns (no baseline); absent `runtime` for
 /// turns recorded before attribution crossed the wire (an optimistic append
 /// or a pre-extension IPC peer -- shown without a badge, distinct from the
 /// recorded-but-unattributed `External` form).
@@ -325,13 +328,13 @@ pub struct TurnRecord {
     pub question: String,
     pub outcome: TurnOutcome,
     pub trace: Vec<TraceRound>,
-    /// The turn's skill provenance (issue #381; semantics per issue #700,
-    /// ADR-0110): each skill whose body was injected into the turn's prompt,
-    /// with its `content_hash` for drift comparison against the registry.
-    /// The activated subset for built-in turns (mounting injects metadata
-    /// only); the full mounted set for external turns until #702 switches
-    /// the ACP injection to disclosure. Empty for turns that injected no
-    /// skill body and for v3->v4 migrated turns.
+    /// The turn's skill provenance (issue #381; semantics per issues
+    /// #700/#702, ADR-0110): each skill whose body was injected into the
+    /// turn's prompt, with its `content_hash` for drift comparison against
+    /// the registry. The activated subset for every runtime (mounting
+    /// injects metadata only; both injection surfaces render disclosure).
+    /// Empty for turns that injected no skill body and for v3->v4 migrated
+    /// turns.
     pub provenance: TurnProvenance,
     /// When the user submitted the question (Unix epoch ms, ADR-0103).
     /// `None` for turns recorded before v5 -- the frontend renders no

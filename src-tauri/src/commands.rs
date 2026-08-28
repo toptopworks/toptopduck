@@ -735,7 +735,8 @@ pub async fn ask(
         // session lock is held, so neither set can change between this read
         // and the turn. The activated names (ADR-0110, issue #700) ride the
         // same lock -- the L1/L2 sort key for the disclosure rendering and
-        // the built-in provenance fork.
+        // the provenance's activated-subset filter (issues #700/#702 -- every
+        // runtime records the activated subset).
         let mounted = s.mounted_skills();
         let activated = s.activated_skills();
         let skill_fragments = resolve_prompt_fragments(&skills_root, &mounted);
