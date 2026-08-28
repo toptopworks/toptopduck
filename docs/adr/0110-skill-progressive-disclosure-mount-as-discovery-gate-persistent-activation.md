@@ -59,3 +59,4 @@ Agent Skills 生态的通用答案发现 / 激活 / 执行三段式 + 渐进披�
 - **延伸 ADR-0105**：元工具家族新增 `activate_skill`——同一装配纪律（网关一处装配、两运行时同面、空集条件挂载）。
 - **延续 ADR-0082**：recipe format_version 单向迁移（v5 → v6）。
 - **留实施期**：元数据索引段措辞与位置（含 ACP 块形状）、`activate_skill` 出入参形状、挂载列表两态 affordance 与 thread 的 `Activate` 事件呈现、内置技能 `description` 触发质量复查、挂载数量大时的索引上限策略。
+- **被 ADR-0111 落地**：Decision 6 推迟的第三层（附带文件按需读取）由 ADR-0111 裁决——受限读面（网关元工具 `read_skill_file`，app 代读、激活集门控、收口三件套）+ 执行文本中继（经注册 CLI 信道，无新执行基质）；「沙箱 + 审批 + FS 收口」的预判形态改写为借道消解（沙箱显式不解决）；`activate_skill` 只返回正文、不携带目录结构提示的纪律维持。
