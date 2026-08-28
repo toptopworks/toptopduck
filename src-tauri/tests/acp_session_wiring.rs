@@ -15,7 +15,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use toptopduck_lib::cli_tools::config::{
     CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
@@ -283,15 +283,13 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
 /// to record_turn after; this test pins the external branch so a future change
 /// cannot silently drop the skill provenance on the ACP path.
 ///
-/// ADR-0110 (issue #700): the ACP provenance fork records the FULL mounted
-/// set regardless of the activated list -- the external injection surface
-/// stays full-text until #702, so the provenance names every skill whose body
-/// the CLI actually received. The activated list deliberately covers only one
-/// of the two mounts, so sorting BOTH fork arms by the activated list -- the
-/// exact mutation the fork exists to prevent -- drops pdf-tools and reddens
-/// this test.
+/// ADR-0110 (issues #700/#702): since the ACP assembly renders disclosure,
+/// the external turn records the ACTIVATED subset -- the same set the
+/// built-in turn records. The activated list deliberately covers only one of
+/// the two mounts, so recording the full mounted set -- the pre-#702 fork --
+/// reddens this test with an extra pdf-tools entry.
 #[test]
-fn external_turn_with_skill_records_provenance() {
+fn external_turn_records_activated_subset_provenance() {
     let skills_root = tempfile::tempdir().unwrap();
     let skills_root = skills_root.path().to_path_buf();
     let body = "Name the statistical method you use.\n";
@@ -308,9 +306,7 @@ fn external_turn_with_skill_records_provenance() {
         "Extract the tables first.\n",
     );
     let sql_coach_bytes = fs::read(skills_root.join("sql-coach").join("SKILL.md")).unwrap();
-    let pdf_tools_bytes = fs::read(skills_root.join("pdf-tools").join("SKILL.md")).unwrap();
     let sql_coach_hash = sha256_hex(&sql_coach_bytes);
-    let pdf_tools_hash = sha256_hex(&pdf_tools_bytes);
 
     let (mut session, old_path, _guard) = external_session("text_reply");
     session.mount_skill("sql-coach").expect("mount");
@@ -318,14 +314,12 @@ fn external_turn_with_skill_records_provenance() {
     let mounted = session.mounted_skills();
     let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
     assert_eq!(fragments.len(), 2);
-    assert_eq!(fragments[0].content_hash, sql_coach_hash);
-    assert_eq!(fragments[1].content_hash, pdf_tools_hash);
 
     let approval = ApprovalState::new();
     let sink = NullSink;
     let keychain = KeychainStore::new();
-    // Only one of the two mounts is activated -- the fork's discriminating
-    // case (see the doc comment).
+    // Only one of the two mounts is activated -- the convergence's
+    // discriminating case (see the doc comment).
     let activated = vec!["sql-coach".to_string()];
     let outcome = session.ask_with_phase(
         "what is the answer?",
@@ -358,17 +352,11 @@ fn external_turn_with_skill_records_provenance() {
         .expect("at least one turn in the recipe");
     assert_eq!(
         last_turn.provenance.skills,
-        vec![
-            SkillProvenance {
-                name: "sql-coach".into(),
-                content_hash: sql_coach_hash,
-            },
-            SkillProvenance {
-                name: "pdf-tools".into(),
-                content_hash: pdf_tools_hash,
-            },
-        ],
-        "the external turn records the FULL mounted set, not the activated subset"
+        vec![SkillProvenance {
+            name: "sql-coach".into(),
+            content_hash: sql_coach_hash,
+        }],
+        "the external turn records the ACTIVATED subset, not the full mounted set"
     );
     // ADR-0101: the turn-top snapshot must record the turn's real runtime --
     // the pre-#588 `TurnAudit::builtin` hardcoded BuiltIn here, mislabeling
@@ -383,6 +371,102 @@ fn external_turn_with_skill_records_provenance() {
         last_turn.provenance.adapter_id.as_deref(),
         Some("fake-cli"),
         "the live snapshot names the driving adapter's stable id"
+    );
+}
+
+/// Issue #702: a resumed session with NO Activate events in its timeline (the
+/// old-session shape -- pre-v6 recipes cannot carry any) folds an EMPTY
+/// activated set, and the external turn driven on top of it records an empty
+/// skill provenance -- the same honest-degrade behavior as the built-in
+/// side. Pins the resume AC end-to-end: mounts rebuild (so the empty
+/// activation is meaningful, not "nothing resumed"), and the turn's
+/// provenance carries no skill whose body was never injected.
+#[test]
+fn resumed_external_turn_without_activations_records_empty_provenance() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(
+        &skills_root,
+        "sql-coach",
+        "Coach honest SQL reporting.",
+        "Name the statistical method you use.\n",
+    );
+    put_skill(
+        &skills_root,
+        "pdf-tools",
+        "Extract tables before querying.",
+        "Extract the tables first.\n",
+    );
+
+    let duck_dir = tempfile::tempdir().unwrap();
+    let duck_path = duck_dir.path().join("resume.duck");
+    let (mut session, old_path, guard) = external_session("text_reply");
+    session
+        .bind_duck(duck_path.clone(), "resume".into())
+        .expect("bind");
+    // Mounts persist through the timeline append; no Activate event ever
+    // lands -- the old-session shape.
+    session.mount_skill("sql-coach").expect("mount");
+    session.mount_skill("pdf-tools").expect("mount");
+    drop(session);
+
+    let mut resumed = Session::open_duck(
+        &duck_path,
+        Arc::new(toptopduck_lib::CancelToken::new()),
+        Box::new(toptopduck_lib::UnwiredProvider),
+        |_| {},
+        |_| toptopduck_lib::SourceResolution::Abort,
+        |_| toptopduck_lib::ActiveResolution::Abort,
+    )
+    .expect("resume");
+    assert_eq!(
+        resumed.mounted_skills(),
+        vec!["sql-coach".to_string(), "pdf-tools".to_string()],
+        "mounts rebuild off the timeline"
+    );
+    assert!(
+        resumed.activated_skills().is_empty(),
+        "a timeline with no Activate events folds an empty activated set"
+    );
+
+    resumed.set_external_runtime(Some(fake_cli_adapter()));
+    let fragments: Vec<SkillPromptFragment> =
+        resolve_prompt_fragments(&skills_root, &resumed.mounted_skills());
+    assert_eq!(fragments.len(), 2);
+    let activated = resumed.activated_skills();
+    let outcome = resumed.ask_with_phase(
+        "what is the answer?",
+        &ApprovalState::new(),
+        &NullSink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &KeychainStore::new(),
+            skills: &fragments,
+            activated: &activated,
+            cli_tools: &[],
+        },
+    );
+    drop(guard);
+    std::env::set_var("PATH", old_path);
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let recipe = resumed.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    assert!(
+        last_turn.provenance.skills.is_empty(),
+        "a resumed external turn with no activations records no skill bodies"
     );
 }
 

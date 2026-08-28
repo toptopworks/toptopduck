@@ -696,20 +696,19 @@ pub struct TurnInputs<'a> {
     /// Borrow of the OS keychain (ADR-0029). The gateway reads each server's
     /// secret env values at spawn; the values never cross IPC back out.
     pub keychain: &'a KeychainStore,
-    /// The mounted-skill prompt fragments (ADR-0086, issue #364). On the
-    /// built-in path, each fragment's metadata + body ride the system prompt
-    /// split by disclosure level (ADR-0110) and the activated fragments'
-    /// `content_hash` snapshots into the turn's provenance for resume-time
-    /// drift detection; the ACP path injects every body full-text and
-    /// records the full mounted set until #702 switches it to disclosure
-    /// (see `activated`).
+    /// The mounted-skill prompt fragments (ADR-0086, issue #364). On either
+    /// runtime path, each fragment's metadata + body ride the turn's prompt
+    /// split by disclosure level (ADR-0110; ACP parity per issue #702) and
+    /// the activated fragments' `content_hash` snapshots into the turn's
+    /// provenance for resume-time drift detection.
     pub skills: &'a [SkillPromptFragment],
-    /// The session's activated-skill names (ADR-0110, issue #700) -- the
-    /// L1/L2 sort key. Two consumers sort by the same list: the built-in
-    /// system prompt renders mounted-but-not-activated names as index
-    /// entries + activated names as bodies, and the built-in turn's
-    /// provenance records only the activated fragments (the ones whose
-    /// bodies the model actually saw). The ACP path ignores it until #702.
+    /// The session's activated-skill names (ADR-0110, issues #700/#702) --
+    /// the L1/L2 sort key. Every consumer sorts by the same list on both
+    /// runtime surfaces: the built-in system prompt's skill section and the
+    /// external ACP block render mounted-but-not-activated names as index
+    /// entries + activated names as bodies, and both runtimes' provenance
+    /// records only the activated fragments (the ones whose bodies the
+    /// model actually saw).
     pub activated: &'a [String],
     /// The effective CLI tool registrations for this turn (the config-level
     /// enabled slice, ADR-0106 single axis -- issue #671, ADR-0108). The
@@ -1182,25 +1181,18 @@ impl Session {
             },
             None => TurnRuntime::BuiltIn,
         };
-        // ADR-0086 (issue #364) + ADR-0110 (issue #700): the mounted-skill
-        // fragments snapshot into the turn's provenance (name + content_hash)
-        // for resume, computed once here so both dispatch branches below see
-        // the same assembly-time snapshot. WHICH set the provenance records
-        // follows the injection surface (honest bookkeeping -- the drift badge
-        // must reflect the skills whose bodies the model actually read): a
-        // built-in turn records the activated subset (disclosure -- only
-        // activated bodies ride the system prompt); an external ACP turn
-        // records the full mounted set until #702 switches the ACP injection
-        // to disclosure. The fork keys off the same runtime attribution.
+        // ADR-0086 (issue #364) + ADR-0110 (issues #700/#702): the mounted-
+        // skill fragments snapshot into the turn's provenance (name +
+        // content_hash) for resume, computed once here so both dispatch
+        // branches below see the same assembly-time snapshot. The provenance
+        // records the ACTIVATED subset for either runtime (honest bookkeeping
+        // -- the drift badge must reflect the skills whose bodies the model
+        // actually read): both injection surfaces render disclosure since
+        // #702, so only activated bodies ride a turn's prompt.
         let skill_provenance: Vec<SkillProvenance> = inputs
             .skills
             .iter()
-            .filter(|f| match &attribution {
-                TurnRuntime::BuiltIn => inputs.activated.contains(&f.name),
-                // Until #702, the external injection surface stays full-text
-                // over the full mounted set.
-                TurnRuntime::External { .. } => true,
-            })
+            .filter(|f| inputs.activated.contains(&f.name))
             .map(|f| SkillProvenance {
                 name: f.name.clone(),
                 content_hash: f.content_hash.clone(),
@@ -1477,8 +1469,14 @@ impl Session {
         let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
         // 4. Assemble the prompt blocks (leading context: locale + schema;
         //    skill block before question; M-contract via gateway tool table).
-        let prompt_blocks =
-            window::assemble_acp_turn(question, &self.working_set, history, locale, inputs.skills);
+        let prompt_blocks = window::assemble_acp_turn(
+            question,
+            &self.working_set,
+            history,
+            locale,
+            inputs.skills,
+            inputs.activated,
+        );
         let input = AcpTurnInput {
             cwd: self.temp_path.to_string_lossy().to_string(),
             mcp_servers: vec![mcp_server],

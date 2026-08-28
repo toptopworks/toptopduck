@@ -145,11 +145,11 @@ export type TurnRuntime =
   | { kind: "built_in" }
   | { kind: "external"; data: { adapter_id: string | null } };
 
-// Per-turn provenance crossing IPC (issue #381, ADR-0101; issue #700,
-// ADR-0110): the skills whose bodies were actually injected into the turn's
-// prompt -- the ACTIVATED set for built-in turns (mounting injects metadata
-// only; ADR-0110 Decision 5), the full mounted set for external turns until
-// #702 switches the ACP injection to disclosure. Each carries its
+// Per-turn provenance crossing IPC (issue #381, ADR-0101; issues
+// #700/#702, ADR-0110): the skills whose bodies were actually injected into
+// the turn's prompt -- the ACTIVATED set for every runtime (mounting injects
+// metadata only; ADR-0110 Decision 5; both injection surfaces render
+// disclosure). Each carries its
 // content_hash so the TurnCard can drift-compare against the registry's
 // current SkillEntry.content_hash and surface a "modified" drift badge when a
 // skill changed after a recorded turn, plus the turn's executing runtime.
@@ -175,8 +175,8 @@ export interface TurnRecord {
   outcome: TurnOutcome;
   trace: TraceRound[];
   // Issue #381: the turn's skill provenance for drift comparison against the
-  // registry (activated set for built-in turns, mounted set for external
-  // turns until #702 -- see TurnProvenance above). Empty `skills` for turns
+  // registry (the activated set, either runtime -- see TurnProvenance
+  // above). Empty `skills` for turns
   // that injected no skill body and for v3->v4 migrated turns (no baseline --
   // never trips the drift check).
   provenance: TurnProvenance;
