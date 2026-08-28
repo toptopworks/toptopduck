@@ -10,10 +10,11 @@
 //! anchors resume's stale-degrade check. A skill that left the registry (or
 //! whose `SKILL.md` is unreadable) degrades honestly -- empty description,
 //! empty body, empty hash, a warn log -- so the turn still proceeds. Its
-//! provenance fate follows the disclosure fork: a built-in turn records only
-//! the ACTIVATED subset, so an unactivated (even vanished) skill no longer
-//! enters the provenance at all; an activated one records the name + empty
-//! hash, which is resume's "gone" signal.
+//! provenance fate follows disclosure: every turn records only the ACTIVATED
+//! subset (issues #700/#702 -- both runtime surfaces render disclosure), so
+//! an unactivated (even vanished) skill no longer enters the provenance at
+//! all; an activated one records the name + empty hash, which is resume's
+//! "gone" signal.
 
 use std::path::Path;
 

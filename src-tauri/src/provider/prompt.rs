@@ -961,6 +961,17 @@ mod tests {
         assert!(!block.contains("IN-SCOPE"), "no capability boundary");
         assert!(!block.contains("OUT-OF-SCOPE"), "no capability boundary");
         assert!(!block.contains("绝不冒充"), "no capability boundary");
+        // No skill section in the context block -- pinned on the CURRENT
+        // disclosure markers (and the retired full-text frame word), so a
+        // leak under any wording reddens.
+        assert!(
+            !block.contains("【可用技能】"),
+            "no skill section in the context block"
+        );
+        assert!(
+            !block.contains("【激活技能】"),
+            "no skill section in the context block"
+        );
         assert!(
             !block.contains("【挂载技能】"),
             "no skill section in the context block"

@@ -400,7 +400,7 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
 
     let duck_dir = tempfile::tempdir().unwrap();
     let duck_path = duck_dir.path().join("resume.duck");
-    let (mut session, old_path, guard) = external_session("text_reply");
+    let (mut session, old_path, _guard) = external_session("text_reply");
     session
         .bind_duck(duck_path.clone(), "resume".into())
         .expect("bind");
@@ -447,7 +447,9 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
             cli_tools: &[],
         },
     );
-    drop(guard);
+    // Restore PATH while still holding the env lock (the `_guard` binding
+    // drops at scope end), matching every sibling test -- an explicit drop
+    // here would open an unlocked env-write window between the two.
     std::env::set_var("PATH", old_path);
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
@@ -468,6 +470,84 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
         last_turn.provenance.skills.is_empty(),
         "a resumed external turn with no activations records no skill bodies"
     );
+}
+
+/// Issue #702 (PR #709 review): the `activated` wire-through into the ACP
+/// assembly is otherwise unpinned end-to-end -- the provenance tests assert
+/// `build_recipe()` output, which is computed before the assembly call, and
+/// the unit tests construct the argument directly. This test drives the
+/// `prompt_echo` fixture scenario, which echoes the received `session/prompt`
+/// blocks back as the agent message (the ACP counterpart of the built-in
+/// face's provider-side prompt capture), and pins the disclosure mix the CLI
+/// actually received: the mounted-only skill as an index entry, the activated
+/// skill's framed verbatim body -- and the mounted-only skill's body nowhere
+/// (a full-text or wrong-list regression at the call site leaks it here).
+#[test]
+fn external_turn_prompt_carries_disclosure_not_full_text() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(
+        &skills_root,
+        "sql-coach",
+        "Coach honest SQL reporting.",
+        "Name the statistical method you use.\n",
+    );
+    put_skill(
+        &skills_root,
+        "pdf-tools",
+        "Extract tables before querying.",
+        "Extract the tables first.\n",
+    );
+
+    let (mut session, old_path, _guard) = external_session("prompt_echo");
+    session.mount_skill("sql-coach").expect("mount");
+    session.mount_skill("pdf-tools").expect("mount");
+    let mounted = session.mounted_skills();
+    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
+    assert_eq!(fragments.len(), 2);
+
+    let activated = vec!["sql-coach".to_string()];
+    let keychain = KeychainStore::new();
+    let outcome = session.ask_with_phase(
+        "what is the answer?",
+        &ApprovalState::new(),
+        &NullSink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &keychain,
+            skills: &fragments,
+            activated: &activated,
+            cli_tools: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            // The mounted-only skill rides as an index entry.
+            assert!(
+                body.contains("【可用技能】"),
+                "index section rides the prompt"
+            );
+            assert!(
+                body.contains("- `pdf-tools` — Extract tables before querying.\n"),
+                "mounted-only skill indexed, not body-injected"
+            );
+            // The activated skill rides its framed verbatim body.
+            assert!(
+                body.contains(
+                    "【激活技能】技能 `sql-coach`：\nName the statistical method you use.\n"
+                ),
+                "activated body framed + verbatim"
+            );
+            // The retired full-text shape leaks the mounted-only body.
+            assert!(
+                !body.contains("Extract the tables first."),
+                "the mounted-only skill's body must not ride the prompt"
+            );
+        }
+        other => panic!("prompt_echo must complete Textual, got {other:?}"),
+    }
 }
 
 /// Issue #530: a pre-handshake ACP failure ("no discovery") must NOT wipe

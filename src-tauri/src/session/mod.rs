@@ -1185,10 +1185,12 @@ impl Session {
         // skill fragments snapshot into the turn's provenance (name +
         // content_hash) for resume, computed once here so both dispatch
         // branches below see the same assembly-time snapshot. The provenance
-        // records the ACTIVATED subset for either runtime (honest bookkeeping
-        // -- the drift badge must reflect the skills whose bodies the model
-        // actually read): both injection surfaces render disclosure since
-        // #702, so only activated bodies ride a turn's prompt.
+        // records the skills ACTIVATED at the turn's assembly time, for
+        // either runtime (honest bookkeeping -- the drift badge tracks the
+        // bodies the assembly injected; a skill first activated mid-turn via
+        // `activate_skill` lands in the NEXT turn's snapshot): both injection
+        // surfaces render disclosure since #702, so only activated bodies
+        // ride a turn's prompt.
         let skill_provenance: Vec<SkillProvenance> = inputs
             .skills
             .iter()

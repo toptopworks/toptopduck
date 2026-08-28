@@ -284,12 +284,15 @@ pub enum TurnRuntime {
     },
 }
 
-/// Per-turn provenance crossing IPC (issue #381, ADR-0101): the active skills
-/// at the turn's assembly time, each with its [`SkillProvenance::content_hash`]
-/// so the frontend drift-compares against the registry and surfaces a
-/// "modified" badge for a skill whose content changed after this turn, plus
-/// the turn's executing [`TurnRuntime`]. Empty `skills` for turns that mounted
-/// no skill and for v3->v4 migrated turns (no baseline); absent `runtime` for
+/// Per-turn provenance crossing IPC (issue #381, ADR-0101): the ACTIVATED
+/// skills at the turn's assembly time -- the activated subset for every
+/// runtime (ADR-0110; both injection surfaces render disclosure), so mounting
+/// alone leaves `skills` empty -- each with its
+/// [`SkillProvenance::content_hash`] so the frontend drift-compares against
+/// the registry and surfaces a "modified" badge for a skill whose content
+/// changed after this turn, plus the turn's executing [`TurnRuntime`]. Empty
+/// `skills` for turns that injected no skill body and for v3->v4 migrated
+/// turns (no baseline); absent `runtime` for
 /// turns recorded before attribution crossed the wire (an optimistic append
 /// or a pre-extension IPC peer -- shown without a badge, distinct from the
 /// recorded-but-unattributed `External` form).
