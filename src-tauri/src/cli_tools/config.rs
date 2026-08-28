@@ -342,6 +342,7 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
         || name == crate::mcp::meta_tools::META_SEARCH_TOOLS
         || name == crate::mcp::meta_tools::META_INVOKE
         || name == crate::skills::activation::ACTIVATE_SKILL
+        || name == crate::skills::read::READ_SKILL_FILE
 }
 
 /// The legal-shape rule in one place (ADR-0109 Decision 7, issue #675

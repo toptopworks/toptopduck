@@ -120,6 +120,7 @@ fn activated_skill_body_in_prompt_and_provenance() {
             mcp_servers: &[],
             keychain: &KeychainStore::new(),
             skills: &fragments,
+            skills_root: &skills_root,
             activated: &activated,
             cli_tools: &[],
         },
@@ -215,6 +216,7 @@ fn mounted_not_activated_lands_index_entry_not_body() {
             mcp_servers: &[],
             keychain: &KeychainStore::new(),
             skills: &fragments,
+            skills_root: &skills_root,
             activated: &activated,
             cli_tools: &[],
         },
@@ -294,6 +296,7 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
                 mcp_servers: &[],
                 keychain: &KeychainStore::new(),
                 skills: &fragments,
+                skills_root,
                 activated: &activated,
                 cli_tools: &[],
             },
@@ -627,6 +630,7 @@ fn agent_activation_persists_midturn_and_survives_turn_failure() {
             mcp_servers: &[],
             keychain: &KeychainStore::new(),
             skills: &fragments,
+            skills_root: &skills_root,
             activated: &[],
             cli_tools: &[],
         },
@@ -697,4 +701,196 @@ impl toptopduck_lib::Provider for ProbeHandle {
     > {
         self.inner.generate_tool_turn(request)
     }
+}
+
+/// The read-surface probe (issue #714): round 1 of each turn inspects the
+/// turn's tool table (does `read_skill_file` ride it?); round 1 of turn 1
+/// activates mid-turn; round 2 of turn 2 captures the served read result the
+/// provider sees fed back.
+struct ReadSurfaceProbeProvider {
+    calls: std::sync::atomic::AtomicUsize,
+    read_mounted: [std::sync::atomic::AtomicBool; 2],
+    served_text: std::sync::Mutex<String>,
+}
+
+impl toptopduck_lib::Provider for ReadSurfaceProbeProvider {
+    fn generate_tool_turn(
+        &self,
+        request: &toptopduck_lib::provider::tool_calling::ToolTurnRequest,
+    ) -> Result<
+        toptopduck_lib::provider::tool_calling::ToolTurnOutcome,
+        toptopduck_lib::ProviderError,
+    > {
+        use std::sync::atomic::Ordering;
+        let has_read = request.tools.iter().any(|t| t.name == "read_skill_file");
+        match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                self.read_mounted[0].store(has_read, Ordering::SeqCst);
+                Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
+                    thinking: Vec::new(),
+                    reply: ToolTurnReply::tool_calls(vec![
+                        toptopduck_lib::provider::tool_calling::ToolUse {
+                            id: "tu_s".into(),
+                            name: "activate_skill".into(),
+                            input: serde_json::json!({"name": "sql-coach"}),
+                        },
+                    ]),
+                })
+            }
+            1 => Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
+                thinking: Vec::new(),
+                reply: ToolTurnReply::Text("turn one done".into()),
+            }),
+            2 => {
+                self.read_mounted[1].store(has_read, Ordering::SeqCst);
+                Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
+                    thinking: Vec::new(),
+                    reply: ToolTurnReply::tool_calls(vec![
+                        toptopduck_lib::provider::tool_calling::ToolUse {
+                            id: "tu_r".into(),
+                            name: "read_skill_file".into(),
+                            input: serde_json::json!({
+                                "name": "sql-coach",
+                                "path": "references/notes.md"
+                            }),
+                        },
+                    ]),
+                })
+            }
+            _ => {
+                *self.served_text.lock().unwrap() = request
+                    .messages
+                    .iter()
+                    .find_map(|m| match m {
+                        toptopduck_lib::provider::tool_calling::ToolTurnMessage::ToolResult {
+                            content,
+                            ..
+                        } => Some(content.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
+                    thinking: Vec::new(),
+                    reply: ToolTurnReply::Text("turn two done".into()),
+                })
+            }
+        }
+    }
+}
+
+/// The Arc-backed handle for [`ReadSurfaceProbeProvider`] (the
+/// [`ProbeHandle`] shape).
+struct ReadProbeHandle {
+    inner: Arc<ReadSurfaceProbeProvider>,
+}
+
+impl toptopduck_lib::Provider for ReadProbeHandle {
+    fn generate_tool_turn(
+        &self,
+        request: &toptopduck_lib::provider::tool_calling::ToolTurnRequest,
+    ) -> Result<
+        toptopduck_lib::provider::tool_calling::ToolTurnOutcome,
+        toptopduck_lib::ProviderError,
+    > {
+        self.inner.generate_tool_turn(request)
+    }
+}
+
+/// The read surface's mount condition + mid-turn timing, end to end (issue
+/// #714, ADR-0111 Decisions 1/3): turn 1 (activated snapshot EMPTY) mounts
+/// NO `read_skill_file` even though the skill is mounted -- reading rides
+/// the activation gate; the agent's mid-turn activation lands but never
+/// widens the CURRENT turn's table; turn 2 -- whose turn-start snapshot
+/// carries the name -- mounts the tool and serves the file text into the
+/// tool result the provider's next round sees.
+#[test]
+fn read_surface_mounts_next_turn_and_serves_after_midturn_activation() {
+    use std::sync::atomic::Ordering;
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(&skills_root, "sql-coach", "Coach SQL.", "Coach the SQL.\n");
+    fs::create_dir_all(skills_root.join("sql-coach").join("references")).unwrap();
+    fs::write(
+        skills_root
+            .join("sql-coach")
+            .join("references")
+            .join("notes.md"),
+        "Use CTEs.\n",
+    )
+    .unwrap();
+
+    let provider = Arc::new(ReadSurfaceProbeProvider {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        read_mounted: [
+            std::sync::atomic::AtomicBool::new(false),
+            std::sync::atomic::AtomicBool::new(false),
+        ],
+        served_text: std::sync::Mutex::new(String::new()),
+    });
+    let mut session = Session::with_provider(Box::new(ReadProbeHandle {
+        inner: Arc::clone(&provider),
+    }))
+    .expect("session");
+    session.mount_skill("sql-coach").expect("mount");
+    let fragments = resolve_prompt_fragments(&skills_root, &session.mounted_skills());
+    let approval = ApprovalState::new();
+
+    // Turn 1: the activated snapshot is empty -- no read surface.
+    let outcome = session.ask_with_phase(
+        "查询",
+        &approval,
+        &NullSink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &KeychainStore::new(),
+            skills: &fragments,
+            activated: &[],
+            skills_root: &skills_root,
+            cli_tools: &[],
+        },
+    );
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+    assert!(
+        !provider.read_mounted[0].load(Ordering::SeqCst),
+        "an empty activated snapshot mounts no read tool"
+    );
+    assert_eq!(
+        session.activated_skills(),
+        vec!["sql-coach".to_string()],
+        "the mid-turn agent activation landed"
+    );
+
+    // Turn 2: the turn-start snapshot now carries the name.
+    let activated = vec!["sql-coach".to_string()];
+    let outcome = session.ask_with_phase(
+        "再查",
+        &approval,
+        &NullSink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &KeychainStore::new(),
+            skills: &fragments,
+            activated: &activated,
+            skills_root: &skills_root,
+            cli_tools: &[],
+        },
+    );
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+    assert!(
+        provider.read_mounted[1].load(Ordering::SeqCst),
+        "the next turn's snapshot mounts the read tool"
+    );
+    assert_eq!(
+        *provider.served_text.lock().unwrap(),
+        "Use CTEs.\n",
+        "the file text rode the tool result back to the provider"
+    );
 }

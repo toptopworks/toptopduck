@@ -715,6 +715,11 @@ pub struct TurnInputs<'a> {
     /// records only the activated fragments (the ones whose bodies the
     /// model actually saw).
     pub activated: &'a [String],
+    /// The skills registry root (ADR-0111, issue #714): the attachment read
+    /// surface resolves names against it live, mid-turn. The root rides the
+    /// turn's data (the same "data passed in" posture as `skills`), keeping
+    /// the session I/O-free for skill content.
+    pub skills_root: &'a std::path::Path,
     /// The effective CLI tool registrations for this turn (the config-level
     /// enabled slice, ADR-0106 single axis -- issue #671, ADR-0108). The
     /// turn direct-lists them into the tool table and dispatches their
@@ -733,6 +738,7 @@ impl<'a> TurnInputs<'a> {
             keychain,
             skills: &[],
             activated: &[],
+            skills_root: std::path::Path::new(""),
             cli_tools: &[],
         }
     }
@@ -1293,6 +1299,18 @@ impl Session {
                             .tools
                             .push(crate::skills::activation::activate_skill_definition());
                     }
+                    // The skill-attachment read surface (ADR-0111 Decision 1,
+                    // issue #714): mounted iff the turn's ACTIVATED set is
+                    // non-empty -- only activated skills' files are readable,
+                    // so an all-index turn pays no standing tool cost. A
+                    // mid-turn activation joins the NEXT turn's snapshot
+                    // (Decision 3 -- activation never competes with the
+                    // turn's assembly), the same posture as the prompt face.
+                    if !inputs.activated.is_empty() {
+                        request
+                            .tools
+                            .push(crate::skills::read::read_skill_file_definition());
+                    }
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
@@ -1314,6 +1332,17 @@ impl Session {
                         &mut self.persister,
                         &self.runtime_facts,
                     );
+                    // The attachment read gate (ADR-0111, issue #714): pure
+                    // classification (no transitions, no persist), so an
+                    // immutable bundle beside the activation channel --
+                    // mounted-set fragments for the failure signals, the
+                    // turn-start ACTIVATED snapshot for eligibility, and the
+                    // registry root for the live name resolution.
+                    let read_gate = crate::skills::read::SkillReadGate {
+                        fragments: inputs.skills,
+                        activated: inputs.activated,
+                        root: inputs.skills_root,
+                    };
                     // The switchover (ADR-0107 Decision 2, issue #669):
                     // `turn_loop_for` is the seam's single entry -- a
                     // profile-backed provider constructs the upstream streamer
@@ -1347,6 +1376,7 @@ impl Session {
                             &mut mcp,
                             inputs.cli_tools,
                             &mut skill_channel,
+                            &read_gate,
                             approval,
                             sink,
                             Arc::clone(&self.cancel),
@@ -1573,9 +1603,18 @@ impl Session {
                 &mut self.persister,
                 &self.runtime_facts,
             );
+            // The bridge face's read gate (issue #714): the same immutable
+            // bundle the built-in loop's dispatch server gets -- one read
+            // semantics on both runtime surfaces (ADR-0111 Decision 7).
+            let read_gate = crate::skills::read::SkillReadGate {
+                fragments: inputs.skills,
+                activated: inputs.activated,
+                root: inputs.skills_root,
+            };
             let ctx = GatewayCtx {
                 deps,
                 skills: skill_channel,
+                read: read_gate,
                 materializer: &mut *self.materializer,
                 approval,
                 sink,

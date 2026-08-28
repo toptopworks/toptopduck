@@ -129,6 +129,7 @@ impl YoagentLoop {
         mcp: &mut McpAggregator,
         cli: &[crate::cli_tools::config::CliToolConfig],
         skills: &mut SkillActivationCtx<'_>,
+        read: &crate::skills::read::SkillReadGate<'_>,
         approval: &crate::approval::ApprovalState,
         sink: &dyn crate::approval::ApprovalSink,
         cancel: Arc<CancelToken>,
@@ -270,6 +271,7 @@ impl YoagentLoop {
                     mcp,
                     cli,
                     skills,
+                    read,
                     &gate,
                     &mut forward,
                 ) {

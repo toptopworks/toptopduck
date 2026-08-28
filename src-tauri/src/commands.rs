@@ -788,6 +788,9 @@ pub async fn ask(
 struct AssembledTurnInputs<'a> {
     skills: Vec<SkillPromptFragment>,
     activated: Vec<String>,
+    /// The registry root borrow (ADR-0111, issue #714): the turn's read
+    /// surface resolves skill names against it live, mid-turn.
+    skills_root: &'a Path,
     cli_tools: Vec<crate::cli_tools::config::CliToolConfig>,
     keychain: &'a crate::provider::keychain::KeychainStore,
 }
@@ -807,7 +810,7 @@ struct AssembledTurnInputs<'a> {
 /// the command body itself uncovered.
 fn assemble_turn_inputs<'a>(
     session: &Session,
-    skills_root: &Path,
+    skills_root: &'a Path,
     live: &'a LiveProviderConfig,
 ) -> AssembledTurnInputs<'a> {
     let mounted = session.mounted_skills();
@@ -817,6 +820,7 @@ fn assemble_turn_inputs<'a>(
     AssembledTurnInputs {
         skills,
         activated,
+        skills_root,
         cli_tools,
         keychain: live.keychain(),
     }
@@ -831,6 +835,7 @@ impl AssembledTurnInputs<'_> {
             keychain: self.keychain,
             skills: &self.skills,
             activated: &self.activated,
+            skills_root: self.skills_root,
             cli_tools: &self.cli_tools,
         }
     }

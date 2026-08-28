@@ -61,6 +61,7 @@ fn a_configured_mcp_server_mounts_the_trio_on_the_provider_tool_surface() {
             mcp_servers: &[server],
             keychain: &KeychainStore::new(),
             skills: &[],
+            skills_root: std::path::Path::new(""),
             activated: &[],
             cli_tools: &[],
         },
@@ -102,6 +103,7 @@ fn an_empty_effective_set_mounts_no_meta_tools() {
             keychain: &KeychainStore::new(),
             skills: &[],
             activated: &[],
+            skills_root: std::path::Path::new(""),
             cli_tools: &[],
         },
     );

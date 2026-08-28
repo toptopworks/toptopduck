@@ -255,6 +255,13 @@ struct Harness {
     /// set keeps every other test off it (the tool mounts only on a
     /// non-empty mounted set).
     skills: crate::session::skills::SkillActivationFixture,
+    /// The read gate's owning buffers (issue #714): separate fields (not the
+    /// fixture's) so the immutable read borrow and the mutable activation
+    /// borrow stay field-disjoint inside [`Self::run_with_parts`]. Defaults
+    /// keep every non-read test off the surface.
+    read_fragments: Vec<crate::skills::SkillPromptFragment>,
+    read_activated: Vec<String>,
+    read_root: std::path::PathBuf,
 }
 
 impl Harness {
@@ -267,6 +274,9 @@ impl Harness {
             temp: TempDir::new().unwrap(),
             phases: Arc::new(Mutex::new(Vec::new())),
             skills: crate::session::skills::SkillActivationFixture::new(Vec::new()),
+            read_fragments: Vec::new(),
+            read_activated: Vec::new(),
+            read_root: std::path::PathBuf::new(),
         }
     }
 
@@ -380,6 +390,11 @@ impl Harness {
         );
         let mut mcp = McpAggregator::empty();
         let phases = Arc::clone(&self.phases);
+        let read = crate::skills::read::SkillReadGate {
+            fragments: &self.read_fragments,
+            activated: &self.read_activated,
+            root: &self.read_root,
+        };
         loop_.run(
             request,
             &mut deps,
@@ -387,6 +402,7 @@ impl Harness {
             &mut mcp,
             cli,
             &mut self.skills.ctx(),
+            &read,
             approval,
             sink,
             cancel,
@@ -1412,4 +1428,68 @@ fn activate_skill_call_serves_body_lands_activation_and_traces() {
     let events = h.skills.skill_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].actor, Some(SkillLifecycleActor::Agent));
+}
+
+/// The `read_skill_file` meta-tool through the full loop (issue #714,
+/// ADR-0111): with an activated skill on the gate, the dispatch core serves
+/// the read ahead of the approval gate (the sink records NO request --
+/// reading is the injected body's risk class), and the trace records the
+/// row under the tool name with "skill: path" as its summary (the same
+/// Local-mapping shape the trio and the activation arm ride). Nothing lands
+/// on the activation channel -- a read is pure classification.
+#[test]
+fn read_skill_file_call_serves_text_and_traces() {
+    let root = TempDir::new().unwrap();
+    let dir = root.path().join("sql-coach");
+    std::fs::create_dir_all(dir.join("references")).unwrap();
+    std::fs::write(dir.join("references/notes.md"), b"Use CTEs.\n").unwrap();
+
+    let mut h = Harness::new();
+    h.read_root = root.path().to_path_buf();
+    h.read_fragments = vec![crate::session::skills::SkillActivationFixture::fragment(
+        "sql-coach",
+        "Coach the SQL.",
+    )];
+    h.read_activated = vec!["sql-coach".to_string()];
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        thinking_and_batch(
+            "read the notes",
+            None,
+            vec![call(
+                "tu_r",
+                "read_skill_file",
+                json!({"name": "sql-coach", "path": "references/notes.md"}),
+            )],
+        ),
+        text_reply("Coaching with notes."),
+    ]));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let outcome = h.run(
+        &h.request_with_tools("coach me", &["read_skill_file"]),
+        offline_loop(Arc::clone(&provider)),
+        &approval,
+        &sink,
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("Coaching with notes.".into())
+    );
+    // Approval-free: the intercept sits ahead of the gate, so no card is
+    // ever requested for the read.
+    assert!(sink.request_ids.lock().unwrap().is_empty());
+    // The trace row: the tool name + "skill: path" as the summary.
+    let entry = outcome
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .find(|e| e.name == "read_skill_file")
+        .expect("a read_skill_file trace row");
+    assert!(entry.success);
+    assert_eq!(entry.summary, "sql-coach: references/notes.md");
+    // Pure: nothing landed on the activation channel.
+    assert!(h.skills.activated.is_empty());
+    assert!(h.skills.skill_events().is_empty());
 }
