@@ -1568,6 +1568,36 @@ fn session_model_config_wire_shape() {
     );
 }
 
+/// Issue #606: the set command's posture pair crosses IPC as ONE struct
+/// argument (`PosturePair`) -- flat snake_case, the exact object the
+/// frontend `ModelPosture` mirror hands to `invoke` verbatim (the wrapper
+/// does no key translation). Pin the input wire shape so serde attribute
+/// or key-set drift fails here, not at the boundary.
+#[test]
+fn set_session_posture_input_wire_shape() {
+    use toptopduck_lib::session::PosturePair;
+    assert_wire(
+        &PosturePair {
+            model: Some("gemini-2.5-pro".into()),
+            thought_level: Some("high".into()),
+        },
+        r#"{"model":"gemini-2.5-pro","thought_level":"high"}"#,
+    );
+    // The cleared / unselected form (both null) is the same explicit-wire
+    // value the picker sends for "default (recommended)".
+    assert_wire(
+        &PosturePair::default(),
+        r#"{"model":null,"thought_level":null}"#,
+    );
+    // The wire keys ARE the field names: a camelCase payload (the pre-#606
+    // flattened-arg shape) must not deserialize -- the snake_case
+    // hand-mirror in `src/types/app-config.ts` is the required form.
+    assert!(
+        serde_json::from_str::<PosturePair>(r#"{"model":"x","thoughtLevel":"y"}"#).is_err(),
+        "camelCase keys must not cross the boundary"
+    );
+}
+
 /// Issue #529: the set command's persist-now verdict rides the command
 /// RETURN (in-process, read before the session lock drops) instead of a
 /// post-hoc shared-slot read -- pin the wire shape.

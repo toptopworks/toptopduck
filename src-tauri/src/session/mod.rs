@@ -373,13 +373,17 @@ pub struct ResumeProgress {
 
 /// The session's external-runtime model + thought-level pair as ONE named
 /// value: the pair crosses every boundary (the handle slot, the Session
-/// mirror, the resume restore) as a unit, so a transposed
-/// `(model, thought_level)` cannot compile silently -- two same-typed
-/// `Option<String>` parameters could. Same shape as
-/// `app_config::ModelPosture` but deliberately session-local: this module
-/// (and `session_store`) imports no app-config types, so the persisted
-/// recipe facts and the machine-preference config stay separate layers.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// mirror, the resume restore, the `set_session_posture` IPC argument) as
+/// a unit, so a transposed `(model, thought_level)` cannot compile
+/// silently -- two same-typed `Option<String>` parameters could. Same
+/// shape as `app_config::ModelPosture` but deliberately session-local:
+/// this module (and `session_store`) imports no app-config types, so the
+/// persisted recipe facts and the machine-preference config stay separate
+/// layers. The serde derives carry no app-config dependency -- the wire
+/// keys are this type's own field names, and unknown keys are rejected so
+/// a drifted mirror cannot silently read as `None` (issue #606).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PosturePair {
     /// The model id exactly as the picker set it.
     pub model: Option<String>,
