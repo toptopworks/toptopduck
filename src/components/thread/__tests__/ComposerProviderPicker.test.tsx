@@ -1446,6 +1446,40 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
+  it("routes a thought-level pick to onPendingModelPostureChange with the held model (no set IPCs)", async () => {
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    const onPendingModelPostureChange = vi.fn();
+    await renderColdStartPicker({ onPendingModelPostureChange });
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^low$/ }));
+    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
+      model: "fake-opus",
+      thought_level: "low",
+    });
+    expect(setSessionPosture).not.toHaveBeenCalled();
+  });
+
+  it("clears the level dimension and wipes the backfill entry via the #581 IPC (level clear)", async () => {
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    const onPendingModelPostureChange = vi.fn();
+    await renderColdStartPicker({ onPendingModelPostureChange });
+    const clearingRows = screen.getAllByRole("menuitem", {
+      name: "Default (recommended)",
+    });
+    fireEvent.click(clearingRows[1]);
+    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
+      model: "fake-opus",
+      thought_level: null,
+    });
+    expect(clearLastModelPosture).toHaveBeenCalledWith("qwen-code");
+    expect(setSessionPosture).not.toHaveBeenCalled();
+  });
+
   it("clears the dimension AND wipes the backfill entry via the #581 IPC (ADR-0100 D3)", async () => {
     vi.mocked(getLastModelPosture).mockResolvedValue({
       model: "fake-opus",

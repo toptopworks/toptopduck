@@ -381,7 +381,8 @@ export function ComposerProviderPicker({
   // flight). In-session only -- the cold-start channel is a synchronous
   // pending write.
   const [postureSwitching, setPostureSwitching] = useState(false);
-  // Inline failure line for the posture set IPC (issue #529). Holds the raw
+  // Inline failure line for posture writes (issue #529): the in-session set
+  // IPC reject and the cold-start backfill-clear reject. Holds the raw
   // reject and formats at render so a locale switch re-renders the wording.
   // Cleared on the next attempt.
   const [postureSetError, setPostureSetError] = useState<unknown>(null);
