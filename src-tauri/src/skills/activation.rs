@@ -24,8 +24,10 @@
 //! The tool's result is the skill's body -- the SAME turn-start
 //! [`SkillPromptFragment`] the system prompt assembled from, so the channel
 //! and the per-turn injection are one source (ADR-0110 Decision 2's L2).
-//! No directory structure rides the result (the third layer is deferred,
-//! Decision 6).
+//! No directory structure rides the result: discovery rides the body's own
+//! naming, and a failed path self-corrects through [`crate::skills::read`]'s
+//! listing (ADR-0111 Decision 4 -- the third layer landed there, and the
+//! no-structure-teaching discipline survives it).
 
 use std::path::Path;
 

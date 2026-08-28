@@ -236,6 +236,7 @@ pub(crate) fn dispatch_gated_call(
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
     skills: &mut SkillActivationCtx<'_>,
+    read: &crate::skills::read::SkillReadGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), DispatchAbort> {
@@ -248,7 +249,17 @@ pub(crate) fn dispatch_gated_call(
     // (ADR-0084).
     let site = format!("tool dispatch `{}`", call.name);
     match guarded_dispatch(deps, &site, |deps| {
-        dispatch_gated_call_inner(call, deps, materializer, mcp, cli, skills, gate, on_phase)
+        dispatch_gated_call_inner(
+            call,
+            deps,
+            materializer,
+            mcp,
+            cli,
+            skills,
+            read,
+            gate,
+            on_phase,
+        )
     }) {
         Err(detail) => Err(DispatchAbort::Panic(Termination::Transient(detail))),
         Ok(result) => result.map_err(|GateCancelled| DispatchAbort::Gate),
@@ -264,6 +275,7 @@ fn dispatch_gated_call_inner(
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
     skills: &mut SkillActivationCtx<'_>,
+    read: &crate::skills::read::SkillReadGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
@@ -316,6 +328,25 @@ fn dispatch_gated_call_inner(
                 }
             },
         );
+    }
+    // The skill-attachment read surface (ADR-0111, issue #714): intercepted
+    // beside the activation arm, equally ahead of any classification / gate
+    // -- reading is the injected body's risk class, so mounting +
+    // activation are the only trust gates (Decision 5). The classification
+    // is pure (no transitions, no persist); this site maps the two variants
+    // exactly as the activation arm does (a Local read gets the started /
+    // completed phase pair + a trace row, a Refused read is the bare error
+    // result with no trace entry).
+    if call.name == crate::skills::read::READ_SKILL_FILE {
+        return Ok(match crate::skills::read::resolve_skill_read(call, read) {
+            crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
+                let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+                (result, Some(entry), None)
+            }
+            crate::skills::read::SkillReadOutcome::Refused(message) => {
+                (meta_failure(call, &message), None, None)
+            }
+        });
     }
     // A registered CLI tool classifies under its own reserved server
     // (ADR-0108 Decision 7): the trust key is the registration name, the
@@ -1172,6 +1203,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -1219,6 +1251,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -1297,6 +1330,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut forward,
         )
@@ -1381,6 +1415,7 @@ mod tests {
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -1495,6 +1530,7 @@ mod tests {
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -1576,6 +1612,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut forward,
         )
@@ -1661,6 +1698,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -1788,6 +1826,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut |_| {},
         )
@@ -2033,6 +2072,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -2098,6 +2138,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut fx.ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -2168,6 +2209,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut fx.ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )
@@ -2228,6 +2270,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
         )

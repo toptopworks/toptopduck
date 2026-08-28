@@ -96,6 +96,12 @@ pub struct GatewayCtx<'a> {
     /// gets -- the bridge face lands activations through the SAME session
     /// transition by construction.
     pub skills: SkillActivationCtx<'a>,
+    /// The attachment read gate (ADR-0111, issue #714): serves the
+    /// `read_skill_file` meta-tool's interception below -- the same
+    /// immutable bundle (turn-start fragments + activated snapshot +
+    /// registry root) the built-in loop's dispatch server gets, so both
+    /// runtime surfaces read with one semantics by construction.
+    pub read: crate::skills::read::SkillReadGate<'a>,
     /// The materializer `tools::dispatch` delegates `materialize` to (the same
     /// trait the built-in loop drives, so numbering + caps inherit verbatim).
     pub materializer: &'a mut dyn Materializer,
@@ -378,6 +384,15 @@ fn handle_method(
                     &crate::skills::activation::activate_skill_definition(),
                 ));
             }
+            // The skill-attachment read surface (ADR-0111 Decision 1, issue
+            // #714): mounted iff the turn's ACTIVATED set is non-empty -- the
+            // bridge mirrors the built-in table's condition verbatim (one
+            // tool plane, two callers).
+            if !ctx.read.activated.is_empty() {
+                tools.push(tool_to_mcp(
+                    &crate::skills::read::read_skill_file_definition(),
+                ));
+            }
             Response::Result(json!({ "tools": tools }))
         }
         "tools/call" => handle_tools_call(msg, ctx, outcome),
@@ -474,6 +489,19 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             crate::skills::activation::SkillActivationOutcome::Refused(message) => {
                 resolution_failure(message)
             }
+        };
+    }
+    // The skill-attachment read surface (ADR-0111, issue #714): intercepted
+    // beside the activation arm, equally ahead of any classification / gate
+    // (reading is the injected body's risk class -- Decision 5). A served
+    // read gets a trace row through the shared local-meta mapper; a refused
+    // read is the bare isError envelope with no trace entry.
+    if call.name == crate::skills::read::READ_SKILL_FILE {
+        return match crate::skills::read::resolve_skill_read(call, &ctx.read) {
+            crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
+                local_meta_result(call, &summary, payload, outcome)
+            }
+            crate::skills::read::SkillReadOutcome::Refused(message) => resolution_failure(message),
         };
     }
     // The gate consumes the RESOLVED identity (ADR-0105 Decision 4), so an
@@ -823,6 +851,9 @@ mod tests {
         GatewayCtx {
             deps,
             skills: skills.ctx(),
+            // Inert by default; the read-surface tests overwrite this field
+            // with a seeded gate (the ctx is built `mut` for that purpose).
+            read: crate::skills::read::SkillReadGate::inert(),
             materializer,
             approval,
             sink,
@@ -1863,6 +1894,185 @@ mod tests {
             }
             Response::None => panic!("tools/list must return Result, got None"),
         }
+    }
+
+    /// A leaked read gate over a real temp registry: the shared fixture for
+    /// the read-surface tests (issue #714). `tmp` must outlive the ctx.
+    fn leaked_read_gate(tmp: &tempfile::TempDir) -> crate::skills::read::SkillReadGate<'static> {
+        let dir = tmp.path().join("sql-coach");
+        std::fs::create_dir_all(dir.join("references")).unwrap();
+        std::fs::write(dir.join("references/notes.md"), b"Use CTEs.\n").unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: sql-coach\n---\nBody.\n").unwrap();
+        crate::skills::read::SkillReadGate {
+            fragments: Box::leak(
+                vec![crate::session::skills::SkillActivationFixture::fragment(
+                    "sql-coach",
+                    "Coach the SQL.",
+                )]
+                .into_boxed_slice(),
+            ),
+            activated: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
+            root: Box::leak(tmp.path().to_path_buf().into_boxed_path()),
+        }
+    }
+
+    /// The read surface's mount condition (issue #714, ADR-0111 Decision 1):
+    /// an EMPTY activated set lists no `read_skill_file` even with skills
+    /// mounted; a non-empty ACTIVATED set mounts it -- the bridge mirrors
+    /// the built-in table's condition.
+    #[test]
+    fn tools_list_mounts_read_skill_file_only_with_a_nonempty_activated_set() {
+        // Mounted but NOT activated: the read surface stays off (reading
+        // rides the activation gate, not the mount gate).
+        let mut ctx = skill_ctx(vec![
+            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach."),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let gate = leaked_read_gate(&tmp);
+        ctx.read = crate::skills::read::SkillReadGate {
+            fragments: gate.fragments,
+            activated: &[],
+            root: gate.root,
+        };
+        match handle_method(
+            "tools/list",
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            &mut ctx,
+            &mut GatewayOutcome::default(),
+        ) {
+            Response::Result(v) => {
+                let names: Vec<&str> = v["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap())
+                    .collect();
+                assert!(
+                    !names.contains(&"read_skill_file"),
+                    "a mounted-but-inactive turn pays no read cost"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("tools/list must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("tools/list must return Result, got None"),
+        }
+
+        let mut ctx = fresh_ctx();
+        let tmp = tempfile::tempdir().unwrap();
+        ctx.read = leaked_read_gate(&tmp);
+        match handle_method(
+            "tools/list",
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            &mut ctx,
+            &mut GatewayOutcome::default(),
+        ) {
+            Response::Result(v) => {
+                let names: Vec<&str> = v["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap())
+                    .collect();
+                assert!(
+                    names.contains(&"read_skill_file"),
+                    "a non-empty activated set mounts the read surface"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("tools/list must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("tools/list must return Result, got None"),
+        }
+    }
+
+    /// The bridge face's `read_skill_file` Local arm (issue #714): the file
+    /// text rides the result verbatim, one trace row lands under the tool
+    /// name with "skill: path" as its summary, and the call is approval-free
+    /// (the intercept sits ahead of the gate, like the activation arm).
+    #[test]
+    fn handle_tools_call_read_skill_file_serves_text_and_traces() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
+            requests: std::sync::Mutex::new(Vec::new()),
+        }));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
+            crate::session::skills::SkillActivationFixture::new(Vec::new()),
+        ));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx);
+        let tmp = tempfile::tempdir().unwrap();
+        ctx.read = leaked_read_gate(&tmp);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "read_skill_file", "arguments": {
+                "name": "sql-coach", "path": "references/notes.md"
+            }}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "a served read is a success");
+                assert_eq!(
+                    v["content"][0]["text"], "Use CTEs.\n",
+                    "the file text rides the result verbatim"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("read_skill_file must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("read_skill_file must return Result, got None"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one read -> one trace row");
+        let row = &outcome.trace[0];
+        assert_eq!(row.name, "read_skill_file");
+        assert!(row.success);
+        assert_eq!(row.summary, "sql-coach: references/notes.md");
+        assert!(
+            sink.requests.lock().unwrap().is_empty(),
+            "reading is approval-free on the bridge face too -- the intercept sits ahead of the gate"
+        );
+    }
+
+    /// The bridge face's `read_skill_file` Refused arm (issue #714): a bad
+    /// path is the bare isError envelope carrying the listing, with NO trace
+    /// row -- the resolution-failure posture, mirrored from the skill arm.
+    #[test]
+    fn handle_tools_call_read_skill_file_refused_is_traceless() {
+        let mut ctx = fresh_ctx();
+        let tmp = tempfile::tempdir().unwrap();
+        ctx.read = leaked_read_gate(&tmp);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {"name": "read_skill_file", "arguments": {
+                "name": "sql-coach", "path": "references/missing.md"
+            }}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "a missing path is refused");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.contains("Readable files"), "{text}");
+                assert!(
+                    text.contains("references/notes.md"),
+                    "the refusal lists the real readable set: {text}"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("a refused read is still a Result, got error {code}: {m}")
+            }
+            Response::None => panic!("a refused read must return Result, got None"),
+        }
+        assert!(
+            outcome.trace.is_empty(),
+            "a refused read records no trace row"
+        );
     }
 
     /// Issue #321 on the gateway face: a builtin dispatch that registers

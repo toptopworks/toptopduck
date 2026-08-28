@@ -12,7 +12,10 @@
 //! (the SKILL.md body) + optional MCP server references (the frontmatter
 //! extension key `metadata.toptopduck_mcp_servers`) + optional CLI tool
 //! references (the frontmatter extension key `metadata.toptopduck_cli_tools`);
-//! `scripts/` execution is out of scope for v1 (ADR-0086 Decision 1).
+//! attachment files across the whole tree (no privileged subdirectory) read
+//! through the `read_skill_file` restricted surface, and script execution
+//! rides registered CLI tools as text relay (ADR-0086 Decision 1, calibrated
+//! by ADR-0111).
 //!
 //! Submodules:
 //! - [`model`]: the wire types (`SkillEntry` / `SkillUpdate` / `Acquired`),
@@ -28,6 +31,9 @@
 //! - [`prompt`]: per-turn skill resolution for prompt injection + provenance
 //!   (issue #364) -- resolves each mounted skill into its verbatim body + the
 //!   SHA-256 of the whole `SKILL.md`.
+//! - [`read`]: the `read_skill_file` restricted attachment-read surface
+//!   (issue #714, ADR-0111) -- the gate trilogy + the gateway meta-tool
+//!   resolver over an ACTIVATED skill's tree.
 
 pub mod activation;
 pub mod builtin;
@@ -35,6 +41,7 @@ pub mod frontmatter;
 pub mod import;
 pub mod model;
 pub mod prompt;
+pub mod read;
 pub mod registry;
 
 pub use builtin::{BuiltinSkillBaseline, BuiltinSkillMark};
