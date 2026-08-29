@@ -9,6 +9,7 @@ import {
   primaryReferenceName,
   findMentionedDataset,
   findStaleSourceIdx,
+  lifecycleRunMarks,
   runtimeSegmentBadges,
   type DatasetLabel,
 } from "./turn-visual";
@@ -73,8 +74,9 @@ interface ThreadProps {
 
 // The always-visible conversation thread (ADR-0028/0039/0040/0047). The rail
 // hosts two visually distinct species: turn cards (single-line verbatim
-// question + outcome glyph/color) and source lifecycle markers (thin, full-
-// width, non-interactive). A Materialized result that has since gone stale
+// question + outcome glyph/color) and lifecycle markers (circular nodes,
+// non-interactive; a run of >=2 connects its nodes, turns never enter the
+// line, issue #721). A Materialized result that has since gone stale
 // renders as a ghost (CircleOff + reduced opacity) whose causal chip jumps to
 // the invalidating source event (ADR-0041/0047). Source events are first-class
 // in the thread (always visible, occupy a slot) but are NOT turns -- they never
@@ -187,6 +189,12 @@ export function Thread({
   // segment's first turn.
   const segmentBadges = useMemo(() => runtimeSegmentBadges(entries), [entries]);
 
+  // Issue #721: each lifecycle entry's position within its maximal run
+  // (skill/source mixed contiguity; a turn always breaks). Rides data-run on
+  // the marker <li>; styles.css draws the 1px node connector for first/mid.
+  // Turns get null -- they never enter the line.
+  const runMarks = useMemo(() => lifecycleRunMarks(entries), [entries]);
+
   // Apply a chip jump (ADR-0047): highlight the matched source event and scroll
   // it into view. Only ever called when findStaleSourceIdx already located a
   // target (the chip is disabled otherwise), so targetIdx is a valid index.
@@ -273,7 +281,7 @@ export function Thread({
               </li>
             );
           }
-          // Skill lifecycle events (ADR-0086, issue #366): thin markers
+          // Skill lifecycle events (ADR-0086, issue #366): node markers
           // isomorphic to source events, a distinct species from a turn (no
           // question, no outcome glyph). Mount = active tone + Plug glyph;
           // Activate = primary tone + Zap glyph; Unmount = weakened tone +
@@ -287,6 +295,7 @@ export function Thread({
                 key={i}
                 className="skill-entry"
                 data-skill-kind={entry.data.kind.toLowerCase()}
+                data-run={runMarks[i]}
               >
                 <SkillMarker event={entry.data} skillIndex={skillIndex} />
               </li>
@@ -307,6 +316,7 @@ export function Thread({
               }}
               className="source-entry"
               data-source-kind={entry.data.kind.toLowerCase()}
+              data-run={runMarks[i]}
               data-highlighted={highlightedSourceIdx === i ? "true" : undefined}
             >
               <SourceMarker

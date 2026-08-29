@@ -476,12 +476,13 @@ describe("Thread", () => {
     });
   });
 
-  it("renders skill lifecycle markers as thin bars distinct from turn cards (issue #366)", () => {
+  it("renders skill lifecycle markers as circle nodes distinct from turn cards (issue #366)", () => {
     // The two skill lifecycle kinds (Mount / Unmount) ride the timeline
-    // isomorphic to source events but as a distinct species -- thin, non-
-    // interactive markers (data-skill-kind + .skill-lifecycle), never turn
-    // cards. Each carries its kind's glyph + an i18n'd verb + the spec name
-    // (the stable identity the timeline carries, never a snapshot).
+    // isomorphic to source events but as a distinct species -- non-interactive
+    // circle-node markers (data-skill-kind + .skill-lifecycle), never turn
+    // cards. Each carries its kind's glyph inside a circular node (issue #721
+    // nodification) + an i18n'd verb + the spec name (the stable identity the
+    // timeline carries, never a snapshot) right of the node.
     const entries: ThreadEntry[] = [
       { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
       { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
@@ -505,15 +506,37 @@ describe("Thread", () => {
     // Each kind's i18n'd verb rides one ICU message with the spec name.
     expect(screen.getByText(/挂载技能「pdf-tools」/)).toBeInTheDocument();
     expect(screen.getByText(/卸载技能「pdf-tools」/)).toBeInTheDocument();
-    // Mount = active tone (border-l-primary); Unmount = weakened tone.
-    const mountBar = container.querySelector(
+    // Issue #721 nodification: the marker row leads with the circle node
+    // (children[0] identity pin -- the verb text follows, "动词右置") and the
+    // retired bar chrome (border-l-2 prefix line + bg-muted fill) must not
+    // survive on the row.
+    const mountRow = container.querySelector(
       `.skill-entry[data-skill-kind="mount"] .skill-lifecycle`,
     ) as HTMLElement;
-    const unmountBar = container.querySelector(
-      `.skill-entry[data-skill-kind="unmount"] .skill-lifecycle`,
-    ) as HTMLElement;
-    expect(mountBar.className.split(/\s+/)).toContain("border-l-primary");
-    expect(unmountBar.className.split(/\s+/)).toContain("border-l-muted-foreground");
+    expect(mountRow.children[0].className.split(/\s+/)).toContain("skill-node");
+    expect(mountRow.className.split(/\s+/)).not.toContain("border-l-2");
+    expect(mountRow.className.split(/\s+/)).not.toContain("bg-muted");
+    // The row's py-0.5 is the OTHER half of the styles.css geometry
+    // contract (the connector's top: 10px / bottom: -2px derive from node
+    // h-4 w-4 AND row py-0.5); the retired bar's px-1.5 must not return --
+    // horizontal padding would shift the left origin the connector hangs
+    // from.
+    expect(mountRow.className.split(/\s+/)).toContain("py-0.5");
+    expect(mountRow.className.split(/\s+/)).not.toContain("px-1.5");
+    // The node is a punch-through circle: bg-background (hides the run
+    // connector behind it) + 1px tone border; h-4 w-4 is the geometry
+    // contract the styles.css data-run connector offsets are computed from.
+    const node = (kind: string) =>
+      container.querySelector(
+        `.skill-entry[data-skill-kind="${kind}"] .skill-node`,
+      ) as HTMLElement;
+    for (const cls of ["rounded-full", "border", "bg-background", "h-4", "w-4"]) {
+      expect(node("mount").className.split(/\s+/)).toContain(cls);
+    }
+    // Mount = active tone (border-primary); Unmount = weakened tone -- the
+    // tier mapping migrated from the retired border-l prefix line to the node.
+    expect(node("mount").className.split(/\s+/)).toContain("border-primary");
+    expect(node("unmount").className.split(/\s+/)).toContain("border-muted-foreground");
   });
 
   it("renders an Activate marker distinguishing the user from the agent actor (issues #698/#701)", () => {
@@ -537,11 +560,13 @@ describe("Thread", () => {
     );
     expect(screen.getByText(/激活技能「pdf-tools」/)).toBeInTheDocument();
     expect(screen.getByText(/Agent 激活技能「sql-coach」/)).toBeInTheDocument();
-    const bar = container.querySelector(
-      `.skill-entry[data-skill-kind="activate"] .skill-lifecycle`,
+    // Activate shares Mount's primary present-tense tier; the tone rides the
+    // node's 1px border (issue #721 nodification).
+    const node = container.querySelector(
+      `.skill-entry[data-skill-kind="activate"] .skill-node`,
     ) as HTMLElement;
-    expect(bar).not.toBeNull();
-    expect(bar.className.split(/\s+/)).toContain("border-l-primary");
+    expect(node).not.toBeNull();
+    expect(node.className.split(/\s+/)).toContain("border-primary");
   });
 
   it("discloses a mounted skill's declared MCP servers in the marker tooltip (issue #366)", async () => {
@@ -657,7 +682,13 @@ describe("Thread", () => {
     const marker = container.querySelector(
       `.skill-entry[data-skill-kind="mount"] .skill-lifecycle`,
     ) as HTMLElement;
-    expect(marker.className.split(/\s+/)).toContain("border-l-destructive");
+    const node = container.querySelector(
+      `.skill-entry[data-skill-kind="mount"] .skill-node`,
+    ) as HTMLElement;
+    // Missing overrides the kind tone: the destructive tier lands on the node
+    // border (issue #721 carrier migration) while the warning text tone stays
+    // on the row.
+    expect(node.className.split(/\s+/)).toContain("border-destructive");
     expect(marker.className.split(/\s+/)).toContain("text-destructive");
     expect(screen.getByText(/已不存在/)).toBeInTheDocument();
   });
@@ -677,6 +708,49 @@ describe("Thread", () => {
     expect(screen.queryByText(/已不存在/)).not.toBeInTheDocument();
     // No tooltip provider lookup needed -- the marker text is the bare verb.
     expect(container.querySelector(".skill-entry")).not.toBeNull();
+  });
+
+  it("marks lifecycle runs first/mid/last/single; a turn always breaks the run (issue #721)", () => {
+    // The run connector (issue #721): consecutive lifecycle events form
+    // maximal runs -- skill and source count as ONE contiguous species, and a
+    // turn ALWAYS breaks the run. The connector expression rides data-run on
+    // the marker <li>: first/mid connect down to the next node (styles.css
+    // ::before), last/single draw nothing. A turn never enters a run -- it
+    // carries no data-run and no node, so it neither rides nor indents the
+    // line.
+    const entries: ThreadEntry[] = [
+      { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
+      { entry: "Source", data: { kind: "Deleted", reference_name: "people", display_name: "员工表" } },
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Source", data: { kind: "Replaced", reference_name: "orders", display_name: "订单表" } },
+      turnEntry(materializedRecord("result_2", null)),
+      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
+      { entry: "Source", data: { kind: "Deleted", reference_name: "orders", display_name: "订单表" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    // The head run spans BOTH species (mixed contiguity): first/mid/last; the
+    // lone event between the turns is single; the tail mixed pair is
+    // first/last. A regression that connects across a turn, splits mixed
+    // species, or miscounts the singleton turns one of these red.
+    const markers = Array.from(
+      container.querySelectorAll(".skill-entry, .source-entry"),
+    ) as HTMLElement[];
+    expect(markers.map((li) => li.getAttribute("data-run"))).toEqual([
+      "first",
+      "mid",
+      "last",
+      "single",
+      "first",
+      "last",
+    ]);
+    // The turns between the runs carry no data-run and no node slot.
+    for (const turnLi of Array.from(container.querySelectorAll(".turn-entry"))) {
+      expect(turnLi.hasAttribute("data-run")).toBe(false);
+      expect(turnLi.querySelector(".skill-node, .source-node")).toBeNull();
+    }
   });
 
   it("shows the active chip only when the question explicitly names a dataset (issue #80, ADR-0047)", async () => {
@@ -872,10 +946,13 @@ describe("Thread", () => {
     expect(bubble?.className.split(/\s+/)).not.toContain("opacity-60");
   });
 
-  it("encodes the three source lifecycle kinds by border-l-* tone (ADR-0047, issue #169)", () => {
-    // The three-way border-left hue (Added=primary / Replaced=accent-foreground /
-    // Deleted=destructive) now rides the marker as a literal border-l-* utility,
-    // replacing the .source-lifecycle.added/replaced/deleted CSS rules.
+  it("encodes the three source lifecycle kinds by node border tone (ADR-0047, issue #169)", () => {
+    // The three-way hue (Added=primary / Replaced=accent-foreground /
+    // Deleted=destructive) rides the marker's circle node as a literal border-*
+    // utility (issue #721 nodification -- the mapping is unchanged, only the
+    // carrier moved from the retired border-l prefix line to the node). The
+    // source species keeps its own kind mapping; it does NOT unify with the
+    // skill tiers.
     const entries: ThreadEntry[] = [
       { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
       { entry: "Source", data: { kind: "Replaced", reference_name: "people", display_name: "员工表" } },
@@ -886,18 +963,38 @@ describe("Thread", () => {
     );
     const tone = (kind: string) =>
       container
-        .querySelector(`.source-entry[data-source-kind="${kind}"] .source-lifecycle`)
+        .querySelector(`.source-entry[data-source-kind="${kind}"] .source-node`)
         ?.className.split(/\s+/);
-    expect(tone("added")).toContain("border-l-primary");
-    expect(tone("replaced")).toContain("border-l-accent-foreground");
-    expect(tone("deleted")).toContain("border-l-destructive");
+    expect(tone("added")).toContain("border-primary");
+    expect(tone("replaced")).toContain("border-accent-foreground");
+    expect(tone("deleted")).toContain("border-destructive");
+    // The node is a punch-through circle leading the row; the retired bar
+    // chrome (border-l-2 + bg-muted) must not survive on the marker row.
+    expect(tone("added")).toContain("rounded-full");
+    expect(tone("added")).toContain("bg-background");
+    // Geometry-contract symmetry with the skill side: the connector offsets
+    // in styles.css are computed for BOTH species from node h-4 w-4 + row
+    // py-0.5, so a source-only resize or row-spacing change would silently
+    // misalign only the source connectors.
+    expect(tone("added")).toContain("h-4");
+    expect(tone("added")).toContain("w-4");
+    const row = container.querySelector(
+      `.source-entry[data-source-kind="added"] .source-lifecycle`,
+    ) as HTMLElement;
+    // The node leads the row (children[0] identity, verb text right).
+    expect(row.children[0].className.split(/\s+/)).toContain("source-node");
+    expect(row.className.split(/\s+/)).not.toContain("border-l-2");
+    expect(row.className.split(/\s+/)).not.toContain("bg-muted");
+    expect(row.className.split(/\s+/)).toContain("py-0.5");
+    expect(row.className.split(/\s+/)).not.toContain("px-1.5");
   });
 
-  it("jump-select lifts the matched source marker via bg-accent + ring (ADR-0047 chip-trace, issue #169)", () => {
-    // The jump-select highlight now rides the marker as bg-accent + ring-2
-    // ring-primary utilities, replacing the [data-highlighted] CSS rule. The
-    // wrapping <li> still carries data-highlighted (the caller-derived flag) for
-    // selector stability, but the visual lands on the inner .source-lifecycle.
+  it("jump-select lifts the matched source marker via node ring + row bg (ADR-0047 chip-trace, issue #169)", () => {
+    // The jump-select highlight lands as "node ring + row wash" (issue #721):
+    // ring-2 ring-primary rides the circle node, the row keeps the bg-accent
+    // wash; the ring never lands on the whole row. The wrapping <li> still
+    // carries data-highlighted (the caller-derived flag) for selector
+    // stability + the scrollIntoView hookup.
     const entries: ThreadEntry[] = [
       { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
       turnEntry(materializedRecord("result_1", null)),
@@ -915,10 +1012,12 @@ describe("Thread", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /源已更新/ }));
-    const highlighted = container.querySelector(`.source-entry[data-highlighted="true"] .source-lifecycle`);
-    expect(highlighted?.className.split(/\s+/)).toContain("bg-accent");
-    expect(highlighted?.className.split(/\s+/)).toContain("ring-2");
-    expect(highlighted?.className.split(/\s+/)).toContain("ring-primary");
+    const row = container.querySelector(`.source-entry[data-highlighted="true"] .source-lifecycle`);
+    expect(row?.className.split(/\s+/)).toContain("bg-accent");
+    expect(row?.className.split(/\s+/)).not.toContain("ring-2");
+    const node = container.querySelector(`.source-entry[data-highlighted="true"] .source-node`);
+    expect(node?.className.split(/\s+/)).toContain("ring-2");
+    expect(node?.className.split(/\s+/)).toContain("ring-primary");
   });
 
   it("encodes result-link active vs stale by tone + border utility (ADR-0050/0041, issue #169)", () => {

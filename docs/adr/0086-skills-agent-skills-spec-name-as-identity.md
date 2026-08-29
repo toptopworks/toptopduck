@@ -6,7 +6,7 @@
 
 2. **技能身份 = 规范 `name`**（kebab-case、≤64、等于目录名），不引入 uuid。每轮 `TurnProvenance.skills` 记 `Vec<{name, content_hash}>`，`content_hash` = SHA256(SKILL.md 整文件字节)。resume 诚实降级：name 在注册表缺失 →「已不存在」；hash 与当前不符 →「自该轮后已修改」；hash 空（v3→v4 迁移产物）→ 无基线、不触发。
 
-3. **recipe format_version v3 → v4。** 新增 `RecipeEntry::Skill(SkillLifecycleEvent { kind: Mount|Unmount, name })`（与 `RecipeEntry::Source` 同构的 timeline 标记条，仅两态——技能内容变化非事件）；`TurnProvenance.skills` 由 `Vec<String>` 改为 `Vec<SkillProvenance>`。`v3_to_v4` 迁移把字符串数组转为 `{name, content_hash: ""}`——生产环境所有 recipe 该字段恒空，迁移是 no-op。单向不可逆（ADR-0082 范式）。
+3. **recipe format_version v3 → v4。** 新增 `RecipeEntry::Skill(SkillLifecycleEvent { kind: Mount|Unmount, name })`（与 `RecipeEntry::Source` 同构的 timeline 标记，仅两态——技能内容变化非事件）；`TurnProvenance.skills` 由 `Vec<String>` 改为 `Vec<SkillProvenance>`。`v3_to_v4` 迁移把字符串数组转为 `{name, content_hash: ""}`——生产环境所有 recipe 该字段恒空，迁移是 no-op。单向不可逆（ADR-0082 范式）。
 
 ## Context
 
