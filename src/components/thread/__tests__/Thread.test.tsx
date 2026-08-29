@@ -516,6 +516,13 @@ describe("Thread", () => {
     expect(mountRow.children[0].className.split(/\s+/)).toContain("skill-node");
     expect(mountRow.className.split(/\s+/)).not.toContain("border-l-2");
     expect(mountRow.className.split(/\s+/)).not.toContain("bg-muted");
+    // The row's py-0.5 is the OTHER half of the styles.css geometry
+    // contract (the connector's top: 10px / bottom: -2px derive from node
+    // h-4 w-4 AND row py-0.5); the retired bar's px-1.5 must not return --
+    // horizontal padding would shift the left origin the connector hangs
+    // from.
+    expect(mountRow.className.split(/\s+/)).toContain("py-0.5");
+    expect(mountRow.className.split(/\s+/)).not.toContain("px-1.5");
     // The node is a punch-through circle: bg-background (hides the run
     // connector behind it) + 1px tone border; h-4 w-4 is the geometry
     // contract the styles.css data-run connector offsets are computed from.
@@ -965,11 +972,21 @@ describe("Thread", () => {
     // chrome (border-l-2 + bg-muted) must not survive on the marker row.
     expect(tone("added")).toContain("rounded-full");
     expect(tone("added")).toContain("bg-background");
+    // Geometry-contract symmetry with the skill side: the connector offsets
+    // in styles.css are computed for BOTH species from node h-4 w-4 + row
+    // py-0.5, so a source-only resize or row-spacing change would silently
+    // misalign only the source connectors.
+    expect(tone("added")).toContain("h-4");
+    expect(tone("added")).toContain("w-4");
     const row = container.querySelector(
       `.source-entry[data-source-kind="added"] .source-lifecycle`,
-    );
-    expect(row?.className.split(/\s+/)).not.toContain("border-l-2");
-    expect(row?.className.split(/\s+/)).not.toContain("bg-muted");
+    ) as HTMLElement;
+    // The node leads the row (children[0] identity, verb text right).
+    expect(row.children[0].className.split(/\s+/)).toContain("source-node");
+    expect(row.className.split(/\s+/)).not.toContain("border-l-2");
+    expect(row.className.split(/\s+/)).not.toContain("bg-muted");
+    expect(row.className.split(/\s+/)).toContain("py-0.5");
+    expect(row.className.split(/\s+/)).not.toContain("px-1.5");
   });
 
   it("jump-select lifts the matched source marker via node ring + row bg (ADR-0047 chip-trace, issue #169)", () => {

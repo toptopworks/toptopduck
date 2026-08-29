@@ -295,7 +295,7 @@ export function Thread({
                 key={i}
                 className="skill-entry"
                 data-skill-kind={entry.data.kind.toLowerCase()}
-                data-run={runMarks[i] ?? undefined}
+                data-run={runMarks[i]}
               >
                 <SkillMarker event={entry.data} skillIndex={skillIndex} />
               </li>
@@ -316,7 +316,7 @@ export function Thread({
               }}
               className="source-entry"
               data-source-kind={entry.data.kind.toLowerCase()}
-              data-run={runMarks[i] ?? undefined}
+              data-run={runMarks[i]}
               data-highlighted={highlightedSourceIdx === i ? "true" : undefined}
             >
               <SourceMarker
