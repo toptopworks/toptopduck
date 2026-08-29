@@ -380,6 +380,16 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     expect(onPick).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(textarea).toHaveValue("/zzz");
+    // Recovery: shrinking the query back to a match must land on a legal
+    // row -- the empty-face arrows above must also leave the STORED
+    // highlight untouched (an unguarded run would corrode it negative and
+    // this assert would name a dangling option id).
+    type("/ch");
+    await screen.findAllByRole("option");
+    expect(textarea).toHaveAttribute(
+      "aria-activedescendant",
+      "question-bar-skill-picker-option-0",
+    );
   });
 
   it("re-opens for a repeated selection after one closes", async () => {
