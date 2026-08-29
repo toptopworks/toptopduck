@@ -236,6 +236,41 @@ export function selectDriftedSkills(
     .map((s) => s.name);
 }
 
+// The four positions a lifecycle event can occupy within its run (issue
+// #721 run connector). Rendered as data-run on the marker <li>; styles.css
+// keys the 1px node-connector segment off the attribute: first/mid connect
+// DOWN to the next node, last/single draw nothing.
+export type LifecycleRunMark = "first" | "mid" | "last" | "single";
+
+// The maximal runs of consecutive lifecycle events (issue #721): skill and
+// source events count as ONE contiguous species (a mixed skill/source stretch
+// is one run); a turn ALWAYS breaks the run (turns never enter the line).
+// Returns one mark per entry, aligned by index -- null for turns. A run of
+// length >=2 connects its adjacent nodes; a lone event keeps its node bare.
+// The thread is append-only (ADR-0028/0040), so the marks recompute cheaply
+// on each render from the entries alone -- no event carries run state.
+export function lifecycleRunMarks(
+  entries: readonly ThreadEntry[],
+): Array<LifecycleRunMark | null> {
+  const marks: Array<LifecycleRunMark | null> = entries.map(() => null);
+  let start = -1;
+  // Close the open run [start, endExclusive): stamp each member's position.
+  const flush = (endExclusive: number) => {
+    if (start === -1) return;
+    const last = endExclusive - 1;
+    for (let i = start; i <= last; i++) {
+      marks[i] = start === last ? "single" : i === start ? "first" : i === last ? "last" : "mid";
+    }
+    start = -1;
+  };
+  entries.forEach((entry, i) => {
+    if (entry.entry === "Turn") flush(i);
+    else if (start === -1) start = i;
+  });
+  flush(entries.length);
+  return marks;
+}
+
 // ADR-0101: the segment key of a runtime attribution. Adjacent turns
 // sharing a key form one runtime segment; the thread renders the badge only
 // at a segment's first turn (the "segment-start quieting" rule -- a mixed
