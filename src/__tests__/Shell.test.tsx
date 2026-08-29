@@ -2626,6 +2626,30 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     expect(activateSkill).not.toHaveBeenCalled();
   });
 
+  it("session-scope intents never leak into another session and restore on switch-back (issue #718)", async () => {
+    vi.mocked(createSession)
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
+    render(<App />);
+    await openSession(); // sess-1
+    const bar = screen.getByLabelText("提问");
+    // An unsubmitted pick lands sess-1's view chip.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    // Open sess-2 (the helper navigates to the empty state, then submits):
+    // sess-1's unsubmitted intent is invisible in sess-2's input area --
+    // the derived read yields [] for a non-matching sid.
+    await openSession(); // sess-2
+    expect(screen.queryByText("charting")).not.toBeInTheDocument();
+    // Switching back to sess-1 restores its unsubmitted intent: the intents
+    // are scoped to their session, not destroyed by the switch.
+    const entries = document.querySelectorAll(".session-entry-main");
+    fireEvent.click(entries[0]);
+    await screen.findByText("charting");
+  });
+
   it("duplicate picks dedupe; Backspace withdraws the most recent pick only (LIFO)", async () => {
     vi.mocked(listSkills).mockResolvedValue({
       skills: [skillEntry("charting"), skillEntry("data-cleaning")],

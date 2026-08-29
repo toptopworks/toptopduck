@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { catalogFor } from "../../../i18n";
 import { listActivatedSkills, listSkills } from "../../../api";
 import { ComposerSkillChips } from "../ComposerSkillChips";
@@ -50,6 +50,36 @@ vi.mock("../../../api", async (importOriginal) => {
     listActivatedSkills: vi.fn(),
   };
 });
+
+/** Render the bar with the skill picker channel on -- the single
+ *  boilerplate point for the picker props (issue #718), including the
+ *  required chips bundle (its stub absorbs what the scenario doesn't
+ *  exercise). */
+function renderPicker(
+  onPick: (name: string) => void,
+  opts: {
+    sessionId?: string | null;
+    onSubmit?: (question: string) => void;
+    chips?: ReactNode;
+    onChipBackspace?: () => void;
+  } = {},
+) {
+  return renderQuestionBar(
+    <QuestionBar
+      onSubmit={opts.onSubmit ?? (() => {})}
+      onCancel={() => {}}
+      loading={false}
+      skillPicker={{
+        sessionId: opts.sessionId ?? null,
+        onPick,
+        chips: {
+          node: opts.chips,
+          onBackspace: opts.onChipBackspace ?? (() => {}),
+        },
+      }}
+    />,
+  );
+}
 
 describe("QuestionBar (issue #28 single in-flight + cancel)", () => {
   it("submits the trimmed question and disables submit on empty", () => {
@@ -172,14 +202,7 @@ describe("QuestionBar header slot", () => {
 
 describe("QuestionBar pre-activation chips (ADR-0112, issue #716)", () => {
   it("seats the chips inline in the input area, sharing the textarea's row", () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        chips={<ComposerSkillChips names={["charting"]} />}
-      />,
-    );
+    renderPicker(() => {}, { chips: <ComposerSkillChips names={["charting"]} /> });
     // The chip list is display:contents inside the input-area row: it shares
     // its flex-wrap container with the textarea (a header chip row would
     // fail this), so the chips wrap inline and the caret seats right after
@@ -193,15 +216,10 @@ describe("QuestionBar pre-activation chips (ADR-0112, issue #716)", () => {
 
   it("Backspace at the draft start withdraws the last chip like a text char", () => {
     const onChipBackspace = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        chips={<ComposerSkillChips names={["charting"]} />}
-        onChipBackspace={onChipBackspace}
-      />,
-    );
+    renderPicker(() => {}, {
+      chips: <ComposerSkillChips names={["charting"]} />,
+      onChipBackspace,
+    });
     // Empty draft: the caret sits at 0, so Backspace deletes the last chip.
     fireEvent.keyDown(screen.getByLabelText("提问"), { key: "Backspace" });
     expect(onChipBackspace).toHaveBeenCalledOnce();
@@ -209,14 +227,7 @@ describe("QuestionBar pre-activation chips (ADR-0112, issue #716)", () => {
 
   it("Backspace inside the draft deletes text, not chips", () => {
     const onChipBackspace = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        onChipBackspace={onChipBackspace}
-      />,
-    );
+    renderPicker(() => {}, { onChipBackspace });
     const textarea = screen.getByLabelText("提问");
     fireEvent.change(textarea, { target: { value: "hi", selectionStart: 2 } });
     fireEvent.keyDown(textarea, { key: "Backspace" });
@@ -225,14 +236,7 @@ describe("QuestionBar pre-activation chips (ADR-0112, issue #716)", () => {
 
   it("Backspace with a selection deletes the selection, not chips", () => {
     const onChipBackspace = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        onChipBackspace={onChipBackspace}
-      />,
-    );
+    renderPicker(() => {}, { onChipBackspace });
     const textarea = screen.getByLabelText("提问");
     fireEvent.change(textarea, {
       target: { value: "hi", selectionStart: 0, selectionEnd: 2 },
@@ -269,14 +273,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
 
   it("opens the grouped panel on a line-start / and filters as the query types", async () => {
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick);
     type("/");
     await screen.findAllByRole("option");
     // "/" is the global panel: the group header renders above the list.
@@ -288,14 +285,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   });
 
   it("opens the flat skills-direct panel on $ (no group header)", async () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {});
     type("$");
     await screen.findAllByRole("option");
     expect(screen.queryByText("技能")).not.toBeInTheDocument();
@@ -303,14 +293,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   });
 
   it("does not open on a mid-line trigger char", () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {});
     type("hi /");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
@@ -318,14 +301,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   it("Enter selects the highlighted row: consumes the span, reports the pick, never submits", async () => {
     const onSubmit = vi.fn();
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={onSubmit}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick, { onSubmit });
     const textarea = type("/");
     await screen.findAllByRole("option");
     // ↓ moves to the second row (clamped movement), Enter picks it.
@@ -340,14 +316,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
 
   it("↑ clamps at the top (never wraps)", async () => {
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick);
     const textarea = type("/");
     await screen.findAllByRole("option");
     key(textarea, "ArrowUp");
@@ -358,14 +327,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   it("Esc closes the panel, keeps the trigger + query as plain text; Enter then submits it", async () => {
     const onSubmit = vi.fn();
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={onSubmit}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick, { onSubmit });
     // The trigger opens the panel as its own keystroke; the query then types
     // into the open panel's filter.
     const textarea = type("/");
@@ -380,21 +342,40 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     expect(onSubmit).toHaveBeenCalledWith("/ch");
   });
 
+  it("a submit while the panel is open closes it and submits the span as plain text (issue #718)", async () => {
+    // The submit button click is the explicit turn boundary: the panel
+    // closes FIRST and the trigger char + query ride along as plain text --
+    // the same semantics Esc established, pinned here on the click path the
+    // Esc test only covers indirectly.
+    const onSubmit = vi.fn();
+    renderPicker(() => {}, { onSubmit });
+    const textarea = type("/");
+    await screen.findAllByRole("option");
+    type("/ch");
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    expect(onSubmit).toHaveBeenCalledWith("/ch");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(textarea).toHaveValue("/ch");
+  });
+
   it("Enter is a no-op on the no-match face (no pick, no submit)", async () => {
     const onSubmit = vi.fn();
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={onSubmit}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick, { onSubmit });
     const textarea = type("/");
     await screen.findAllByRole("option");
     type("/zzz");
     await screen.findByText("没有匹配的技能。");
+    // The null-highlight derivation (issue #718): an open panel over an
+    // empty filtered list names NO active option -- the sentinel itself
+    // guards aria-activedescendant -- and the arrow keys are consumed
+    // no-ops (nothing to move; the clamp's precondition is a non-empty
+    // list). This is the component-level pin of the retired "empty list
+    // pins 0" clamp contract.
+    expect(textarea).not.toHaveAttribute("aria-activedescendant");
+    key(textarea, "ArrowDown");
+    key(textarea, "ArrowUp");
+    expect(textarea).not.toHaveAttribute("aria-activedescendant");
     key(textarea, "Enter");
     expect(onPick).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
@@ -403,14 +384,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
 
   it("re-opens for a repeated selection after one closes", async () => {
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick);
     const textarea = type("/");
     await screen.findAllByRole("option");
     key(textarea, "Enter");
@@ -427,14 +401,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     // other (the submit-time materialization absorbs the redundancy).
     vi.mocked(listActivatedSkills).mockResolvedValue(["charting"]);
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: "sess-1", onPick }}
-      />,
-    );
+    renderPicker(onPick, { sessionId: "sess-1" });
     const textarea = type("/");
     const rows = await screen.findAllByRole("option");
     expect(rows[0]).toHaveTextContent("已激活");
@@ -446,14 +413,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     // Neither name contains "skill"; both descriptions do ("… skill"), so a
     // description-only query keeps both rows -- and the hit renders as its
     // own foreground span inside the muted description.
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {});
     type("/");
     type("/skill");
     const rows = await screen.findAllByRole("option");
@@ -463,14 +423,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   });
 
   it("blur closes the panel, keeping the span as plain text", async () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {});
     const textarea = type("/");
     await screen.findAllByRole("option");
     // Blur closes without touching the draft; a re-focus does not reopen --
@@ -491,14 +444,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
       ignored: [],
       root_error: null,
     });
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {});
     type("/");
     const rows = await screen.findAllByRole("option");
     expect(within(rows[0]).getByText("个人")).toBeInTheDocument();
@@ -513,14 +459,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     });
     const onPick = vi.fn();
     const onSubmit = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={onSubmit}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick, { onSubmit });
     const textarea = type("/");
     await screen.findByText("暂无技能");
     key(textarea, "Enter");
@@ -537,14 +476,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     // with NO change event -- the stored span stays [0, 2), and the removal
     // the old code bounded by the live caret would eat "hello" with it.
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick);
     const textarea = screen.getByLabelText<HTMLTextAreaElement>("提问");
     fireEvent.change(textarea, {
       target: { value: "/hello", selectionStart: 1 },
@@ -565,14 +497,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     // query "cha"); a click inside "hi" moves the caret to 1 with no change
     // event -- the old removal bounded by that caret would duplicate "hi\n".
     const onPick = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick }}
-      />,
-    );
+    renderPicker(onPick);
     const textarea = screen.getByLabelText<HTMLTextAreaElement>("提问");
     fireEvent.change(textarea, {
       target: { value: "hi\n/", selectionStart: 4 },
@@ -592,15 +517,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     // Caret 0 while the panel is open is outside the span -- the pick flow
     // owns the keys, and the chips only withdraw once the panel is closed.
     const onChipBackspace = vi.fn();
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        onChipBackspace={onChipBackspace}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {}, { onChipBackspace });
     const textarea = type("/");
     await screen.findByRole("listbox");
     textarea.setSelectionRange(0, 0);
@@ -612,14 +529,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   });
 
   it("carries the combobox semantics on the textarea while the panel is open", async () => {
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {});
     const textarea = screen.getByLabelText("提问");
     // Closed: a plain textbox, no role override.
     expect(textarea).not.toHaveAttribute("role");
@@ -656,14 +566,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
 
   it("renders the listing error row instead of the empty face when the fetch fails", async () => {
     vi.mocked(listSkills).mockRejectedValue(new Error("ipc down"));
-    renderQuestionBar(
-      <QuestionBar
-        onSubmit={() => {}}
-        onCancel={() => {}}
-        loading={false}
-        skillPicker={{ sessionId: null, onPick: () => {} }}
-      />,
-    );
+    renderPicker(() => {});
     type("/");
     // A failed fetch is a fault, not an empty registry: the error row
     // replaces the "No skills" face.

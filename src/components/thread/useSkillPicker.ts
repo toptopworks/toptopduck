@@ -10,6 +10,7 @@ import {
   filterSkills,
   readPickerQuery,
   removeTriggerSpan,
+  type SkillPickerMode,
   type SkillPickerTrigger,
 } from "./skillPickerLogic";
 
@@ -41,6 +42,26 @@ export interface UseSkillPickerOpts {
   enabled?: boolean;
 }
 
+/** The picker's render-time state, one variant per panel posture (issue
+ *  #718 collapsed the isOpen/mode redundant pair into this discriminant):
+ *  closed carries no panel fields at all; open carries every read the
+ *  panel surface needs. */
+export type SkillPickerState =
+  | { status: "closed" }
+  | {
+    status: "open";
+    mode: SkillPickerMode;
+    rows: SkillEntry[];
+    query: string;
+    /** null = no highlighted row (the filtered list is empty). The
+       *  sentinel exists ONLY in this snapshot -- the stored highlight
+       *  stays a plain number. */
+    highlightIndex: number | null;
+    totalSkills: number;
+    registryError: Error | null;
+    activatedNames: ReadonlySet<string>;
+  };
+
 export function useSkillPicker({
   sessionId,
   onPick,
@@ -67,6 +88,11 @@ export function useSkillPicker({
   // Display-only activation truth (Decision 5): session mode reads the
   // activated set; cold start keeps the query disabled -- no session exists,
   // so no badges. The set NEVER gates selection (Decision 3).
+  // Failure ruling (issue #718): a rejected read here degrades to "no
+  // badges", NOT an error surface -- deliberately asymmetric with the
+  // listing failure (which renders the error row): the badges are pure
+  // display, so a failed read misstates nothing actionable, while a failed
+  // listing hides the panel's whole substance.
   const { data: activated } = useQuery({
     queryKey: sessionKeys.activatedSkills(sessionId ?? ""),
     queryFn: () => listActivatedSkills(sessionId as string),
@@ -78,9 +104,27 @@ export function useSkillPicker({
     () => (trigger !== null ? filterSkills(registry, query) : []),
     [trigger, registry, query],
   );
-  // Render-time clamp: the query can shrink the row count below the stored
-  // highlight index between keystrokes.
-  const highlightIndex = Math.min(highlight, Math.max(0, rows.length - 1));
+  // The single holder of the null sentinel (issue #718): the stored
+  // highlight stays a plain number; only this derivation maps an empty
+  // filtered list to null (no row to name) and clamps against the live row
+  // count otherwise -- the query can shrink the list below the stored index
+  // between keystrokes. Every consumer reads the snapshot's value, never a
+  // re-derivation of its own.
+  const highlightIndex =
+    rows.length === 0 ? null : Math.min(highlight, rows.length - 1);
+  const state: SkillPickerState =
+    trigger === null
+      ? { status: "closed" }
+      : {
+          status: "open",
+          mode: trigger.mode,
+          rows,
+          query,
+          highlightIndex,
+          totalSkills: registry.length,
+          registryError: listingError ?? null,
+          activatedNames,
+        };
 
   /** Feed every textarea change: opens the panel on a freshly typed
    *  line-start trigger char and recomputes / closes the query region. */
@@ -136,8 +180,11 @@ export function useSkillPicker({
     // path applies -- an in-progress composition's Enter must not act).
     if (e.nativeEvent.isComposing) return false;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      // Clamped movement, never wrapping (Decision 5).
+      // Clamped movement, never wrapping (Decision 5). The empty face has
+      // no row to move: a consumed no-op there -- the null sentinel marks
+      // it, because the clamp's precondition is a non-empty list.
       e.preventDefault();
+      if (highlightIndex === null) return true;
       setHighlight(
         clampHighlight(
           highlightIndex,
@@ -152,7 +199,7 @@ export function useSkillPicker({
       // face, where it is a plain no-op (Shift+Enter still inserts the
       // newline; the newline in the query region closes the panel anyway).
       e.preventDefault();
-      const row = rows[highlightIndex];
+      const row = highlightIndex === null ? undefined : rows[highlightIndex];
       if (row) {
         select(
           row,
@@ -182,15 +229,12 @@ export function useSkillPicker({
     setHighlight(0);
   }
 
+  // The action methods sit OUTSIDE the state union (issue #718): they are
+  // posture-stable -- the closed-state submit path still calls close(), and
+  // handleKeyDown returns false on closed so the key flows through to the
+  // bar's own Enter-submit handling.
   return {
-    isOpen: trigger !== null,
-    mode: trigger?.mode ?? null,
-    rows,
-    query,
-    totalSkills: registry.length,
-    registryError: listingError ?? null,
-    activatedNames,
-    highlightIndex,
+    state,
     handleChange,
     handleKeyDown,
     select,

@@ -67,14 +67,16 @@ export function removeTriggerSpan(
 }
 
 /** Move the highlight by +1/-1 clamped to [0, count - 1] -- never wrapping
- *  (ADR-0112 Decision 5). A zero-row list pins 0 (the caller renders the
- *  no-match row and Enter is a no-op there). */
+ *  (ADR-0112 Decision 5). Precondition: a NON-empty list (count >= 1) -- the
+ *  empty face has no row to move, so the arrow keys are a no-op there and
+ *  this function is never called; the picker snapshot's null highlightIndex
+ *  is what marks the empty face (issue #718 retired the old "pin 0 for an
+ *  empty list" branch that only a comment held honest). */
 export function clampHighlight(
   index: number,
   delta: number,
   count: number,
 ): number {
-  if (count <= 0) return 0;
   return Math.min(count - 1, Math.max(0, index + delta));
 }
 
