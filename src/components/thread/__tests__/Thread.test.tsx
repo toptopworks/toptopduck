@@ -517,13 +517,13 @@ describe("Thread", () => {
     expect(mountRow.className.split(/\s+/)).not.toContain("border-l-2");
     expect(mountRow.className.split(/\s+/)).not.toContain("bg-muted");
     // The node is a punch-through circle: bg-background (hides the run
-    // connector behind it) + 1px tone border; h-6 w-6 is the geometry
+    // connector behind it) + 1px tone border; h-4 w-4 is the geometry
     // contract the styles.css data-run connector offsets are computed from.
     const node = (kind: string) =>
       container.querySelector(
         `.skill-entry[data-skill-kind="${kind}"] .skill-node`,
       ) as HTMLElement;
-    for (const cls of ["rounded-full", "border", "bg-background", "h-6", "w-6"]) {
+    for (const cls of ["rounded-full", "border", "bg-background", "h-4", "w-4"]) {
       expect(node("mount").className.split(/\s+/)).toContain(cls);
     }
     // Mount = active tone (border-primary); Unmount = weakened tone -- the

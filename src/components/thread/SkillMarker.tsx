@@ -173,17 +173,17 @@ export function SkillMarker({
       {/* The kind glyph rides inside a circular node (issue #721): the
           bg-background fill punches the run-connector line behind it, the 1px
           border carries the kind tone; relative + z-10 keeps the circle above
-          the li::before segment. The h-6 w-6 node + the row's py-0.5 are the
+          the li::before segment. The h-4 w-4 node + the row's py-0.5 are the
           geometry contract owned by the styles.css data-run rule (single
           source of truth for the offsets). */}
       <span
         className={cn(
-          "skill-node relative z-10 flex h-6 w-6 shrink-0 items-center justify-center",
+          "skill-node relative z-10 flex h-4 w-4 shrink-0 items-center justify-center",
           "rounded-full border bg-background",
           nodeTone,
         )}
       >
-        <MarkerIcon className="skill-icon w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+        <MarkerIcon className="skill-icon w-2.5 h-2.5 shrink-0" aria-hidden="true" />
       </span>
       <TruncatingTooltip text={tooltipText} className="skill-text min-w-0 truncate">
         {text}

@@ -121,18 +121,18 @@ export function SourceMarker({
       {/* The kind glyph rides inside a circular node (issue #721): the
           bg-background fill punches the run-connector line behind it, the 1px
           border carries the kind tone; relative + z-10 keeps the circle above
-          the li::before segment and the row's highlight wash. The h-6 w-6
+          the li::before segment and the row's highlight wash. The h-4 w-4
           node + the row's py-0.5 are the geometry contract owned by the
           styles.css data-run rule (single source of truth for the offsets). */}
       <span
         className={cn(
-          "source-node relative z-10 flex h-6 w-6 shrink-0 items-center justify-center",
+          "source-node relative z-10 flex h-4 w-4 shrink-0 items-center justify-center",
           "rounded-full border bg-background",
           nodeTone,
           highlighted && "ring-2 ring-primary",
         )}
       >
-        <Icon className="source-icon w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+        <Icon className="source-icon w-2.5 h-2.5 shrink-0" aria-hidden="true" />
       </span>
       <TruncatingTooltip
         text={staleSuffix ? <>{text}{staleSuffix}</> : text}
