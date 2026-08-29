@@ -606,13 +606,13 @@
   "settings.skills.filterBuiltin": "System",
   "settings.skills.acquiredBuiltin": "system",
   "settings.skills.editedBadge": "Edited",
-  "settings.skills.fieldNameLockedHint": "Built-in skill names are locked",
-  "settings.skills.confirmRestoreTitle": "Restore built-in definition for {name}?",
+  "settings.skills.fieldNameLockedHint": "System skill names are locked",
+  "settings.skills.confirmRestoreTitle": "Restore System definition for {name}?",
   "settings.skills.confirmRestoreBody": "This discards your edits to {name} and returns it to the definition shipped with the app. This cannot be undone.",
   "settings.skills.restoreAction": "Restore",
-  "settings.skills.restoreLabel": "Restore built-in definition for skill {name}",
+  "settings.skills.restoreLabel": "Restore System definition for skill {name}",
   "composer.contextPanel.builtinSkillBadge": "System",
-  "error.skill.reservedName": "The name \"{name}\" is reserved for a built-in skill",
-  "error.skill.nameLocked": "Built-in skill \"{name}\" cannot be renamed",
-  "error.skill.undeletable": "Built-in skill \"{name}\" cannot be deleted; disable its tool instead"
+  "error.skill.reservedName": "The name \"{name}\" is reserved for a system skill",
+  "error.skill.nameLocked": "System skill \"{name}\" cannot be renamed",
+  "error.skill.undeletable": "System skill \"{name}\" cannot be deleted; disable its tool instead"
 }
