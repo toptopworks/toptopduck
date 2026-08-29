@@ -118,4 +118,47 @@ describe("agentActivationOwner (association invariant)", () => {
     };
     expect(agentActivationOwner([userActivate, turn])).toEqual([null, null]);
   });
+
+  it("never absorbs a contract-violating non-Activate event stamped with the agent actor", () => {
+    // The wire contract says the actor is present IFF Activate; a Mount
+    // carrying actor "Agent" can only come from a hand-edited or imported
+    // recipe. The kind guard keeps it on the honest standalone path instead
+    // of absorbing it into a turn it did not happen inside.
+    const mountByAgent: ThreadEntry = {
+      entry: "Skill",
+      data: { kind: "Mount", name: "pdf-tools", actor: "Agent" },
+    };
+    expect(agentActivationOwner([mountByAgent, turn])).toEqual([null, null]);
+  });
+});
+
+// The absorbed-activation half of the run-position contract (issue #722):
+// an activation absorbed into its turn -- settled owner or live -- never
+// enters the standalone line, so it carries null and breaks the run around
+// it exactly like a turn does. The Thread DOM pins never read the mark on
+// an absorbed entry (the standalone row returns early), so this half is
+// only observable here, same as the null-for-turns half above.
+
+describe("lifecycleRunMarks (absorbed-activation contract)", () => {
+  it("stamps null on a settled-owned activation and breaks the run around it", () => {
+    const entries = [skill("Mount"), agentActivate("python"), skill("Unmount"), turn];
+    expect(agentActivationOwner(entries)).toEqual([null, 3, null, null]);
+    // The Mount/Unmount on either side are lone standalone nodes -- the line
+    // never crosses the turn that swallowed the activation.
+    expect(lifecycleRunMarks(entries, agentActivationOwner(entries))).toEqual([
+      "single",
+      null,
+      "single",
+      null,
+    ]);
+  });
+
+  it("flushes the run on a live-owned activation the same as a settled one", () => {
+    // "live" is an owner too while the turn runs -- the flush must treat it
+    // identically to a settled owner index (not just any number).
+    const entries = [skill("Mount"), agentActivate("python"), skill("Unmount")];
+    const owners = agentActivationOwner(entries, true);
+    expect(owners).toEqual([null, "live", null]);
+    expect(lifecycleRunMarks(entries, owners)).toEqual(["single", null, "single"]);
+  });
 });

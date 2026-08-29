@@ -361,7 +361,16 @@ export function agentActivationOwner(
       nextTurn = i;
       continue;
     }
-    if (entry.entry === "Skill" && entry.data.actor === "Agent") {
+    // The kind guard mirrors SkillMarker's tooltip disclosure: the wire
+    // contract says the actor is present IFF Activate, and a
+    // contract-violating event (a hand-edited recipe stamping the agent
+    // actor on a Mount) stays a standalone row instead of being absorbed
+    // into a turn it did not happen inside.
+    if (
+      entry.entry === "Skill" &&
+      entry.data.kind === "Activate" &&
+      entry.data.actor === "Agent"
+    ) {
       if (nextTurn !== -1) owners[i] = nextTurn;
       else if (hasLiveTurn) owners[i] = "live";
     }

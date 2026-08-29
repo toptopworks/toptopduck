@@ -707,6 +707,99 @@ describe("Thread", () => {
     expect(container.querySelector(".turn-entry .agent-activation")).toBeNull();
   });
 
+  it("keeps the agent activation ahead of the dataset chip in both hosts across the settle swap (issue #722)", () => {
+    // The reading order DESIGN.md's chat-exchange defines -- the
+    // agent-activation head opens the stream, the dataset chip (stream
+    // header) follows -- must hold in the live exchange AND the settled
+    // card, so the swap never moves the one past the other. Naming a
+    // dataset mounts the chip; without it the head is only pinned against
+    // an empty stream.
+    const labels = [{ reference_name: "people", display_name: "员工表" }];
+    const base: ThreadEntry[] = [
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+    ];
+    const liveTurn: LiveTurn = {
+      question: "在员工表上统计",
+      askedAt: 1724232000000,
+      step: null,
+      rounds: [],
+    };
+    const { container, rerender } = renderThread(
+      <Thread
+        entries={base}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        datasetLabels={labels}
+        liveTurn={liveTurn}
+      />,
+    );
+    // Live half: the chip is present (guards the guard -- the order pins
+    // are vacuous without it) and the activation opens ahead of it.
+    const liveStream = container.querySelector(
+      ".live-turn-exchange .assistant-stream",
+    ) as HTMLElement;
+    expect(liveStream.querySelector(".turn-active-chip")).not.toBeNull();
+    const liveChildren = Array.from(liveStream.children);
+    expect(liveChildren[0].className).toContain("agent-activation");
+    expect(liveChildren[1].className).toContain("stream-header");
+    // Settle: the appended Turn owns the activation and its question names
+    // the same dataset (the chip renders settled) -- the order must survive.
+    const settledRecord: TurnRecord = {
+      question: "在员工表上统计",
+      outcome: { kind: "Cancelled" },
+      trace: [],
+      provenance: { skills: [] },
+    };
+    rerender(
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+        <TooltipProvider>
+          <Thread
+            entries={[...base, turnEntry(settledRecord)]}
+            selectedResult={null}
+            onSelectResult={() => {}}
+            datasetLabels={labels}
+          />
+        </TooltipProvider>
+      </IntlProvider>,
+    );
+    expect(container.querySelector(".live-turn-exchange")).toBeNull();
+    const turns = container.querySelectorAll(".turn-entry");
+    expect(turns).toHaveLength(2);
+    const settledStream = turns[1].querySelector(".assistant-stream") as HTMLElement;
+    expect(settledStream.querySelector(".turn-active-chip")).not.toBeNull();
+    const settledChildren = Array.from(settledStream.children);
+    expect(settledChildren[0].className).toContain("agent-activation");
+    expect(settledChildren[1].className).toContain("stream-header");
+  });
+
+  it("groups each turn's activations under it, not only the last owner (issue #722)", () => {
+    // The steady state of a long session: every turn's agent activates
+    // what it needs, so two turns each own their own activations. The
+    // grouping must give each owner its own head -- a merge into one owner
+    // would strand the first turn's activation hostless.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Skill", data: { kind: "Activate", name: "web-search", actor: "Agent" } },
+      { entry: "Skill", data: { kind: "Activate", name: "sql-coach", actor: "Agent" } },
+      turnEntry(materializedRecord("result_2", null)),
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const activationTexts = (scope: Element) =>
+      Array.from(scope.querySelectorAll(".agent-activation .skill-text")).map(
+        (el) => el.textContent,
+      );
+    const turns = container.querySelectorAll(".turn-entry");
+    expect(turns).toHaveLength(2);
+    expect(activationTexts(turns[0])).toEqual(["激活技能「python」"]);
+    expect(activationTexts(turns[1])).toEqual(["激活技能「web-search」", "激活技能「sql-coach」"]);
+    // No activation falls back to a standalone row while its owner renders.
+    expect(container.querySelectorAll("ol > .skill-entry")).toHaveLength(0);
+  });
+
   it("discloses a mounted skill's declared MCP servers in the marker tooltip (issue #366)", async () => {
     // A Mount marker's tooltip carries the skill's declared MCP server ids
     // (looked up from the registry, never snapshotted into the event) so a
@@ -759,6 +852,30 @@ describe("Thread", () => {
     await waitFor(() => {
       const tip = screen.getByRole("tooltip");
       expect(tip.textContent).toContain("由 Agent 发起");
+    });
+  });
+
+  it("keeps the byAgent disclosure off a user activation's tooltip (issue #722)", async () => {
+    // The negative half of the disclosure: the tooltip names the initiator
+    // only when the agent initiated. A dropped actor guard would stamp the
+    // byAgent suffix on every activation, permanently misattributing the
+    // user's own (the file's convention pins the negative branch too).
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Activate", name: "pdf-tools", actor: "User" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const markerText = container.querySelector(
+      `.skill-entry[data-skill-kind="activate"] .skill-text`,
+    ) as HTMLElement;
+    expect(markerText.textContent).toBe("激活技能「pdf-tools」");
+    fireEvent.pointerMove(markerText);
+    // The tooltip carries the verb alone -- no initiator disclosure, no
+    // other suffix (the registry is not wired and the skill declares
+    // nothing), so the exact text pins the absence.
+    await waitFor(() => {
+      expect(screen.getByRole("tooltip").textContent).toBe("激活技能「pdf-tools」");
     });
   });
 
