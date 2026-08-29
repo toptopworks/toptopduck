@@ -9,6 +9,7 @@ import {
   primaryReferenceName,
   findMentionedDataset,
   findStaleSourceIdx,
+  agentActivationOwner,
   lifecycleRunMarks,
   runtimeSegmentBadges,
   type DatasetLabel,
@@ -189,11 +190,38 @@ export function Thread({
   // segment's first turn.
   const segmentBadges = useMemo(() => runtimeSegmentBadges(entries), [entries]);
 
+  // D5 / issue #722 placement: an agent activation renders at the head of its
+  // owning turn's assistant stream (the entry's next Turn), not as a
+  // standalone row; while its turn runs it renders at the live exchange's
+  // head instead ("live"), and a turn-less, live-less tail degrades to a
+  // standalone row. activationsByTurn groups the settled owners' indices.
+  const owners = useMemo(
+    () => agentActivationOwner(entries, liveTurn !== null),
+    [entries, liveTurn],
+  );
+  const { activationsByTurn, liveActivationIdxs } = useMemo(() => {
+    // One pass splits the owned indices by host: a settled owner's Turn
+    // groups them for its card's head; "live" (their turn has no entry yet)
+    // keeps array order for the live exchange's head -- the settle swap
+    // re-hosts that same order inside the appended Turn.
+    const m = new Map<number, number[]>();
+    const live: number[] = [];
+    owners.forEach((owner, i) => {
+      if (owner === "live") live.push(i);
+      else if (typeof owner === "number") {
+        const list = m.get(owner);
+        if (list) list.push(i);
+        else m.set(owner, [i]);
+      }
+    });
+    return { activationsByTurn: m, liveActivationIdxs: live };
+  }, [owners]);
+
   // Issue #721: each lifecycle entry's position within its maximal run
   // (skill/source mixed contiguity; a turn always breaks). Rides data-run on
   // the marker <li>; styles.css draws the 1px node connector for first/mid.
   // Turns get null -- they never enter the line.
-  const runMarks = useMemo(() => lifecycleRunMarks(entries), [entries]);
+  const runMarks = useMemo(() => lifecycleRunMarks(entries, owners), [entries, owners]);
 
   // Apply a chip jump (ADR-0047): highlight the matched source event and scroll
   // it into view. Only ever called when findStaleSourceIdx already located a
@@ -205,6 +233,18 @@ export function Thread({
     // attribute set on the line above instead).
     sourceRefs.current[targetIdx]?.scrollIntoView?.({ behavior: "smooth", block: "center" });
   }, []);
+
+  // One owned activation rendered as an agent-activation row (D5 / issue
+  // #722) -- shared by the settled turn's head and the live exchange's head
+  // so the two hosts cannot drift apart.
+  const renderAgentActivation = (idx: number) => {
+    const owned = entries[idx];
+    return owned.entry === "Skill" ? (
+      <div key={idx} className="agent-activation">
+        <SkillMarker event={owned.data} skillIndex={skillIndex} />
+      </div>
+    ) : null;
+  };
 
   // A session asking its FIRST question has no entries yet but a live turn --
   // the live card must still render, so the empty bail-out needs both empty.
@@ -237,6 +277,9 @@ export function Thread({
             // renders disabled rather than promising a jump it cannot perform.
             const jumpTargetIdx =
               staleAnchor === undefined ? null : findStaleSourceIdx(entries, i, staleAnchor);
+            // D5 / issue #722: the agent activations this turn owns render at
+            // the head of its assistant stream (they happened inside it).
+            const headIdx = activationsByTurn.get(i);
             return (
               <li
                 // The thread is append-only and never reordered (ADR-0028/0039/
@@ -277,6 +320,7 @@ export function Thread({
                       : undefined
                   }
                   skillIndex={skillIndex}
+                  agentHead={headIdx?.map(renderAgentActivation)}
                 />
               </li>
             );
@@ -290,6 +334,9 @@ export function Thread({
           // warning. The registry lookup is optional -- without skillIndex
           // the marker renders the verb + name from the event alone.
           if (entry.entry === "Skill") {
+            // An agent activation renders inside its owning turn's assistant
+            // stream (D5 / issue #722), not as a standalone timeline row.
+            if (owners[i] != null) return null;
             return (
               <li
                 key={i}
@@ -343,6 +390,9 @@ export function Thread({
           mentionedDataset={findMentionedDataset(liveTurn.question, datasetLabels)}
           onRespondApproval={onRespondApproval}
           onThinkingExpandedChange={handleLiveThinkingExpanded}
+          agentHead={
+            liveActivationIdxs.length > 0 ? liveActivationIdxs.map(renderAgentActivation) : undefined
+          }
         />
       )}
     </section>

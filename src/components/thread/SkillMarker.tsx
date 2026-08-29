@@ -6,8 +6,8 @@
 // full-width bar (border-l-2 prefix line + bg-muted fill). Mount = active
 // (Plug + border-primary); Activate = the persistent promotion (Zap +
 // border-primary -- same present-tense tier as Mount, #698's minimal form;
-// the actor distinction landed with #701: the copy picks the user / agent key
-// off the event's actor); Unmount = weakened (Unplug +
+// the initiator actor rides the placement, not the copy, issue #722);
+// Unmount = weakened (Unplug +
 // border-muted-foreground). The tier mapping migrated from the border-l
 // prefix line to the node unchanged (issue #721). A name
 // the registry no longer carries (resume drift: deleted / renamed / external
@@ -25,7 +25,6 @@ import { cn } from "@/lib/utils";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import type {
   SkillEntry,
-  SkillLifecycleActor,
   SkillLifecycleEvent,
   SkillLifecycleKind,
 } from "../../types/skills";
@@ -42,7 +41,6 @@ function skillMarkerText(
   intl: IntlShape,
   kind: SkillLifecycleKind,
   name: string,
-  actor: SkillLifecycleActor | null,
 ): { Icon: LucideIcon; text: string } {
   switch (kind) {
     case "Mount":
@@ -62,26 +60,16 @@ function skillMarkerText(
         ),
       };
     case "Activate":
-      // The initiation actor picks the copy (issue #701, ADR-0110 Decision
-      // 4): the pre-existing key stays the user's; the agent's meta-tool
-      // activation gets its own. The actor is present IFF the kind is
-      // Activate (the wire contract), so the ternary covers User and there
-      // is no defensive null branch.
+      // One verb for both actors (issue #722): the placement carries the
+      // initiator -- an agent activation renders inside its owning turn --
+      // and the tooltip discloses it where the placement cannot (the
+      // degraded standalone row).
       return {
         Icon: Zap,
-        text:
-          actor === "Agent"
-            ? intl.formatMessage(
-                {
-                  id: "thread.skill.activateAgent",
-                  defaultMessage: "Agent activated skill \"{name}\"",
-                },
-                { name },
-              )
-            : intl.formatMessage(
-                { id: "thread.skill.activate", defaultMessage: "Activated skill \"{name}\"" },
-                { name },
-              ),
+        text: intl.formatMessage(
+          { id: "thread.skill.activate", defaultMessage: "Activated skill \"{name}\"" },
+          { name },
+        ),
       };
     default: {
       const unhandled: never = kind;
@@ -101,7 +89,7 @@ export function SkillMarker({
   // The verb + name come from the event alone -- always present, even when
   // the registry has no entry (the timeline's record is the source of truth,
   // not the current registry state).
-  const { Icon, text } = skillMarkerText(intl, event.kind, event.name, event.actor);
+  const { Icon, text } = skillMarkerText(intl, event.kind, event.name);
   const skill = skillIndex?.get(event.name);
   // Three-way lookup distinguishes "registry not wired" (honest degrade, no
   // drift signal) from "registry wired but name absent" (drift warning). The
@@ -132,6 +120,16 @@ export function SkillMarker({
       defaultMessage=" · no longer exists"
     />
   ) : null;
+  // The agent-initiator disclosure (issue #722): the visible copy is one
+  // verb for both actors (an agent activation renders inside its owning
+  // turn -- the placement carries the actor), so the tooltip names the
+  // initiator where the placement cannot speak (e.g. the degraded
+  // standalone row). The actor is present IFF the kind is Activate (the
+  // wire contract), so the guard needs no defensive null branch.
+  const actorNote =
+    event.kind === "Activate" && event.actor === "Agent" ? (
+      <FormattedMessage id="thread.skill.byAgent" defaultMessage=" · by Agent" />
+    ) : null;
   const mcpDetail = mcpServers.length > 0 ? (
     <FormattedMessage
       id="thread.skill.declaresMcp"
@@ -149,6 +147,7 @@ export function SkillMarker({
   const tooltipText = (
     <>
       {text}
+      {actorNote}
       {missingSuffix}
       {mcpDetail !== null && (
         <>

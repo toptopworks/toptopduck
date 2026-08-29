@@ -69,6 +69,12 @@ describe("Thread", () => {
     return { entry: "Turn", data: record };
   }
 
+  // The bare live turn the issue #722 live-path pins mount -- no rounds, no
+  // step: the exchange's head is the surface under test, not its body.
+  function bareLiveTurn(): LiveTurn {
+    return { question: "q", askedAt: 1724232000000, step: null, rounds: [] };
+  }
+
   // Build a registry SkillEntry with only the fields the skill-marker render
   // path reads (name + mcp_servers). The other declaration fields are filled
   // with benign defaults -- the marker never inspects them, and keeping the
@@ -539,12 +545,13 @@ describe("Thread", () => {
     expect(node("unmount").className.split(/\s+/)).toContain("border-muted-foreground");
   });
 
-  it("renders an Activate marker distinguishing the user from the agent actor (issues #698/#701)", () => {
+  it("renders one Activate verb for both actors, the placement carrying the initiator (issues #698/#701/#722)", () => {
     // ADR-0110: an Activate event renders as the third lifecycle species --
     // verb + spec name + the primary present-tense tier (same as Mount).
-    // The copy picks the actor's key (issue #701): the user activation
-    // keeps #698's message verbatim; the agent (the activate_skill
-    // meta-tool channel) gets its own.
+    // The actor no longer picks the copy (#722): an agent activation renders
+    // inside its owning turn, so both actors share #698's message verbatim;
+    // the retired agent-specific copy is gone from the visible timeline (the
+    // tooltip discloses the initiator instead).
     const entries: ThreadEntry[] = [
       { entry: "Skill", data: { kind: "Activate", name: "pdf-tools", actor: "User" } },
       { entry: "Skill", data: { kind: "Activate", name: "sql-coach", actor: "Agent" } },
@@ -559,7 +566,8 @@ describe("Thread", () => {
       />,
     );
     expect(screen.getByText(/激活技能「pdf-tools」/)).toBeInTheDocument();
-    expect(screen.getByText(/Agent 激活技能「sql-coach」/)).toBeInTheDocument();
+    expect(screen.getByText(/激活技能「sql-coach」/)).toBeInTheDocument();
+    expect(screen.queryByText(/Agent 激活技能/)).toBeNull();
     // Activate shares Mount's primary present-tense tier; the tone rides the
     // node's 1px border (issue #721 nodification).
     const node = container.querySelector(
@@ -567,6 +575,229 @@ describe("Thread", () => {
     ) as HTMLElement;
     expect(node).not.toBeNull();
     expect(node.className.split(/\s+/)).toContain("border-primary");
+  });
+
+  it("renders an agent activation at the head of its owning turn's stream (D5, issue #722)", () => {
+    // The backend inserts an agent activation at occurrence -- inside the
+    // turn that settles after it -- so the marker renders at the head of the
+    // owning turn's assistant stream (question bubble -> activation -> card),
+    // not as a standalone timeline row and never above the turn.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+      turnEntry(materializedRecord("result_1", null)),
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    // No standalone row: the activation lives inside the turn li, opening the
+    // assistant stream ahead of the outcome body.
+    expect(container.querySelector("ol > .skill-entry")).toBeNull();
+    const stream = container.querySelector(".turn-entry .assistant-stream") as HTMLElement;
+    const head = stream.firstElementChild as HTMLElement;
+    expect(head.className.split(/\s+/)).toContain("agent-activation");
+    expect(head.querySelector(".skill-node")).not.toBeNull();
+  });
+
+  it("absorbed activations break standalone runs like turns do (issue #722)", () => {
+    // The absorbed activation renders inside the turn, so the user events on
+    // either side are lone standalone nodes -- the line never crosses the
+    // turn that swallowed the middle event.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
+      turnEntry(materializedRecord("result_1", null)),
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const marks = Array.from(container.querySelectorAll(".skill-entry")).map((li) =>
+      li.getAttribute("data-run"),
+    );
+    expect(marks).toEqual(["single", "single"]);
+    expect(container.querySelector(".turn-entry .agent-activation .skill-node")).not.toBeNull();
+  });
+
+  it("renders an in-flight activation at the live exchange's head (issue #722)", () => {
+    // While a turn runs, its activation has no Turn entry yet (the Turn
+    // lands at settle) -- the marker opens the live exchange's assistant
+    // stream, the same slot the settled turn's agentHead occupies, not a
+    // standalone timeline row.
+    const entries: ThreadEntry[] = [
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+    ];
+    const liveTurn = bareLiveTurn();
+    const { container } = renderThread(
+      <Thread
+        entries={entries}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        liveTurn={liveTurn}
+      />,
+    );
+    // No standalone row: the activation lives inside the live exchange.
+    expect(container.querySelector("ol > .skill-entry")).toBeNull();
+    const stream = container.querySelector(".live-turn-exchange .assistant-stream") as HTMLElement;
+    const head = stream.firstElementChild as HTMLElement;
+    expect(head.className.split(/\s+/)).toContain("agent-activation");
+    expect(head.querySelector(".skill-node")).not.toBeNull();
+  });
+
+  it("swaps live-owned activations into the settled turn's head in order (issue #722)", () => {
+    // Two activations stream into the running turn's head (array order); at
+    // settle the Turn entry lands and owns them in the same order -- the
+    // swap moves the markers as a block without reordering.
+    const base: ThreadEntry[] = [
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+      { entry: "Skill", data: { kind: "Activate", name: "web-search", actor: "Agent" } },
+    ];
+    const liveTurn = bareLiveTurn();
+    const { container, rerender } = renderThread(
+      <Thread
+        entries={base}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        liveTurn={liveTurn}
+      />,
+    );
+    const activationTexts = () =>
+      Array.from(container.querySelectorAll(".agent-activation .skill-text")).map(
+        (el) => el.textContent,
+      );
+    expect(activationTexts()).toEqual(["激活技能「python」", "激活技能「web-search」"]);
+    // Settle: the live exchange folds away, the Turn entry appends owning
+    // both activations in the same order (the same single rerender the
+    // settle swap performs).
+    rerender(
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+        <TooltipProvider>
+          <Thread
+            entries={[...base, turnEntry(materializedRecord("result_2", null))]}
+            selectedResult={null}
+            onSelectResult={() => {}}
+            liveTurn={null}
+          />
+        </TooltipProvider>
+      </IntlProvider>,
+    );
+    expect(container.querySelector(".live-turn-exchange")).toBeNull();
+    expect(activationTexts()).toEqual(["激活技能「python」", "激活技能「web-search」"]);
+    // The host is the newly settled turn's card (the owning turn).
+    const turns = container.querySelectorAll(".turn-entry");
+    expect(turns).toHaveLength(2);
+    expect(turns[1].querySelectorAll(".agent-activation")).toHaveLength(2);
+  });
+
+  it("degrades an ownerless activation to a standalone row when nothing hosts it (issue #722)", () => {
+    // The resume inconsistency edge: no Turn entry follows and no live turn
+    // runs -- the event stays honest as a top-level marker rather than
+    // vanishing into a turn it cannot be attributed to.
+    const entries: ThreadEntry[] = [
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const li = container.querySelector(".skill-entry") as HTMLElement;
+    expect(li).not.toBeNull();
+    expect(li.getAttribute("data-run")).toBe("single");
+    expect(container.querySelector(".turn-entry .agent-activation")).toBeNull();
+  });
+
+  it("keeps the agent activation ahead of the dataset chip in both hosts across the settle swap (issue #722)", () => {
+    // The reading order DESIGN.md's chat-exchange defines -- the
+    // agent-activation head opens the stream, the dataset chip (stream
+    // header) follows -- must hold in the live exchange AND the settled
+    // card, so the swap never moves the one past the other. Naming a
+    // dataset mounts the chip; without it the head is only pinned against
+    // an empty stream.
+    const labels = [{ reference_name: "people", display_name: "员工表" }];
+    const base: ThreadEntry[] = [
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+    ];
+    const liveTurn: LiveTurn = {
+      question: "在员工表上统计",
+      askedAt: 1724232000000,
+      step: null,
+      rounds: [],
+    };
+    const { container, rerender } = renderThread(
+      <Thread
+        entries={base}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        datasetLabels={labels}
+        liveTurn={liveTurn}
+      />,
+    );
+    // Live half: the chip is present (guards the guard -- the order pins
+    // are vacuous without it) and the activation opens ahead of it.
+    const liveStream = container.querySelector(
+      ".live-turn-exchange .assistant-stream",
+    ) as HTMLElement;
+    expect(liveStream.querySelector(".turn-active-chip")).not.toBeNull();
+    const liveChildren = Array.from(liveStream.children);
+    expect(liveChildren[0].className).toContain("agent-activation");
+    expect(liveChildren[1].className).toContain("stream-header");
+    // Settle: the appended Turn owns the activation and its question names
+    // the same dataset (the chip renders settled) -- the order must survive.
+    const settledRecord: TurnRecord = {
+      question: "在员工表上统计",
+      outcome: { kind: "Cancelled" },
+      trace: [],
+      provenance: { skills: [] },
+    };
+    rerender(
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+        <TooltipProvider>
+          <Thread
+            entries={[...base, turnEntry(settledRecord)]}
+            selectedResult={null}
+            onSelectResult={() => {}}
+            datasetLabels={labels}
+          />
+        </TooltipProvider>
+      </IntlProvider>,
+    );
+    expect(container.querySelector(".live-turn-exchange")).toBeNull();
+    const turns = container.querySelectorAll(".turn-entry");
+    expect(turns).toHaveLength(2);
+    const settledStream = turns[1].querySelector(".assistant-stream") as HTMLElement;
+    expect(settledStream.querySelector(".turn-active-chip")).not.toBeNull();
+    const settledChildren = Array.from(settledStream.children);
+    expect(settledChildren[0].className).toContain("agent-activation");
+    expect(settledChildren[1].className).toContain("stream-header");
+  });
+
+  it("groups each turn's activations under it, not only the last owner (issue #722)", () => {
+    // The steady state of a long session: every turn's agent activates
+    // what it needs, so two turns each own their own activations. The
+    // grouping must give each owner its own head -- a merge into one owner
+    // would strand the first turn's activation hostless.
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+      turnEntry(materializedRecord("result_1", null)),
+      { entry: "Skill", data: { kind: "Activate", name: "web-search", actor: "Agent" } },
+      { entry: "Skill", data: { kind: "Activate", name: "sql-coach", actor: "Agent" } },
+      turnEntry(materializedRecord("result_2", null)),
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const activationTexts = (scope: Element) =>
+      Array.from(scope.querySelectorAll(".agent-activation .skill-text")).map(
+        (el) => el.textContent,
+      );
+    const turns = container.querySelectorAll(".turn-entry");
+    expect(turns).toHaveLength(2);
+    expect(activationTexts(turns[0])).toEqual(["激活技能「python」"]);
+    expect(activationTexts(turns[1])).toEqual(["激活技能「web-search」", "激活技能「sql-coach」"]);
+    // No activation falls back to a standalone row while its owner renders.
+    expect(container.querySelectorAll("ol > .skill-entry")).toHaveLength(0);
   });
 
   it("discloses a mounted skill's declared MCP servers in the marker tooltip (issue #366)", async () => {
@@ -599,6 +830,52 @@ describe("Thread", () => {
       expect(tip.textContent).toContain("pdf-tools");
       expect(tip.textContent).toContain("github-mcp");
       expect(tip.textContent).toContain("fs-server");
+    });
+  });
+
+  it("discloses the agent initiator in the tooltip while the visible copy stays unified (issue #722)", async () => {
+    // The placement carries the actor: both actors share the single Activate
+    // verb in the visible copy (the agent-specific variant retired), and the
+    // tooltip names the initiator -- the disclosure that survives where the
+    // placement cannot speak (e.g. the degraded standalone row).
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const markerText = container.querySelector(
+      `.skill-entry[data-skill-kind="activate"] .skill-text`,
+    ) as HTMLElement;
+    expect(markerText.textContent).toBe("激活技能「python」");
+    fireEvent.pointerMove(markerText);
+    await waitFor(() => {
+      const tip = screen.getByRole("tooltip");
+      expect(tip.textContent).toContain("由 Agent 发起");
+    });
+  });
+
+  it("keeps the byAgent disclosure off a user activation's tooltip (issue #722)", async () => {
+    // The negative half of the disclosure: the tooltip names the initiator
+    // only when the agent initiated. A dropped actor guard would stamp the
+    // byAgent suffix on every activation, permanently misattributing the
+    // user's own (the file's convention pins the negative branch too).
+    const entries: ThreadEntry[] = [
+      { entry: "Skill", data: { kind: "Activate", name: "pdf-tools", actor: "User" } },
+    ];
+    const { container } = renderThread(
+      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+    );
+    const markerText = container.querySelector(
+      `.skill-entry[data-skill-kind="activate"] .skill-text`,
+    ) as HTMLElement;
+    expect(markerText.textContent).toBe("激活技能「pdf-tools」");
+    fireEvent.pointerMove(markerText);
+    // The tooltip carries the verb alone -- no initiator disclosure, no
+    // other suffix (the registry is not wired and the skill declares
+    // nothing), so the exact text pins the absence.
+    await waitFor(() => {
+      expect(screen.getByRole("tooltip").textContent).toBe("激活技能「pdf-tools」");
     });
   });
 

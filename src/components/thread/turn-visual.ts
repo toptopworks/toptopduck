@@ -244,13 +244,16 @@ export type LifecycleRunMark = "first" | "mid" | "last" | "single";
 
 // The maximal runs of consecutive lifecycle events (issue #721): skill and
 // source events count as ONE contiguous species (a mixed skill/source stretch
-// is one run); a turn ALWAYS breaks the run (turns never enter the line).
-// Returns one mark per entry, aligned by index -- null for turns. A run of
-// length >=2 connects its adjacent nodes; a lone event keeps its node bare.
-// The thread is append-only (ADR-0028/0040), so the marks recompute cheaply
-// on each render from the entries alone -- no event carries run state.
+// is one run); a turn ALWAYS breaks the run (turns never enter the line), and
+// so does an agent activation absorbed into its turn (it renders inside the
+// turn, D5 / issue #722 -- the `owned` slot per entry). Returns one mark per
+// entry, aligned by index -- null for turns and absorbed activations. A run
+// of length >=2 connects its adjacent nodes; a lone event keeps its node
+// bare. The thread is append-only (ADR-0028/0040), so the marks recompute
+// cheaply on each render from the entries alone -- no event carries run state.
 export function lifecycleRunMarks(
   entries: readonly ThreadEntry[],
+  owned: readonly ActivationOwner[] = [],
 ): Array<LifecycleRunMark | null> {
   const marks: Array<LifecycleRunMark | null> = entries.map(() => null);
   let start = -1;
@@ -264,7 +267,7 @@ export function lifecycleRunMarks(
     start = -1;
   };
   entries.forEach((entry, i) => {
-    if (entry.entry === "Turn") flush(i);
+    if (entry.entry === "Turn" || owned[i] != null) flush(i);
     else if (start === -1) start = i;
   });
   flush(entries.length);
@@ -330,4 +333,47 @@ export function runtimeSegmentBadges(
     prevKey = key;
   }
   return out;
+}
+
+// D5 / issue #722 placement: an actor=Agent skill event happened INSIDE the
+// turn that settles after it (the backend inserts the event at occurrence and
+// the Turn entry at settle, and the agent only acts within a turn), so the
+// entry's next Turn is its owning turn. Returns one owning-turn index per
+// entry (agent activations with a settled turn ahead), null everywhere else
+// -- the thread renders those markers at the head of the owning turn's
+// assistant side instead of as standalone timeline rows. An in-flight turn's
+// activation has no Turn entry yet (the Turn lands at settle): while a turn
+// runs it falls to the live exchange ("live"), which the settle swap then
+// replaces with the appended Turn's index -- same head slot, same order.
+// null is the honest degrade: no turn ahead and none running, the event
+// stays a standalone top-level row (the resume inconsistency edge).
+export type ActivationOwner = number | "live" | null;
+
+export function agentActivationOwner(
+  entries: readonly ThreadEntry[],
+  hasLiveTurn = false,
+): ActivationOwner[] {
+  const owners: ActivationOwner[] = entries.map(() => null);
+  let nextTurn = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.entry === "Turn") {
+      nextTurn = i;
+      continue;
+    }
+    // The kind guard mirrors SkillMarker's tooltip disclosure: the wire
+    // contract says the actor is present IFF Activate, and a
+    // contract-violating event (a hand-edited recipe stamping the agent
+    // actor on a Mount) stays a standalone row instead of being absorbed
+    // into a turn it did not happen inside.
+    if (
+      entry.entry === "Skill" &&
+      entry.data.kind === "Activate" &&
+      entry.data.actor === "Agent"
+    ) {
+      if (nextTurn !== -1) owners[i] = nextTurn;
+      else if (hasLiveTurn) owners[i] = "live";
+    }
+  }
+  return owners;
 }
