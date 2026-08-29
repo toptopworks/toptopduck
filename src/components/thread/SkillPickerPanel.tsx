@@ -1,10 +1,13 @@
 import { Puzzle } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { cn } from "@/lib/utils";
+import { useEffect, useRef } from "react";
 
+import { fmtError } from "../../lib/error-presentation";
 import type { ReactNode } from "react";
 import type { SkillEntry } from "../../types/skills";
-import type { SkillPickerMode } from "./skillPickerLogic";
+import { skillPickerOptionId, type SkillPickerMode } from "./skillPickerLogic";
+import { SkillActiveBadge } from "./SkillActiveBadge";
 
 // The floating picker surface of the composer (ADR-0112, issue #716). One
 // component, two presentation modes: mode "global" ("/") renders the group
@@ -49,6 +52,10 @@ export type SkillPickerPanelProps = {
   /** Registry size before filtering -- distinguishes the "No skills" empty
    *  registry face from the no-match row. */
   totalSkills: number;
+  /** The listing query's reject, if any: a failed fetch renders an error
+   *  row instead of collapsing into the "No skills" empty face (the mount
+   *  list riding the same cache surfaces its error; so does the picker). */
+  registryError?: unknown;
   /** Activated names for the display-only Active badges (empty on the
    *  cold-start bar -- no session, no activation truth). */
   activatedNames: ReadonlySet<string>;
@@ -64,6 +71,7 @@ export function SkillPickerPanel({
   skills,
   query,
   totalSkills,
+  registryError,
   activatedNames,
   highlightIndex,
   onHoverIndex,
@@ -73,6 +81,19 @@ export function SkillPickerPanel({
   const empty = totalSkills === 0;
   const noMatches = !empty && skills.length === 0;
   const filtering = query.trim() !== "";
+  // A failed listing is a fault, not an empty registry -- the error row
+  // replaces the empty face rather than riding beside it.
+  const displayError =
+    registryError != null ? fmtError(registryError, intl) : null;
+
+  // Keyboard highlight follows into the scrollable fold: without this, ↑↓
+  // can park the highlight below max-h-60's fold and Enter picks an
+  // invisible row. block: "nearest" is a no-op while the option is visible;
+  // hover mirrors the highlight, so the mouse never fights the scroll.
+  const activeOptionRef = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    activeOptionRef.current?.scrollIntoView({ block: "nearest" });
+  }, [highlightIndex, skills]);
 
   return (
     <div className={PANEL_CLASS} role="presentation">
@@ -94,14 +115,12 @@ export function SkillPickerPanel({
           defaultMessage: "Skill picker",
         })}
         className={LIST_CLASS}
-        aria-activedescendant={
-          skills.length > 0 ? optionId(id, highlightIndex) : undefined
-        }
       >
         {skills.map((skill, index) => (
           <li
             key={skill.name}
-            id={optionId(id, index)}
+            id={skillPickerOptionId(id, index)}
+            ref={index === highlightIndex ? activeOptionRef : undefined}
             role="option"
             aria-selected={index === highlightIndex}
             className={cn(
@@ -144,20 +163,16 @@ export function SkillPickerPanel({
                 />
               )}
             </span>
-            {activatedNames.has(skill.name) && (
-              // Same primary token as the section's Active badge -- one
-              // domain concept, one color.
-              <span className="bg-primary text-primary-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
-                <FormattedMessage
-                  id="composer.contextPanel.skillActiveBadge"
-                  defaultMessage="Active"
-                />
-              </span>
-            )}
+            {activatedNames.has(skill.name) && <SkillActiveBadge />}
           </li>
         ))}
       </ul>
-      {empty && (
+      {displayError && (
+        <p className="text-destructive px-2 py-2 text-xs" role="alert">
+          {displayError}
+        </p>
+      )}
+      {empty && !displayError && (
         <div className={NOTE_CLASS}>
           <FormattedMessage
             id="composer.contextPanel.skillsEmpty"
@@ -199,8 +214,4 @@ function highlightMatches(text: string, query: string): ReactNode {
   }
   parts.push(text.slice(cursor));
   return parts;
-}
-
-function optionId(panelId: string, index: number): string {
-  return `${panelId}-option-${index}`;
 }

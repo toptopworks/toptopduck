@@ -2592,4 +2592,72 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     );
     expect(screen.queryByText("charting")).not.toBeInTheDocument();
   });
+
+  it("in-session pick lands a view chip; Backspace withdraws it before submit", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Open the session with a first question (the turn rejects and settles).
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // A second picker pick lands the in-session chip (the viewActivations
+    // list is the whole intent -- this surface has no mount facet).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    // Backspace at caret 0 (the draft is empty; the panel is closed)
+    // withdraws the session-scope intent...
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.queryByText("charting")).not.toBeInTheDocument(),
+    );
+    // ...so the next submit fires the ask with NO materialization at all.
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"),
+    );
+    expect(activateSkill).not.toHaveBeenCalled();
+  });
+
+  it("duplicate picks dedupe; Backspace withdraws the most recent pick only (LIFO)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [skillEntry("charting"), skillEntry("data-cleaning")],
+      ignored: [],
+      root_error: null,
+    });
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Pick charting, then charting AGAIN: the composite is a set -- the
+    // duplicate is a no-op (one chip, one pending mount pick).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    expect(screen.getByRole("button", { name: "技能 (1/2)" })).toBeInTheDocument();
+    // A different name joins: two chips, two pending picks.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "ArrowDown" });
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("data-cleaning");
+    expect(screen.getByRole("button", { name: "技能 (2/2)" })).toBeInTheDocument();
+    // Backspace withdraws the MOST RECENT pick only (data-cleaning); the
+    // charting chip and its mount half stay.
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.queryByText("data-cleaning")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("charting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "技能 (1/2)" })).toBeInTheDocument();
+  });
 });

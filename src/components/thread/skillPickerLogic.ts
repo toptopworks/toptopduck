@@ -51,15 +51,19 @@ export function readPickerQuery(
 }
 
 /** Selection consumes the trigger span: everything from the trigger
- *  character up to (not including) `cursor` leaves the draft, so only the
- *  remaining text is left to submit. Esc, by contrast, keeps the span as
- *  plain text (ADR-0112 Decision 5). */
+ *  character up to (not including) `end` leaves the draft, so only the
+ *  remaining text is left to submit. `end` is the stored span's boundary
+ *  (trigger char + stored query), NOT the live caret -- the caller gates the
+ *  caret against the span first, so a caret moved outside it without a
+ *  change event can never bound the removal and eat or duplicate text
+ *  beyond the span. Esc, by contrast, keeps the span as plain text
+ *  (ADR-0112 Decision 5). */
 export function removeTriggerSpan(
   value: string,
   triggerIndex: number,
-  cursor: number,
+  end: number,
 ): string {
-  return value.slice(0, triggerIndex) + value.slice(cursor);
+  return value.slice(0, triggerIndex) + value.slice(end);
 }
 
 /** Move the highlight by +1/-1 clamped to [0, count - 1] -- never wrapping
@@ -92,4 +96,13 @@ export function filterSkills<T extends { name: string; description: string }>(
 
 function charFor(mode: SkillPickerMode): string {
   return mode === "global" ? "/" : "$";
+}
+
+/** Option row DOM id inside the picker panel: the textarea's
+ *  aria-activedescendant points at the highlighted option while focus stays
+ *  in the textarea (the combobox pattern), so the id shape is contract --
+ *  shared by the panel that renders the rows and the bar that names the
+ *  active one. */
+export function skillPickerOptionId(panelId: string, index: number): string {
+  return `${panelId}-option-${index}`;
 }

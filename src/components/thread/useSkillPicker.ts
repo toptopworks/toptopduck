@@ -53,8 +53,12 @@ export function useSkillPicker({
 
   // Registry rows for the panel. The key is the shared skillKeys.all() cache
   // the Skills trigger + mount list already ride, so opening the picker adds
-  // no extra IPC round-trip once any of them has loaded.
-  const { data: listing } = useQuery({
+  // no extra IPC round-trip once any of them has loaded. The error channel
+  // is exposed alongside the data: a rejected listing must surface as an
+  // error row, not collapse into the "No skills" empty face (the mount list
+  // riding the same cache surfaces its error -- the picker must not be the
+  // one surface that hides it).
+  const { data: listing, error: listingError } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,
     enabled,
@@ -100,10 +104,22 @@ export function useSkillPicker({
   }
 
   /** Selection: consume the trigger span from the draft (trigger char +
-   *  query), report the pick, close the panel. */
+   *  stored query), report the pick, close the panel. The consumed span is
+   *  the STORED one (what the rendered rows filtered); the live caret only
+   *  gates that it still sits inside it -- a caret move that fires no change
+   *  event (click / Home / arrows) leaves the stored span stale against the
+   *  draft, and a removal bounded by an out-of-span caret would eat or
+   *  duplicate text beyond the span. On an out-of-span caret the panel
+   *  closes without picking and the draft is left untouched. */
   function select(skill: SkillEntry, value: string, cursor: number): void {
     if (trigger === null) return;
-    setValue(removeTriggerSpan(value, trigger.triggerIndex, cursor));
+    const end = trigger.triggerIndex + 1 + query.length;
+    if (cursor <= trigger.triggerIndex || cursor > end) {
+      setTrigger(null);
+      setHighlight(0);
+      return;
+    }
+    setValue(removeTriggerSpan(value, trigger.triggerIndex, end));
     onPick(skill.name);
     setTrigger(null);
     setHighlight(0);
@@ -156,16 +172,11 @@ export function useSkillPicker({
     return false;
   }
 
-  /** Blur closes the panel without touching the draft -- the trigger span
-   *  stays as plain text; a re-focus does not reopen (Decision 5). */
-  function handleBlur(): void {
-    if (trigger === null) return;
-    setTrigger(null);
-    setHighlight(0);
-  }
-
-  /** Close without consuming anything (a submit while the panel is open is
-   *  still a turn boundary). */
+  /** Close without consuming anything: blur (the trigger span stays as
+   *  plain text; a re-focus does not reopen, Decision 5) and a submit while
+   *  the panel is open (still a turn boundary) both land here -- while
+   *  closed the state is already reset, and a same-value setState bails
+   *  out without a render. */
   function close(): void {
     setTrigger(null);
     setHighlight(0);
@@ -177,11 +188,11 @@ export function useSkillPicker({
     rows,
     query,
     totalSkills: registry.length,
+    registryError: listingError ?? null,
     activatedNames,
     highlightIndex,
     handleChange,
     handleKeyDown,
-    handleBlur,
     select,
     setHighlight,
     close,

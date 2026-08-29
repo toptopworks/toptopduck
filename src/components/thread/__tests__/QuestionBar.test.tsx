@@ -256,7 +256,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   /** Type into the (uncontrolled) textarea; selectionStart defaults to the
    *  typed value's length, mirroring real caret placement. */
   function type(text: string) {
-    const textarea = screen.getByLabelText("提问");
+    const textarea = screen.getByLabelText<HTMLTextAreaElement>("提问");
     fireEvent.change(textarea, {
       target: { value: text, selectionStart: text.length },
     });
@@ -512,9 +512,10 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
       root_error: null,
     });
     const onPick = vi.fn();
+    const onSubmit = vi.fn();
     renderQuestionBar(
       <QuestionBar
-        onSubmit={() => {}}
+        onSubmit={onSubmit}
         onCancel={() => {}}
         loading={false}
         skillPicker={{ sessionId: null, onPick }}
@@ -524,5 +525,149 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     await screen.findByText("暂无技能");
     key(textarea, "Enter");
     expect(onPick).not.toHaveBeenCalled();
+    // Enter on the empty face neither picks nor submits -- the draft keeps
+    // the trigger span.
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(textarea).toHaveValue("/");
+  });
+
+  it("closes without picking when the caret moved past the span (no change event)", async () => {
+    // "hello" + Home + "/" + "c" opens the panel (trigger 0, query "c",
+    // span [0, 2)); clicking at the END of "/chello" moves the caret to 7
+    // with NO change event -- the stored span stays [0, 2), and the removal
+    // the old code bounded by the live caret would eat "hello" with it.
+    const onPick = vi.fn();
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={false}
+        skillPicker={{ sessionId: null, onPick }}
+      />,
+    );
+    const textarea = screen.getByLabelText<HTMLTextAreaElement>("提问");
+    fireEvent.change(textarea, {
+      target: { value: "/hello", selectionStart: 1 },
+    });
+    fireEvent.change(textarea, {
+      target: { value: "/chello", selectionStart: 2 },
+    });
+    await screen.findAllByRole("option");
+    textarea.setSelectionRange(7, 7);
+    key(textarea, "Enter");
+    expect(onPick).not.toHaveBeenCalled();
+    expect(textarea).toHaveValue("/chello");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("closes without picking when the caret moved before the trigger (no change event)", async () => {
+    // "hi\n/cha" with the panel open on the second line's "/" (trigger 3,
+    // query "cha"); a click inside "hi" moves the caret to 1 with no change
+    // event -- the old removal bounded by that caret would duplicate "hi\n".
+    const onPick = vi.fn();
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={false}
+        skillPicker={{ sessionId: null, onPick }}
+      />,
+    );
+    const textarea = screen.getByLabelText<HTMLTextAreaElement>("提问");
+    fireEvent.change(textarea, {
+      target: { value: "hi\n/", selectionStart: 4 },
+    });
+    fireEvent.change(textarea, {
+      target: { value: "hi\n/cha", selectionStart: 7 },
+    });
+    await screen.findAllByRole("option");
+    textarea.setSelectionRange(1, 1);
+    key(textarea, "Enter");
+    expect(onPick).not.toHaveBeenCalled();
+    expect(textarea).toHaveValue("hi\n/cha");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("an open panel suppresses the chip Backspace withdrawal at caret 0", async () => {
+    // Caret 0 while the panel is open is outside the span -- the pick flow
+    // owns the keys, and the chips only withdraw once the panel is closed.
+    const onChipBackspace = vi.fn();
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={false}
+        onChipBackspace={onChipBackspace}
+        skillPicker={{ sessionId: null, onPick: () => {} }}
+      />,
+    );
+    const textarea = type("/");
+    await screen.findByRole("listbox");
+    textarea.setSelectionRange(0, 0);
+    key(textarea, "Backspace");
+    expect(onChipBackspace).not.toHaveBeenCalled();
+    key(textarea, "Escape");
+    key(textarea, "Backspace");
+    expect(onChipBackspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the combobox semantics on the textarea while the panel is open", async () => {
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={false}
+        skillPicker={{ sessionId: null, onPick: () => {} }}
+      />,
+    );
+    const textarea = screen.getByLabelText("提问");
+    // Closed: a plain textbox, no role override.
+    expect(textarea).not.toHaveAttribute("role");
+    type("/");
+    await screen.findAllByRole("option");
+    // Open: the ARIA combobox pattern -- focus stays in the textarea, so
+    // the active-option hand-off rides aria-activedescendant HERE (AT
+    // tracks only the focused element's), never on the listbox.
+    expect(textarea).toHaveAttribute("role", "combobox");
+    expect(textarea).toHaveAttribute("aria-expanded", "true");
+    expect(textarea).toHaveAttribute("aria-controls", "question-bar-skill-picker");
+    expect(textarea).toHaveAttribute("aria-haspopup", "listbox");
+    expect(textarea).toHaveAttribute("aria-autocomplete", "list");
+    expect(textarea).toHaveAttribute(
+      "aria-activedescendant",
+      "question-bar-skill-picker-option-0",
+    );
+    expect(screen.getByRole("listbox")).not.toHaveAttribute(
+      "aria-activedescendant",
+    );
+    key(textarea, "ArrowDown");
+    expect(textarea).toHaveAttribute(
+      "aria-activedescendant",
+      "question-bar-skill-picker-option-1",
+    );
+    // Bottom clamp: the second ArrowDown on a two-row list stays on the
+    // last row (never wrapping).
+    key(textarea, "ArrowDown");
+    expect(textarea).toHaveAttribute(
+      "aria-activedescendant",
+      "question-bar-skill-picker-option-1",
+    );
+  });
+
+  it("renders the listing error row instead of the empty face when the fetch fails", async () => {
+    vi.mocked(listSkills).mockRejectedValue(new Error("ipc down"));
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={false}
+        skillPicker={{ sessionId: null, onPick: () => {} }}
+      />,
+    );
+    type("/");
+    // A failed fetch is a fault, not an empty registry: the error row
+    // replaces the "No skills" face.
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByText("暂无技能")).not.toBeInTheDocument();
   });
 });

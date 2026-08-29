@@ -46,6 +46,7 @@ import type { SettingsSection } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
+import { toAppError } from "./lib/error-presentation";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
@@ -380,9 +381,12 @@ export default function App() {
   // submit -- the ONLY materialization moment (Decision 4).
   const [coldActivations, setColdActivations] = useState<string[]>([]);
   // Session-scope pre-activations carry their owning view id: a switch /
-  // close (or the null->session mint) leaves the stored scope stale and the
-  // derived read below yields [] -- unsubmitted intents never leak across
-  // sessions, with no effect-driven reset (the sid IS the reset).
+  // close (or the null->session mint) stops the ids matching, so the derived
+  // read below yields [] while another session is active -- unsubmitted
+  // intents never leak across sessions, with no effect-driven reset. The
+  // intents are scoped to their session, not destroyed by the switch:
+  // switching back to the same session restores its unsubmitted intents
+  // (resume mints a fresh sid, so the restore never sees stale truth).
   const [viewActivations, setViewActivations] = useState<{
     sid: string | null;
     names: string[];
@@ -467,11 +471,20 @@ export default function App() {
         // -- the activation lands before the turn assembles, so the question
         // sees the injected body. The chips are consumed by the submit either
         // way (an isolated write failure surfaces via the shell error without
-        // blocking the ask).
-        void materializeActivations(activeSessionId, intents).then(() => {
-          setViewActivations({ sid: activeSessionId, names: [] });
-          fields.handleAsk(question);
-        });
+        // blocking the ask). The .catch is the same contract for an
+        // unexpected fault higher up: clear the spent intents, surface the
+        // fault, and STILL fire the ask -- a materialization crash never
+        // silently eats the submit.
+        void materializeActivations(activeSessionId, intents)
+          .then(() => {
+            setViewActivations({ sid: activeSessionId, names: [] });
+            fields.handleAsk(question);
+          })
+          .catch((e: unknown) => {
+            setViewActivations({ sid: activeSessionId, names: [] });
+            setShellError(toAppError(e, intl, "shell"));
+            fields.handleAsk(question);
+          });
         return;
       }
       if (effectivePendingRuntime.kind === "built_in" && builtInGateOpen) {
@@ -542,6 +555,8 @@ export default function App() {
       builtInGateOpen,
       profileKeys.activeProfileId,
       openSettings,
+      intl,
+      setShellError,
     ],
   );
 

@@ -13,6 +13,7 @@ import {
   unmountSkill,
 } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
+import { SkillActiveBadge } from "./SkillActiveBadge";
 import { log } from "../../lib/log";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import type { SkillEntry } from "../../types/skills";
@@ -153,7 +154,12 @@ export function ComposerSkillsSection({
   // mount authority -- the mounted set in session mode, the pending list in
   // draft mode -- UNION the pre-activation intents, because a picker
   // selection expresses a mount intent that only materializes at submit.
-  // The sync is display-only: no mount IPC fires until the submit does.
+  // The draft branch takes no union: the cold-start pick double-writes the
+  // composite into pendingSkills (the mount half) AND the intent list, so
+  // pendingSkills already carries the union -- the session branch needs the
+  // explicit union because its mounted set is server truth the intent has
+  // not joined yet. The sync is display-only: no mount IPC fires until the
+  // submit does.
   const selectedSet = useMemo(() => {
     if (sessionId === null) return mountedSet;
     const union = new Set(mountedSet);
@@ -381,14 +387,7 @@ export function ComposerSkillsSection({
                   deactivate action here (ADR-0112: the picker is the entry,
                   unmount the sole exit). The activated set is always a
                   subset of the mounted set, so no mounted check is needed. */}
-              {sessionId !== null && isActivated && (
-                <span className="bg-primary text-primary-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
-                  <FormattedMessage
-                    id="composer.contextPanel.skillActiveBadge"
-                    defaultMessage="Active"
-                  />
-                </span>
-              )}
+              {sessionId !== null && isActivated && <SkillActiveBadge />}
             </li>
           );
         })}

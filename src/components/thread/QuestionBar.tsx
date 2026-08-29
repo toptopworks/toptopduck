@@ -4,6 +4,7 @@ import { ArrowUp, Square } from "lucide-react";
 import type { TurnPhase } from "../../types/session";
 import { Button } from "../ui/button";
 import { SkillPickerPanel } from "./SkillPickerPanel";
+import { skillPickerOptionId } from "./skillPickerLogic";
 import { useSkillPicker } from "./useSkillPicker";
 
 type QuestionBarProps = {
@@ -146,8 +147,21 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
           }}
           placeholder={intl.formatMessage({ id: "questionBar.placeholder", defaultMessage: "Ask in natural language…" })}
           aria-label={intl.formatMessage({ id: "questionBar.ariaLabel", defaultMessage: "Question" })}
+          // Combobox semantics while the panel is open (the ARIA 1.2
+          // combobox pattern): focus never leaves the textarea, so the
+          // active-option hand-off rides aria-activedescendant HERE -- on
+          // the focused element, where AT actually tracks it. Closed, the
+          // textarea is a plain textbox again (no role override).
+          role={picker.isOpen ? "combobox" : undefined}
           aria-expanded={picker.isOpen || undefined}
           aria-controls={picker.isOpen ? SKILL_PICKER_PANEL_ID : undefined}
+          aria-haspopup={picker.isOpen ? "listbox" : undefined}
+          aria-autocomplete={picker.isOpen ? "list" : undefined}
+          aria-activedescendant={
+            picker.isOpen && picker.rows.length > 0
+              ? skillPickerOptionId(SKILL_PICKER_PANEL_ID, picker.highlightIndex)
+              : undefined
+          }
           disabled={loading}
           rows={3}
           className="min-w-40 flex-1 resize-none border-0 bg-transparent p-0 text-sm outline-none placeholder:text-muted-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50"
@@ -156,9 +170,13 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
             // with the caret at the very start and no selection, Backspace
             // withdraws the last chip like a text char (ADR-0112 Decision 3
             // removability). Native Backspace is inert at caret 0, so no
-            // preventDefault is needed.
+            // preventDefault is needed. Guarded on the panel being closed
+            // (an open panel means a picker flow, and caret 0 is outside
+            // its span) and on IME composition, matching the Enter paths.
             if (
               e.key === "Backspace" &&
+              !picker.isOpen &&
+              !e.nativeEvent.isComposing &&
               e.currentTarget.selectionStart === 0 &&
               e.currentTarget.selectionEnd === 0
             ) {
@@ -166,8 +184,8 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
             }
             // The picker consumes its keys first (ADR-0112): with the panel
             // open, Enter selects and Esc closes -- never submit. The
-            // textarea keeps focus; the listbox marks its highlighted row
-            // via aria-activedescendant.
+            // textarea keeps focus; it carries the combobox semantics and
+            // names the highlighted row via aria-activedescendant.
             if (picker.handleKeyDown(e)) return;
             // Enter submits; Shift+Enter inserts a newline (standard chat
             // composer behavior). The form onSubmit is the belt-and-suspenders
@@ -184,7 +202,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
           // Blur closes an open panel; the draft is untouched (the trigger
           // span stays plain text) and a re-focus does not reopen (ADR-0112
           // Decision 5).
-          onBlur={() => picker.handleBlur()}
+          onBlur={picker.close}
         />
       </div>
       {/* The panel anchors to the bar itself (the form is the positioned
@@ -197,6 +215,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
           skills={picker.rows}
           query={picker.query}
           totalSkills={picker.totalSkills}
+          registryError={picker.registryError}
           activatedNames={picker.activatedNames}
           highlightIndex={picker.highlightIndex}
           onHoverIndex={picker.setHighlight}
