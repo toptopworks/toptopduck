@@ -1052,7 +1052,6 @@ export default function App() {
                                       names: next,
                                     })
                             }
-                            cliTools={appConfig?.cli_tools.tools ?? []}
                           />
                         )}
                         trailing={

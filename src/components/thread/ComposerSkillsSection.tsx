@@ -13,7 +13,6 @@ import {
   unmountSkill,
 } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
-import type { CliToolConfig } from "../../types/cli-tool";
 import { SkillActiveBadge } from "./SkillActiveBadge";
 import { log } from "../../lib/log";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
@@ -76,7 +75,6 @@ export type ComposerSkillsSectionProps = {
    *  render checked AND disabled -- the backend folds them into every new
    *  session's initial set, so the panel agrees with the trigger count by
    *  showing them as already in, not toggleable off. */
-  cliTools?: CliToolConfig[];
   /** When sessionId is null (cold-start bar), a toggle hands the NEXT pending
    *  list (pick appended / removed) to the shell via this callback. Undefined
    *  when sessionId is non-null. */
@@ -98,7 +96,6 @@ export function ComposerSkillsSection({
   loading,
   onOpenSettingsSkills,
   pendingSkills,
-  cliTools,
   onPendingSkillsChange,
   activationIntents,
   onActivationIntentsChange,
@@ -158,45 +155,24 @@ export function ComposerSkillsSection({
     [activationIntents],
   );
 
-  // Auto-included builtin skills on the cold-start bar (issue #677): the
-  // backend folds these into every new session's initial set (derived here
-  // the same way the trigger count derives them -- no extra IPC), so the
-  // draft-mode checkbox reads them as checked and their toggle is disabled
-  // (unchecking cannot stop the backend from including them).
-  const autoIncludedSet = useMemo(() => {
-    if (sessionId !== null) return new Set<string>();
-    const tools = cliTools ?? [];
-    return new Set(
-      (listing?.skills ?? [])
-        .filter(
-          (s) =>
-            s.acquired === "builtin" &&
-            tools.some(
-              (t) => t.name === s.name && t.source === "builtin" && t.enabled,
-            ),
-        )
-        .map((s) => s.name),
-    );
-  }, [sessionId, listing, cliTools]);
   // Selection display set (ADR-0112 Decision 2): the checkbox reads the
   // mount authority -- the mounted set in session mode, the pending list in
   // draft mode -- UNION the pre-activation intents, because a picker
   // selection expresses a mount intent that only materializes at submit.
-  // The draft branch unions the auto-included builtins too (checked +
-  // disabled, above) so the panel agrees with the trigger count; the
-  // session branch needs the explicit intent union because its mounted set
-  // is server truth the intent has not joined yet. The sync is
-  // display-only: no mount IPC fires until the submit does.
+  // The draft branch takes no union: the cold-start pick double-writes the
+  // composite into pendingSkills (the mount half) AND the intent list, so
+  // pendingSkills already carries the union -- the session branch needs the
+  // explicit union because its mounted set is server truth the intent has
+  // not joined yet. The sync is display-only: no mount IPC fires until the
+  // submit does. The auto-included builtins stay plain rows here (issue
+  // #677 retitle): system skills mount themselves server-side, and an
+  // explicit check absorbs as AlreadyMounted at submit.
   const selectedSet = useMemo(() => {
-    if (sessionId === null) {
-      const draft = new Set(mountedSet);
-      for (const name of autoIncludedSet) draft.add(name);
-      return draft;
-    }
+    if (sessionId === null) return mountedSet;
     const union = new Set(mountedSet);
     for (const name of activationIntents ?? []) union.add(name);
     return union;
-  }, [sessionId, mountedSet, activationIntents, autoIncludedSet]);
+  }, [sessionId, mountedSet, activationIntents]);
 
   // Session-mode-only machinery below: toggle() holds the invariant -- it
   // routes null-sessionId rows to the pending-list path before any mutation
@@ -388,7 +364,7 @@ export function ComposerSkillsSection({
                 <input
                   type="checkbox"
                   checked={selectedSet.has(skill.name)}
-                  disabled={disabled || autoIncludedSet.has(skill.name)}
+                  disabled={disabled}
                   onChange={() => toggle(skill)}
                   className="size-3.5 cursor-pointer accent-primary disabled:cursor-not-allowed"
                   aria-label={intl.formatMessage(

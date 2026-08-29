@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
 import { Puzzle } from "lucide-react";
 
 import { listMountedSkills, listSkills } from "../../api";
-import type { CliToolConfig } from "../../types/cli-tool";
+
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { ComposerSkillsSection } from "./ComposerSkillsSection";
@@ -43,10 +43,6 @@ export type ComposerSkillsTriggerProps = {
   activationIntents?: string[];
   /** Drop-one-intent channel, passed through to the section (see there). */
   onActivationIntentsChange?: (next: string[]) => void;
-  /** The registered CLI tools (issue #677): the cold-start chip's count
-   *  folds the auto-included builtin skills in, derived purely on the
-   *  frontend from the skills listing x this registry (no extra IPC). */
-  cliTools?: CliToolConfig[];
 };
 
 const CHIP_CLASS =
@@ -60,7 +56,7 @@ export function ComposerSkillsTrigger({
   onPendingSkillsChange,
   activationIntents,
   onActivationIntentsChange,
-  cliTools,
+
 }: ComposerSkillsTriggerProps) {
   const intl = useIntl();
   const [open, setOpen] = useState(false);
@@ -79,27 +75,16 @@ export function ComposerSkillsTrigger({
     queryFn: listSkills,
   });
 
-  // Cold start (issue #677): the count the chip reports is what the NEXT
-  // session's folded active set will hold -- the pending picks PLUS the
-  // auto-included builtin skills (builtin-sourced, enabled entries whose
-  // companion skill file is in the registry; the backend computes the same
-  // set at creation). Unioned + deduped so a pending pick that names an
-  // auto skill counts once.
-  const autoIncluded = useMemo(() => {
-    const tools = cliTools ?? [];
-    return (listing?.skills ?? [])
-      .filter(
-        (s) =>
-          s.acquired === "builtin" &&
-          tools.some(
-            (t) => t.name === s.name && t.source === "builtin" && t.enabled,
-          ),
-      )
-      .map((s) => s.name);
-  }, [listing, cliTools]);
+  // Cold start: the count reports the USER's pending picks alone. The
+  // auto-included builtin skills fold into every new session server-side
+  // (issue #677) and stay off the badge on purpose -- the user mental model
+  // is "system skills mount themselves", the panel treats them as plain
+  // rows (explicitly checking one is harmlessly absorbed as AlreadyMounted
+  // at submit), and a badge counting non-interactive items would disagree
+  // with the panel's checkboxes again.
   const mountedCount =
     sessionId === null
-      ? new Set([...(pendingSkills ?? []), ...autoIncluded]).size
+      ? (pendingSkills ?? []).length
       : (mounted ?? []).length;
   const totalCount = (listing?.skills ?? []).length;
   const label = intl.formatMessage(
@@ -134,7 +119,6 @@ export function ComposerSkillsTrigger({
           onPendingSkillsChange={onPendingSkillsChange}
           activationIntents={activationIntents}
           onActivationIntentsChange={onActivationIntentsChange}
-          cliTools={cliTools}
         />
       </PopoverContent>
     </Popover>
