@@ -9,7 +9,7 @@
 // the assistant side; the bubble carries only user output and conversation
 // facts.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { PencilLine } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -61,6 +61,11 @@ interface TurnCardProps {
    *  degrade -- the timeline stays readable, mirroring SkillMarker's #366
    *  no-index posture). */
   skillIndex: ReadonlyMap<string, SkillEntry> | undefined;
+  /** D5 / issue #722: the agent activations that happened inside this turn,
+   *  rendered at the head of the assistant stream -- chronologically after the
+   *  user bubble, before the execution they enabled. undefined when the turn
+   *  owns none. */
+  agentHead?: ReactNode;
 }
 
 // One turn rendered as a chat exchange (ADR-0103): the user bubble (verbatim
@@ -89,6 +94,7 @@ export function TurnCard({
   mentionedDataset,
   thinkingInitiallyExpanded,
   skillIndex,
+  agentHead,
 }: TurnCardProps) {
   const intl = useIntl();
   const isStale = !!staleAnchor;
@@ -118,6 +124,10 @@ export function TurnCard({
           weakened && "opacity-60",
         )}
       >
+        {/* D5 / issue #722: agent activations owned by this turn open the
+            assistant stream -- after the user bubble, before the execution
+            they enabled. */}
+        {agentHead}
         {/* Header annotations (ADR-0103): the app's read of the question --
             which dataset it named (ADR-0047 active chip) and which mounted
             skills drifted since the answer (issue #381) -- open the stream,

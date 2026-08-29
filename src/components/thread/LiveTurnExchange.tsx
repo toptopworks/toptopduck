@@ -19,7 +19,7 @@
 // on the settled side via the onThinkingExpandedChange report (issue #620).
 
 import { FormattedMessage } from "react-intl";
-import { useCallback } from "react";
+import { useCallback, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { UserBubble } from "./UserBubble";
 import { LiveRow } from "./TraceView";
@@ -81,6 +81,7 @@ export function LiveTurnExchange({
   mentionedDataset,
   onRespondApproval,
   onThinkingExpandedChange,
+  agentHead,
 }: {
   liveTurn: LiveTurn;
   /** The dataset the question explicitly names (the same findMentionedDataset
@@ -93,6 +94,12 @@ export function LiveTurnExchange({
    *  the settle seed matches on -- the projection carries the same
    *  reference onto the settled round). */
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
+  /** D5 / issue #722: the agent activations that happened inside this
+   *  (still-running) turn, rendered at the head of the assistant stream --
+   *  the same slot the settled TurnCard's agentHead occupies, so the settle
+   *  swap re-hosts them without moving them. undefined when the turn owns
+   *  none. */
+  agentHead?: ReactNode;
 }) {
   // The running status reads honestly per phase: while a call dispatches (or
   // waits at the gate) its row carries the motion, so the trailing status
@@ -106,6 +113,10 @@ export function LiveTurnExchange({
     <div className="live-turn-exchange turn-card rounded-md py-1.5" data-live="true">
       <UserBubble question={liveTurn.question} askedAt={liveTurn.askedAt} isStale={false} />
       <div className="assistant-stream mt-1 flex flex-col items-start">
+        {/* D5 / issue #722: agent activations open the stream, the same
+            slot (and order) the settled TurnCard's agentHead occupies, so
+            the settle swap does not move them. */}
+        {agentHead}
         {mentionedDataset !== null && (
           // The stream header opens with the dataset chip only -- the settled
           // header may add skill-drift badges at settle, but the chip itself

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { lifecycleRunMarks } from "../turn-visual";
+import { agentActivationOwner, lifecycleRunMarks } from "../turn-visual";
 import type { ThreadEntry } from "../../../types/thread";
 
 // The issue #721 run-position contract, pinned at the pure-algebra seam. The
@@ -65,5 +65,57 @@ describe("lifecycleRunMarks (run-position contract)", () => {
 
   it("returns an empty array for an empty thread", () => {
     expect(lifecycleRunMarks([])).toEqual([]);
+  });
+});
+
+// The D5 association invariant (issue #722), pinned at the same pure-algebra
+// seam: the backend inserts an agent activation at occurrence -- inside the
+// turn that settles after it -- so an actor=Agent event belongs to the NEXT
+// Turn entry, never the previous one. The sandwich pin is the mutation
+// tripwire: flipping the association to "previous turn" turns it red.
+
+const agentActivate = (name: string): ThreadEntry => ({
+  entry: "Skill",
+  data: { kind: "Activate", name, actor: "Agent" },
+});
+
+describe("agentActivationOwner (association invariant)", () => {
+  it("maps an agent activation to the turn that settles after it, never the one before", () => {
+    // Sandwiched between two turns the activation belongs to the LATER one
+    // (it happened inside that turn) -- the interleaving is the invariant.
+    expect(agentActivationOwner([turn, agentActivate("python"), turn])).toEqual([
+      null,
+      2,
+      null,
+    ]);
+  });
+
+  it("keeps an ownerless activation standalone when no turn follows and none runs live", () => {
+    // The resume inconsistency edge (honest degrade): with no settled turn
+    // ahead and no live exchange to host it, the event stays a top-level row.
+    expect(agentActivationOwner([turn, agentActivate("python")])).toEqual([null, null]);
+  });
+
+  it("falls back to the live turn for the tail while a turn runs", () => {
+    // In flight the owning turn has no entry yet -- the activation renders
+    // at the live exchange's head until settle swaps it into the turn card.
+    expect(agentActivationOwner([turn, agentActivate("python")], true)).toEqual([
+      null,
+      "live",
+    ]);
+  });
+
+  it("keeps a settled owner even while a later turn runs live", () => {
+    // The live fallback only catches the tail: an activation with a settled
+    // turn ahead stays with that turn regardless of the live flag.
+    expect(agentActivationOwner([agentActivate("python"), turn], true)).toEqual([1, null]);
+  });
+
+  it("never absorbs a user-initiated activation into a turn", () => {
+    const userActivate: ThreadEntry = {
+      entry: "Skill",
+      data: { kind: "Activate", name: "pdf-tools", actor: "User" },
+    };
+    expect(agentActivationOwner([userActivate, turn])).toEqual([null, null]);
   });
 });
