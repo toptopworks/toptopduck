@@ -91,10 +91,10 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     });
   });
 
-  it("shows the built-in badge and no delete entry on a builtin row", async () => {
+  it("shows the system badge and no delete entry on a builtin row", async () => {
     renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
     const row = await screen.findByTestId("skill-row");
-    expect(row).toHaveTextContent("built-in");
+    expect(row).toHaveTextContent("system");
     // Undeletable: the trash button does not render on a builtin row.
     expect(row.querySelector("button[aria-label='pandoc']")).toBeNull();
   });

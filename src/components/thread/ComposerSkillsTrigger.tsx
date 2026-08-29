@@ -37,6 +37,12 @@ export type ComposerSkillsTriggerProps = {
    *  toggle writes to the shell-level pending list via this callback instead
    *  of the per-session mount IPC. Undefined when sessionId is non-null. */
   onPendingSkillsChange?: (next: string[]) => void;
+  /** Pre-activation intents (ADR-0112): passed through to the section so the
+   *  checkbox displays the mount authority UNION the intents and an uncheck
+   *  cascades the intent away with the mount. */
+  activationIntents?: string[];
+  /** Drop-one-intent channel, passed through to the section (see there). */
+  onActivationIntentsChange?: (next: string[]) => void;
   /** The registered CLI tools (issue #677): the cold-start chip's count
    *  folds the auto-included builtin skills in, derived purely on the
    *  frontend from the skills listing x this registry (no extra IPC). */
@@ -52,6 +58,8 @@ export function ComposerSkillsTrigger({
   onOpenSettingsSkills,
   pendingSkills,
   onPendingSkillsChange,
+  activationIntents,
+  onActivationIntentsChange,
   cliTools,
 }: ComposerSkillsTriggerProps) {
   const intl = useIntl();
@@ -124,6 +132,8 @@ export function ComposerSkillsTrigger({
           }}
           pendingSkills={pendingSkills}
           onPendingSkillsChange={onPendingSkillsChange}
+          activationIntents={activationIntents}
+          onActivationIntentsChange={onActivationIntentsChange}
         />
       </PopoverContent>
     </Popover>

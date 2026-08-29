@@ -63,6 +63,10 @@ vi.mock("../../api", async (importOriginal) => {
     })),
     setAuthorizationMode: vi.fn(async () => {}),
     mountSkill: vi.fn(async () => {}),
+    // ADR-0112 pre-activation materialization (mint-chain activation loop +
+    // the in-session materializer). Default no-op; the materialization tests
+    // assert calls.
+    activateSkill: vi.fn(async () => {}),
   };
 });
 
@@ -80,6 +84,7 @@ vi.mock("../../lib/log", () => ({
 }));
 
 import {
+  activateSkill,
   closeSession,
   createSession,
   exportSession,
@@ -112,6 +117,7 @@ const DEFAULT_POSTURE: PendingComposerPosture = {
   modelPosture: null,
   authMode: AUTH_MODE_DEFAULT,
   skills: [],
+  activations: [],
 };
 
 /** Build a CreateSessionReply for mock returns (ADR-0089). */
@@ -191,6 +197,7 @@ describe("useShellSessions", () => {
         modelPosture: null,
         authMode: "no_confirmation",
         skills: [],
+        activations: [],
       }, []);
     });
     expect(setSessionRuntime).toHaveBeenCalledWith("s1", { kind: "external", data: "gemini" });
@@ -225,6 +232,7 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -250,6 +258,7 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: null },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -277,6 +286,7 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -305,6 +315,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -332,6 +343,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["data-cleaning", "charting"],
+          activations: [],
         },
         [],
       );
@@ -359,6 +371,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["broken", "charting"],
+          activations: [],
         },
         [],
       );
@@ -391,6 +404,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["pandoc", "charting"],
+          activations: [],
         },
         [],
       );
@@ -1069,5 +1083,87 @@ describe("useShellSessions", () => {
     });
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
+  });
+});
+
+describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dropListener.current = null;
+  });
+
+  it("runs the activation loop strictly after the mount loop", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const calls: string[] = [];
+    vi.mocked(mountSkill).mockImplementation(async (_sid, name) => {
+      calls.push(`mount:${name}`);
+    });
+    vi.mocked(activateSkill).mockImplementation(async (_sid, name) => {
+      calls.push(`activate:${name}`);
+    });
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", {
+        runtime: null,
+        modelPosture: null,
+        authMode: AUTH_MODE_DEFAULT,
+        skills: ["charting"],
+        activations: ["charting", "cleaning"],
+      }, []);
+    });
+    // Mounts first, then activations -- the sequence can never hit
+    // NotMountedForActivation, and an auto-included activation rides the
+    // same order.
+    expect(calls).toEqual([
+      "mount:charting",
+      "activate:charting",
+      "activate:cleaning",
+    ]);
+  });
+
+  it("absorbs the redundant mount of an auto-included pick and still activates it", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    vi.mocked(mountSkill).mockRejectedValue({ data: { kind: "AlreadyMounted" } });
+    const { result, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", {
+        runtime: null,
+        modelPosture: null,
+        authMode: AUTH_MODE_DEFAULT,
+        skills: ["charting"],
+        activations: ["charting"],
+      }, []);
+    });
+    expect(activateSkill).toHaveBeenCalledWith("s1", "charting");
+    // The folded-initial-set collision is the expected outcome, not an
+    // error -- nothing surfaces.
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("materializeActivations mounts (absorbing redundancy), activates, and isolates write failures", async () => {
+    const { result, setShellError } = renderSessions();
+    vi.mocked(mountSkill).mockImplementation(async (_sid, name) => {
+      if (name === "auto") {
+        throw { data: { kind: "AlreadyMounted" } };
+      }
+    });
+    vi.mocked(activateSkill).mockImplementation(async (_sid, name) => {
+      if (name === "broken") {
+        throw new Error("boom");
+      }
+    });
+    let resolved = false;
+    await act(async () => {
+      await result.current.materializeActivations("s1", ["auto", "broken"]);
+      resolved = true;
+    });
+    expect(resolved).toBe(true);
+    expect(mountSkill).toHaveBeenCalledWith("s1", "auto");
+    expect(mountSkill).toHaveBeenCalledWith("s1", "broken");
+    expect(activateSkill).toHaveBeenCalledWith("s1", "auto");
+    expect(activateSkill).toHaveBeenCalledWith("s1", "broken");
+    // Only the failing write surfaces (isolated like the posture writes);
+    // the redundant mount stays silent and the sequence resolves regardless.
+    expect(setShellError).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,12 +1,11 @@
 import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Zap } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import { Input } from "../ui/input";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import {
-  activateSkill,
   listActivatedSkills,
   listMountedSkills,
   listSkills,
@@ -17,6 +16,7 @@ import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
 import type { SkillEntry } from "../../types/skills";
+import { filterSkills } from "./skillPickerLogic";
 
 // The skills section of the Skills trigger popover (issue #365, ADR-0086).
 // Rendered inside ComposerSkillsTrigger's PopoverContent -- the trigger chip
@@ -38,18 +38,18 @@ import type { SkillEntry } from "../../types/skills";
 // gate and the IPC gate agree (AC #5). The "Add skill" footer hops to the
 // settings SkillsSection via the parent's onOpenSettingsSkills callback.
 //
-// Activation (issue #699, ADR-0110 Decision 5): a mounted unactivated row
-// carries a row-tail activate action -- a second control OUTSIDE the mount
-// label so clicking it cannot toggle the mount; an activated row shows the
-// Active badge instead (same primary token as the thread's Activate marker).
-// There is no deactivation action: unmount is activation's sole exit, and its
-// success cascades the activation cache in the same synchronous delta. Draft
-// mode renders no activation affordance at all -- activation is
-// session-scoped (user here, agent via the gateway tool in #701), so the
-// draft stage has no face for it. Every successful skill mutation also
-// invalidates the thread query so the lifecycle marker refetches (the server
-// timeline is the marker's source; nothing else refreshes the thread after a
-// skill mutation).
+// This list is the mount trust gate and NOTHING else (ADR-0112): the
+// activation ENTRY is the input-bar picker ("/" / "$"), not a row action --
+// the retired issue #699 row-tail activate button made way for it. The
+// activation FACE stays: an activated row shows the Active badge (same
+// primary token as the thread's Activate marker), and there is no
+// deactivation action -- unmount is activation's sole exit. A picker
+// selection syncs the checkbox through the selection union (below), so the
+// two surfaces never disagree on what is selected; the intent itself
+// materializes at submit, never at click. Every successful skill mutation
+// also invalidates the thread query so the lifecycle marker refetches (the
+// server timeline is the marker's source; nothing else refreshes the thread
+// after a skill mutation).
 
 const ROW_CLASS =
   "composer-skill-row focus-visible:outline-ring flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2";
@@ -73,6 +73,16 @@ export type ComposerSkillsSectionProps = {
    *  list (pick appended / removed) to the shell via this callback. Undefined
    *  when sessionId is non-null. */
   onPendingSkillsChange?: (next: string[]) => void;
+  /** Pre-activation intents (ADR-0112): the chip list the composer holds.
+   *  A picker selection is a mount + activate composite, so the checkbox
+   *  displays the mount authority UNION the intents (the mount half has not
+   *  materialized yet); clearing the checkbox drops the intent in the same
+   *  action (the cascade's intent half). */
+  activationIntents?: string[];
+  /** Drop-one-intent channel for the cascade above. Undefined callers get no
+   *  union display and no cascade (the activation surface rides the picker
+   *  alone). */
+  onActivationIntentsChange?: (next: string[]) => void;
 };
 
 export function ComposerSkillsSection({
@@ -81,6 +91,8 @@ export function ComposerSkillsSection({
   onOpenSettingsSkills,
   pendingSkills,
   onPendingSkillsChange,
+  activationIntents,
+  onActivationIntentsChange,
 }: ComposerSkillsSectionProps) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -132,6 +144,22 @@ export function ComposerSkillsSection({
     enabled: sessionId !== null,
   });
   const activatedSet = useMemo(() => new Set(activated ?? []), [activated]);
+  const intentSet = useMemo(
+    () => new Set(activationIntents ?? []),
+    [activationIntents],
+  );
+
+  // Selection display set (ADR-0112 Decision 2): the checkbox reads the
+  // mount authority -- the mounted set in session mode, the pending list in
+  // draft mode -- UNION the pre-activation intents, because a picker
+  // selection expresses a mount intent that only materializes at submit.
+  // The sync is display-only: no mount IPC fires until the submit does.
+  const selectedSet = useMemo(() => {
+    if (sessionId === null) return mountedSet;
+    const union = new Set(mountedSet);
+    for (const name of activationIntents ?? []) union.add(name);
+    return union;
+  }, [sessionId, mountedSet, activationIntents]);
 
   // Session-mode-only machinery below: toggle() holds the invariant -- it
   // routes null-sessionId rows to the pending-list path before any mutation
@@ -217,26 +245,18 @@ export function ComposerSkillsSection({
     onSettled: (_d, _e, name) => clearPending(name),
   });
 
-  const activateMutation = useMutation({
-    mutationFn: (name: string) => activateSkill(sessionId as string, name),
-    onMutate: (name) => markPending(name),
-    onSuccess: (_data, name) => {
-      applyActivationDelta((prev) =>
-        prev?.includes(name) ? prev : [...(prev ?? []), name],
-      );
-      refreshThread();
-    },
-    onError: (e) => {
-      setError(fmtError(e, intl));
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.activatedSkills(sessionId as string),
-      });
-    },
-    onSettled: (_d, _e, name) => clearPending(name),
-  });
-
   function toggle(skill: SkillEntry) {
     if (loading || pendingNames.has(skill.name)) return;
+    // The intent half of the uncheck cascade (ADR-0112 Decision 2): clearing
+    // a selection drops that skill's pre-activation intent in the same
+    // action -- the intent version of "unmount is activation's sole exit".
+    const dropIntent = () => {
+      if (intentSet.has(skill.name) && onActivationIntentsChange) {
+        onActivationIntentsChange(
+          (activationIntents ?? []).filter((n) => n !== skill.name),
+        );
+      }
+    };
     // Null sessionId (cold-start bar, ADR-0092 / #500): rewrite the
     // caller-held pending list synchronously — no IPC, no per-name pending
     // gate. When the callback is absent the toggle is logged and discarded so
@@ -244,10 +264,11 @@ export function ComposerSkillsSection({
     if (sessionId === null) {
       if (onPendingSkillsChange) {
         const current = pendingSkills ?? [];
-        const next = mountedSet.has(skill.name)
+        const next = selectedSet.has(skill.name)
           ? current.filter((n) => n !== skill.name)
           : [...current, skill.name];
         onPendingSkillsChange(next);
+        if (selectedSet.has(skill.name)) dropIntent();
       } else {
         log.warn(
           "ComposerSkillsSection",
@@ -256,26 +277,34 @@ export function ComposerSkillsSection({
       }
       return;
     }
-    if (mountedSet.has(skill.name)) {
-      unmountMutation.mutate(skill.name);
-    } else {
-      mountMutation.mutate(skill.name);
+    if (selectedSet.has(skill.name)) {
+      // Unchecking: the intent drops synchronously; the unmount IPC fires
+      // only when the skill was actually mounted (an intent-only row never
+      // mounted, so its uncheck is pure intent removal -- no NotMounted
+      // refusal to surface).
+      dropIntent();
+      if (mountedSet.has(skill.name)) {
+        unmountMutation.mutate(skill.name);
+      }
+      return;
     }
+    mountMutation.mutate(skill.name);
   }
 
   const registry = useMemo(() => listing?.skills ?? [], [listing]);
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const matched =
-      q === ""
-        ? registry
-        : registry.filter((s) => s.name.toLowerCase().includes(q));
-    // Pin mounted (selected) skills to the top; Array.prototype.sort is
-    // stable, so the registry order is preserved within each group.
+    // The shared name-or-description substring, case-insensitive match
+    // (filterSkills), the same filter the picker applies -- the two surfaces
+    // agree on what a query selects by code, not by convention.
+    const matched = filterSkills(registry, search);
+    // Pin selected skills to the top (mounted OR intent-union -- both read as
+    // "selected"); Array.prototype.sort is stable, so the registry order is
+    // preserved within each group.
     return [...matched].sort(
-      (a, b) => Number(mountedSet.has(b.name)) - Number(mountedSet.has(a.name)),
+      (a, b) =>
+        Number(selectedSet.has(b.name)) - Number(selectedSet.has(a.name)),
     );
-  }, [registry, search, mountedSet]);
+  }, [registry, search, selectedSet]);
 
   const empty = !isLoading && registry.length === 0;
   const noMatches = !empty && filtered.length === 0;
@@ -309,20 +338,19 @@ export function ComposerSkillsSection({
           from ever growing a horizontal one. */}
       <ul className="grid max-h-44 min-h-0 grid-cols-[minmax(0,1fr)] gap-0.5 overflow-x-hidden overflow-y-auto pr-0.5">
         {filtered.map((skill) => {
-          const isMounted = mountedSet.has(skill.name);
           const isActivated = activatedSet.has(skill.name);
           const pending = pendingNames.has(skill.name);
           const disabled = loading || pending;
           return (
-            // The li is the row's flex container; the mount label is narrowed
-            // to checkbox + name + builtin badge (flex-1 keeps the row-tail
-            // control right-aligned) so clicking the activation control
-            // cannot toggle the mount.
+            // The li is the row's flex container; the mount label is the
+            // whole row (checkbox + name + builtin badge) -- the retired
+            // #699 row-tail activate action made way for the ADR-0112
+            // input-bar picker, leaving the Active badge as the only tail.
             <li key={skill.name} className="flex items-center gap-1">
               <label className={`${ROW_CLASS} min-w-0 flex-1`}>
                 <input
                   type="checkbox"
-                  checked={isMounted}
+                  checked={selectedSet.has(skill.name)}
                   disabled={disabled}
                   onChange={() => toggle(skill)}
                   className="size-3.5 cursor-pointer accent-primary disabled:cursor-not-allowed"
@@ -341,35 +369,19 @@ export function ComposerSkillsSection({
                   <span className="bg-muted text-muted-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
                     <FormattedMessage
                       id="composer.contextPanel.builtinSkillBadge"
-                      defaultMessage="Built-in"
+                      defaultMessage="System"
                     />
                   </span>
                 )}
               </label>
-              {/* Session-mode row tail (issue #699): mounted+unactivated gets
-                  the activate action (same loading/pendingNames gate as the
-                  checkbox); activated gets the badge-primary pill -- the same
-                  primary token as the thread Activate marker, so one domain
-                  concept reads one color. Nothing here renders in draft mode
-                  and an activated row gets no second action (no deactivate). */}
-              {sessionId !== null && isMounted && !isActivated && (
-                <button
-                  type="button"
-                  onClick={() => activateMutation.mutate(skill.name)}
-                  disabled={disabled}
-                  aria-label={intl.formatMessage(
-                    {
-                      id: "composer.contextPanel.skillActivateAria",
-                      defaultMessage: "Activate skill {name}",
-                    },
-                    { name: skill.name },
-                  )}
-                  className="text-muted-foreground hover:bg-accent hover:text-primary focus-visible:outline-ring shrink-0 cursor-pointer rounded-md p-1.5 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Zap className="size-3.5" aria-hidden />
-                </button>
-              )}
-              {sessionId !== null && isMounted && isActivated && (
+              {/* Session-mode row tail: the Active badge is the activation
+                  FACE (display only) -- the same primary token as the thread
+                  Activate marker, one domain concept one color. Nothing
+                  renders in draft mode, and there is no activate /
+                  deactivate action here (ADR-0112: the picker is the entry,
+                  unmount the sole exit). The activated set is always a
+                  subset of the mounted set, so no mounted check is needed. */}
+              {sessionId !== null && isActivated && (
                 <span className="bg-primary text-primary-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
                   <FormattedMessage
                     id="composer.contextPanel.skillActiveBadge"

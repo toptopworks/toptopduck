@@ -32,6 +32,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
 import type { CreateSessionReply, SetPosturePersistOutcome } from "../api";
 import {
+  activateSkill,
   closeSession,
   closeSessionAndWaitRelease,
   createSession,
@@ -56,6 +57,7 @@ import type { AuthMode } from "../types/approval";
 import { AUTH_MODE_DEFAULT } from "../types/approval";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import type { OpenSession } from "../session/sidebarModel";
+import { sessionKeys } from "../session/queryKeys";
 import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
 
 /** Composer posture the user picked on the cold-start bar before a session
@@ -85,6 +87,59 @@ export interface PendingComposerPosture {
   /** Skill spec names picked on the cold-start Skills trigger (draft mode,
    *  #500): mounted onto the minted session one by one, in pick order. */
   skills: string[];
+  /** Pre-activation intents picked on the cold-start picker (ADR-0112, issue
+   *  #716): activated onto the minted session AFTER the mount loop, in pick
+   *  order -- every name is mounted first (the redundant-mount refusal is
+   *  absorbed), so the activation sequence can never hit
+   *  NotMountedForActivation. The activation lands before registerOpen, so
+   *  the pane's first turn assembles with the activated body injected. */
+  activations: string[];
+}
+
+/** Absorb the expected redundant-mount refusal (issue #677): a cold-start
+ *  pick or pre-activation that names an auto-included builtin skill is
+ *  already in the session's folded initial set -- the backend's
+ *  AlreadyMounted is the expected outcome, not an error. Anything else
+ *  rethrows. Shared by the mint chain's mount loop and the in-session
+ *  materializer (ADR-0112: the composite intent never checks the mounted
+ *  cache -- the write runs and the refusal resolves silently). */
+function absorbRedundantMount(e: unknown): void {
+  if (
+    typeof e === "object" &&
+    e !== null &&
+    (e as { data?: { kind?: string } }).data?.kind === "AlreadyMounted"
+  ) {
+    return;
+  }
+  throw e;
+}
+
+/** Build an isolated pending-write wrapper shared by the mint chain and the
+ *  in-session materializer (ADR-0092 / ADR-0112): a rejected write logs +
+ *  surfaces via setShellError but never fails the surrounding flow -- the
+ *  session opens / the ask proceeds without it. */
+function isolatedPendingWrite(
+  intl: IntlShape,
+  setShellError: (error: AppError | null) => void,
+  onFault: string,
+) {
+  return async (
+    write: () => Promise<unknown>,
+    facet: string,
+    ...labels: unknown[]
+  ): Promise<void> => {
+    try {
+      await write();
+    } catch (e) {
+      log.warn(
+        "useShellSessions",
+        `apply pending ${facet} failed; ${onFault}`,
+        ...labels,
+        fmtError(e, intl),
+      );
+      setShellError(toAppError(e, intl, "shell"));
+    }
+  };
 }
 
 /** Resume / open-busy status (ADR-0034). A structured discriminated union, not
@@ -154,6 +209,13 @@ export function useShellSessions({
     posture: PendingComposerPosture,
     pendingFiles: string[],
   ) => Promise<boolean>;
+  /** ADR-0112 (issue #716): materialize an ACTIVE session's pre-activation
+   *  intents before its next ask. Mount every name (redundant mounts
+   *  absorbed), then activate each; each write is isolated like the mint
+   *  chain's posture writes. Resolves only after the session's mounted /
+   *  activated / thread caches have re-read, so the ask that follows starts
+   *  from fresh cache. */
+  materializeActivations: (sid: string, names: string[]) => Promise<void>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
   /** Route one webview file drop (#81). `position` is the Tauri drop-event
@@ -343,23 +405,11 @@ export function useShellSessions({
           // remaining picks still apply (the picker's keep-server-posture
           // semantics). The write kinds share this helper so the catch
           // contract lives in one place.
-          const applyPostureWrite = async (
-            write: () => Promise<unknown>,
-            facet: string,
-            ...labels: unknown[]
-          ): Promise<void> => {
-            try {
-              await write();
-            } catch (e) {
-              log.warn(
-                "useShellSessions",
-                `apply pending ${facet} failed; the session opens without it`,
-                ...labels,
-                fmtError(e, intl),
-              );
-              setShellError(toAppError(e, intl, "shell"));
-            }
-          };
+          const applyPostureWrite = isolatedPendingWrite(
+            intl,
+            setShellError,
+            "the session opens without it",
+          );
           // The posture write carries the #529 persist verdict in the
           // RESOLVED value (never a reject): surface it like the picker's
           // fault lines, because an un-surfaced verdict leaves the selection
@@ -433,23 +483,22 @@ export function useShellSessions({
           }
           for (const name of posture.skills) {
             await applyPostureWrite(
-              () =>
-                mountSkill(sid, name).catch((e: unknown) => {
-                  // Issue #677: a cold-start pick that names an auto-included
-                  // builtin skill is already in the session's folded initial
-                  // set -- the backend refuses the redundant mount, and that
-                  // refusal is the expected outcome here, not an error.
-                  if (
-                    typeof e === "object" &&
-                    e !== null &&
-                    (e as { data?: { kind?: string } }).data?.kind ===
-                    "AlreadyMounted"
-                  ) {
-                    return null;
-                  }
-                  throw e;
-                }),
+              () => mountSkill(sid, name).catch(absorbRedundantMount),
               "skill mount",
+              name,
+            );
+          }
+          // ADR-0112 Decision 4: the activation sequence lands AFTER the
+          // whole mount loop -- every pre-activated name is mounted by now
+          // (this chain mounted it, or it was auto-included with the refusal
+          // absorbed above), so activate_skill can never hit
+          // NotMountedForActivation. Activation is idempotent server-side,
+          // so a name the folded initial set already activated resolves as a
+          // silent no-op.
+          for (const name of posture.activations) {
+            await applyPostureWrite(
+              () => activateSkill(sid, name),
+              "skill activation",
               name,
             );
           }
@@ -495,6 +544,47 @@ export function useShellSessions({
       }
     },
     [intl, mintAndRegister, setShellError],
+  );
+
+  // ADR-0112 (issue #716): materialize the active session's pre-activation
+  // intents before an ask. Mount every name (the redundant-mount refusal is
+  // absorbed -- the composite intent never checks the mounted cache, the
+  // write runs and the refusal resolves silently), then activate each
+  // (idempotent server-side, so an already-active name is a no-op). Each
+  // write is isolated like the mint chain's posture writes: a reject logs +
+  // surfaces via setShellError but never blocks the ask that follows. The
+  // caches re-read before this resolves: the writes bypassed the mutations'
+  // synchronous deltas, and awaiting the invalidation also closes the
+  // ADR-0051 race (a thread refetch resolving after the ask's optimistic
+  // append would wipe it).
+  const materializeActivations = useCallback(
+    async (sid: string, names: string[]): Promise<void> => {
+      const applyWrite = isolatedPendingWrite(
+        intl,
+        setShellError,
+        "the ask proceeds without it",
+      );
+      for (const name of names) {
+        await applyWrite(
+          () => mountSkill(sid, name).catch(absorbRedundantMount),
+          "skill mount",
+          name,
+        );
+      }
+      for (const name of names) {
+        await applyWrite(() => activateSkill(sid, name), "skill activation", name);
+      }
+      await queryClient.invalidateQueries({
+        queryKey: sessionKeys.mountedSkills(sid),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: sessionKeys.activatedSkills(sid),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: sessionKeys.thread(sid),
+      });
+    },
+    [intl, queryClient, setShellError],
   );
 
   // Drop-to-create on the empty-state main area (ADR-0061/0089/0092, #81 A1):
@@ -973,6 +1063,7 @@ export function useShellSessions({
     busy,
     resumeStatus,
     createSessionWithQuestion,
+    materializeActivations,
     openPersisted,
     dropFile,
     onWebviewDrop,
