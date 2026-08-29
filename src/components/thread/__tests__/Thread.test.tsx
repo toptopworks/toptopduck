@@ -1309,6 +1309,9 @@ describe("Thread", () => {
       const classes = card!.className.split(/\s+/);
       expect(classes).toContain("bg-destructive/10");
       expect(classes).toContain("border-destructive/40");
+      // The bare border (width) rides in the shared card shell -- dropping it
+      // would leave the color tokens on an invisible border.
+      expect(classes).toContain("border");
       // The card hugs its content (the draft posture): no width utility that
       // would stretch it across the items-start stream.
       expect(classes).not.toContain("w-full");
@@ -1318,6 +1321,9 @@ describe("Thread", () => {
       const head = card!.querySelector(".outcome-icon")!.parentElement;
       expect(head?.querySelector(".failed-reason")?.textContent).toBe("执行查询失败");
       expect(card!.querySelector(".error-details")).not.toBeNull();
+      // The fold sits below the glyph head: it is the card's second child,
+      // after the head row (same element as the .error-details query).
+      expect(card!.children[1]).toBe(card!.querySelector(".error-details"));
       // The closing meta row no longer repeats the glyph; the stamp
       // hover-reveal survives (chatRecord carries a settled_at).
       expect(container.querySelector(".turn-meta .outcome-icon")).toBeNull();

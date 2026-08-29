@@ -5,7 +5,7 @@
 // thinking folds + always-expanded connective prose + per-round step folds,
 // the outcome body, and a closing meta row (reply copy + settled_at + the
 // outcome glyph for Materialized/Textual; Failed/Cancelled integrate their
-// glyph into the failure card head, issue #720). App annotations all live on
+// glyph into the outcome card head, issue #720). App annotations all live on
 // the assistant side; the bubble carries only user output and conversation
 // facts.
 
@@ -96,10 +96,10 @@ export function TurnCard({
   // ADR-0028 Why 2 + ADR-0103 attribution: Failed/Cancelled weaken the stream
   // only. Stale only lands on Materialized turns, so the two dims never stack.
   const weakened = record.outcome.kind === "Failed" || record.outcome.kind === "Cancelled";
-  // Issue #720: Failed/Cancelled render their glyph at the failure card head
+  // Issue #720: Failed/Cancelled render their glyph at the outcome card head
   // (TurnBody), so the closing meta row carries no glyph for them; the row
-  // itself renders only while something remains in it (the glyph for the other
-  // outcomes, or the settle stamp) -- an empty row would be pure spacing noise.
+  // renders only while it carries content (the glyph for the other outcomes,
+  // or the settle stamp).
   const glyphInMeta = !weakened;
   const showsMetaRow = glyphInMeta || record.settled_at !== undefined;
   // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
@@ -447,9 +447,14 @@ function TurnBody({
     case "Cancelled":
       // Outcome D, same card shape as Failed but muted (issue #720): the glyph
       // head carries the whole body -- no reason text, no fold -- so the card
-      // reads as the weakened-grey sibling of the failure card.
+      // reads as the weakened-grey sibling of the Failed card.
       return (
-        <div className={cn(OUTCOME_CARD_CLASS, "turn-outcome cancelled bg-muted text-muted-foreground")}>
+        <div
+          className={cn(
+            OUTCOME_CARD_CLASS,
+            "turn-outcome cancelled bg-muted text-muted-foreground",
+          )}
+        >
           <div className="flex items-center gap-1.5">
             <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
             <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
