@@ -3,9 +3,11 @@
 // question in full + asked_at + copy) over a left assistant stream -- header
 // annotations (active chip, skill drift), the round-grouped trace as per-round
 // thinking folds + always-expanded connective prose + per-round step folds,
-// the outcome body, and a closing meta row (outcome glyph + reply copy +
-// settled_at). App annotations all live on the assistant side; the bubble
-// carries only user output and conversation facts.
+// the outcome body, and a closing meta row (reply copy + settled_at + the
+// outcome glyph for Materialized/Textual; Failed/Cancelled integrate their
+// glyph into the failure card head, issue #720). App annotations all live on
+// the assistant side; the bubble carries only user output and conversation
+// facts.
 
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
@@ -64,7 +66,8 @@ interface TurnCardProps {
 // One turn rendered as a chat exchange (ADR-0103): the user bubble (verbatim
 // question, full text) over the assistant stream. The four outcome kinds stay
 // distinguishable by text as well as by glyph/color (ADR-0028); the outcome
-// glyph rides the stream's closing meta row. A stale Materialized turn ghosts
+// glyph rides the stream's closing meta row on Materialized/Textual and the
+// failure card head on Failed/Cancelled (issue #720). A stale Materialized turn ghosts
 // the whole exchange (opacity-50) and gains a clickable causal chip
 // (ADR-0041/0047). ADR-0103's attribution list names `stale`: the CHIP is
 // that app annotation and renders on the assistant side (inside the body);
@@ -90,10 +93,15 @@ export function TurnCard({
   const intl = useIntl();
   const isStale = !!staleAnchor;
   const drifted = selectDriftedSkills(record, skillIndex);
-  const { Icon, label, tone } = outcomeVisual(intl, record.outcome, isStale);
   // ADR-0028 Why 2 + ADR-0103 attribution: Failed/Cancelled weaken the stream
   // only. Stale only lands on Materialized turns, so the two dims never stack.
   const weakened = record.outcome.kind === "Failed" || record.outcome.kind === "Cancelled";
+  // Issue #720: Failed/Cancelled render their glyph at the failure card head
+  // (TurnBody), so the closing meta row carries no glyph for them; the row
+  // itself renders only while something remains in it (the glyph for the other
+  // outcomes, or the settle stamp) -- an empty row would be pure spacing noise.
+  const glyphInMeta = !weakened;
+  const showsMetaRow = glyphInMeta || record.settled_at !== undefined;
   // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
   // IS text: a Textual turn's body. Materialized answers with a result link,
   // Failed/Cancelled with markers -- nothing textual to copy.
@@ -147,40 +155,59 @@ export function TurnCard({
           onStaleChipJump={onStaleChipJump}
         />
         {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
-            state, always visible. The settle facts (reply copy + stamp, honest
-            degrade: no settled_at recorded -> no time element) are
-            hover-revealed alongside it (HOVER_REVEAL_CLASS rides the
-            assistant-stream group). */}
-        <p className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <span
-            className={cn(
-              "outcome-icon inline-flex items-center justify-center w-4 h-4 shrink-0",
-              tone,
+            state, always visible -- for Materialized/Textual (issue #720 moves
+            the Failed/Cancelled glyph to the failure card head). The settle
+            facts (reply copy + stamp, honest degrade: no settled_at recorded ->
+            no time element) are hover-revealed alongside it (HOVER_REVEAL_CLASS
+            rides the assistant-stream group). */}
+        {showsMetaRow && (
+          <p className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+            {/* Derived here (not above) so Failed/Cancelled never compute the
+                meta-row visual they cannot use -- their glyph derives in
+                TurnBody's card head. */}
+            {glyphInMeta && (
+              <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, isStale)} />
             )}
-            role="img"
-            aria-label={label}
-          >
-            <Icon aria-hidden="true" className="w-4 h-4" />
-          </span>
-          <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
-            {replyText !== null && (
-              <CopyButton
-                text={replyText}
-                label={intl.formatMessage({
-                  id: "thread.copy.reply",
-                  defaultMessage: "Copy reply",
-                })}
-              />
-            )}
-            {record.settled_at !== undefined && (
-              <time dateTime={new Date(record.settled_at).toISOString()}>
-                {intl.formatTime(record.settled_at)}
-              </time>
-            )}
-          </span>
-        </p>
+            <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
+              {replyText !== null && (
+                <CopyButton
+                  text={replyText}
+                  label={intl.formatMessage({
+                    id: "thread.copy.reply",
+                    defaultMessage: "Copy reply",
+                  })}
+                />
+              )}
+              {record.settled_at !== undefined && (
+                <time dateTime={new Date(record.settled_at).toISOString()}>
+                  {intl.formatTime(record.settled_at)}
+                </time>
+              )}
+            </span>
+          </p>
+        )}
       </div>
     </div>
+  );
+}
+
+// The outcome glyph span (ADR-0047/0050): Lucide icon + accessible label +
+// text-* tone, shared by the closing meta row (Materialized/Textual) and the
+// failure card head (Failed/Cancelled, issue #720) so the glyph renders
+// identically wherever it lands.
+function OutcomeGlyph({ visual }: { visual: ReturnType<typeof outcomeVisual> }) {
+  const { Icon, label, tone } = visual;
+  return (
+    <span
+      className={cn(
+        "outcome-icon inline-flex items-center justify-center w-4 h-4 shrink-0",
+        tone,
+      )}
+      role="img"
+      aria-label={label}
+    >
+      <Icon aria-hidden="true" className="w-4 h-4" />
+    </span>
   );
 }
 
@@ -268,6 +295,13 @@ interface TurnBodyProps {
   hasJumpTarget: boolean;
   onStaleChipJump: (() => void) | undefined;
 }
+
+// The shared shell of the Failed/Cancelled outcome cards (issue #720): one
+// constant so the two kinds stay isomorphic -- Failed tints it destructive,
+// Cancelled mutes it; only the tint utilities and the head content differ.
+// No width utility: the card hugs its content (the assistant stream is
+// items-start), stretching only as far as a long reason or detail forces.
+const OUTCOME_CARD_CLASS = "mt-1 rounded-md border px-2.5 py-2 text-xs leading-snug";
 
 function TurnBody({
   record,
@@ -383,22 +417,44 @@ function TurnBody({
     case "Failed": {
       // Outcome C (issue #125): render by TurnFailure kind via the locale
       // catalog (no backend Display string crosses IPC). Execute / Resource
-      // carry a technical detail under the collapsed fold.
+      // carry a technical detail under the collapsed fold. Issue #720: one
+      // destructive tint card -- the outcome glyph at the card head with the
+      // reason on the same line, the fold inside the card below them -- taking
+      // the tinted bg + border treatment the shadcn Alert destructive variant
+      // consumes (border-destructive/40 bg-destructive/10, DESIGN.md Alerts).
       const failure = record.outcome.data;
       const detail = turnFailureDetail(failure);
       return (
-        <div className="turn-outcome failed mt-1 text-xs leading-snug">
-          {/* <div>, not <p>: a <p> cannot legally contain the <details> fold. */}
-          <span className="failed-reason text-destructive">{formatTurnFailure(failure, intl)}</span>
+        // <div>, not <p>: a <p> cannot legally contain the <details> fold.
+        <div
+          className={cn(
+            OUTCOME_CARD_CLASS,
+            "turn-outcome failed border-destructive/40 bg-destructive/10",
+          )}
+        >
+          <div className="flex items-center gap-1.5">
+            {/* Stale never lands here (Materialized only), so the visual is
+                derived with stale=false. */}
+            <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
+            <span className="failed-reason text-destructive">
+              {formatTurnFailure(failure, intl)}
+            </span>
+          </div>
           <TechnicalDetailsFold detail={detail} />
         </div>
       );
     }
     case "Cancelled":
+      // Outcome D, same card shape as Failed but muted (issue #720): the glyph
+      // head carries the whole body -- no reason text, no fold -- so the card
+      // reads as the weakened-grey sibling of the failure card.
       return (
-        <p className="turn-outcome cancelled mt-1 text-xs leading-snug text-muted-foreground">
-          <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
-        </p>
+        <div className={cn(OUTCOME_CARD_CLASS, "turn-outcome cancelled bg-muted text-muted-foreground")}>
+          <div className="flex items-center gap-1.5">
+            <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
+            <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
+          </div>
+        </div>
       );
     default: {
       // Exhaustiveness guard: a future TurnOutcome variant must add a case here,

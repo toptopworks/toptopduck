@@ -2,7 +2,7 @@
 
 ## Decision
 
-thread 表现层把轮次账本渲染为 chat 消息流：一轮 = 右对齐用户气泡 + 左 assistant 流。气泡仅承载用户产出与对话事实——问话全文换行、`asked_at`、复制；app 注解（active chip、技能 drift、outcome、stale、失败回溯、假设说明、结果预览）统一归 assistant 侧。assistant 流时序：头部注解 → 每轮「thinking 折叠（默认折叠）+ 连接话语恒展开 + 步折叠（默认折叠）」交替（按轮分组见 ADR-0078）→ 收尾 meta 行（答复复制 + `settled_at`）+ outcome 收尾。非轮次条目（源 / 技能生命周期事件、运行时归属段头）保持 divider 形态插在原时序位置。领域层 `Turn` / 执行轨迹 / 生命周期事件定义不变——投影不改域。
+thread 表现层把轮次账本渲染为 chat 消息流：一轮 = 右对齐用户气泡 + 左 assistant 流。气泡仅承载用户产出与对话事实——问话全文换行、`asked_at`、复制；app 注解（active chip、技能 drift、outcome、stale、失败回溯、假设说明、结果预览）统一归 assistant 侧。assistant 流时序：头部注解 → 每轮「thinking 折叠（默认折叠）+ 连接话语恒展开 + 步折叠（默认折叠）」交替（按轮分组见 ADR-0078）→ outcome 收尾 + 收尾 meta 行（答复复制 + `settled_at`；Materialized/Textual 的 outcome glyph 仍在收尾行）。Failed/Cancelled 的 outcome 收尾整合为单一卡：glyph 居卡头与 reason 同行，技术详情折叠在卡内其下（Failed 走 destructive tint，Cancelled 同构 muted 卡）；两 outcome 的收尾 meta 行不再渲染 glyph。非轮次条目（源 / 技能生命周期事件、运行时归属段头）保持 divider 形态插在原时序位置。领域层 `Turn` / 执行轨迹 / 生命周期事件定义不变——投影不改域。
 
 ## Context
 

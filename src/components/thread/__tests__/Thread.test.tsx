@@ -1296,6 +1296,58 @@ describe("Thread", () => {
       expect(stream!.querySelector(".turn-meta time")).not.toBeNull();
     });
 
+    it("integrates Failed into one destructive tint card: glyph head + reason + fold (issue #720)", () => {
+      const { container } = renderChat(
+        chatRecord({
+          outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } },
+        }),
+      );
+      const card = container.querySelector(".turn-outcome.failed");
+      expect(card).not.toBeNull();
+      // The tinted card takes the shadcn Alert destructive variant's treatment
+      // (border-destructive/40 bg-destructive/10, per the DESIGN.md Alerts note).
+      const classes = card!.className.split(/\s+/);
+      expect(classes).toContain("bg-destructive/10");
+      expect(classes).toContain("border-destructive/40");
+      // The card hugs its content (the draft posture): no width utility that
+      // would stretch it across the items-start stream.
+      expect(classes).not.toContain("w-full");
+      // One container: the glyph at the card head with the reason on the same
+      // line, the technical fold inside the card below them.
+      expect(card!.querySelector(".outcome-icon")?.getAttribute("aria-label")).toBe("失败");
+      const head = card!.querySelector(".outcome-icon")!.parentElement;
+      expect(head?.querySelector(".failed-reason")?.textContent).toBe("执行查询失败");
+      expect(card!.querySelector(".error-details")).not.toBeNull();
+      // The closing meta row no longer repeats the glyph; the stamp
+      // hover-reveal survives (chatRecord carries a settled_at).
+      expect(container.querySelector(".turn-meta .outcome-icon")).toBeNull();
+      expect(container.querySelector(".turn-meta time")).not.toBeNull();
+      expect(container.querySelector(".turn-meta .meta-reveal")).not.toBeNull();
+    });
+
+    it("renders Cancelled as a same-shape muted card whose glyph head is the whole body (issue #720)", () => {
+      const { container } = renderChat(chatRecord({ outcome: { kind: "Cancelled" } }));
+      const card = container.querySelector(".turn-outcome.cancelled");
+      expect(card).not.toBeNull();
+      expect(card!.className.split(/\s+/)).toContain("bg-muted");
+      expect(card!.querySelector(".outcome-icon")?.getAttribute("aria-label")).toBe("已取消");
+      // No fold on the muted sibling -- nothing technical to disclose.
+      expect(card!.querySelector(".error-details")).toBeNull();
+      expect(container.querySelector(".turn-meta .outcome-icon")).toBeNull();
+      expect(container.querySelector(".turn-meta time")).not.toBeNull();
+    });
+
+    it("omits the closing meta row entirely when Failed/Cancelled records no stamp (issue #720)", () => {
+      // Honest degrade: with neither a glyph (it moved to the card head) nor a
+      // settle stamp, the row would render as an empty line -- no content
+      // means no row; the outcome card alone closes the exchange.
+      const { container } = renderChat(
+        chatRecord({ outcome: { kind: "Cancelled" }, settled_at: undefined }),
+      );
+      expect(container.querySelector(".turn-meta")).toBeNull();
+      expect(container.querySelector(".turn-outcome.cancelled")).not.toBeNull();
+    });
+
     it("weakens Failed/Cancelled on the assistant side only -- the user bubble stays full", () => {
       // ADR-0103 attribution: the failure is the assistant's, so the
       // weakening lands on the stream; the user's own question never dims.
