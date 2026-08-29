@@ -1019,15 +1019,17 @@ export default function App() {
                         skillPicker={{
                           sessionId: activeSessionId,
                           onPick: handleSkillPick,
+                          chips: {
+                            node: (
+                              // The ADR-0112 pre-activation chips flow inline
+                              // in the input area (the composer-held intents
+                              // since the last submit); the caret seats right
+                              // after the last chip.
+                              <ComposerSkillChips names={pendingActivations} />
+                            ),
+                            onBackspace: handleChipBackspace,
+                          },
                         }}
-                        onChipBackspace={handleChipBackspace}
-                        chips={(
-                          // The ADR-0112 pre-activation chips flow inline in
-                          // the input area (the composer-held intents since
-                          // the last submit); the caret seats right after the
-                          // last chip.
-                          <ComposerSkillChips names={pendingActivations} />
-                        )}
                         header={(
                           // ADR-0092 Decision 6 (#500): the Skills trigger
                           // renders in BOTH postures — session-active and

@@ -59,8 +59,10 @@ export type SkillPickerPanelProps = {
   /** Activated names for the display-only Active badges (empty on the
    *  cold-start bar -- no session, no activation truth). */
   activatedNames: ReadonlySet<string>;
-  /** The highlighted row index (already clamped by the parent). */
-  highlightIndex: number;
+  /** The highlighted row index (already clamped by the parent); null when
+   *  the filtered list is empty -- no row is highlighted, and no option id
+   *  is named for aria-activedescendant. */
+  highlightIndex: number | null;
   onHoverIndex: (index: number) => void;
   onSelect: (skill: SkillEntry) => void;
 };

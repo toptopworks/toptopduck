@@ -24,15 +24,6 @@ type QuestionBarProps = {
    *  textarea (the Skills / MCP trigger chips threaded from the shell,
    *  ADR-0092). */
   header?: ReactNode;
-  /** Pre-activation chips (ADR-0112, issue #716) flowing inline in the input
-   *  area before the textarea (the ComposerSkillChips list): each chip joins
-   *  the input row's flex wrap, so the caret seats right after the last
-   *  chip. */
-  chips?: ReactNode;
-  /** Backspace at the draft's start (caret 0, no selection) withdraws the
-   *  most recent pre-activation chip -- the chips seat before the draft's
-   *  first char, so the last one deletes like a text char (ADR-0112). */
-  onChipBackspace?: () => void;
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */
   children?: ReactNode;
@@ -48,6 +39,20 @@ type QuestionBarProps = {
   skillPicker?: {
     sessionId: string | null;
     onPick: (name: string) => void;
+    /** The pre-activation chips (ADR-0112, issue #716) travel as a REQUIRED
+     *  bundle with the picker surface (issue #718): the chip node renders
+     *  inline in the input area before the textarea (each chip joins the
+     *  input row's flex wrap, so the caret seats right after the last chip),
+     *  and Backspace at the draft's start (caret 0, no selection) fires
+     *  onBackspace to withdraw the most recent chip -- the chips seat before
+     *  the draft's first char, so the last one deletes like a text char.
+     *  Bundling makes the two unmoored shapes -- a chips slot hanging
+     *  outside the picker channel, and a picker channel with no chips slot
+     *  -- inexpressible in the type layer. */
+    chips: {
+      node: ReactNode;
+      onBackspace: () => void;
+    };
   };
 } & {
   /** Controlled draft pair (ADR-0092 useComposerState). Both must be provided
@@ -85,7 +90,7 @@ type QuestionBarProps = {
 // from it for the aria-activedescendant hand-off (focus never leaves the
 // textarea).
 const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, header, chips, onChipBackspace, children, trailing, skillPicker }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, header, children, trailing, skillPicker }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
   const value = draft ?? localDraft;
@@ -97,6 +102,10 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
     setValue,
     enabled: skillPicker !== undefined,
   });
+  // The single narrowing point (issue #718): the snapshot's status is the
+  // one judge of the panel's posture -- everything panel-shaped reads
+  // `panel`, never a re-check of its own.
+  const panel = picker.state.status === "open" ? picker.state : null;
 
   function submit() {
     const q = value.trim();
@@ -134,7 +143,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
           row, so the caret seats right after the last chip. With no chips
           the textarea alone fills the row (the plain composer). */}
       <div className="flex flex-wrap items-start gap-x-3 gap-y-1 px-3 pt-3 pb-2">
-        {chips}
+        {skillPicker?.chips.node}
         <textarea
           id="question-bar-input"
           ref={textareaRef}
@@ -152,14 +161,16 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
           // active-option hand-off rides aria-activedescendant HERE -- on
           // the focused element, where AT actually tracks it. Closed, the
           // textarea is a plain textbox again (no role override).
-          role={picker.isOpen ? "combobox" : undefined}
-          aria-expanded={picker.isOpen || undefined}
-          aria-controls={picker.isOpen ? SKILL_PICKER_PANEL_ID : undefined}
-          aria-haspopup={picker.isOpen ? "listbox" : undefined}
-          aria-autocomplete={picker.isOpen ? "list" : undefined}
+          role={panel ? "combobox" : undefined}
+          aria-expanded={panel ? true : undefined}
+          aria-controls={panel ? SKILL_PICKER_PANEL_ID : undefined}
+          aria-haspopup={panel ? "listbox" : undefined}
+          aria-autocomplete={panel ? "list" : undefined}
           aria-activedescendant={
-            picker.isOpen && picker.rows.length > 0
-              ? skillPickerOptionId(SKILL_PICKER_PANEL_ID, picker.highlightIndex)
+            // The null highlight (empty filtered list) names no option --
+            // the guard is the sentinel itself, not a row-count re-check.
+            panel && panel.highlightIndex !== null
+              ? skillPickerOptionId(SKILL_PICKER_PANEL_ID, panel.highlightIndex)
               : undefined
           }
           disabled={loading}
@@ -175,12 +186,12 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
             // its span) and on IME composition, matching the Enter paths.
             if (
               e.key === "Backspace" &&
-              !picker.isOpen &&
+              !panel &&
               !e.nativeEvent.isComposing &&
               e.currentTarget.selectionStart === 0 &&
               e.currentTarget.selectionEnd === 0
             ) {
-              onChipBackspace?.();
+              skillPicker?.chips.onBackspace();
             }
             // The picker consumes its keys first (ADR-0112): with the panel
             // open, Enter selects and Esc closes -- never submit. The
@@ -208,16 +219,16 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
       {/* The panel anchors to the bar itself (the form is the positioned
           ancestor) and floats above its top edge with a gap -- it never
           overlaps the composer, matching the reference surface. */}
-      {picker.isOpen && picker.mode !== null && (
+      {panel && (
         <SkillPickerPanel
           id={SKILL_PICKER_PANEL_ID}
-          mode={picker.mode}
-          skills={picker.rows}
-          query={picker.query}
-          totalSkills={picker.totalSkills}
-          registryError={picker.registryError}
-          activatedNames={picker.activatedNames}
-          highlightIndex={picker.highlightIndex}
+          mode={panel.mode}
+          skills={panel.rows}
+          query={panel.query}
+          totalSkills={panel.totalSkills}
+          registryError={panel.registryError}
+          activatedNames={panel.activatedNames}
+          highlightIndex={panel.highlightIndex}
           onHoverIndex={picker.setHighlight}
           onSelect={(skill) =>
             picker.select(

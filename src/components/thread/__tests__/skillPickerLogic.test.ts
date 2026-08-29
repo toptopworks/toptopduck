@@ -77,8 +77,15 @@ describe("clampHighlight (never wraps)", () => {
     expect(clampHighlight(1, 1, 3)).toBe(2);
   });
 
-  it("pins 0 for an empty list", () => {
-    expect(clampHighlight(2, -1, 0)).toBe(0);
+  // The degenerate-but-legal non-empty case (a filter that leaves one row):
+  // both directions clamp onto that row. The EMPTY list is no longer this
+  // function's business (issue #718): the snapshot derives a null highlight
+  // there and the arrow keys no-op before the clamp -- its "pin 0" contract
+  // is pinned at the QuestionBar level instead (aria-activedescendant
+  // absent on the empty face).
+  it("holds the only row of a single-row list in both directions", () => {
+    expect(clampHighlight(0, -1, 1)).toBe(0);
+    expect(clampHighlight(0, 1, 1)).toBe(0);
   });
 });
 
