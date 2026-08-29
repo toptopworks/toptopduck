@@ -134,6 +134,7 @@ export function ComposerSkillsTrigger({
           onPendingSkillsChange={onPendingSkillsChange}
           activationIntents={activationIntents}
           onActivationIntentsChange={onActivationIntentsChange}
+          cliTools={cliTools}
         />
       </PopoverContent>
     </Popover>
