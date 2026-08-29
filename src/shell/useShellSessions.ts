@@ -32,6 +32,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
 import type { CreateSessionReply, SetPosturePersistOutcome } from "../api";
 import {
+  activateSkill,
   closeSession,
   closeSessionAndWaitRelease,
   createSession,
@@ -56,6 +57,7 @@ import type { AuthMode } from "../types/approval";
 import { AUTH_MODE_DEFAULT } from "../types/approval";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import type { OpenSession } from "../session/sidebarModel";
+import { sessionKeys } from "../session/queryKeys";
 import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
 
 /** Composer posture the user picked on the cold-start bar before a session
@@ -85,6 +87,119 @@ export interface PendingComposerPosture {
   /** Skill spec names picked on the cold-start Skills trigger (draft mode,
    *  #500): mounted onto the minted session one by one, in pick order. */
   skills: string[];
+  /** Pre-activation intents picked on the cold-start picker (ADR-0112, issue
+   *  #716): activated onto the minted session AFTER the mount loop, in pick
+   *  order -- every name is mounted first (the redundant-mount refusal
+   *  absorbed; a name whose mount failed with a genuine error is skipped at
+   *  activation time, its root cause already surfaced), so an activation
+   *  never masks a mount failure with NotMountedForActivation. The
+   *  activation lands before registerOpen, so the pane's first turn
+   *  assembles with the activated body injected. */
+  activations: string[];
+}
+
+/** Narrow a mount reject to the typed wire shape: SessionError's SkillMount
+ *  variant carrying SkillMountError::AlreadyMounted (issue #677 -- the
+ *  expected redundant-mount refusal, not an error). The ADR-0069 facade
+ *  keeps the guards module-internal, so this local predicate mirrors their
+ *  defensive L1 shape (the outer kind + the inner kind + the name verified
+ *  before the shape is promised). */
+function isAlreadyMountedRefusal(
+  e: unknown,
+): e is {
+  kind: "SkillMount";
+  data: { kind: "AlreadyMounted"; data: { name: string } };
+} {
+  if (typeof e !== "object" || e === null) return false;
+  if ((e as { kind?: unknown }).kind !== "SkillMount") return false;
+  const inner = (e as { data?: unknown }).data;
+  if (
+    typeof inner !== "object" ||
+    inner === null ||
+    (inner as { kind?: unknown }).kind !== "AlreadyMounted"
+  ) {
+    return false;
+  }
+  return (
+    typeof (inner as { data?: { name?: unknown } }).data?.name === "string"
+  );
+}
+
+/** Absorb the expected redundant-mount refusal (issue #677): a cold-start
+ *  pick or pre-activation that names an auto-included builtin skill is
+ *  already in the session's folded initial set -- the backend's
+ *  AlreadyMounted is the expected outcome, not an error. Anything else
+ *  rethrows. Shared by the mint chain's mount loop and the in-session
+ *  materializer (ADR-0112: the composite intent never checks the mounted
+ *  cache -- the write runs and the refusal resolves silently). */
+function absorbRedundantMount(e: unknown): void {
+  if (isAlreadyMountedRefusal(e)) return;
+  throw e;
+}
+
+/** Build an isolated pending-write wrapper shared by the mint chain and the
+ *  in-session materializer (ADR-0092 / ADR-0112): a rejected write logs +
+ *  surfaces via setShellError but never fails the surrounding flow -- the
+ *  session opens / the ask proceeds without it. Resolves false on a reject
+ *  (the fault is already surfaced), so composite sequences can skip what a
+ *  failed write would have depended on. */
+function isolatedPendingWrite(
+  intl: IntlShape,
+  setShellError: (error: AppError | null) => void,
+  onFault: string,
+) {
+  return async (
+    write: () => Promise<unknown>,
+    facet: string,
+    ...labels: unknown[]
+  ): Promise<boolean> => {
+    try {
+      await write();
+      return true;
+    } catch (e) {
+      log.warn(
+        "useShellSessions",
+        `apply pending ${facet} failed; ${onFault}`,
+        ...labels,
+        fmtError(e, intl),
+      );
+      setShellError(toAppError(e, intl, "shell"));
+      return false;
+    }
+  };
+}
+
+/** Apply a composite pre-activation sequence in the ADR-0112 order: mount
+ *  every name first (the expected AlreadyMounted refusal absorbed), then
+ *  activate. A name whose mount failed with a genuine error is skipped at
+ *  activation time -- the isolated write already surfaced the root cause,
+ *  and activating an unmounted name would reject
+ *  NotMountedForActivation, overwriting that root cause in the single
+ *  shell-error slot. Shared by the mint chain and the in-session
+ *  materializer so the ordering contract lives in one place. */
+async function applyPendingSkillWrites(
+  sid: string,
+  mountNames: readonly string[],
+  activateNames: readonly string[],
+  applyWrite: (
+    write: () => Promise<unknown>,
+    facet: string,
+    ...labels: unknown[]
+  ) => Promise<boolean>,
+): Promise<void> {
+  const mounted = new Set<string>();
+  for (const name of mountNames) {
+    const ok = await applyWrite(
+      () => mountSkill(sid, name).catch(absorbRedundantMount),
+      "skill mount",
+      name,
+    );
+    if (ok) mounted.add(name);
+  }
+  for (const name of activateNames) {
+    if (!mounted.has(name)) continue;
+    await applyWrite(() => activateSkill(sid, name), "skill activation", name);
+  }
 }
 
 /** Resume / open-busy status (ADR-0034). A structured discriminated union, not
@@ -154,6 +269,13 @@ export function useShellSessions({
     posture: PendingComposerPosture,
     pendingFiles: string[],
   ) => Promise<boolean>;
+  /** ADR-0112 (issue #716): materialize an ACTIVE session's pre-activation
+   *  intents before its next ask. Mount every name (redundant mounts
+   *  absorbed), then activate each; each write is isolated like the mint
+   *  chain's posture writes. Resolves only after the session's mounted /
+   *  activated / thread caches have re-read, so the ask that follows starts
+   *  from fresh cache. */
+  materializeActivations: (sid: string, names: string[]) => Promise<void>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
   /** Route one webview file drop (#81). `position` is the Tauri drop-event
@@ -343,23 +465,11 @@ export function useShellSessions({
           // remaining picks still apply (the picker's keep-server-posture
           // semantics). The write kinds share this helper so the catch
           // contract lives in one place.
-          const applyPostureWrite = async (
-            write: () => Promise<unknown>,
-            facet: string,
-            ...labels: unknown[]
-          ): Promise<void> => {
-            try {
-              await write();
-            } catch (e) {
-              log.warn(
-                "useShellSessions",
-                `apply pending ${facet} failed; the session opens without it`,
-                ...labels,
-                fmtError(e, intl),
-              );
-              setShellError(toAppError(e, intl, "shell"));
-            }
-          };
+          const applyPostureWrite = isolatedPendingWrite(
+            intl,
+            setShellError,
+            "the session opens without it",
+          );
           // The posture write carries the #529 persist verdict in the
           // RESOLVED value (never a reject): surface it like the picker's
           // fault lines, because an un-surfaced verdict leaves the selection
@@ -431,28 +541,21 @@ export function useShellSessions({
               "auth mode",
             );
           }
-          for (const name of posture.skills) {
-            await applyPostureWrite(
-              () =>
-                mountSkill(sid, name).catch((e: unknown) => {
-                  // Issue #677: a cold-start pick that names an auto-included
-                  // builtin skill is already in the session's folded initial
-                  // set -- the backend refuses the redundant mount, and that
-                  // refusal is the expected outcome here, not an error.
-                  if (
-                    typeof e === "object" &&
-                    e !== null &&
-                    (e as { data?: { kind?: string } }).data?.kind ===
-                    "AlreadyMounted"
-                  ) {
-                    return null;
-                  }
-                  throw e;
-                }),
-              "skill mount",
-              name,
-            );
-          }
+          // ADR-0112 Decision 4: the mounts (the pending skills UNION the
+          // pre-activation names -- the composite intent's mount half rides
+          // the same loop even if a future path stages an activation without
+          // the mount list) strictly precede the activations;
+          // applyPendingSkillWrites owns the ordering, absorbs the expected
+          // redundant-mount refusal, and skips activation for names whose
+          // mount failed with a genuine error. Activation is idempotent
+          // server-side, so a name the folded initial set already activated
+          // resolves as a silent no-op.
+          await applyPendingSkillWrites(
+            sid,
+            [...new Set([...posture.skills, ...posture.activations])],
+            posture.activations,
+            applyPostureWrite,
+          );
         }
         registerOpen({
           sid,
@@ -495,6 +598,44 @@ export function useShellSessions({
       }
     },
     [intl, mintAndRegister, setShellError],
+  );
+
+  // ADR-0112 (issue #716): materialize the active session's pre-activation
+  // intents before an ask. Mount every name (the redundant-mount refusal
+  // absorbed -- the composite intent never checks the mounted cache, the
+  // write runs and the refusal resolves silently), then activate each
+  // (idempotent server-side, so an already-active name is a no-op); a name
+  // whose mount failed with a genuine error is skipped at activation time,
+  // so the mount's root cause stays surfaced. Each write is isolated like
+  // the mint chain's posture writes: a reject logs + surfaces via
+  // setShellError but never blocks the ask that follows. The caches re-read
+  // before this resolves: the writes bypassed the mutations' synchronous
+  // deltas, and awaiting the invalidation also closes the ADR-0051 race (a
+  // thread refetch resolving after the ask's optimistic append would wipe
+  // it). The invalidations themselves are best-effort -- allSettled, so a
+  // failed refetch (recorded by its query's own error state) never rejects
+  // the materialization and takes the ask down with it.
+  const materializeActivations = useCallback(
+    async (sid: string, names: string[]): Promise<void> => {
+      const applyWrite = isolatedPendingWrite(
+        intl,
+        setShellError,
+        "the ask proceeds without it",
+      );
+      await applyPendingSkillWrites(sid, names, names, applyWrite);
+      await Promise.allSettled([
+        queryClient.invalidateQueries({
+          queryKey: sessionKeys.mountedSkills(sid),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: sessionKeys.activatedSkills(sid),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: sessionKeys.thread(sid),
+        }),
+      ]);
+    },
+    [intl, queryClient, setShellError],
   );
 
   // Drop-to-create on the empty-state main area (ADR-0061/0089/0092, #81 A1):
@@ -973,6 +1114,7 @@ export function useShellSessions({
     busy,
     resumeStatus,
     createSessionWithQuestion,
+    materializeActivations,
     openPersisted,
     dropFile,
     onWebviewDrop,

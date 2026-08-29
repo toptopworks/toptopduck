@@ -371,7 +371,7 @@ export function SkillsSection({
                   : opt === "builtin"
                     ? intl.formatMessage({
                         id: "settings.skills.filterBuiltin",
-                        defaultMessage: "Built-in",
+                        defaultMessage: "System",
                       })
                     : intl.formatMessage({
                         id: "settings.skills.filterLocal",
@@ -588,7 +588,7 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
             ) : skill.acquired === "builtin" ? (
               <FormattedMessage
                 id="settings.skills.acquiredBuiltin"
-                defaultMessage="built-in"
+                defaultMessage="system"
               />
             ) : (
               <FormattedMessage

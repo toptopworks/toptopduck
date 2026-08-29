@@ -63,6 +63,10 @@ vi.mock("../../api", async (importOriginal) => {
     })),
     setAuthorizationMode: vi.fn(async () => {}),
     mountSkill: vi.fn(async () => {}),
+    // ADR-0112 pre-activation materialization (mint-chain activation loop +
+    // the in-session materializer). Default no-op; the materialization tests
+    // assert calls.
+    activateSkill: vi.fn(async () => {}),
   };
 });
 
@@ -80,6 +84,7 @@ vi.mock("../../lib/log", () => ({
 }));
 
 import {
+  activateSkill,
   closeSession,
   createSession,
   exportSession,
@@ -96,6 +101,7 @@ import {
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
+import { sessionKeys } from "../../session/queryKeys";
 import { mountComposerBarStub } from "../../__tests__/setup/barRectStub";
 import { useShellSessions } from "../useShellSessions";
 import type { PendingComposerPosture } from "../useShellSessions";
@@ -112,11 +118,24 @@ const DEFAULT_POSTURE: PendingComposerPosture = {
   modelPosture: null,
   authMode: AUTH_MODE_DEFAULT,
   skills: [],
+  activations: [],
 };
 
 /** Build a CreateSessionReply for mock returns (ADR-0089). */
 function reply(sid: string) {
   return { session_id: sid, duck_path: `/sessions/${sid}/session.duck` };
+}
+
+/** The typed wire shape of the redundant-mount refusal (issue #677):
+ *  SessionError's SkillMount variant carrying SkillMountError::AlreadyMounted.
+ *  The absorbing predicate verifies the outer kind + inner kind + name, so a
+ *  lean `{ data: { kind: "AlreadyMounted" } }` no longer reads as the
+ *  refusal -- only the full shape documents the contract. */
+function alreadyMounted(name: string) {
+  return {
+    kind: "SkillMount" as const,
+    data: { kind: "AlreadyMounted" as const, data: { name } },
+  };
 }
 
 // The #501 drop tests pin the composer bar's geometry via the shared
@@ -191,6 +210,7 @@ describe("useShellSessions", () => {
         modelPosture: null,
         authMode: "no_confirmation",
         skills: [],
+        activations: [],
       }, []);
     });
     expect(setSessionRuntime).toHaveBeenCalledWith("s1", { kind: "external", data: "gemini" });
@@ -225,6 +245,7 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -250,6 +271,7 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: null },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -277,6 +299,7 @@ describe("useShellSessions", () => {
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -305,6 +328,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: [],
+          activations: [],
         },
         [],
       );
@@ -332,6 +356,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["data-cleaning", "charting"],
+          activations: [],
         },
         [],
       );
@@ -359,6 +384,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["broken", "charting"],
+          activations: [],
         },
         [],
       );
@@ -376,11 +402,11 @@ describe("useShellSessions", () => {
     // in the session's folded initial set: the backend refuses the redundant
     // mount with the AlreadyMounted kind, and that refusal is the expected
     // outcome here -- no error banner, the session opens, the remaining
-    // picks still land. The nested IPC shape (the SessionError data.kind the
-    // tolerance matches on) is the contract under test; anything else
-    // rejects loudly (the test above).
+    // picks still land. The typed IPC shape (SessionError's SkillMount
+    // variant the tolerance narrows on) is the contract under test; anything
+    // else rejects loudly (the test above).
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
-    vi.mocked(mountSkill).mockRejectedValueOnce({ data: { kind: "AlreadyMounted" } });
+    vi.mocked(mountSkill).mockRejectedValueOnce(alreadyMounted("pandoc"));
     const { result, setShellError } = renderSessions();
     let created = false;
     await act(async () => {
@@ -391,6 +417,7 @@ describe("useShellSessions", () => {
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
           skills: ["pandoc", "charting"],
+          activations: [],
         },
         [],
       );
@@ -1069,5 +1096,119 @@ describe("useShellSessions", () => {
     });
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
+  });
+});
+
+describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dropListener.current = null;
+  });
+
+  it("runs the activation loop strictly after the mount loop", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const calls: string[] = [];
+    vi.mocked(mountSkill).mockImplementation(async (_sid, name) => {
+      calls.push(`mount:${name}`);
+    });
+    vi.mocked(activateSkill).mockImplementation(async (_sid, name) => {
+      calls.push(`activate:${name}`);
+    });
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", {
+        runtime: null,
+        modelPosture: null,
+        authMode: AUTH_MODE_DEFAULT,
+        skills: ["charting"],
+        activations: ["charting", "cleaning"],
+      }, []);
+    });
+    // Union + strict phasing (ADR-0112 Decision 4): the mount loop takes the
+    // pending skills UNION the pre-activation names (an activation-only name
+    // like "cleaning" rides the same mount loop -- the union is structural,
+    // so the chain never depends on the caller staging the mount half), and
+    // every mount strictly precedes every activation.
+    expect(calls).toEqual([
+      "mount:charting",
+      "mount:cleaning",
+      "activate:charting",
+      "activate:cleaning",
+    ]);
+  });
+
+  it("absorbs the redundant mount of an auto-included pick and still activates it", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    vi.mocked(mountSkill).mockRejectedValue(alreadyMounted("charting"));
+    const { result, setShellError } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", {
+        runtime: null,
+        modelPosture: null,
+        authMode: AUTH_MODE_DEFAULT,
+        skills: ["charting"],
+        activations: ["charting"],
+      }, []);
+    });
+    expect(activateSkill).toHaveBeenCalledWith("s1", "charting");
+    // The folded-initial-set collision is the expected outcome, not an
+    // error -- nothing surfaces.
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("materializeActivations mounts (absorbing redundancy), activates, skips failed mounts, isolates write failures, and re-reads the caches", async () => {
+    const { result, setShellError, queryClient } = renderSessions();
+    const calls: string[] = [];
+    vi.mocked(mountSkill).mockImplementation(async (_sid, name) => {
+      calls.push(`mount:${name}`);
+      if (name === "auto") throw alreadyMounted("auto");
+      if (name === "unmountable") throw new Error("mount boom");
+    });
+    vi.mocked(activateSkill).mockImplementation(async (_sid, name) => {
+      calls.push(`activate:${name}`);
+      if (name === "broken") throw new Error("boom");
+    });
+    const invalidateSpy = vi
+      .spyOn(queryClient, "invalidateQueries")
+      .mockResolvedValue(undefined);
+    let resolved = false;
+    await act(async () => {
+      await result.current.materializeActivations("s1", [
+        "auto",
+        "unmountable",
+        "broken",
+      ]);
+      resolved = true;
+    });
+    expect(resolved).toBe(true);
+    // All mounts strictly precede all activations. The genuine mount failure
+    // (unmountable) skips that name's activation -- the mount's root cause is
+    // the surfaced error, and a follow-up NotMountedForActivation would only
+    // overwrite it in the single shell-error slot. The absorbed refusal
+    // (auto) still activates; so does the name whose mount succeeded
+    // (broken, whose own activation then fails).
+    expect(calls).toEqual([
+      "mount:auto",
+      "mount:unmountable",
+      "mount:broken",
+      "activate:auto",
+      "activate:broken",
+    ]);
+    // The three caches re-read before the materializer resolves (the
+    // ADR-0051 race guard) -- the mounted / activated / thread keys for THIS
+    // session, awaited so the ask that follows starts from fresh cache.
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.mountedSkills("s1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.activatedSkills("s1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.thread("s1"),
+    });
+    // Only the two genuine failures surface (isolated like the posture
+    // writes); the redundant mount stays silent and the sequence resolves
+    // regardless.
+    expect(setShellError).toHaveBeenCalledTimes(2);
   });
 });

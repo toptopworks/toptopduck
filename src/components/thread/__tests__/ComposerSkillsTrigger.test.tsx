@@ -116,10 +116,12 @@ describe("ComposerSkillsTrigger draft mode (ADR-0092 / #500)", () => {
     );
   });
 
-  it("folds the auto-included builtin skills into the cold-start count (issue #677)", async () => {
+  it("keeps the auto-included builtin skills off the cold-start count (issue #677 retitle)", async () => {
     // The registry holds one builtin + one local skill; the CLI registry
     // carries an ENABLED builtin pandoc entry, so the next session starts
-    // with pandoc auto-included regardless of the pending list.
+    // with pandoc auto-included -- but the badge reports the USER's
+    // pending picks alone (system skills mount themselves; the panel
+    // treats them as plain rows, an explicit check absorbed at submit).
     const builtin = { ...skill("pandoc"), acquired: "builtin" as const };
     vi.mocked(listSkills).mockResolvedValue({
       skills: [builtin, skill("charting")],
@@ -132,58 +134,10 @@ describe("ComposerSkillsTrigger draft mode (ADR-0092 / #500)", () => {
         {...DRAFT_PROPS}
         pendingSkills={["charting"]}
         onPendingSkillsChange={vi.fn()}
-        cliTools={[
-          {
-            name: "pandoc",
-            description: "",
-            executable: "pandoc",
-            argv_template: [],
-            params: [],
-            env: {},
-            enabled: true,
-            source: "builtin",
-            baseline: "following",
-          },
-        ]}
-      />,
-    );
-    // 1 pending pick + 1 auto-included builtin, deduped against the pending
-    // list (charting is not builtin) -> 2 of 2.
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Skills (2/2)" })).toBeInTheDocument(),
-    );
-  });
-
-  it("excludes a disabled builtin entry's skill from the cold-start count", async () => {
-    const builtin = { ...skill("pandoc"), acquired: "builtin" as const };
-    vi.mocked(listSkills).mockResolvedValue({
-      skills: [builtin, skill("charting")],
-      ignored: [],
-      root_error: null,
-    });
-    renderTrigger(
-      <ComposerSkillsTrigger
-        sessionId={null}
-        {...DRAFT_PROPS}
-        pendingSkills={[]}
-        onPendingSkillsChange={vi.fn()}
-        cliTools={[
-          {
-            name: "pandoc",
-            description: "",
-            executable: "pandoc",
-            argv_template: [],
-            params: [],
-            env: {},
-            enabled: false,
-            source: "builtin",
-            baseline: "following",
-          },
-        ]}
       />,
     );
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Skills (0/2)" })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "Skills (1/2)" })).toBeInTheDocument(),
     );
   });
 

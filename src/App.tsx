@@ -23,6 +23,7 @@ import { QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillsTrigger } from "./components/thread/ComposerSkillsTrigger";
+import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
 import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
@@ -45,6 +46,7 @@ import type { SettingsSection } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
+import { toAppError } from "./lib/error-presentation";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
@@ -218,6 +220,7 @@ export default function App() {
     busy,
     resumeStatus,
     createSessionWithQuestion,
+    materializeActivations,
     openPersisted,
     clearPendingIngest,
     clearPendingQuestion,
@@ -367,6 +370,34 @@ export default function App() {
     useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingSkills, setPendingSkills] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
+  // Pre-activation intents (ADR-0112, issue #716), two facets with different
+  // lifecycles: the cold-start list lives in shell memory beside
+  // pendingSkills (it survives a session peek and dies only on the minting
+  // submit); the session list is view-scoped -- it dies on any active-session
+  // switch / close so unsubmitted intents never leak across sessions. A
+  // picker selection is the mount + activate composite: at cold start it also
+  // lands in pendingSkills (the checkbox authority); in session mode the
+  // checkbox reads the mounted set UNION this list. Both materialize at
+  // submit -- the ONLY materialization moment (Decision 4).
+  const [coldActivations, setColdActivations] = useState<string[]>([]);
+  // Session-scope pre-activations carry their owning view id: a switch /
+  // close (or the null->session mint) stops the ids matching, so the derived
+  // read below yields [] while another session is active -- unsubmitted
+  // intents never leak across sessions, with no effect-driven reset. The
+  // intents are scoped to their session, not destroyed by the switch:
+  // switching back to the same session restores its unsubmitted intents
+  // (resume mints a fresh sid, so the restore never sees stale truth).
+  const [viewActivations, setViewActivations] = useState<{
+    sid: string | null;
+    names: string[];
+  }>({ sid: null, names: [] });
+  const sessionActivations = useMemo(
+    () =>
+      activeSessionId !== null && viewActivations.sid === activeSessionId
+        ? viewActivations.names
+        : [],
+    [activeSessionId, viewActivations],
+  );
 
   // The startup resolution of the persisted default_runtime against the
   // shared adapter table (ADR-0098 Decisions 2/3, issue #572): what a cold
@@ -430,7 +461,30 @@ export default function App() {
     (question: string) => {
       if (activeSessionId !== null) {
         const fields = composerFieldsMap[activeSessionId];
-        if (fields) void fields.handleAsk(question);
+        if (!fields) return;
+        const intents = sessionActivations;
+        if (intents.length === 0) {
+          void fields.handleAsk(question);
+          return;
+        }
+        // ADR-0112 Decision 4: materialize the pre-activations BEFORE the ask
+        // -- the activation lands before the turn assembles, so the question
+        // sees the injected body. The chips are consumed by the submit either
+        // way (an isolated write failure surfaces via the shell error without
+        // blocking the ask). The .catch is the same contract for an
+        // unexpected fault higher up: clear the spent intents, surface the
+        // fault, and STILL fire the ask -- a materialization crash never
+        // silently eats the submit.
+        void materializeActivations(activeSessionId, intents)
+          .then(() => {
+            setViewActivations({ sid: activeSessionId, names: [] });
+            fields.handleAsk(question);
+          })
+          .catch((e: unknown) => {
+            setViewActivations({ sid: activeSessionId, names: [] });
+            setShellError(toAppError(e, intl, "shell"));
+            fields.handleAsk(question);
+          });
         return;
       }
       if (effectivePendingRuntime.kind === "built_in" && builtInGateOpen) {
@@ -457,10 +511,11 @@ export default function App() {
           : null;
       const authMode = pendingAuthMode;
       const skills = pendingSkills;
+      const activations = coldActivations;
       const files = pendingFiles;
       void createSessionWithQuestion(
         question,
-        { runtime, modelPosture, authMode, skills },
+        { runtime, modelPosture, authMode, skills, activations },
         files,
       ).then((created) => {
         if (created) {
@@ -468,6 +523,7 @@ export default function App() {
           setPendingModelPosture(null);
           setPendingAuthMode(AUTH_MODE_DEFAULT);
           setPendingSkills([]);
+          setColdActivations([]);
           setPendingFiles([]);
           // The mint-time set IPCs landed the explicit pair in the startup
           // backfill entry (record_last_model_posture, the single write
@@ -486,6 +542,9 @@ export default function App() {
       activeSessionId,
       composerFieldsMap,
       createSessionWithQuestion,
+      materializeActivations,
+      sessionActivations,
+      coldActivations,
       queryClient,
       effectivePendingRuntime,
       pendingRuntime,
@@ -496,6 +555,8 @@ export default function App() {
       builtInGateOpen,
       profileKeys.activeProfileId,
       openSettings,
+      intl,
+      setShellError,
     ],
   );
 
@@ -507,6 +568,74 @@ export default function App() {
       if (fields) void fields.handleCancel();
     }
   }, [activeSessionId, composerFieldsMap]);
+
+  // ADR-0112 (issue #716): a picker selection reports here. The pick is a
+  // single uniform state -- it never consults the mounted / activated caches
+  // (display data only);
+  // it always lands a chip, and at cold start also the pending mount pick
+  // (the composite's mount half, syncing the checkbox authority).
+  const handleSkillPick = useCallback(
+    (name: string) => {
+      if (activeSessionId === null) {
+        setPendingSkills((prev) =>
+          prev.includes(name) ? prev : [...prev, name],
+        );
+        setColdActivations((prev) =>
+          prev.includes(name) ? prev : [...prev, name],
+        );
+        return;
+      }
+      setViewActivations((prev) =>
+        prev.sid === activeSessionId
+          ? {
+              sid: activeSessionId,
+              names: prev.names.includes(name)
+                ? prev.names
+                : [...prev.names, name],
+            }
+          : { sid: activeSessionId, names: [name] },
+      );
+    },
+    [activeSessionId],
+  );
+
+  // Withdrawing an activation intent (ADR-0112 Decision 3): the composer's
+  // Backspace at the draft start is the user surface (the chips carry no
+  // visible removal affordance). The cold-start pick synced the mount half
+  // into pendingSkills (the composite's two surfaces stay in sync), so the
+  // withdrawal mirrors it out; a session pick never touched the pending
+  // mount list, so its withdrawal does not either.
+  const handleRemoveActivation = useCallback(
+    (name: string) => {
+      if (activeSessionId === null) {
+        setPendingSkills((prev) => prev.filter((n) => n !== name));
+        setColdActivations((prev) => prev.filter((n) => n !== name));
+        return;
+      }
+      setViewActivations((prev) =>
+        prev.sid === activeSessionId
+          ? {
+              sid: activeSessionId,
+              names: prev.names.filter((n) => n !== name),
+            }
+          : prev,
+      );
+    },
+    [activeSessionId],
+  );
+
+  // The bar's live chip facet: the cold-start shell memory in draft mode, the
+  // session view's intents otherwise.
+  const pendingActivations =
+    activeSessionId === null ? coldActivations : sessionActivations;
+
+  // Backspace at the draft's start withdraws the most recent intent: the
+  // chips seat before the draft's first char, so the last chip deletes like
+  // a text char (ADR-0112 Decision 3).
+  const handleChipBackspace = useCallback(() => {
+    const last = pendingActivations[pendingActivations.length - 1];
+    if (last !== undefined) handleRemoveActivation(last);
+  }, [pendingActivations, handleRemoveActivation]);
 
   // ADR-0092 (#500): shell-level file ingest. When active, delegate to the
   // session's handleIngestMany. On cold start the picked files accumulate in
@@ -887,6 +1016,18 @@ export default function App() {
                         phase={composer.phase}
                         draft={composer.draft}
                         setDraft={composer.setDraft}
+                        skillPicker={{
+                          sessionId: activeSessionId,
+                          onPick: handleSkillPick,
+                        }}
+                        onChipBackspace={handleChipBackspace}
+                        chips={(
+                          // The ADR-0112 pre-activation chips flow inline in
+                          // the input area (the composer-held intents since
+                          // the last submit); the caret seats right after the
+                          // last chip.
+                          <ComposerSkillChips names={pendingActivations} />
+                        )}
                         header={(
                           // ADR-0092 Decision 6 (#500): the Skills trigger
                           // renders in BOTH postures — session-active and
@@ -901,7 +1042,16 @@ export default function App() {
                               openSettings({ section: "skills" })}
                             pendingSkills={pendingSkills}
                             onPendingSkillsChange={setPendingSkills}
-                            cliTools={appConfig?.cli_tools.tools ?? []}
+                            activationIntents={pendingActivations}
+                            onActivationIntentsChange={
+                              activeSessionId === null
+                                ? setColdActivations
+                                : (next) =>
+                                    setViewActivations({
+                                      sid: activeSessionId,
+                                      names: next,
+                                    })
+                            }
                           />
                         )}
                         trailing={

@@ -130,12 +130,18 @@ vi.mock("../api", async (importOriginal) => {
     listMountedSkills: vi.fn(async () => []),
     mountSkill: vi.fn(async () => {}),
     unmountSkill: vi.fn(async () => {}),
+    // ADR-0112 picker pre-activation: the activated read feeds the picker's
+    // Active badges + the section's badge; activateSkill is the
+    // submit-time materialization write. Defaults keep both quiet.
+    listActivatedSkills: vi.fn(async () => [] as const),
+    activateSkill: vi.fn(async () => {}),
   };
 });
 
 import App from "../App";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  activateSkill,
   activeDataset,
   askQuestion,
   cancelQuery,
@@ -147,6 +153,8 @@ import {
   getSessionRuntime,
   ingestFile,
   listAdapters,
+  listActivatedSkills,
+  listMountedSkills,
   listProviderProfiles,
   listSessions,
   listSkills,
@@ -2480,5 +2488,176 @@ describe("App composer refactor follow-ups (issue #504)", () => {
     // The greeting renders as a visible <label> associated with the textarea.
     expect(screen.getByLabelText("提问")).toBeInTheDocument();
     expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+  });
+});
+
+describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      cli_tools: { tools: [] },
+    });
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [skillEntry("charting")],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(listMountedSkills).mockResolvedValue([]);
+    vi.mocked(listActivatedSkills).mockResolvedValue([]);
+    // Every turn rejects so each ask settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValue(new Error("discard turns"));
+  });
+
+  it("materializes picker picks at submit: mount → activate → ask, cold start AND in-session", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+
+    // Cold start: the trigger char opens the picker; Enter picks charting.
+    // The pick lands the chip (activation intent) AND the pending mount pick
+    // (composite) -- nothing fires yet (预激活, not activation).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    // The landed chip renders as an inline token in the input area (its
+    // name is the marker; withdrawal rides Backspace at the draft start).
+    await screen.findByText("charting");
+    expect(mountSkill).not.toHaveBeenCalled();
+    expect(activateSkill).not.toHaveBeenCalled();
+
+    // Submit: mount → activate → first question, in that order.
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"));
+    expect(mountSkill).toHaveBeenCalledWith("sess-1", "charting");
+    expect(activateSkill).toHaveBeenCalledWith("sess-1", "charting");
+    expect(vi.mocked(mountSkill).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(activateSkill).mock.invocationCallOrder[0],
+    );
+    expect(vi.mocked(activateSkill).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(askQuestion).mock.invocationCallOrder[0],
+    );
+
+    // In-session: after the first turn settles (the submit button returns
+    // from the 停止 face; the draft itself was cleared by the ask), a second
+    // picker pick lands a view chip; the next submit materializes it BEFORE
+    // the ask fires (the activation lands before the turn assembles).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    // The landed chip renders as an inline token in the input area (its
+    // name is the marker; withdrawal rides Backspace at the draft start).
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"),
+    );
+    expect(
+      vi.mocked(activateSkill).mock.calls.filter(([sid]) => sid === "sess-1"),
+    ).toHaveLength(2);
+    expect(vi.mocked(activateSkill).mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(askQuestion).mock.invocationCallOrder[1],
+    );
+  });
+
+  it("cold-start pick syncs the mount facet; Backspace withdrawal mirrors it out", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // The trigger chip counts the cold-start pending mount picks against
+    // the one-skill registry: nothing staged yet.
+    expect(
+      screen.getByRole("button", { name: "技能 (0/1)" }),
+    ).toBeInTheDocument();
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    // The composite's mount half synced the checkbox authority: the
+    // trigger's pending count rose with the chip.
+    expect(
+      screen.getByRole("button", { name: "技能 (1/1)" }),
+    ).toBeInTheDocument();
+    // Backspace at the draft start withdraws the chip AND mirrors the mount
+    // half out of pendingSkills -- add and removal stay in sync.
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "技能 (0/1)" }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("charting")).not.toBeInTheDocument();
+  });
+
+  it("in-session pick lands a view chip; Backspace withdraws it before submit", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Open the session with a first question (the turn rejects and settles).
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // A second picker pick lands the in-session chip (the viewActivations
+    // list is the whole intent -- this surface has no mount facet).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    // Backspace at caret 0 (the draft is empty; the panel is closed)
+    // withdraws the session-scope intent...
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.queryByText("charting")).not.toBeInTheDocument(),
+    );
+    // ...so the next submit fires the ask with NO materialization at all.
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"),
+    );
+    expect(activateSkill).not.toHaveBeenCalled();
+  });
+
+  it("duplicate picks dedupe; Backspace withdraws the most recent pick only (LIFO)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [skillEntry("charting"), skillEntry("data-cleaning")],
+      ignored: [],
+      root_error: null,
+    });
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Pick charting, then charting AGAIN: the composite is a set -- the
+    // duplicate is a no-op (one chip, one pending mount pick).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    expect(screen.getByRole("button", { name: "技能 (1/2)" })).toBeInTheDocument();
+    // A different name joins: two chips, two pending picks.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "ArrowDown" });
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("data-cleaning");
+    expect(screen.getByRole("button", { name: "技能 (2/2)" })).toBeInTheDocument();
+    // Backspace withdraws the MOST RECENT pick only (data-cleaning); the
+    // charting chip and its mount half stay.
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.queryByText("data-cleaning")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("charting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "技能 (1/2)" })).toBeInTheDocument();
   });
 });
