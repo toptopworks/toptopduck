@@ -1,42 +1,57 @@
 import { useId, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import { Check, ChevronDown } from "lucide-react";
 
 import { testProfile } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import type { ProfileTestOutcome, ProviderProfile } from "../../types/provider";
 import { Button } from "../ui/button";
+import {
+  Command,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "../ui/command";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { SettingsRow } from "./settings-chrome";
 
-// Model field + connection preflight atom (issue #236, ADR-0070). Lifts the
-// model input OUT of ProviderEndpointFields so this atom owns the ADR-0070
-// preflight surface: a "Test connection" button that fires the test_profile IPC
-// (Rust reads the profile's stored key from the OS keychain + probes the
-// endpoint), classifies the result into ADR-0044's six states, and feeds the
-// listed models to a dropdown when the probe succeeds. The model list is held
-// IN-MEMORY here only -- it never enters app-config (ADR-0038 stores
-// preferences, not probe snapshots); list failure or "not yet probed" falls back
-// to the hand-typed input (the #1 shape).
+// Model field + connection preflight atom (issue #236, ADR-0070; combobox
+// shape issue #735). Lifts the model input OUT of ProviderEndpointFields so
+// this atom owns the ADR-0070 preflight surface: a "Test connection" button
+// that fires the test_profile IPC (Rust probes the endpoint), classifies the
+// result into ADR-0044's six states, and feeds the listed models to a
+// dropdown when the probe succeeds. The model list is held IN-MEMORY here
+// only -- it never enters app-config (ADR-0038 stores preferences, not probe
+// snapshots).
+//
+// SHAPE (issue #735): an editable combobox -- the input is ALWAYS the
+// hand-typed value surface, and the probe list is a side dropdown panel
+// (Popover + cmdk Command) opened by a chevron button in the same row. List
+// selection and hand typing are therefore permanently co-available; the
+// pre-upgrade "swap Input for Select after a successful probe" shape (and
+// its prepend-the-current-model-into-the-options hack) is retired. With no
+// list yet, the panel opens to a hint pointing at the Test connection button
+// instead of being disabled -- the fetch affordance stays discoverable.
 //
 // The IPC takes the profile's CURRENT endpoint values (protocol + base_url +
 // model from the edit form), so a user who edits base_url and re-tests does not
-// have to save first (ADR-0070 Why 3). The key alone is read from the keychain
-// by profile id -- it never crosses IPC (ADR-0029 invariant 3).
+// have to save first (ADR-0070 Why 3). In add mode the caller additionally
+// passes the buffered draft key (`probeKey`): the profile -- and its keychain
+// entry -- does not exist yet, so the probe carries the key one-shot
+// (frontend -> Rust, never persisted, never echoed back; ADR-0070
+// calibration, issue #735). Edit mode omits it and Rust reads the stored key
+// from the keychain (ADR-0029 -- the stored key never crosses IPC to the
+// frontend).
 
 type ProviderModelFieldProps = {
   // The profile being edited. protocol + base_url drive the probe; id indexes
-  // the keychain key; model is the ping payload + the dropdown selection.
+  // the keychain key (edit mode); model is the ping payload + the combobox
+  // value.
   profile: ProviderProfile;
   // Immutable model update (coding-style: never mutate). Fired when the user
-  // types (input mode) or selects from the probed dropdown.
+  // types (the input) or selects from the probed dropdown panel.
   onUpdate: (patch: Partial<ProviderProfile>) => void;
   disabled: boolean;
   // Notified imperatively at probe IPC boundaries (true on start, false in the
@@ -46,10 +61,18 @@ type ProviderModelFieldProps = {
   // mirror would no-op and never report "settled" upward. Mirrors
   // ProviderKeyField's onBusyChange contract.
   onBusyChange?: (busy: boolean) => void;
-  // Mirrors the probed-models Select's open state upward so the parent's
+  // Mirrors the probed-models panel's open state upward so the parent's
   // commit-on-blur can hold back while the portalized option list owns focus
-  // (the listbox sits OUTSIDE the edit form's DOM subtree).
+  // (the panel sits OUTSIDE the edit form's DOM subtree).
   onSelectOpenChange?: (open: boolean) => void;
+  // One-shot probe key (issue #735): the add form's buffered draft key,
+  // threaded through ProviderEndpointFields. Omitted in edit mode, where the
+  // probe reads the stored key instead.
+  probeKey?: string;
+  // Field-level validation error for the model value (issue #735): rendered
+  // under the input, drives its aria-invalid + aria-describedby. Owned by
+  // ProfilesSection's validateProfile -- never the probe result.
+  error?: string | null;
 };
 
 export function ProviderModelField({
@@ -58,9 +81,12 @@ export function ProviderModelField({
   disabled,
   onBusyChange,
   onSelectOpenChange,
+  probeKey,
+  error,
 }: ProviderModelFieldProps) {
   const intl = useIntl();
   const modelId = useId();
+  const [listOpen, setListOpen] = useState(false);
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<ProfileTestOutcome | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
@@ -95,6 +121,7 @@ export function ProviderModelField({
         profile.protocol,
         profile.base_url,
         profile.model,
+        probeKey,
       );
       setTestResult(result);
     } catch (e) {
@@ -105,19 +132,19 @@ export function ProviderModelField({
     }
   }
 
-  // Dropdown shows only when the probe listed at least one model. An Ok with an
-  // empty list (the ping fallback succeeded but /models is unimplemented) falls
-  // back to the hand-typed input (ADR-0070: "list failure or not-yet-probed ->
-  // hand-typed").
+  function handleListOpenChange(open: boolean) {
+    setListOpen(open);
+    onSelectOpenChange?.(open);
+  }
+
+  // The panel lists the probed models only when the probe listed at least one.
+  // An Ok with an empty list (the ping fallback succeeded but /models is
+  // unimplemented) leaves the panel in its hint state (ADR-0070: "list failure
+  // or not-yet-probed -> hand-typed"). The current model value is NOT merged
+  // into the options: the input already holds it, so selection and typing stay
+  // two independent paths to the same value.
   const okResult = testResult?.kind === "Ok" ? testResult : null;
-  const hasDropdown = okResult !== null && okResult.data.models.length > 0;
-  // The dropdown lists the probed models, always keeping the current model
-  // selectable (prepend it when it is not in the list) so the select never
-  // silently snaps to the first option when the user's hand-typed model is not
-  // one the endpoint advertises.
-  const options = hasDropdown
-    ? Array.from(new Set([profile.model, ...okResult.data.models]))
-    : [];
+  const models = okResult?.data.models ?? [];
 
   const fieldDisabled = disabled || testBusy;
 
@@ -131,27 +158,7 @@ export function ProviderModelField({
       )}
     >
       <div className="grid gap-2">
-        {hasDropdown ? (
-          <Select
-            value={profile.model}
-            onValueChange={(model) => onUpdate({ model })}
-            onOpenChange={onSelectOpenChange}
-            disabled={fieldDisabled}
-          >
-            <SelectTrigger id={modelId} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {options.map((m) => (
-                <SelectItem key={m} value={m}>
-                  {/* Model ids are identifiers -- the system monospace stack
-                      (DESIGN.md typography.code), not the sans UI stack. */}
-                  <span className="font-mono text-[0.82rem]">{m}</span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : (
+        <div className="flex items-center gap-2">
           <Input
             id={modelId}
             type="text"
@@ -159,16 +166,75 @@ export function ProviderModelField({
             onChange={(e) => onUpdate({ model: e.target.value })}
             disabled={fieldDisabled}
             spellCheck={false}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? `${modelId}-error` : undefined}
           />
-        )}
-
-        <div className="flex items-center gap-2">
+          {/* The list panel rides a Popover so its focus-trap/ESC/outside-click
+              dismissal matches the preset select's, and so the parent's
+              commit-on-blur hold-back (onSelectOpenChange) covers it -- the
+              portalized panel sits outside the edit form's DOM subtree. */}
+          <Popover open={listOpen} onOpenChange={handleListOpenChange}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                disabled={fieldDisabled}
+                aria-label={intl.formatMessage({
+                  id: "settings.profiles.model.listTrigger",
+                  defaultMessage: "Select model from list",
+                })}
+              >
+                <ChevronDown className="size-4" aria-hidden />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-72 p-0">
+              {models.length > 0 ? (
+                <Command>
+                  <CommandInput
+                    placeholder={intl.formatMessage({
+                      id: "settings.profiles.model.searchPlaceholder",
+                      defaultMessage: "Search models…",
+                    })}
+                  />
+                  <CommandList>
+                    {models.map((m) => (
+                      <CommandItem
+                        key={m}
+                        value={m}
+                        onSelect={() => {
+                          onUpdate({ model: m });
+                          handleListOpenChange(false);
+                        }}
+                      >
+                        {/* Model ids are identifiers -- the system monospace
+                            stack (DESIGN.md typography.code), not the sans UI
+                            stack. */}
+                        <span className="font-mono text-[0.82rem]">{m}</span>
+                        {m === profile.model && (
+                          <Check className="ms-auto size-3.5" aria-hidden />
+                        )}
+                      </CommandItem>
+                    ))}
+                  </CommandList>
+                </Command>
+              ) : (
+                <p className="text-muted-foreground px-3 py-3 text-sm">
+                  <FormattedMessage
+                    id="settings.profiles.model.listHint"
+                    defaultMessage="No model list yet. Click Test connection to fetch one."
+                  />
+                </p>
+              )}
+            </PopoverContent>
+          </Popover>
           <Button
             type="button"
             variant="outline"
             size="sm"
             onClick={handleTest}
             disabled={fieldDisabled}
+            className="shrink-0"
           >
             {testBusy ? (
               <FormattedMessage
@@ -183,6 +249,11 @@ export function ProviderModelField({
             )}
           </Button>
         </div>
+        {error && (
+          <p id={`${modelId}-error`} className="text-destructive text-sm">
+            {error}
+          </p>
+        )}
         {testResult && <PreflightResult outcome={testResult} />}
         {testError && <p className="text-destructive text-sm">{testError}</p>}
       </div>

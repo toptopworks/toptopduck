@@ -146,30 +146,60 @@ function sameEndpoint(a: ProviderProfile, b: ProviderProfile): boolean {
   );
 }
 
-/** Validate a profile before commit. Returns a formatted error message or null.
+/** A field-scoped validation error (issue #735): rendered at the offending
+ *  field's row (driving its aria-invalid), unlike the pane-bottom formError
+ *  which stays reserved for submit-level failures (IPC / delete / key write)
+ *  that have no field to attach to. */
+type FieldError = {
+  field: "base_url" | "model";
+  message: string;
+};
+
+/** Validate a profile before commit. Returns the first field error or null.
  *  base_url must be an http/https URL (a bad scheme is a config error the
- *  preflight would otherwise misreport as a network fault, issue #279). */
-function validateProfile(p: ProviderProfile, intl: IntlShape): string | null {
+ *  preflight would otherwise misreport as a network fault, issue #279).
+ *  model must be non-blank after trim (issue #735: an empty model is a
+ *  deterministic config error -- the turn path sends it verbatim and the
+ *  endpoint answers 400 -- so the commit boundary refuses it up front). */
+function validateProfile(p: ProviderProfile, intl: IntlShape): FieldError | null {
   const url = p.base_url.trim();
   if (!url) {
-    return intl.formatMessage({
-      id: "settings.profiles.validate.baseUrlRequired",
-      defaultMessage: "Base URL is required.",
-    });
+    return {
+      field: "base_url",
+      message: intl.formatMessage({
+        id: "settings.profiles.validate.baseUrlRequired",
+        defaultMessage: "Base URL is required.",
+      }),
+    };
   }
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return intl.formatMessage({
-        id: "settings.profiles.validate.httpOnly",
-        defaultMessage: "Base URL must use http or https.",
-      });
+      return {
+        field: "base_url",
+        message: intl.formatMessage({
+          id: "settings.profiles.validate.httpOnly",
+          defaultMessage: "Base URL must use http or https.",
+        }),
+      };
     }
   } catch {
-    return intl.formatMessage({
-      id: "settings.profiles.validate.invalidUrl",
-      defaultMessage: "Base URL is not a valid URL.",
-    });
+    return {
+      field: "base_url",
+      message: intl.formatMessage({
+        id: "settings.profiles.validate.invalidUrl",
+        defaultMessage: "Base URL is not a valid URL.",
+      }),
+    };
+  }
+  if (!p.model.trim()) {
+    return {
+      field: "model",
+      message: intl.formatMessage({
+        id: "settings.profiles.validate.modelRequired",
+        defaultMessage: "Model is required.",
+      }),
+    };
   }
   return null;
 }
@@ -229,6 +259,9 @@ export function ProfilesSection({
   const [draft, setDraft] = useState<ProviderProfile | null>(source ? { ...source } : null);
   const [draftForId, setDraftForId] = useState<string | null>(editingId);
   const [formError, setFormError] = useState<string | null>(null);
+  // Field-scoped validation error (issue #735) -- see FieldError. formError
+  // stays reserved for submit-level failures.
+  const [fieldError, setFieldError] = useState<FieldError | null>(null);
   // Whether one of the form's Radix Selects currently holds focus in its
   // portalized option list. The listbox renders OUTSIDE this pane's DOM subtree,
   // so a focus move into it trips the form-level blur capture; commit-on-blur
@@ -246,6 +279,7 @@ export function ProfilesSection({
     setDraftForId(editingId);
     setDraft(source ? { ...source } : null);
     setFormError(null);
+    setFieldError(null);
     setSelectOpen(false);
   }
 
@@ -322,12 +356,25 @@ export function ProfilesSection({
   async function commitDraft(): Promise<boolean> {
     if (addMode || !draft || !selectedId || commitBusy) return true;
     const committed = provider.profiles.find((p) => p.id === selectedId);
-    if (!committed || sameEndpoint(draft, committed)) return true;
+    if (!committed || sameEndpoint(draft, committed)) {
+      // A draft identical to its committed source makes any field error stale
+      // -- the value the error described is gone. Clear it here: this early
+      // return otherwise skips the clearing further down, so a bad edit that
+      // reported a field error and was then reverted kept its red field after
+      // the follow-up blur.
+      setFieldError(null);
+      return true;
+    }
     const validationError = validateProfile(draft, intl);
     if (validationError) {
-      setFormError(validationError);
+      setFieldError(validationError);
       return false;
     }
+    // Validation passed: any earlier field error is stale from here on --
+    // the field is valid as typed, and whatever fails next (IPC,
+    // revert-on-fail) is submit-level and reports through formError
+    // (issue #735: fieldError stays field-scoped).
+    setFieldError(null);
     const next = draft;
     setCommitBusy(true);
     const err = await onCommit((cfg) => ({
@@ -364,6 +411,7 @@ export function ProfilesSection({
     setAddingProfile(addingProfile ?? freshProfileSkeleton());
     setAddMode(true);
     setFormError(null);
+    setFieldError(null);
   }
 
   // Drop the retained add draft entirely: the draft profile, the buffered
@@ -374,6 +422,7 @@ export function ProfilesSection({
     setAddMode(false);
     setDraftKey("");
     setFormError(null);
+    setFieldError(null);
   }
 
   // Explicit Cancel in add mode: the click IS the discard intent, so the
@@ -387,9 +436,14 @@ export function ProfilesSection({
     if (!addMode || !addingProfile || !draft || commitBusy) return;
     const validationError = validateProfile(draft, intl);
     if (validationError) {
-      setFormError(validationError);
+      setFieldError(validationError);
       return;
     }
+    // Validation passed: any earlier field error is stale from here on --
+    // create-time failures (commit, key write) are submit-level and report
+    // through formError (issue #735: fieldError stays field-scoped), and
+    // the created profile is valid as created.
+    setFieldError(null);
     const next = draft;
     const keyToWrite = draftKey.trim();
     setCommitBusy(true);
@@ -706,6 +760,12 @@ export function ProfilesSection({
                 disabled={fieldsDisabled}
                 onBusyChange={reportTestBusy}
                 onModelSelectOpenChange={setSelectOpen}
+                // Add mode carries the buffered draft key into the probe
+                // (issue #735): the profile has no keychain entry yet, so the
+                // one-shot key is the only key a pre-create probe can reach.
+                probeKey={addMode ? draftKey : undefined}
+                baseUrlError={fieldError?.field === "base_url" ? fieldError.message : null}
+                modelError={fieldError?.field === "model" ? fieldError.message : null}
               />
 
               <ProviderKeyField
@@ -798,10 +858,12 @@ export function ProfilesSection({
               />
             </div>
           ) : null}
-          {/* Commit failures render at the pane bottom regardless of the
+          {/* SUBMIT-level failures render at the pane bottom regardless of the
               right pane's mode (draft form, select prompt, or zero-profile
               empty state) -- a failed delete keeps no draft of its own, so
-              the error must not live inside the draft branch. */}
+              the error must not live inside the draft branch. Field-level
+              validation errors instead render at their field (issue #735,
+              see fieldError) -- this surface no longer doubles for them. */}
           {formError && <p className="settings-error mt-3 text-destructive text-sm">{formError}</p>}
         </div>
       </div>

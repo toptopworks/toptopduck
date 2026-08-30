@@ -246,6 +246,29 @@ describe("ProviderEndpointFields (issue #235)", () => {
     expect(screen.getByLabelText("Model")).toBeInTheDocument();
   });
 
+  it("renders baseUrlError under the base URL input with aria-invalid + aria-describedby (issue #735)", () => {
+    // Field-scoped validation surface: the error renders at the offending
+    // field row (never the pane-bottom submit surface) and the input carries
+    // the invalid state + description link. Mirror of the model-field test.
+    renderSettings(
+      <ProviderEndpointFields
+        profile={baseProfile}
+        onUpdate={vi.fn()}
+        showProtocolRadio={false}
+        disabled={false}
+        baseUrlError="Base URL is required."
+      />,
+    );
+    const input = screen.getByLabelText("Base URL");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    const describedBy = input.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(screen.getByText("Base URL is required.")).toHaveProperty(
+      "id",
+      describedBy,
+    );
+  });
+
   it("edits to base URL / model / protocol call onUpdate with the matching patch", () => {
     const onUpdate = vi.fn();
     renderSettings(
@@ -521,7 +544,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     vi.clearAllMocks();
   });
 
-  it("renders the hand-typed model input + Test connection before any probe", () => {
+  it("renders the always-editable model input + list trigger + Test connection before any probe", () => {
     renderSettings(
       <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
     );
@@ -529,11 +552,15 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     expect(
       screen.getByRole("button", { name: "Test connection" }),
     ).toBeInTheDocument();
-    // No dropdown before a successful probe that lists models.
-    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    // The editable-combobox shape (issue #735): the list panel's trigger rides
+    // beside the input at all times -- with no probed list the panel it opens
+    // shows the fetch hint, never dead space or a disabled affordance.
+    expect(
+      screen.getByRole("button", { name: "Select model from list" }),
+    ).toBeInTheDocument();
   });
 
-  it("Test connection calls testProfile with the current endpoint + flips to dropdown on Ok", async () => {
+  it("Test connection calls testProfile with the current endpoint; the input stays and the panel gains the list", async () => {
     vi.mocked(testProfile).mockResolvedValue({
       kind: "Ok",
       data: { models: ["claude-sonnet-4-6", "claude-haiku-4-5"] },
@@ -548,14 +575,72 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
         "anthropic",
         "https://api.anthropic.com",
         "claude-sonnet-4-6",
+        undefined,
       ),
     );
-    // The dropdown replaces the input after the probe lists models.
-    await screen.findByRole("combobox", { name: "Model" });
-    // The hand-typed textbox is gone; only the combobox carries "Model" now
-    // (both ride the same <Label>, so distinguish by role, not by label text).
-    expect(screen.queryByRole("textbox", { name: "Model" })).not.toBeInTheDocument();
+    // The hand-typed textbox NEVER leaves (issue #735) -- the probe result
+    // feeds the side list panel instead of replacing the input.
+    expect(screen.getByRole("textbox", { name: "Model" })).toBeInTheDocument();
     expect(screen.getByText(/2 models available/)).toBeInTheDocument();
+    // Opening the panel now lists the probed models.
+    fireEvent.click(screen.getByRole("button", { name: "Select model from list" }));
+    expect(await screen.findByText("claude-haiku-4-5")).toBeInTheDocument();
+  });
+
+  it("forwards the one-shot probe key (add mode) as the 5th testProfile argument, untouched", async () => {
+    // Issue #735 (ADR-0070 calibration): the add form's buffered draft key is
+    // the only key a pre-create probe can reach. Trim normalization happens
+    // Rust-side (resolve_probe_key), so the wire sees the raw buffered value.
+    vi.mocked(testProfile).mockResolvedValue({ kind: "Ok", data: { models: [] } });
+    renderSettings(
+      <ProviderModelField
+        profile={baseProfile}
+        onUpdate={vi.fn()}
+        disabled={false}
+        probeKey=" sk-add-123 "
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    await waitFor(() =>
+      expect(vi.mocked(testProfile)).toHaveBeenCalledWith(
+        "p1",
+        "anthropic",
+        "https://api.anthropic.com",
+        "claude-sonnet-4-6",
+        " sk-add-123 ",
+      ),
+    );
+  });
+
+  it("renders the field error under the input and marks it aria-invalid + aria-describedby", () => {
+    // Issue #735: validation errors are field-scoped -- rendered at the field
+    // (never the pane-bottom submit surface) and wired into the input's
+    // invalid state so the offending control is visually and accessibly
+    // distinct.
+    renderSettings(
+      <ProviderModelField
+        profile={baseProfile}
+        onUpdate={vi.fn()}
+        disabled={false}
+        error="Model is required."
+      />,
+    );
+    const input = screen.getByRole("textbox", { name: "Model" });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    const describedBy = input.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(screen.getByText("Model is required.")).toHaveProperty(
+      "id",
+      describedBy,
+    );
+  });
+
+  it("with no probed list the panel opens to the fetch hint instead of options", async () => {
+    renderSettings(
+      <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select model from list" }));
+    expect(await screen.findByText(/No model list yet/)).toBeInTheDocument();
   });
 
   it("Ok with empty models (ping fallback) keeps the hand-typed input + okPing message", async () => {
@@ -662,7 +747,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
   });
 
-  it("editing base_url clears the probe result back to the hand-typed input", async () => {
+  it("editing base_url clears the probed list (the panel falls back to the fetch hint)", async () => {
     vi.mocked(testProfile).mockResolvedValue({
       kind: "Ok",
       data: { models: ["claude-sonnet-4-6"] },
@@ -673,7 +758,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
       </IntlProvider>,
     );
     fireEvent.click(view.getByRole("button", { name: "Test connection" }));
-    await view.findByRole("combobox", { name: "Model" });
+    await view.findByText(/1 model available/);
     view.rerender(
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <ProviderModelField
@@ -683,11 +768,17 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
         />
       </IntlProvider>,
     );
-    expect(view.queryByRole("combobox")).not.toBeInTheDocument();
+    // Stale guard (ADR-0070): the list is a function of the endpoint, so the
+    // result message is gone and the panel opens to the fetch hint, not the
+    // superseded model list.
+    expect(view.queryByText(/1 model available/)).not.toBeInTheDocument();
+    fireEvent.click(view.getByRole("button", { name: "Select model from list" }));
+    expect(await view.findByText(/No model list yet/)).toBeInTheDocument();
+    // The input itself keeps the (endpoint-orthogonal) hand-typed value.
     expect(view.getByLabelText("Model")).toBeInTheDocument();
   });
 
-  it("editing protocol clears the probe result back to the hand-typed input", async () => {
+  it("editing protocol clears the probed list (the panel falls back to the fetch hint)", async () => {
     // Protocol flip is the riskier stale-list case than base_url: an anthropic
     // model list fed to an openai endpoint would let the user pick a model the
     // new endpoint rejects. The render-time reset clears it (same guard as the
@@ -702,7 +793,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
       </IntlProvider>,
     );
     fireEvent.click(view.getByRole("button", { name: "Test connection" }));
-    await view.findByRole("combobox", { name: "Model" });
+    await view.findByText(/1 model available/);
     view.rerender(
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <ProviderModelField
@@ -712,11 +803,42 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
         />
       </IntlProvider>,
     );
-    expect(view.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(view.queryByText(/1 model available/)).not.toBeInTheDocument();
+    fireEvent.click(view.getByRole("button", { name: "Select model from list" }));
+    expect(await view.findByText(/No model list yet/)).toBeInTheDocument();
     expect(view.getByLabelText("Model")).toBeInTheDocument();
   });
 
-  it("selecting from the probed dropdown fires onUpdate({ model })", async () => {
+  it("editing the model value does NOT clear the probe result (the list is a function of the endpoint, not the model)", async () => {
+    // ADR-0070: only protocol / base_url changes invalidate a probe. A model
+    // edit must keep the verdict message and the listed models selectable --
+    // the mirror of the two clearing tests above.
+    vi.mocked(testProfile).mockResolvedValue({
+      kind: "Ok",
+      data: { models: ["claude-sonnet-4-6"] },
+    });
+    const view = render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <ProviderModelField profile={baseProfile} onUpdate={vi.fn()} disabled={false} />
+      </IntlProvider>,
+    );
+    fireEvent.click(view.getByRole("button", { name: "Test connection" }));
+    await view.findByText(/1 model available/);
+    view.rerender(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <ProviderModelField
+          profile={{ ...baseProfile, model: "claude-haiku-4-5" }}
+          onUpdate={vi.fn()}
+          disabled={false}
+        />
+      </IntlProvider>,
+    );
+    expect(view.getByText(/1 model available/)).toBeInTheDocument();
+    fireEvent.click(view.getByRole("button", { name: "Select model from list" }));
+    expect(await view.findByText("claude-sonnet-4-6")).toBeInTheDocument();
+  });
+
+  it("selecting from the probed panel fires onUpdate({ model }) and closes the panel", async () => {
     vi.mocked(testProfile).mockResolvedValue({
       kind: "Ok",
       data: { models: ["claude-sonnet-4-6", "claude-haiku-4-5"] },
@@ -726,10 +848,15 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
       <ProviderModelField profile={baseProfile} onUpdate={onUpdate} disabled={false} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
-    const select = await screen.findByRole("combobox", { name: "Model" });
-    openSelect(select);
-    chooseOption("claude-haiku-4-5");
+    await screen.findByText(/2 models available/);
+    fireEvent.click(screen.getByRole("button", { name: "Select model from list" }));
+    // A selection is one onUpdate({ model }) + panel close (the input keeps
+    // receiving the value via the parent's controlled re-render).
+    fireEvent.click(await screen.findByText("claude-haiku-4-5"));
     expect(onUpdate).toHaveBeenLastCalledWith({ model: "claude-haiku-4-5" });
+    await waitFor(() =>
+      expect(screen.queryByRole("option")).not.toBeInTheDocument(),
+    );
   });
 
   it("disables + flips the button label to Testing while a probe is in flight", async () => {

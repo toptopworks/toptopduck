@@ -1,9 +1,20 @@
 //! Connection preflight (ADR-0070): a "Test connection" probe fired from the
 //! Settings Profiles edit form. The Rust core reads the profile's stored key
-//! from the OS keychain (ADR-0029 -- the key never crosses IPC; the caller
-//! passes only the profile id) and probes the endpoint via `GET /models`
-//! (primary path), degrading to a minimal messages ping (fallback) when the
-//! endpoint does not implement `/models` or returns a non-auth HTTP error.
+//! from the OS keychain (ADR-0029 -- the stored key never crosses IPC back to
+//! the frontend; the caller passes only the profile id) and probes the
+//! endpoint via `GET /models` (primary path), degrading to a minimal messages
+//! ping (fallback) when the endpoint does not implement `/models` or returns
+//! a non-auth HTTP error.
+//!
+//! Key channel (issue #735, ADR-0070 calibration): EDIT mode has the key in
+//! the keychain, so the probe reads it there (the original store-then-test
+//! flow, unchanged). ADD mode buffers the typed key in the frontend draft
+//! (issue #733) -- it has not reached the keychain yet -- so the caller may
+//! pass that key as a one-shot explicit parameter (see
+//! [`resolve_probe_key`]). That transfer is frontend -> Rust, one request,
+//! never persisted and never echoed back: the same direction `set_profile_key`
+//! already uses, so no ADR-0029 invariant (not in app-config, not leaked back
+//! from Rust, no plaintext at rest) is widened.
 //!
 //! The result is classified into six states along the ADR-0044 axis
 //! ([`ProfileTestOutcome`]): success (carrying the listed models), key rejected
@@ -64,10 +75,31 @@ const PING_PROMPT: &str = ".";
 /// serve the chat/messages shape.
 const PING_MAX_TOKENS: u32 = 1;
 
+/// Resolve which key a probe uses (issue #735, ADR-0070 calibration).
+/// `explicit` is the caller's one-shot key (the add-mode form's buffered
+/// draft key, which has not reached the keychain yet): when it trims to a
+/// non-empty value it WINS and the keychain read is never even invoked --
+/// `keychain_read` is a lazy closure only the fallback arm calls, so a
+/// locked or faulted keychain cannot block an add-mode probe, and the
+/// verdict predicts the created profile's real behavior because the
+/// frontend writes the same trimmed value on create. When it is absent or
+/// blank the probe falls back to the keychain read verbatim (edit mode
+/// passes no explicit key, preserving store-then-test unchanged).
+pub(crate) fn resolve_probe_key(
+    explicit: Option<&str>,
+    keychain_read: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    match explicit.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(k) => Ok(Some(k.to_string())),
+        None => keychain_read(),
+    }
+}
+
 /// Run a connection preflight for a profile: classify the keychain read, then
-/// probe the endpoint (ADR-0070). `key_read` is the caller's
-/// [`KeychainStore::fetch_key_for`](crate::provider::KeychainStore::fetch_key_for)
-/// result (the key never crosses IPC -- ADR-0029 invariant 3). A failed read
+/// probe the endpoint (ADR-0070). `key_read` is the caller's resolved key
+/// source ([`resolve_probe_key`] output: the keychain read, or the explicit
+/// one-shot key when the caller supplied one -- the stored key never crosses
+/// IPC back to the frontend, ADR-0029 invariant 3). A failed read
 /// short-circuits to [`ProfileTestOutcome::KeychainUnavailable`] without any
 /// HTTP (the trust root itself is unavailable, so no endpoint verdict applies
 /// -- issue #243); a successful read delegates to [`probe`], which splits
@@ -332,6 +364,36 @@ mod tests {
             "choices": [{"message": {"role":"assistant","content":"ok"}}],
         })
         .to_string()
+    }
+
+    #[test]
+    fn resolve_probe_key_explicit_key_wins_without_invoking_the_keychain_read() {
+        // Issue #735 (ADR-0070 calibration): an add-mode probe carries the
+        // buffered draft key, which trims to what the frontend will write on
+        // create. The explicit key WINS and the read closure is never
+        // invoked -- it panics if it runs, so a green test proves the
+        // keychain is not even consulted (a locked keychain cannot block an
+        // add-mode probe -- the keychain is not needed when the key is in
+        // hand).
+        let resolved = resolve_probe_key(Some(" sk-test-123 "), || {
+            panic!("keychain read must not run when the explicit key wins")
+        });
+        assert_eq!(resolved, Ok(Some("sk-test-123".into())));
+    }
+
+    #[test]
+    fn resolve_probe_key_blank_or_absent_falls_back_to_the_keychain_read() {
+        // Absence and blank (whitespace-only) explicit keys are the same
+        // state -- "the caller has no key to offer yet" -- and fall back to
+        // the keychain read verbatim, edit mode's unchanged store-then-test
+        // path. The fault propagates untouched (KeychainUnavailable stays
+        // classifiable upstream).
+        for explicit in [None, Some(""), Some("   ")] {
+            let resolved = resolve_probe_key(explicit, || Err("keychain access failed".into()));
+            assert_eq!(resolved, Err("keychain access failed".into()));
+        }
+        let resolved = resolve_probe_key(None, || Ok(Some("stored".into())));
+        assert_eq!(resolved, Ok(Some("stored".into())));
     }
 
     #[test]

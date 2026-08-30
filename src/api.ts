@@ -256,8 +256,19 @@ export async function testProfile(
   protocol: Protocol,
   baseUrl: string,
   model: string,
+  // One-shot add-mode override (issue #735, ADR-0070 calibration): the draft
+  // key the add form buffers before the profile (and its keychain entry)
+  // exists. Passed explicitly as null when absent so Rust's Option<String>
+  // sees None regardless of how Tauri treats a missing field.
+  key?: string,
 ): Promise<ProfileTestOutcome> {
-  return invoke<ProfileTestOutcome>("test_profile", { profileId, protocol, baseUrl, model });
+  return invoke<ProfileTestOutcome>("test_profile", {
+    profileId,
+    protocol,
+    baseUrl,
+    model,
+    key: key ?? null,
+  });
 }
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -----------------
