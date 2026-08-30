@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import type { IntlShape } from "react-intl";
-import { askQuestion, cancelQuery, onTurnProgress } from "../api";
+import { askQuestion, cancelQuery, getSessionRuntime, onTurnProgress } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { sessionKeys } from "./queryKeys";
 import type { ApprovalEntry } from "./useApprovalEvents";
@@ -9,7 +9,8 @@ import type { UseViewedResult } from "./useViewedResult";
 import type { AppError } from "../types/error";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
 import type { TurnPhase } from "../types/session";
-import type { ThreadEntry, ThinkingTrace, TraceEntry, TraceRound } from "../types/thread";
+import type { SessionRuntimeChoice } from "../types/runtime";
+import type { ThreadEntry, ThinkingTrace, TraceEntry, TraceRound, TurnRuntime } from "../types/thread";
 
 // The turn-orchestration domain (issue #230), extracted from useSessionState
 // (slice 2 of the three-slice deepening). This hook owns the turn-progress
@@ -113,7 +114,8 @@ export interface LiveTurn {
   /** The client's submit stamp (the live bubble's `asked_at`, ADR-0103 live
    *  isomorphism, issue #610): read at handleAsk, carried so the bubble
    *  mounts its timestamp before any progress event lands. The same value
-   *  rides the optimistic TurnRecord until the refetch replaces it. */
+   *  rides the optimistic TurnRecord until a reopened mount lands the
+   *  backend's own stamps (no in-place refetch, ADR-0051). */
   askedAt: number;
   /** The 1-based step of the latest Thinking event (round-trip count,
    *  ADR-0081); null until the first event arrives. */
@@ -278,6 +280,19 @@ export function liveRoundsToTrace(rounds: ReadonlyArray<LiveRound>): TraceRound[
     trace.push(settled);
   }
   return trace;
+}
+
+// Map the composer's runtime choice onto the thread's runtime attribution
+// (issue #725): the choice read at submit time mirrors the turn-top snapshot
+// the backend's ask will consume (a switch lands between turns, never
+// mid-turn), so the optimistic append stamps it where record_turn would.
+// The payloads differ only on the external half -- the choice's bare adapter
+// string vs the attribution's adapter-id object (see TurnRuntime); built-in
+// is identity.
+export function choiceToTurnRuntime(choice: SessionRuntimeChoice): TurnRuntime {
+  return choice.kind === "external"
+    ? { kind: "external", data: { adapter_id: choice.data } }
+    : { kind: "built_in" };
 }
 
 export interface UseTurnFlowDeps {
@@ -577,10 +592,22 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       setError(null);
       // ADR-0103 (issue #608): the ask timestamp, read at submit so the
       // optimistic record carries the user's ask time (the backend stamps its
-      // own reading at record time; the next thread refetch replaces it).
+      // own reading at record time; it lands only on reopen -- the thread
+      // never refetches in place, ADR-0051).
       const askedAt = Date.now();
       // The live turn card mounts with the question; events grow its trace.
       commitLive({ question, askedAt, step: null, calls: [], roundTexts: [], roundThinkings: [] });
+      // Issue #725: the ask-time runtime choice, fired BEFORE the ask
+      // dispatch -- synchronously at submit, no await in between, so it
+      // mirrors the turn-top snapshot the backend's ask will consume (see
+      // choiceToTurnRuntime). A switch CAN still land in the read-to-dispatch
+      // gap (set_session_runtime is lock-light and never blocks on a turn):
+      // the backend would then run the new runtime while this stamp holds
+      // the old one -- a one-turn badge lag that heals on reopen, accepted
+      // over the settle-time read whose window is the turn's whole duration.
+      // A failed read degrades honestly (undefined -> no runtime -> no badge
+      // until reopen); the ask itself never depends on it.
+      const runtimeRead = getSessionRuntime(sessionId).catch(() => undefined);
       let outcome;
       // The settled trace, snapshotted in the finally BEFORE the live state
       // folds away (the optimistic append below reads it on the success
@@ -608,23 +635,34 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         commitLive(null);
         onApprovalsSettled?.();
       }
+      // The ask-time choice lands here (the turn's own duration dwarfs the
+      // IPC round-trip, so the read is long resolved).
+      const runtimeChoice = await runtimeRead;
       // Optimistic thread append (ADR-0051): the outcome object is the same
       // shape the backend recorded; the trace is the event stream's settled
-      // rows (completed calls only), so the appended entry matches the
-      // refetch.
+      // rows (completed calls only); the runtime attribution is the ask-time
+      // choice stamp (issue #725). Only the content_hashes and the backend's
+      // own timestamps differ from the recorded row -- and no refetch ever
+      // lands them: the thread is staleTime-Infinity and the turn flow never
+      // invalidates it (ADR-0051 -- an invalidation would wipe this append),
+      // so this optimistic form IS the final rendered form until the session
+      // reopens.
       const newEntry: ThreadEntry = {
         entry: "Turn",
-        // Issue #381: the optimistic entry's provenance is empty -- the frontend
-        // does not know the assembly-time content_hashes (the backend records
-        // them in record_turn). ADR-0101: the runtime attribution is likewise
-        // left unset (the backend stamps the turn-top snapshot in
-        // record_turn) -- the optimistic row renders no badge, and the refetch
-        // replaces it with the real TurnRecord carrying both halves.
+        // Issue #381: the optimistic entry's provenance carries no
+        // content_hashes -- the frontend cannot know the assembly-time
+        // hashes (the backend records them in record_turn). Issue #725: the
+        // runtime half IS stamped, from the ask-time choice read above; an
+        // unknown choice omits it (the unrecorded-turn degradation -- no
+        // badge, rendered after reopen).
         data: {
           question,
           outcome,
           trace: settledTrace,
-          provenance: { skills: [] },
+          provenance: {
+            skills: [],
+            ...(runtimeChoice && { runtime: choiceToTurnRuntime(runtimeChoice) }),
+          },
           asked_at: askedAt,
           settled_at: Date.now(),
         },
