@@ -1,8 +1,8 @@
 // The collapsed row for a run of consecutive same-kind lifecycle markers
 // (issue #737): batch operations materialize long same-kind stretches
 // (Mount×N then Activate×N at submit, Added×N on sequential ingest), which
-// bury the surrounding turns -- a stretch at/above the fold threshold
-// renders as THIS one row instead. An accessible disclosure (button +
+// bury the surrounding turns -- a stretch at/above LIFECYCLE_FOLD_THRESHOLD
+// (3, turn-visual.ts) renders as THIS one row instead. An accessible disclosure (button +
 // aria-expanded + rotating chevron, the FoldToggle language): expanding is
 // the one way to see the member names (no hover tooltip: the count label
 // never overflows, so a truncation-recovery tooltip would be dead chrome;
@@ -27,7 +27,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { staleKey, type LifecycleFoldInfo } from "./turn-visual";
+import { staleDerivativeCount, type LifecycleFoldInfo } from "./turn-visual";
 import type { SkillEntry } from "../../types/skills";
 import type { ThreadEntry } from "../../types/thread";
 
@@ -40,6 +40,7 @@ function foldText(
   intl: IntlShape,
   group: LifecycleFoldInfo,
 ): { Icon: LucideIcon; text: string } {
+  const count = group.memberIdxs.length;
   if (group.species === "Skill") {
     // A local alias: switching on the member itself would narrow `group` to
     // never in the default branch (TS discards the whole object once its
@@ -54,7 +55,7 @@ function foldText(
               id: "thread.fold.mountSkills",
               defaultMessage: "Mounted {count, plural, one {# skill} other {# skills}}",
             },
-            { count: group.memberIdxs.length },
+            { count },
           ),
         };
       case "Unmount":
@@ -65,7 +66,7 @@ function foldText(
               id: "thread.fold.unmountSkills",
               defaultMessage: "Unmounted {count, plural, one {# skill} other {# skills}}",
             },
-            { count: group.memberIdxs.length },
+            { count },
           ),
         };
       case "Activate":
@@ -76,7 +77,7 @@ function foldText(
               id: "thread.fold.activateSkills",
               defaultMessage: "Activated {count, plural, one {# skill} other {# skills}}",
             },
-            { count: group.memberIdxs.length },
+            { count },
           ),
         };
       default: {
@@ -95,7 +96,7 @@ function foldText(
             id: "thread.fold.addSources",
             defaultMessage: "Loaded {count, plural, one {# dataset} other {# datasets}}",
           },
-          { count: group.memberIdxs.length },
+          { count },
         ),
       };
     case "Deleted":
@@ -106,7 +107,7 @@ function foldText(
             id: "thread.fold.deleteSources",
             defaultMessage: "Deleted {count, plural, one {# dataset} other {# datasets}}",
           },
-          { count: group.memberIdxs.length },
+          { count },
         ),
       };
     case "Replaced":
@@ -117,7 +118,7 @@ function foldText(
             id: "thread.fold.replaceSources",
             defaultMessage: "Replaced {count, plural, one {# dataset} other {# datasets}}",
           },
-          { count: group.memberIdxs.length },
+          { count },
         ),
       };
     default: {
@@ -166,7 +167,7 @@ export function LifecycleFold({
     group.driftCount > 0 ? (
       <FormattedMessage
         id="thread.fold.missingSuffix"
-        defaultMessage=" · {count} no longer exist"
+        defaultMessage=" · {count, plural, one {# no longer exists} other {# no longer exist}}"
         values={{ count: group.driftCount }}
       />
     ) : null;
@@ -261,11 +262,12 @@ export function LifecycleFoldMembers({
     }
     // The projector only points fold rows at Skill/Source entries.
     if (entry.entry !== "Source") return null;
-    const stale =
-      entry.data.kind === "Added"
-        ? 0
-        : staleCountsByKey.get(staleKey(entry.data.reference_name, entry.data.kind)) ?? 0;
-    return { idx, name: entry.data.display_name, missing: false, stale };
+    return {
+      idx,
+      name: entry.data.display_name,
+      missing: false,
+      stale: staleDerivativeCount(entry.data, staleCountsByKey),
+    };
   });
   return (
     <li

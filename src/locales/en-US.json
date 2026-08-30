@@ -501,7 +501,7 @@
   "thread.fold.activateSkills": "Activated {count, plural, one {# skill} other {# skills}}",
   "thread.fold.addSources": "Loaded {count, plural, one {# dataset} other {# datasets}}",
   "thread.fold.deleteSources": "Deleted {count, plural, one {# dataset} other {# datasets}}",
-  "thread.fold.missingSuffix": " · {count} no longer exist",
+  "thread.fold.missingSuffix": " · {count, plural, one {# no longer exists} other {# no longer exist}}",
   "thread.fold.mountSkills": "Mounted {count, plural, one {# skill} other {# skills}}",
   "thread.fold.replaceSources": "Replaced {count, plural, one {# dataset} other {# datasets}}",
   "thread.fold.unmountSkills": "Unmounted {count, plural, one {# skill} other {# skills}}",

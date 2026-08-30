@@ -13,7 +13,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
-import type { SourceLifecycleKind } from "../../types/lifecycle";
+import type { SourceLifecycleEvent, SourceLifecycleKind } from "../../types/lifecycle";
 import type { SkillEntry, SkillLifecycleKind } from "../../types/skills";
 import type { ThreadEntry, TurnOutcome, TurnRecord, TurnRuntime } from "../../types/thread";
 
@@ -299,14 +299,29 @@ export interface LifecycleFoldInputs {
 }
 
 // The stale-derivative count key (issues #40/#41, ADR-0047 no-event_id
-// attribution): one template in one place so the fold aggregation
-// (buildFoldGroup) and the scatter row's suffix (Thread) can never drift
-// apart silently on a format change.
+// attribution): one template in one place so every producer and consumer
+// (the stale map's fill in Thread, the fold aggregation in buildFoldGroup,
+// the scatter suffix in Thread, the expanded member row in LifecycleFold)
+// can never drift apart silently on a format change.
 export function staleKey(
   referenceName: string,
   kind: SourceLifecycleKind,
 ): string {
   return `${referenceName}:${kind}`;
+}
+
+// The stale-derivative count of one source event (issues #40/#41): an Added
+// never invalidates (structurally 0 -- a stray Added key in the map must not
+// leak, pinned by tests); otherwise the (reference_name, kind) count from
+// the aggregated stale map, 0 when the map holds no entry. Extracted next to
+// staleKey so the three render surfaces (fold aggregation, scatter suffix,
+// expanded member suffix) share ONE derivation.
+export function staleDerivativeCount(
+  event: Pick<SourceLifecycleEvent, "reference_name" | "kind">,
+  staleCountsByKey: ReadonlyMap<string, number> | undefined,
+): number {
+  if (event.kind === "Added") return 0;
+  return staleCountsByKey?.get(staleKey(event.reference_name, event.kind)) ?? 0;
 }
 
 // A standalone marker's identity for segmentation: the species tag and its
@@ -341,13 +356,10 @@ function buildFoldGroup(
   for (const idx of seg.idxs) {
     const entry = entries[idx];
     if (entry.entry === "Source") {
-      // An Added never invalidates (its stale count is structurally 0);
-      // only Replaced/Deleted members contribute their (reference_name,
-      // reason) counts, summed so the fold row carries the group total.
-      if (entry.data.kind !== "Added") {
-        invalidatedCount +=
-          inputs.staleCountsByKey?.get(staleKey(entry.data.reference_name, entry.data.kind)) ?? 0;
-      }
+      // An Added contributes 0 (never invalidates); Replaced/Deleted members
+      // contribute their (reference_name, reason) counts, summed so the fold
+      // row carries the group total.
+      invalidatedCount += staleDerivativeCount(entry.data, inputs.staleCountsByKey);
     } else if (
       entry.entry === "Skill" &&
       // Three-way lookup mirroring SkillMarker: only a WIRED registry that

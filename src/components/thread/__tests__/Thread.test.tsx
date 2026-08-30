@@ -3028,6 +3028,12 @@ describe("Thread", () => {
       expect(
         midRun.container.querySelector(".lifecycle-fold-members")?.getAttribute("data-run-continue"),
       ).toBe("true");
+      // The fold head itself is the segment's single node: it carries the run
+      // position the connector rule keys on (mid here -- [marker | fold |
+      // marker]), pinned in the DOM like the scatter rows' data-run.
+      expect(
+        midRun.container.querySelector(".lifecycle-fold-entry")?.getAttribute("data-run"),
+      ).toBe("mid");
 
       const loneEntries: ThreadEntry[] = [turnEntry(materializedRecord("result_1", null)), mount("s1"), mount("s2"), mount("s3")];
       const lone = renderThread(
@@ -3041,6 +3047,10 @@ describe("Thread", () => {
       expect(
         lone.container.querySelector(".lifecycle-fold-members")?.hasAttribute("data-run-continue"),
       ).toBe(false);
+      // A lone fold is its run's only node: single, no line either way.
+      expect(
+        lone.container.querySelector(".lifecycle-fold-entry")?.getAttribute("data-run"),
+      ).toBe("single");
     });
 
     it("aggregates the drift count onto a skill fold; expanded members keep their warnings", () => {
@@ -3072,14 +3082,15 @@ describe("Thread", () => {
       expect(screen.getAllByText(/已不存在/)).toHaveLength(3);
     });
 
-    it("sums the invalidation counts onto the fold row", () => {
-      // a:Replaced invalidates 2 results, b none, c 1 -- the fold carries 3.
+    it("sums the invalidation counts onto the fold row; expanded members keep their counts", () => {
+      // a:Replaced invalidates 2 results, b none, c 1 -- the fold carries 3,
+      // and each expanded member names its own count beside its name.
       const staleByReference = new Map([
         ["result_1", { reference_name: "a", display_name: "甲", reason: "Replaced" as const }],
         ["result_2", { reference_name: "a", display_name: "甲", reason: "Replaced" as const }],
         ["result_3", { reference_name: "c", display_name: "丙", reason: "Replaced" as const }],
       ]);
-      renderThread(
+      const { container } = renderThread(
         <Thread
           entries={[replaced("a", "甲"), replaced("b", "乙"), replaced("c", "丙")]}
           selectedResult={null}
@@ -3087,7 +3098,17 @@ describe("Thread", () => {
           staleByReference={staleByReference}
         />,
       );
-      screen.getByRole("button", { name: /换源了 3 个数据源.*失效 3/ });
+      const foldBtn = screen.getByRole("button", { name: /换源了 3 个数据源.*失效 3/ });
+      expect(foldBtn).toBeInTheDocument();
+      fireEvent.click(foldBtn);
+      const names = container.querySelectorAll(
+        ".lifecycle-fold-members span[data-entry-idx]",
+      );
+      expect(Array.from(names).map((n) => n.textContent)).toEqual([
+        "甲 · 失效 2",
+        "乙",
+        "丙 · 失效 1",
+      ]);
     });
 
     it("expands a collapsed group before a stale-chip jump lands on the exact member (ADR-0047)", () => {

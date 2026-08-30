@@ -14,6 +14,7 @@ import {
   lifecycleRunMarks,
   lifecycleVisualRows,
   runtimeSegmentBadges,
+  staleDerivativeCount,
   staleKey,
   type DatasetLabel,
   type LifecycleFoldInfo,
@@ -199,7 +200,9 @@ export function Thread({
   const staleCountsByKey = useMemo(() => {
     const m = new Map<string, number>();
     for (const anchor of staleByReference.values()) {
-      const key = `${anchor.reference_name}:${anchor.reason}`;
+      // The key rides staleKey so the producer shares the one template every
+      // consumer reads through -- a format change stays coherent end to end.
+      const key = staleKey(anchor.reference_name, anchor.reason);
       m.set(key, (m.get(key) ?? 0) + 1);
     }
     return m;
@@ -323,10 +326,7 @@ export function Thread({
         </li>
       );
     }
-    const staleCount =
-      entry.data.kind === "Added"
-        ? 0
-        : staleCountsByKey.get(staleKey(entry.data.reference_name, entry.data.kind)) ?? 0;
+    const staleCount = staleDerivativeCount(entry.data, staleCountsByKey);
     return (
       <li
         key={idx}
