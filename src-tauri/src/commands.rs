@@ -1292,13 +1292,19 @@ pub fn discover_mcp_servers(
 
 /// Run a connection preflight against the named profile (ADR-0070, issue
 /// #236). Reads the profile's stored key from the OS keychain by `profile_id`
-/// (ADR-0029 -- the key never crosses IPC) and probes the caller-supplied
-/// endpoint (`protocol` + `base_url` + `model` = the frontend's current edit
-/// values, so a user who edits base_url and re-tests does not have to save
-/// first) via `GET /models` with a minimal-turn ping fallback. A failed
-/// keychain read short-circuits to `KeychainUnavailable` before any HTTP
-/// (issue #243 -- previously swallowed into `None` and misclassified as
-/// `KeyRejected`). Returns the six-state [`ProfileTestOutcome`] so the
+/// (ADR-0029 -- the stored key never crosses IPC back to the frontend) and
+/// probes the caller-supplied endpoint (`protocol` + `base_url` + `model` =
+/// the frontend's current edit values, so a user who edits base_url and
+/// re-tests does not have to save first) via `GET /models` with a
+/// minimal-turn ping fallback. A failed keychain read short-circuits to
+/// `KeychainUnavailable` before any HTTP (issue #243 -- previously swallowed
+/// into `None` and misclassified as `KeyRejected`). `key` is the optional
+/// one-shot add-mode override (issue #735, ADR-0070 calibration): the add
+/// form's buffered draft key, which has not reached the keychain yet -- when
+/// it trims non-empty it wins over the keychain read (the keychain is never
+/// consulted), otherwise the probe falls back to the keychain read verbatim.
+/// The transfer is frontend -> Rust, one request, never persisted and never
+/// echoed back. Returns the six-state [`ProfileTestOutcome`] so the
 /// frontend renders the result and feeds the listed models to the model
 /// dropdown (the list is NOT persisted -- ADR-0038). Runs off the async/UI
 /// thread (the probe is two blocking HTTP calls up to the 30s ceiling); the
@@ -1312,11 +1318,15 @@ pub async fn test_profile(
     protocol: Protocol,
     base_url: String,
     model: String,
+    key: Option<String>,
 ) -> Result<ProfileTestOutcome, String> {
     let live = live.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let id = ProfileId(profile_id);
-        let key_read = live.key_for_profile(&id);
+        let key_read = crate::provider::preflight::resolve_probe_key(
+            key.as_deref(),
+            live.key_for_profile(&id),
+        );
         crate::provider::preflight::run(key_read, protocol, &base_url, &model)
     })
     .await

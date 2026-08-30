@@ -33,9 +33,19 @@ type ProviderEndpointFieldsProps = {
   // not land on an unmounted node). Optional: the field renders without it but
   // loses the close guard.
   onBusyChange?: (busy: boolean) => void;
-  // Mirrors the model Select's open state upward (the preset select reports its
-  // own); see ProviderPresetField.onOpenChange for the commit-on-blur rationale.
+  // Mirrors the model list panel's open state upward (the preset select
+  // reports its own); see ProviderPresetField.onOpenChange for the
+  // commit-on-blur rationale.
   onModelSelectOpenChange?: (open: boolean) => void;
+  // One-shot probe key (issue #735): threaded to ProviderModelField. The add
+  // form passes its buffered draft key (the profile has no keychain entry
+  // yet); edit mode omits it (store-then-test unchanged).
+  probeKey?: string;
+  // Field-level validation errors (issue #735), owned by ProfilesSection's
+  // validateProfile: rendered at the offending field, driving its
+  // aria-invalid + aria-describedby. Null when the field is clean.
+  baseUrlError?: string | null;
+  modelError?: string | null;
 };
 
 export function ProviderEndpointFields({
@@ -45,6 +55,9 @@ export function ProviderEndpointFields({
   disabled,
   onBusyChange,
   onModelSelectOpenChange,
+  probeKey,
+  baseUrlError,
+  modelError,
 }: ProviderEndpointFieldsProps) {
   const intl = useIntl();
   const baseUrlId = useId();
@@ -118,17 +131,26 @@ export function ProviderEndpointFields({
           </Label>
         )}
       >
-        <Input
-          id={baseUrlId}
-          type="text"
-          value={profile.base_url}
-          onChange={(e) => onUpdate({ base_url: e.target.value })}
-          disabled={disabled}
-          spellCheck={false}
-          // An example URL -- a technical string with no language form, so it
-          // stays out of the catalog (ADR-0052 layer 1 covers text).
-          placeholder="https://api.example.com/v1"
-        />
+        <div className="grid gap-2">
+          <Input
+            id={baseUrlId}
+            type="text"
+            value={profile.base_url}
+            onChange={(e) => onUpdate({ base_url: e.target.value })}
+            disabled={disabled}
+            spellCheck={false}
+            // An example URL -- a technical string with no language form, so it
+            // stays out of the catalog (ADR-0052 layer 1 covers text).
+            placeholder="https://api.example.com/v1"
+            aria-invalid={baseUrlError ? true : undefined}
+            aria-describedby={baseUrlError ? `${baseUrlId}-error` : undefined}
+          />
+          {baseUrlError && (
+            <p id={`${baseUrlId}-error`} className="text-destructive text-sm">
+              {baseUrlError}
+            </p>
+          )}
+        </div>
       </SettingsRow>
 
       <ProviderModelField
@@ -137,6 +159,8 @@ export function ProviderEndpointFields({
         disabled={disabled}
         onBusyChange={onBusyChange}
         onSelectOpenChange={onModelSelectOpenChange}
+        probeKey={probeKey}
+        error={modelError}
       />
     </>
   );

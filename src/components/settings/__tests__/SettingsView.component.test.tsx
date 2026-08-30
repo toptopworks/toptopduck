@@ -643,6 +643,28 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onCommitAppConfig).not.toHaveBeenCalled();
   });
 
+  it("reverting a bad edit to its committed value clears the field error on the follow-up blur", async () => {
+    // Issue #735 review finding: commitDraft's clean-draft early return
+    // skipped the field-error clearing, so a bad edit that was reverted kept
+    // its error message and aria-invalid after the follow-up blur.
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    const baseUrl = await screen.findByLabelText("Base URL");
+    fireEvent.change(baseUrl, { target: { value: "ftp://nope" } });
+    fireEvent.blur(baseUrl, { relatedTarget: document.body });
+    expect(await screen.findByText("Base URL must use http or https.")).toBeInTheDocument();
+    // Back to the committed value -> blur -> the early return fires with the
+    // draft clean: the error (and its aria-invalid) must not linger, and no
+    // commit happens (nothing changed).
+    fireEvent.change(baseUrl, { target: { value: "https://api.anthropic.com" } });
+    fireEvent.blur(baseUrl, { relatedTarget: document.body });
+    await waitFor(() =>
+      expect(screen.queryByText("Base URL must use http or https.")).not.toBeInTheDocument(),
+    );
+    expect(baseUrl).not.toHaveAttribute("aria-invalid");
+    expect(onCommitAppConfig).not.toHaveBeenCalled();
+  });
+
   it("an open preset dropdown holds back the blur commit until the select closes", async () => {
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
