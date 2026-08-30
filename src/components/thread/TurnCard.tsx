@@ -419,7 +419,11 @@ function TurnBody({
           )}
         >
           {badge && (
-            <span className="textual-kind inline-block mr-1 text-muted-foreground">{badge}</span>
+            // The kind badge is chrome, not discourse: it keeps the caption
+            // tier instead of inheriting the body's conversation tier.
+            <span className="textual-kind inline-block mr-1 text-xs text-muted-foreground">
+              {badge}
+            </span>
           )}
           <span className="textual-body text-foreground">{body}</span>
           <AssumptionNote assumption={assumption} />

@@ -154,7 +154,7 @@ describe("Thread", () => {
       },
       { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
     ];
-    renderThread(
+    const { container } = renderThread(
       <Thread
         entries={records.map(turnEntry)}
         selectedResult="result_1"
@@ -174,6 +174,12 @@ describe("Thread", () => {
     expect(screen.getByText(/假设：把 id 当主键/)).toBeInTheDocument();
     // Clarify and refuse render distinctly with their kind + body.
     expect(screen.getByText("需要澄清")).toBeInTheDocument();
+    // The kind badge is chrome, not discourse: it keeps the caption tier
+    // (text-xs) instead of inheriting the body's conversation tier (issue
+    // #727 -- the tier pin for the body itself is in the Agent textual test).
+    expect(
+      container.querySelector(".turn-outcome.textual.clarify .textual-kind")?.className,
+    ).toContain("text-xs");
     expect(screen.getByText("按产品名还是客户名？")).toBeInTheDocument();
     expect(screen.getByText("无法处理")).toBeInTheDocument();
     expect(screen.getByText("预测不在 v1 能力范围内")).toBeInTheDocument();
@@ -488,13 +494,13 @@ describe("Thread", () => {
     });
   });
 
-  it("renders skill lifecycle markers as circle nodes distinct from turn cards (issue #366)", () => {
+  it("renders skill lifecycle markers as bare glyph nodes distinct from turn cards (issue #366)", () => {
     // The two skill lifecycle kinds (Mount / Unmount) ride the timeline
     // isomorphic to source events but as a distinct species -- non-interactive
-    // circle-node markers (data-skill-kind + .skill-lifecycle), never turn
-    // cards. Each carries its kind's glyph inside a circular node (issue #721
-    // nodification) + an i18n'd verb + the spec name (the stable identity the
-    // timeline carries, never a snapshot) right of the node.
+    // glyph-led markers (data-skill-kind + .skill-lifecycle), never turn
+    // cards. Each leads with its kind's bare tone-colored glyph (issue #727
+    // calibration) + an i18n'd verb + the spec name (the stable identity the
+    // timeline carries, never a snapshot) right of the glyph.
     const entries: ThreadEntry[] = [
       { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
       { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
