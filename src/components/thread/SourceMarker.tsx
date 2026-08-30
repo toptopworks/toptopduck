@@ -4,20 +4,21 @@
 // left it); Replaced = RefreshCw (a source's backing snapshot was swapped under
 // the same reference name, ADR-0025). A Replaced/Deleted marker names how many
 // derivatives it invalidated when that count is non-zero. Issue #721
-// nodification: the kind glyph rides inside a circular node, the verb text
-// sits right of the node, so the species stays visually distinct from turn
-// cards at a glance. The display name is layer-4 canonical (ADR-0037) and
-// passes through the {name} ICU placeholder untranslated.
+// nodification: the kind glyph leads the row as a bare tone-colored icon
+// (no node chrome), the verb text sits right of it, so the species stays
+// visually distinct from turn cards at a glance. The display name is
+// layer-4 canonical (ADR-0037) and passes through the {name} ICU
+// placeholder untranslated.
 //
 // ADR-0067 (issue #169): the marker's visual details migrated here from
 // styles.css's `.thread .source-lifecycle*` rules. The three lifecycle kinds
-// each carry a tailwind border-* utility over the ADR-0050 token so the kind
+// each carry a tailwind text-* utility over the ADR-0050 token so the kind
 // is readable at a glance (Added=primary / Replaced=accent-foreground /
-// Deleted=destructive, ADR-0047 source-marker species). Issue #721 moved the
-// carrier: the tone rides the node's 1px border (the retired bar carried it
-// as a border-l prefix line), and the jump-select highlight (ADR-0047
+// Deleted=destructive, ADR-0047 source-marker species). The tone rides the
+// glyph color (the retired bar carried it as a border-l prefix line, then
+// the #721 circle as a border), and the jump-select highlight (ADR-0047
 // chip-trace) lands as "node ring + row wash" -- ring-2 ring-primary on the
-// node, bg-accent on the row. The `highlighted` flag is derived by the caller
+// node box, bg-accent on the row. The `highlighted` flag is derived by the caller
 // from data-highlighted on the wrapping <li>; the data attribute and the
 // scrollIntoView hookup are unchanged (chip-trace semantics conserved).
 
@@ -84,16 +85,16 @@ export function SourceMarker({
 }) {
   const intl = useIntl();
   const { Icon, text } = sourceMarkerText(intl, event.kind, event.display_name);
-  // The three-way hue is the kind's identity cue (ADR-0047), riding the node's
-  // 1px border (issue #721). Each branch is a literal utility so the Tailwind
-  // scanner keeps the class; a computed `border-${kind}` string would be
-  // tree-shaken away.
-  const nodeTone =
+  // The three-way hue is the kind's identity cue (ADR-0047), riding the
+  // glyph color. Each branch is a literal utility so the Tailwind scanner
+  // keeps the class; a computed `text-${kind}` string would be tree-shaken
+  // away.
+  const iconTone =
     event.kind === "Added"
-      ? "border-primary"
+      ? "text-primary"
       : event.kind === "Replaced"
-        ? "border-accent-foreground"
-        : "border-destructive"; // Deleted (exhaustive over SourceLifecycleKind).
+        ? "text-accent-foreground"
+        : "text-destructive"; // Deleted (exhaustive over SourceLifecycleKind).
   // The stale suffix (ADR-0047 invalidation disclosure) is i18n'd (ADR-0052)
   // and rides both the visible marker and the hover Tooltip, so a marker
   // truncated by the fixed source-row width still discloses the count on hover.
@@ -118,21 +119,18 @@ export function SourceMarker({
         highlighted && "bg-accent",
       )}
     >
-      {/* The kind glyph rides inside a circular node (issue #721): the
-          bg-background fill punches the run-connector line behind it, the 1px
-          border carries the kind tone; relative + z-10 keeps the circle above
-          the li::before segment and the row's highlight wash. The h-4 w-4
-          node + the row's py-0.5 are the geometry contract owned by the
-          styles.css data-run rule (single source of truth for the offsets). */}
+      {/* The kind glyph rides in an invisible h-4 w-4 box: the box + the
+          row's py-0.5 are the geometry contract owned by the styles.css
+          data-run rule (the connector starts at the box's bottom edge).
+          rounded-full + relative + z-10 stay for the jump-select ring: the
+          ring reads round and paints above the connector segment. */}
       <span
         className={cn(
-          "source-node relative z-10 flex h-4 w-4 shrink-0 items-center justify-center",
-          "rounded-full border bg-background",
-          nodeTone,
+          "source-node relative z-10 flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
           highlighted && "ring-2 ring-primary",
         )}
       >
-        <Icon className="source-icon w-2.5 h-2.5 shrink-0" aria-hidden="true" />
+        <Icon className={cn("source-icon w-3 h-3 shrink-0", iconTone)} aria-hidden="true" />
       </span>
       <TruncatingTooltip
         text={staleSuffix ? <>{text}{staleSuffix}</> : text}

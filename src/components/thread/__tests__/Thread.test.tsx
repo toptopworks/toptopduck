@@ -512,10 +512,10 @@ describe("Thread", () => {
     // Each kind's i18n'd verb rides one ICU message with the spec name.
     expect(screen.getByText(/挂载技能「pdf-tools」/)).toBeInTheDocument();
     expect(screen.getByText(/卸载技能「pdf-tools」/)).toBeInTheDocument();
-    // Issue #721 nodification: the marker row leads with the circle node
-    // (children[0] identity pin -- the verb text follows, "动词右置") and the
-    // retired bar chrome (border-l-2 prefix line + bg-muted fill) must not
-    // survive on the row.
+    // Issue #721 nodification: the marker row leads with the glyph's node
+    // box (children[0] identity pin -- the verb text follows, "动词右置") and
+    // the retired bar chrome (border-l-2 prefix line + bg-muted fill) must
+    // not survive on the row.
     const mountRow = container.querySelector(
       `.skill-entry[data-skill-kind="mount"] .skill-lifecycle`,
     ) as HTMLElement;
@@ -523,26 +523,34 @@ describe("Thread", () => {
     expect(mountRow.className.split(/\s+/)).not.toContain("border-l-2");
     expect(mountRow.className.split(/\s+/)).not.toContain("bg-muted");
     // The row's py-0.5 is the OTHER half of the styles.css geometry
-    // contract (the connector's top: 10px / bottom: -2px derive from node
+    // contract (the connector's top: 18px / bottom: -6px derive from node
     // h-4 w-4 AND row py-0.5); the retired bar's px-1.5 must not return --
     // horizontal padding would shift the left origin the connector hangs
     // from.
     expect(mountRow.className.split(/\s+/)).toContain("py-0.5");
     expect(mountRow.className.split(/\s+/)).not.toContain("px-1.5");
-    // The node is a punch-through circle: bg-background (hides the run
-    // connector behind it) + 1px tone border; h-4 w-4 is the geometry
-    // contract the styles.css data-run connector offsets are computed from.
+    // The node box is chrome-free: the #721 circle (rounded-full + 1px tone
+    // border + bg-background punch) is retired; only the h-4 w-4 geometry
+    // contract the styles.css data-run connector offsets are computed from
+    // remains.
     const node = (kind: string) =>
       container.querySelector(
         `.skill-entry[data-skill-kind="${kind}"] .skill-node`,
       ) as HTMLElement;
-    for (const cls of ["rounded-full", "border", "bg-background", "h-4", "w-4"]) {
+    for (const cls of ["h-4", "w-4"]) {
       expect(node("mount").className.split(/\s+/)).toContain(cls);
     }
-    // Mount = active tone (border-primary); Unmount = weakened tone -- the
-    // tier mapping migrated from the retired border-l prefix line to the node.
-    expect(node("mount").className.split(/\s+/)).toContain("border-primary");
-    expect(node("unmount").className.split(/\s+/)).toContain("border-muted-foreground");
+    for (const cls of ["rounded-full", "border", "bg-background"]) {
+      expect(node("mount").className.split(/\s+/)).not.toContain(cls);
+    }
+    // Mount = active tone; Unmount = weakened tone -- the tier mapping rides
+    // the glyph color (the retired circle carried it as a border).
+    // The glyph is an SVG, so read its class via getAttribute -- an SVG's
+    // className is an SVGAnimatedString, not a string.
+    const icon = (kind: string) =>
+      node(kind).querySelector(".skill-icon")?.getAttribute("class")?.split(/\s+/);
+    expect(icon("mount")).toContain("text-primary");
+    expect(icon("unmount")).toContain("text-muted-foreground");
   });
 
   it("renders one Activate verb for both actors, the placement carrying the initiator (issues #698/#701/#722)", () => {
@@ -569,12 +577,14 @@ describe("Thread", () => {
     expect(screen.getByText(/激活技能「sql-coach」/)).toBeInTheDocument();
     expect(screen.queryByText(/Agent 激活技能/)).toBeNull();
     // Activate shares Mount's primary present-tense tier; the tone rides the
-    // node's 1px border (issue #721 nodification).
+    // glyph color.
     const node = container.querySelector(
       `.skill-entry[data-skill-kind="activate"] .skill-node`,
     ) as HTMLElement;
     expect(node).not.toBeNull();
-    expect(node.className.split(/\s+/)).toContain("border-primary");
+    expect(
+      node.querySelector(".skill-icon")?.getAttribute("class")?.split(/\s+/),
+    ).toContain("text-primary");
   });
 
   it("renders an agent activation at the head of its owning turn's stream (D5, issue #722)", () => {
@@ -962,10 +972,11 @@ describe("Thread", () => {
     const node = container.querySelector(
       `.skill-entry[data-skill-kind="mount"] .skill-node`,
     ) as HTMLElement;
-    // Missing overrides the kind tone: the destructive tier lands on the node
-    // border (issue #721 carrier migration) while the warning text tone stays
-    // on the row.
-    expect(node.className.split(/\s+/)).toContain("border-destructive");
+    // Missing overrides the kind tone: the destructive tier lands on the
+    // glyph while the warning text tone stays on the row.
+    expect(
+      node.querySelector(".skill-icon")?.getAttribute("class")?.split(/\s+/),
+    ).toContain("text-destructive");
     expect(marker.className.split(/\s+/)).toContain("text-destructive");
     expect(screen.getByText(/已不存在/)).toBeInTheDocument();
   });
@@ -1223,13 +1234,13 @@ describe("Thread", () => {
     expect(bubble?.className.split(/\s+/)).not.toContain("opacity-60");
   });
 
-  it("encodes the three source lifecycle kinds by node border tone (ADR-0047, issue #169)", () => {
+  it("encodes the three source lifecycle kinds by glyph tone (ADR-0047, issue #169)", () => {
     // The three-way hue (Added=primary / Replaced=accent-foreground /
-    // Deleted=destructive) rides the marker's circle node as a literal border-*
-    // utility (issue #721 nodification -- the mapping is unchanged, only the
-    // carrier moved from the retired border-l prefix line to the node). The
-    // source species keeps its own kind mapping; it does NOT unify with the
-    // skill tiers.
+    // Deleted=destructive) rides the marker's glyph as a literal text-*
+    // utility (the mapping is unchanged, only the carrier moved -- the
+    // retired bar's border-l prefix line, then the #721 circle's border).
+    // The source species keeps its own kind mapping; it does NOT unify with
+    // the skill tiers.
     const entries: ThreadEntry[] = [
       { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
       { entry: "Source", data: { kind: "Replaced", reference_name: "people", display_name: "员工表" } },
@@ -1238,23 +1249,28 @@ describe("Thread", () => {
     const { container } = renderThread(
       <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
     );
+    const node = (kind: string) =>
+      container.querySelector(
+        `.source-entry[data-source-kind="${kind}"] .source-node`,
+      ) as HTMLElement;
+    // The glyph is an SVG: className is an SVGAnimatedString, so read the
+    // class attribute instead.
     const tone = (kind: string) =>
-      container
-        .querySelector(`.source-entry[data-source-kind="${kind}"] .source-node`)
-        ?.className.split(/\s+/);
-    expect(tone("added")).toContain("border-primary");
-    expect(tone("replaced")).toContain("border-accent-foreground");
-    expect(tone("deleted")).toContain("border-destructive");
-    // The node is a punch-through circle leading the row; the retired bar
-    // chrome (border-l-2 + bg-muted) must not survive on the marker row.
-    expect(tone("added")).toContain("rounded-full");
-    expect(tone("added")).toContain("bg-background");
-    // Geometry-contract symmetry with the skill side: the connector offsets
-    // in styles.css are computed for BOTH species from node h-4 w-4 + row
-    // py-0.5, so a source-only resize or row-spacing change would silently
-    // misalign only the source connectors.
-    expect(tone("added")).toContain("h-4");
-    expect(tone("added")).toContain("w-4");
+      node(kind).querySelector(".source-icon")?.getAttribute("class")?.split(/\s+/);
+    expect(tone("added")).toContain("text-primary");
+    expect(tone("replaced")).toContain("text-accent-foreground");
+    expect(tone("deleted")).toContain("text-destructive");
+    // The node box keeps no circle chrome (the border + bg-background punch
+    // retired with the #721 circle) except rounded-full, which stays so the
+    // jump-select ring reads round. Geometry-contract symmetry with the skill
+    // side: the connector offsets in styles.css are computed for BOTH species
+    // from node h-4 w-4 + row py-0.5, so a source-only resize or
+    // row-spacing change would silently misalign only the source connectors.
+    expect(node("added").className.split(/\s+/)).not.toContain("border");
+    expect(node("added").className.split(/\s+/)).not.toContain("bg-background");
+    expect(node("added").className.split(/\s+/)).toContain("rounded-full");
+    expect(node("added").className.split(/\s+/)).toContain("h-4");
+    expect(node("added").className.split(/\s+/)).toContain("w-4");
     const row = container.querySelector(
       `.source-entry[data-source-kind="added"] .source-lifecycle`,
     ) as HTMLElement;
@@ -1268,7 +1284,7 @@ describe("Thread", () => {
 
   it("jump-select lifts the matched source marker via node ring + row bg (ADR-0047 chip-trace, issue #169)", () => {
     // The jump-select highlight lands as "node ring + row wash" (issue #721):
-    // ring-2 ring-primary rides the circle node, the row keeps the bg-accent
+    // ring-2 ring-primary rides the node box, the row keeps the bg-accent
     // wash; the ring never lands on the whole row. The wrapping <li> still
     // carries data-highlighted (the caller-derived flag) for selector
     // stability + the scrollIntoView hookup.
