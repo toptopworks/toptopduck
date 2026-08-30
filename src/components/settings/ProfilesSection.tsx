@@ -1,15 +1,16 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type FocusEvent,
   type MutableRefObject,
 } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
-import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, Trash2 } from "lucide-react";
 
-import { listProviderProfiles } from "../../api";
+import { listProviderProfiles, setProfileKey } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
 import type { AppConfig } from "../../types/app-config";
@@ -33,15 +34,19 @@ import {
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { PaneHeader } from "./settings-chrome";
+import { Label } from "../ui/label";
+import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 import { ProviderEndpointFields } from "./ProviderEndpointFields";
 import { ProviderKeyField } from "./ProviderKeyField";
 import { ProviderPresetField } from "./ProviderPresetField";
 import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 
 // Profiles pane (ADR-0075, issue #281; ADR-0064/0065). Master-detail: the left
-// column lists every profile (status dot + name + active badge); the right
-// column is the selected profile's edit form.
+// column lists every profile (status dot + name + active badge) inside a
+// bordered card; the right column is the selected profile's edit form -- the
+// same SettingsCard / SettingsRow chrome every other settings pane rides, so
+// add + edit share ONE row shape (name, preset, protocol, base URL, model,
+// API key) above a single action bar.
 //
 // PERSISTENCE MODEL (ADR-0075 governing principle, case b): the endpoint fields
 // (protocol / base_url / model + the derived preset) form ONE commit unit and
@@ -51,13 +56,18 @@ import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 // inline error). Closing the view flushes the still-focused field (the parent
 // calls the `flush` this pane registers on controlsRef). Structural operations
 // are immediate: create commits on its bottom button (a freshly-minted profile
-// is held in memory -- `addingProfile` -- and never listed until committed; its
-// key can still be set first via the ADR-0064 orphan slot), delete commits on
+// is held in memory -- `addingProfile` -- and never listed until committed; a
+// key typed in add mode is BUFFERED (`draftKey`) and written to the keychain
+// together with the create, so a discarded add never leaves a keychain entry
+// for a profile that was never created), delete commits on
 // confirm (deleting the last profile lands the legal zero-profile state,
 // ADR-0098), and set-active commits at once (mirroring the
-// top-bar quick-switcher). The API-key field keeps its OWN
+// top-bar quick-switcher). In EDIT mode the API-key field keeps its OWN
 // immediate Set/Clear IPC (ADR-0029 -- the key never enters app-config) and does
-// NOT participate in the blur / create commit.
+// NOT participate in the blur / create commit; in ADD mode it rides the create
+// flow (profile commit first, key write second -- a failed commit never
+// touches the keychain, and a failed key write leaves the created profile
+// selected with the error surfaced for an edit-mode retry).
 
 /** The control surface this pane exposes to SettingsView so the close / ESC
  *  contract (ADR-0075) can flush a focused field, detect a dirty add-mode form
@@ -76,9 +86,12 @@ export type ProfilesControls = {
   /** True while any IPC this pane owns is in flight (blur commit / create /
    *  key / test). The parent blocks close while set. */
   busy: boolean;
-  /** True while this pane's delete-confirm AlertDialog is open; the parent's
-   *  window ESC handler yields to the dialog while set (ADR-0075: a confirm
-   *  dialog owns window ESC). */
+  /** True while a modal layer this pane owns is open: the delete-confirm
+   *  AlertDialog OR one of the form's portalized Select listboxes. The
+   *  parent's window ESC handler yields while set (ADR-0075: an open layer
+   *  owns window ESC -- Radix's Select consumes Escape with preventDefault
+   *  only, never stopPropagation, so a dropdown's ESC must not close the
+   *  whole view). */
   dialogOpen: boolean;
 };
 
@@ -183,6 +196,7 @@ export function ProfilesSection({
   hideHeader = false,
 }: ProfilesSectionProps) {
   const intl = useIntl();
+  const nameInputId = useId();
 
   // Per-profile has_key overlay (issue #153), fetched on mount + on demand.
   const [profileKeys, setProfileKeys] = useState<Record<string, ProfileKeyStatus>>({});
@@ -202,7 +216,10 @@ export function ProfilesSection({
   // even while the user browses existing profiles with addMode false.
   const [addMode, setAddMode] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [renaming, setRenaming] = useState(false);
+  // The API key typed during add mode. Buffered (never IPC'd) until the create
+  // commits the profile -- see the pane header comment. Stashed alongside the
+  // retained `addingProfile` draft so a browse-away and back keeps it.
+  const [draftKey, setDraftKey] = useState("");
 
   // Local editable draft for the editing target (a copy of the selected profile
   // in edit mode, or of the in-memory skeleton in add mode). Edits land here;
@@ -212,18 +229,28 @@ export function ProfilesSection({
   const [draft, setDraft] = useState<ProviderProfile | null>(source ? { ...source } : null);
   const [draftForId, setDraftForId] = useState<string | null>(editingId);
   const [formError, setFormError] = useState<string | null>(null);
+  // Whether one of the form's Radix Selects currently holds focus in its
+  // portalized option list. The listbox renders OUTSIDE this pane's DOM subtree,
+  // so a focus move into it trips the form-level blur capture; commit-on-blur
+  // holds back while a select is open (the selection lands via onValueChange,
+  // and the closing focus-return re-arms the capture). A boolean suffices --
+  // opening one Select closes the other (Radix's focus model) -- and the
+  // editing-target reset below clears a stale true left by a Select that
+  // unmounted mid-open (onOpenChange(false) never fires on unmount).
+  const [selectOpen, setSelectOpen] = useState(false);
   if (editingId !== draftForId) {
     // Reset state when the editing target changes (React's documented "adjust
     // state during render" pattern -- no set-state-in-effect). Clears a stale
-    // draft + error + the rename affordance on profile switch.
+    // draft + error on profile switch, and re-arms the select-open guard (a
+    // Select unmounted mid-open never reports its close).
     setDraftForId(editingId);
     setDraft(source ? { ...source } : null);
     setFormError(null);
-    setRenaming(false);
+    setSelectOpen(false);
   }
 
   // IPC in-flight state, lifted from the key + model atoms so a key IPC disables
-  // Test and vice-versa (issue #236), and so the parent's close guard can block
+  // Test and vice versa (issue #236), and so the parent's close guard can block
   // unmount mid-flight (ADR-0029 trust root). `commitBusy` covers the pane's own
   // blur / create commits.
   const [keyBusy, setKeyBusy] = useState(false);
@@ -318,12 +345,42 @@ export function ProfilesSection({
   // Form-level blur: commit when focus leaves the edit form (commit-on-blur).
   // `relatedTarget` inside the form = an internal focus move (no commit); null
   // (focus left the window) or outside = commit. Add mode never blur-commits
-  // (its create button is the only commit path).
+  // (its create button is the only commit path). An open Select (focus parked in
+  // its portalized listbox) and an open delete-confirm dialog are NOT focus
+  // exits -- both hold back the commit (see selectOpen).
   function handleBlurCapture(e: FocusEvent<HTMLDivElement>) {
-    if (addMode) return;
+    if (addMode || selectOpen || confirmDeleteId !== null) return;
     const next = e.relatedTarget as Node | null;
     if (next && e.currentTarget.contains(next)) return;
     void commitDraft();
+  }
+
+  function handleEnterAddMode() {
+    // Restore a stashed draft if one survives; otherwise start a fresh
+    // skeleton. Entering add mode shows it for editing; a fresh start clears
+    // the drafted key (a stashed-draft restore keeps it -- the key belongs to
+    // the same in-progress add as the stashed endpoint).
+    if (!addingProfile) setDraftKey("");
+    setAddingProfile(addingProfile ?? freshProfileSkeleton());
+    setAddMode(true);
+    setFormError(null);
+  }
+
+  // Drop the retained add draft entirely: the draft profile, the buffered
+  // key, and any form error. Shared by the explicit Cancel and the parent's
+  // close-time discard contract -- both mean "abandon this add".
+  function dropAddDraft() {
+    setAddingProfile(null);
+    setAddMode(false);
+    setDraftKey("");
+    setFormError(null);
+  }
+
+  // Explicit Cancel in add mode: the click IS the discard intent, so the
+  // retained draft drops without the close-time confirm (the parent's discard
+  // contract covers the implicit paths -- close / nav-away).
+  function handleCancelAdd() {
+    dropAddDraft();
   }
 
   async function handleCreate() {
@@ -334,22 +391,47 @@ export function ProfilesSection({
       return;
     }
     const next = draft;
+    const keyToWrite = draftKey.trim();
     setCommitBusy(true);
+    if (keyToWrite) reportKeyBusy(true);
     const err = await onCommit((cfg) => ({
       ...cfg,
       provider: { ...cfg.provider, profiles: [...cfg.provider.profiles, next] },
     }));
-    setCommitBusy(false);
     if (err) {
+      setCommitBusy(false);
+      if (keyToWrite) reportKeyBusy(false);
       setFormError(err);
       return;
     }
-    // Committed: clear the retained draft + leave add mode, select the new
-    // profile for editing.
+    // Profile committed. NOW write the drafted key (ADR-0029 one-shot IPC),
+    // deliberately AFTER the commit: reversed order would strand an orphaned
+    // keychain entry when the commit fails -- the exact state the buffered
+    // draft exists to avoid. A failed key write here keeps the (already
+    // created) profile selected and surfaces the error; the user retries via
+    // the edit-mode Update key.
+    let keyErr: string | null = null;
+    if (keyToWrite) {
+      try {
+        const hasKey = await setProfileKey(next.id, keyToWrite);
+        setProfileKeys((prev) => ({
+          ...prev,
+          [next.id]: { profile_id: next.id, has_key: hasKey, keychain_fault: null },
+        }));
+      } catch (e) {
+        keyErr = fmtError(e, intl);
+      } finally {
+        reportKeyBusy(false);
+      }
+    }
+    setCommitBusy(false);
+    // Committed: clear the retained draft + drafted key, leave add mode,
+    // select the new profile for editing.
     setAddingProfile(null);
     setAddMode(false);
+    setDraftKey("");
     setSelectedId(next.id);
-    setFormError(null);
+    setFormError(keyErr);
   }
 
   async function handleConfirmDelete() {
@@ -413,18 +495,19 @@ export function ProfilesSection({
   // unmounts this pane -- its commit-on-blur already fired on the focus move).
   // In-flight key / test IPCs keep blocking close after unmount via the
   // transitions mirrored upward through onIpcBusy, which survive this pane.
-  const addDirty = addMode && addingProfile !== null && draft !== null && !sameEndpoint(draft, addingProfile);
+  // The buffered key counts as an unsaved edit too: a fresh skeleton is fully
+  // valid, so a key-only add would otherwise bypass the discard confirm and
+  // silently drop the typed key on close.
+  const addDirty =
+    addMode && addingProfile !== null && draft !== null &&
+    (!sameEndpoint(draft, addingProfile) || draftKey.trim() !== "");
   useEffect(() => {
     controlsRef.current = {
       flush: commitDraft,
       addDirty,
-      discardAdd: () => {
-        setAddingProfile(null);
-        setAddMode(false);
-        setFormError(null);
-      },
+      discardAdd: dropAddDraft,
       busy,
-      dialogOpen: confirmDeleteId !== null,
+      dialogOpen: confirmDeleteId !== null || selectOpen,
     };
     return () => {
       controlsRef.current = null;
@@ -482,19 +565,13 @@ export function ProfilesSection({
 
       <div className="profiles-master-detail gap-6">
         {/* Left: profile list (master). */}
-        <div className="profiles-list flex flex-col gap-2">
-          <div className="profiles-list-actions flex items-center gap-2">
+        <div className="profiles-list flex flex-col gap-3">
+          <div className="profiles-list-actions flex items-center justify-between gap-2">
             <Button
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => {
-                // Restore a stashed draft if one survives; otherwise start a
-                // fresh skeleton. Entering add mode shows it for editing.
-                setAddingProfile(addingProfile ?? freshProfileSkeleton());
-                setAddMode(true);
-                setFormError(null);
-              }}
+              onClick={handleEnterAddMode}
               disabled={busy}
             >
               <Plus aria-hidden />
@@ -502,140 +579,106 @@ export function ProfilesSection({
             </Button>
             {hideHeader && refreshButton}
           </div>
-          {keysLoading ? (
-            <p className="text-muted-foreground text-sm">
-              <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />
-            </p>
-          ) : provider.profiles.length === 0 ? (
-            <p className="text-muted-foreground text-sm">
-              <FormattedMessage
-                id="settings.profiles.empty"
-                defaultMessage="No profiles yet. Click “New profile” to add one."
-              />
-            </p>
-          ) : (
-            <ul className="profiles-list-items m-0 flex list-none flex-col gap-1 p-0">
-              {provider.profiles.map((p) => {
-                const isActive = p.id === provider.active_profile;
-                const pStatus = profileKeys[p.id];
-                const pHasKey = pStatus?.has_key ?? false;
-                const pFault = pStatus?.keychain_fault ?? null;
-                const isSelected = !addMode && p.id === selectedId;
-                const label = p.display_name.trim() || unnamed;
-                // Status dot (ADR-0075): active+key = connected, active+no-key
-                // = needs key, a keychain read fault = fault, otherwise idle.
-                // Colors ride the ADR-0050 semantic tokens with the same
-                // key-state pairing ADR-0067 anchored for the header badges
-                // (primary teal = configured / active, warning amber = needs
-                // key, destructive = fault) -- no raw palette. Conveys what the
-                // old Active / Key-set badges did, compactly.
-                const dotClass = pFault
-                  ? "bg-destructive"
-                  : isActive && pHasKey
-                    ? "bg-primary"
-                    : isActive
-                      ? "bg-warning"
-                      : "bg-muted-foreground/40";
-                return (
-                  <li
-                    key={p.id}
-                    className={cn(
-                      "profiles-list-item flex items-center gap-2 rounded-md border border-transparent py-1.5 pr-1.5 pl-2",
-                      isSelected && "selected border-border bg-muted",
-                    )}
-                  >
-                    <button
-                      type="button"
-                      className={cn(
-                        bareButtonReset,
-                        "profiles-list-item-select min-w-0 flex-1 cursor-pointer",
-                        "flex items-center gap-2 rounded-md py-1 pr-1.5 text-sm text-foreground",
-                        "hover:bg-accent",
-                        "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
-                      )}
-                      onClick={() => handleSelectProfile(p.id)}
-                      aria-current={isSelected ? "true" : undefined}
-                    >
-                      <span
-                        className={cn("size-2 shrink-0 rounded-full", dotClass)}
-                        aria-hidden
-                      />
-                      <span className="profiles-list-item-name truncate">{label}</span>
-                      {isActive && (
-                        <Badge variant="default">
-                          <FormattedMessage
-                            id="settings.profiles.activeBadge"
-                            defaultMessage="Active"
-                          />
-                        </Badge>
-                      )}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+
+          <SettingsCard className="profiles-list-card p-1">
+            {keysLoading ? (
+              <p className="text-muted-foreground px-2 py-3 text-sm">
+                <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />
+              </p>
+            ) : provider.profiles.length === 0 ? (
+              <p className="text-muted-foreground px-2 py-3 text-sm">
+                <FormattedMessage
+                  id="settings.profiles.empty"
+                  defaultMessage="No profiles yet. Click “New profile” to add one."
+                />
+              </p>
+            ) : (
+              <ul className="profiles-list-items m-0 flex list-none flex-col gap-0.5 p-0">
+                {provider.profiles.map((p) => {
+                  const isActive = p.id === provider.active_profile;
+                  const pStatus = profileKeys[p.id];
+                  const pHasKey = pStatus?.has_key ?? false;
+                  const pFault = pStatus?.keychain_fault ?? null;
+                  const isSelected = !addMode && p.id === selectedId;
+                  const label = p.display_name.trim() || unnamed;
+                  // Status dot (ADR-0075): active+key = connected, active+no-key
+                  // = needs key, a keychain read fault = fault, otherwise idle.
+                  // Colors ride the ADR-0050 semantic tokens with the same
+                  // key-state pairing ADR-0067 anchored for the header badges
+                  // (primary teal = configured / active, warning amber = needs
+                  // key, destructive = fault) -- no raw palette. Conveys what the
+                  // old Active / Key-set badges did, compactly.
+                  const dotClass = pFault
+                    ? "bg-destructive"
+                    : isActive && pHasKey
+                      ? "bg-primary"
+                      : isActive
+                        ? "bg-warning"
+                        : "bg-muted-foreground/40";
+                  return (
+                    <li key={p.id} className="profiles-list-item">
+                      <button
+                        type="button"
+                        className={cn(
+                          bareButtonReset,
+                          "profiles-list-item-select w-full cursor-pointer",
+                          "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground",
+                          "hover:bg-accent/50",
+                          "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
+                          isSelected && "selected bg-accent",
+                        )}
+                        onClick={() => handleSelectProfile(p.id)}
+                        aria-current={isSelected ? "true" : undefined}
+                      >
+                        <span
+                          className={cn("size-2 shrink-0 rounded-full", dotClass)}
+                          aria-hidden
+                        />
+                        <span className="profiles-list-item-name min-w-0 flex-1 truncate text-left">
+                          {label}
+                        </span>
+                        {isActive && (
+                          <Badge variant="default">
+                            <FormattedMessage
+                              id="settings.profiles.activeBadge"
+                              defaultMessage="Active"
+                            />
+                          </Badge>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </SettingsCard>
           {keysError && <p className="text-destructive text-sm">{keysError}</p>}
         </div>
 
         {/* Right: edit form (detail). Wrapped for form-level commit-on-blur. */}
         <div className="profiles-edit min-w-0" onBlurCapture={handleBlurCapture}>
           {draft ? (
-            <div className="grid gap-4">
-              {/* Form header: name heading + pencil (edit mode) or a plain name
-                  input (add mode); trash at the right (edit mode only). */}
-              <div className="flex items-center justify-between gap-2">
-                {addMode || renaming ? (
-                  <Input
-                    type="text"
-                    value={draft.display_name}
-                    onChange={(e) => setDraft({ ...draft, display_name: e.target.value })}
-                    onBlur={() => setRenaming(false)}
-                    disabled={fieldsDisabled}
-                    placeholder={unnamed}
-                    aria-label={intl.formatMessage({
-                      id: "common.displayName",
-                      defaultMessage: "Display name",
-                    })}
-                    className="max-w-xs"
-                  />
-                ) : (
-                  <div className="flex min-w-0 items-center gap-2">
-                    <h4 className="truncate text-base font-semibold">
-                      {draft.display_name.trim() || unnamed}
-                    </h4>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setRenaming(true)}
-                      disabled={fieldsDisabled}
-                      aria-label={intl.formatMessage({
-                        id: "settings.profiles.rename",
-                        defaultMessage: "Rename profile",
-                      })}
-                    >
-                      <Pencil className="size-3.5" aria-hidden />
-                    </Button>
-                  </div>
+            <SettingsCard>
+              <SettingsRow
+                dense
+                title={(
+                  <Label htmlFor={nameInputId} className="text-muted-foreground">
+                    <FormattedMessage
+                      id="common.displayName"
+                      defaultMessage="Display name"
+                    />
+                  </Label>
                 )}
-                {!addMode && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="profiles-delete text-destructive hover:text-destructive"
-                    onClick={() => setConfirmDeleteId(draft.id)}
-                    disabled={fieldsDisabled}
-                    aria-label={intl.formatMessage({
-                      id: "common.delete",
-                      defaultMessage: "Delete",
-                    })}
-                  >
-                    <Trash2 className="size-4" aria-hidden />
-                  </Button>
-                )}
-              </div>
+              >
+                <Input
+                  id={nameInputId}
+                  type="text"
+                  value={draft.display_name}
+                  onChange={(e) => setDraft({ ...draft, display_name: e.target.value })}
+                  disabled={fieldsDisabled}
+                  placeholder={unnamed}
+                />
+              </SettingsRow>
 
               <ProviderPresetField
                 presetId={derivedPreset}
@@ -646,7 +689,14 @@ export function ProfilesSection({
                     base_url: p.base_url,
                     model: p.default_model,
                   })}
+                onSelectCustom={() =>
+                  // Enter hand-fill mode: the openai-compatible protocol with
+                  // a cleared base_url the user must type (the commit-time
+                  // validation enforces it). model survives -- a wrong model
+                  // is cheaper to overwrite than a typed endpoint.
+                  setDraft({ ...draft, protocol: "openai", base_url: "" })}
                 disabled={fieldsDisabled}
+                onOpenChange={setSelectOpen}
               />
 
               <ProviderEndpointFields
@@ -655,6 +705,7 @@ export function ProfilesSection({
                 showProtocolRadio={derivedPreset === PRESET_CUSTOM}
                 disabled={fieldsDisabled}
                 onBusyChange={reportTestBusy}
+                onModelSelectOpenChange={setSelectOpen}
               />
 
               <ProviderKeyField
@@ -674,26 +725,60 @@ export function ProfilesSection({
                 showBadge={false}
                 disabled={fieldsDisabled}
                 onBusyChange={reportKeyBusy}
+                // Add mode buffers the key into draftKey (written by
+                // handleCreate); edit mode keeps the immediate Set/Clear IPC.
+                draftMode={
+                  addMode ? { value: draftKey, onChange: setDraftKey } : undefined
+                }
               />
 
-              {addMode ? (
-                <div className="flex justify-end">
-                  <Button type="button" onClick={() => void handleCreate()} disabled={busy}>
-                    <FormattedMessage
-                      id="settings.profiles.create"
-                      defaultMessage="Create profile"
-                    />
+              {/* Action bar: destructive left, contextual primary right. Add
+                  mode commits via Create (never blur); edit mode commits on
+                  blur and only structural ops live here. */}
+              <div className="flex items-center gap-2 px-4 py-3">
+                {!addMode && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => setConfirmDeleteId(draft.id)}
+                    disabled={fieldsDisabled}
+                    aria-label={intl.formatMessage({
+                      id: "common.delete",
+                      defaultMessage: "Delete",
+                    })}
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                    <FormattedMessage id="common.delete" defaultMessage="Delete" />
                   </Button>
-                </div>
-              ) : draft.id === provider.active_profile ? (
-                <p className="text-muted-foreground text-sm">
-                  <FormattedMessage
-                    id="settings.profiles.activeHint"
-                    defaultMessage="This is the active profile used for new turns."
-                  />
-                </p>
-              ) : (
-                <div>
+                )}
+                <div className="flex-1" />
+                {addMode ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={handleCancelAdd}
+                      disabled={busy}
+                    >
+                      <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
+                    </Button>
+                    <Button type="button" onClick={() => void handleCreate()} disabled={busy}>
+                      <FormattedMessage
+                        id="settings.profiles.create"
+                        defaultMessage="Create profile"
+                      />
+                    </Button>
+                  </>
+                ) : draft.id === provider.active_profile ? (
+                  <p className="text-muted-foreground text-xs">
+                    <FormattedMessage
+                      id="settings.profiles.activeHint"
+                      defaultMessage="This is the active profile used for new turns."
+                    />
+                  </p>
+                ) : (
                   <Button
                     type="button"
                     variant="outline"
@@ -702,23 +787,22 @@ export function ProfilesSection({
                   >
                     <FormattedMessage id="settings.profiles.setActive" defaultMessage="Set as active" />
                   </Button>
-                </div>
-              )}
-
-            </div>
+                )}
+              </div>
+            </SettingsCard>
           ) : provider.profiles.length > 0 ? (
-            <p className="text-muted-foreground text-sm">
+            <div className="bg-card text-muted-foreground rounded-lg border px-4 py-10 text-center text-sm">
               <FormattedMessage
                 id="settings.profiles.selectPrompt"
                 defaultMessage="Select a profile on the left to edit it, or create a new one."
               />
-            </p>
+            </div>
           ) : null}
           {/* Commit failures render at the pane bottom regardless of the
               right pane's mode (draft form, select prompt, or zero-profile
               empty state) -- a failed delete keeps no draft of its own, so
               the error must not live inside the draft branch. */}
-          {formError && <p className="text-destructive text-sm">{formError}</p>}
+          {formError && <p className="settings-error mt-3 text-destructive text-sm">{formError}</p>}
         </div>
       </div>
 

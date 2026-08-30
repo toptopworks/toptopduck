@@ -37,12 +37,16 @@ export function SettingsCard({ className, ...props }: ComponentProps<"div">) {
 
 /** One setting row inside a SettingsCard.
  *
- *  Two shapes, driven by which slots are filled:
+ *  Three shapes, driven by which slots are filled:
  *  - Compact control (Select / Switch): pass the control as `action` (inline
  *    right, vertically centered against the title); leave `children` empty.
  *  - Explicit-save text field: pass the Save button as `action` (right side,
  *    vertically centered against the header row) and the Input as `children`
  *    (rendered below the header row).
+ *  - Stacked form row: leave `action` empty and pass the full-width fields as
+ *    `children` below the label (the profile editor's per-field rows). Pair
+ *    with `dense` -- a whole form of stacked rows reads better at the tighter
+ *    rhythm than the single-control default.
  *
  *  `title` is the bold label; `description` is the muted helper line under it. */
 export function SettingsRow({
@@ -51,18 +55,26 @@ export function SettingsRow({
   action,
   children,
   className,
+  dense,
 }: {
   title: ReactNode;
   description?: ReactNode;
   /** Right-hand slot of the header row: an inline compact control, or a Save
    *  button for the explicit-save shape. */
   action?: ReactNode;
-  /** Content below the header row (the text input for explicit-save rows). */
+  /** Content below the header row (the text input for explicit-save rows, or
+   *  the full-width fields of a stacked form row). */
   children?: ReactNode;
   className?: string;
+  /** Tighter vertical padding (py-2.5) for stacked form rows; the default
+   *  py-4 suits rows carrying one inline control. */
+  dense?: boolean;
 }) {
   return (
-    <div data-slot="settings-row" className={cn("px-4 py-4", className)}>
+    <div
+      data-slot="settings-row"
+      className={cn("px-4", dense ? "py-2.5" : "py-4", className)}
+    >
       {/* Always center the header row: rows whose children mount/unmount
        *  (the local CLI fold) must not shift the action controls between
        *  center- and start-aligned as the fold toggles. */}

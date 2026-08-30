@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import { testProfile } from "../../api";
@@ -7,6 +7,14 @@ import type { ProfileTestOutcome, ProviderProfile } from "../../types/provider";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
+import { SettingsRow } from "./settings-chrome";
 
 // Model field + connection preflight atom (issue #236, ADR-0070). Lifts the
 // model input OUT of ProviderEndpointFields so this atom owns the ADR-0070
@@ -38,6 +46,10 @@ type ProviderModelFieldProps = {
   // mirror would no-op and never report "settled" upward. Mirrors
   // ProviderKeyField's onBusyChange contract.
   onBusyChange?: (busy: boolean) => void;
+  // Mirrors the probed-models Select's open state upward so the parent's
+  // commit-on-blur can hold back while the portalized option list owns focus
+  // (the listbox sits OUTSIDE the edit form's DOM subtree).
+  onSelectOpenChange?: (open: boolean) => void;
 };
 
 export function ProviderModelField({
@@ -45,8 +57,10 @@ export function ProviderModelField({
   onUpdate,
   disabled,
   onBusyChange,
+  onSelectOpenChange,
 }: ProviderModelFieldProps) {
   const intl = useIntl();
+  const modelId = useId();
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<ProfileTestOutcome | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
@@ -98,7 +112,7 @@ export function ProviderModelField({
   const okResult = testResult?.kind === "Ok" ? testResult : null;
   const hasDropdown = okResult !== null && okResult.data.models.length > 0;
   // The dropdown lists the probed models, always keeping the current model
-  // selectable (prepend it when it is not in the list) so the <select> never
+  // selectable (prepend it when it is not in the list) so the select never
   // silently snaps to the first option when the user's hand-typed model is not
   // one the endpoint advertises.
   const options = hasDropdown
@@ -108,55 +122,71 @@ export function ProviderModelField({
   const fieldDisabled = disabled || testBusy;
 
   return (
-    <fieldset className="grid gap-2 border-0 p-0 m-0">
-      <Label className="grid gap-1">
-        <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
+    <SettingsRow
+      dense
+      title={(
+        <Label htmlFor={modelId} className="text-muted-foreground">
+          <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
+        </Label>
+      )}
+    >
+      <div className="grid gap-2">
         {hasDropdown ? (
-          <select
+          <Select
             value={profile.model}
-            onChange={(e) => onUpdate({ model: e.target.value })}
+            onValueChange={(model) => onUpdate({ model })}
+            onOpenChange={onSelectOpenChange}
             disabled={fieldDisabled}
-            className="border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30 focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
           >
-            {options.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger id={modelId} className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {options.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {/* Model ids are identifiers -- the system monospace stack
+                      (DESIGN.md typography.code), not the sans UI stack. */}
+                  <span className="font-mono text-[0.82rem]">{m}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         ) : (
           <Input
+            id={modelId}
             type="text"
             value={profile.model}
             onChange={(e) => onUpdate({ model: e.target.value })}
             disabled={fieldDisabled}
+            spellCheck={false}
           />
         )}
-      </Label>
 
-      <div className="flex flex-col gap-1">
-        <Button
-          type="button"
-          variant="outline"
-          onClick={handleTest}
-          disabled={fieldDisabled}
-        >
-          {testBusy ? (
-            <FormattedMessage
-              id="common.testing"
-              defaultMessage="Testing…"
-            />
-          ) : (
-            <FormattedMessage
-              id="settings.profiles.test.action"
-              defaultMessage="Test connection"
-            />
-          )}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleTest}
+            disabled={fieldDisabled}
+          >
+            {testBusy ? (
+              <FormattedMessage
+                id="common.testing"
+                defaultMessage="Testing…"
+              />
+            ) : (
+              <FormattedMessage
+                id="settings.profiles.test.action"
+                defaultMessage="Test connection"
+              />
+            )}
+          </Button>
+        </div>
         {testResult && <PreflightResult outcome={testResult} />}
         {testError && <p className="text-destructive text-sm">{testError}</p>}
       </div>
-    </fieldset>
+    </SettingsRow>
   );
 }
 
@@ -171,7 +201,7 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
   switch (outcome.kind) {
     case "Ok":
       return outcome.data.models.length > 0 ? (
-        <p className="text-muted-foreground text-sm">
+        <p className="text-muted-foreground text-xs">
           <FormattedMessage
             id="settings.profiles.test.okModels"
             defaultMessage="Connected — {count, plural, one {# model} other {# models}} available."
@@ -179,7 +209,7 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
           />
         </p>
       ) : (
-        <p className="text-muted-foreground text-sm">
+        <p className="text-muted-foreground text-xs">
           <FormattedMessage
             id="settings.profiles.test.okPing"
             defaultMessage="Connected — the endpoint responds. It did not list models, so type one by hand."

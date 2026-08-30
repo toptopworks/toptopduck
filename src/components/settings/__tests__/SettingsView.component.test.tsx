@@ -643,6 +643,62 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onCommitAppConfig).not.toHaveBeenCalled();
   });
 
+  it("an open preset dropdown holds back the blur commit until the select closes", async () => {
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    const baseUrl = await screen.findByLabelText("Base URL");
+    fireEvent.change(baseUrl, { target: { value: "https://my-gw.example/v1" } });
+    // The listbox is portalized OUTSIDE the edit form's DOM subtree, so a blur
+    // through it reads as a focus exit -- only the selectOpen guard holds the
+    // commit back (ADR-0075: the endpoint fields are one commit unit, and the
+    // user has not picked anything yet).
+    const preset = screen.getByRole("combobox", { name: "Provider preset" });
+    openSelect(preset);
+    fireEvent.blur(baseUrl, { relatedTarget: document.body });
+    expect(onCommitAppConfig).not.toHaveBeenCalled();
+    // Closing the dropdown re-arms the capture; a genuine blur then commits.
+    // Escape-dismiss rather than a re-pick: choosing the current preset name
+    // APPLIES the preset (existing semantics), which would overwrite the
+    // hand-typed base_url under test. Exactly one commit lands, carrying the
+    // dirty value -- without the guard the held-back blur fires first.
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
+    fireEvent.blur(baseUrl, { relatedTarget: document.body });
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    expect(committed.provider.profiles[0].base_url).toBe("https://my-gw.example/v1");
+  });
+
+  it("an open delete-confirm dialog holds back the blur commit", async () => {
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    const baseUrl = await screen.findByLabelText("Base URL");
+    fireEvent.change(baseUrl, { target: { value: "https://my-gw.example/v1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    // Focus moving into the portalized dialog reads as a form exit; the
+    // confirmDeleteId guard holds the commit while the dialog owns the flow.
+    fireEvent.blur(baseUrl, {
+      relatedTarget: within(dialog).getByRole("button", { name: "Delete" }),
+    });
+    expect(onCommitAppConfig).not.toHaveBeenCalled();
+    // Dismissing the dialog re-arms the capture; a genuine blur then commits.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.blur(baseUrl, { relatedTarget: document.body });
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+  });
+
+  it("Escape while a dropdown is open closes the dropdown, not the whole view", async () => {
+    const { onClose } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    const preset = await screen.findByRole("combobox", { name: "Provider preset" });
+    openSelect(preset);
+    // Radix's DismissableLayer only preventDefaults the Escape it consumes
+    // (never stopPropagation), so the keydown still reaches the window close
+    // handler -- the pane's dialogOpen (folded with selectOpen) must yield.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("add mode holds the profile in memory until the Create button commits it", async () => {
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
@@ -656,6 +712,142 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(committed.provider.profiles).toHaveLength(2);
     expect(committed.provider.profiles[1].id).toBeTruthy();
     expect(committed.provider.profiles[1].protocol).toBe("anthropic");
+  });
+
+  it("add mode buffers the key; Create commits the profile first, then writes the key", async () => {
+    vi.mocked(setProfileKey).mockResolvedValue(true);
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    // Typing the key fires NO keychain IPC before Create (the deferred posture
+    // has no Set key button either).
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-with-create" },
+    });
+    expect(vi.mocked(setProfileKey)).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Set key" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    // The profile commit landed; the key write follows against its minted id.
+    await waitFor(() =>
+      expect(vi.mocked(setProfileKey)).toHaveBeenCalledWith(
+        expect.any(String),
+        "sk-with-create",
+      ),
+    );
+    // Ordering invariant: commit FIRST, key write SECOND -- the reverse would
+    // strand an orphaned keychain entry when the commit fails.
+    expect(onCommitAppConfig.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(setProfileKey).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("cancelling an add with a typed key never writes the keychain (no orphaned entry)", async () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-then-cancel" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // Back in edit mode with the profile list intact; nothing hit the keychain.
+    expect(await screen.findByRole("button", { name: "New profile" })).toBeEnabled();
+    expect(vi.mocked(setProfileKey)).not.toHaveBeenCalled();
+  });
+
+  it("a failed key write after a successful create keeps the profile selected and surfaces the error", async () => {
+    vi.mocked(setProfileKey).mockRejectedValue(new Error("keychain locked"));
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-fail-write" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    // The profile commit landed exactly once; the failed key write neither
+    // retries nor reverts it. The error surfaces at the pane bottom.
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(vi.mocked(setProfileKey)).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("keychain locked")).toBeInTheDocument();
+    // The created profile stays selected in edit mode, so the retry path is
+    // the immediate edit-mode Set key (add mode has exited).
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create profile" })).not.toBeInTheDocument();
+    expect(onCommitAppConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("a typed key rides the stashed add draft: browse away and back keeps it", async () => {
+    vi.mocked(setProfileKey).mockResolvedValue(true);
+    const { onCommitAppConfig } = renderView({ appConfig: twoProfileConfig });
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-stashed" },
+    });
+    // Browse away to an existing profile (the add draft stashes), then return.
+    fireEvent.click(screen.getByRole("button", { name: "GLM" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Base URL")).toHaveValue(
+        twoProfileConfig.provider.profiles[1].base_url,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New profile" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    // The stashed key survives the round trip and lands with the create.
+    await waitFor(() =>
+      expect(vi.mocked(setProfileKey)).toHaveBeenCalledWith(expect.any(String), "sk-stashed"),
+    );
+  });
+
+  it("a fresh add after Cancel starts with an empty key buffer", async () => {
+    vi.mocked(setProfileKey).mockResolvedValue(true);
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-cancelled" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // Re-entering add mode after an explicit Cancel is a FRESH start: the
+    // buffered key is dropped, and creating without re-typing writes no key.
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    expect(screen.getByPlaceholderText("sk-ant-api03-…")).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(setProfileKey)).not.toHaveBeenCalled();
+  });
+
+  it("closing a key-only add confirms discard (the buffered key is unsaved input)", async () => {
+    const { onClose, container } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-key-only" },
+    });
+    fireEvent.click(container.querySelector(".settings-back") as HTMLElement);
+    // The endpoint fields are pristine but the typed key is unsaved input --
+    // the discard confirm appears instead of a silent close-and-drop.
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("picking Custom from the preset list enters hand-fill mode in the editor", async () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    await screen.findAllByText("Anthropic");
+    // The default profile sits on the anthropic preset; the Custom action
+    // entry resets the endpoint for hand-fill.
+    const preset = screen.getByRole("combobox", { name: "Provider preset" });
+    openSelect(preset);
+    chooseOption("Custom");
+    expect(preset).toHaveTextContent("Custom");
+    expect((screen.getByLabelText("Base URL") as HTMLInputElement).value).toBe("");
+    // The protocol radio appears only once the endpoint reads as custom.
+    expect(screen.getByRole("radio", { name: /Anthropic/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /OpenAI/ })).toBeInTheDocument();
+    // A wrong model is cheaper to overwrite than a typed endpoint: it survives.
+    expect((screen.getByLabelText("Model") as HTMLInputElement).value).toBe("claude-sonnet");
   });
 
   it("zero profiles: empty state shows, New profile prefills defaults, Create commits 0 → 1 (issue #570)", async () => {
