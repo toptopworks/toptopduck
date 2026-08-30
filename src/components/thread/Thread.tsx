@@ -75,9 +75,9 @@ interface ThreadProps {
 
 // The always-visible conversation thread (ADR-0028/0039/0040/0047). The rail
 // hosts two visually distinct species: turn cards (single-line verbatim
-// question + outcome glyph/color) and lifecycle markers (circular nodes,
-// non-interactive; a run of >=2 connects its nodes, turns never enter the
-// line, issue #721). A Materialized result that has since gone stale
+// question + outcome glyph/color) and lifecycle markers (bare tone-colored
+// glyphs, non-interactive; a run of >=2 connects its nodes, turns never enter
+// the line, issue #721). A Materialized result that has since gone stale
 // renders as a ghost (CircleOff + reduced opacity) whose causal chip jumps to
 // the invalidating source event (ADR-0041/0047). Source events are first-class
 // in the thread (always visible, occupy a slot) but are NOT turns -- they never
@@ -219,7 +219,7 @@ export function Thread({
 
   // Issue #721: each lifecycle entry's position within its maximal run
   // (skill/source mixed contiguity; a turn always breaks). Rides data-run on
-  // the marker <li>; styles.css draws the 1px node connector for first/mid.
+  // the marker <li>; styles.css draws the 2px node connector for first/mid.
   // Turns get null -- they never enter the line.
   const runMarks = useMemo(() => lifecycleRunMarks(entries, owners), [entries, owners]);
 

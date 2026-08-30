@@ -1,15 +1,13 @@
 // A skill lifecycle event rendered as a non-interactive timeline marker
 // (ADR-0086, issue #366; ADR-0110, issue #698): a sibling species to
 // SourceMarker -- no question / outcome glyph. Issue #721 nodification: the
-// kind glyph rides inside a circular node (bg-background punch + 1px tone
-// border), the verb text sits right of the node; the retired form was a
-// full-width bar (border-l-2 prefix line + bg-muted fill). Mount = active
-// (Plug + border-primary); Activate = the persistent promotion (Zap +
-// border-primary -- same present-tense tier as Mount, #698's minimal form;
-// the initiator actor rides the placement, not the copy, issue #722);
-// Unmount = weakened (Unplug +
-// border-muted-foreground). The tier mapping migrated from the border-l
-// prefix line to the node unchanged (issue #721). A name
+// kind glyph leads the row as a bare tone-colored icon (no node chrome), the
+// verb text sits right of it; the retired form was a full-width bar
+// (border-l-2 prefix line + bg-muted fill). Mount = active (Plug +
+// text-primary); Activate = the persistent promotion (Zap + text-primary --
+// same present-tense tier as Mount, #698's minimal form; the initiator
+// actor rides the placement, not the copy, issue #722); Unmount = weakened
+// (Unplug + text-muted-foreground). A name
 // the registry no longer carries (resume drift: deleted / renamed / external
 // library uninstalled since the event was recorded) overrides the kind tone
 // to a destructive warning + TriangleAlert glyph + "no longer exists"
@@ -97,16 +95,16 @@ export function SkillMarker({
   // is not in it -- a caller that skips the index opts out of drift detection.
   const missing = skillIndex !== undefined && skill === undefined;
   // Each branch is a literal utility so the Tailwind scanner keeps the class;
-  // a computed `border-${x}` string would be tree-shaken away. Missing
+  // a computed `text-${x}` string would be tree-shaken away. Missing
   // overrides the kind tone (destructive > kind) so drift is unmistakable.
   // Mount and Activate share the primary present-tense tier; Unmount is the
   // weakened one (exhaustive over SkillLifecycleKind). The tone rides the
-  // node's 1px border (issue #721 -- the retired bar carried it as border-l).
-  const nodeTone = missing
-    ? "border-destructive"
+  // glyph color; the verb text stays muted regardless of kind.
+  const iconTone = missing
+    ? "text-destructive"
     : event.kind === "Unmount"
-      ? "border-muted-foreground"
-      : "border-primary"; // Mount | Activate.
+      ? "text-muted-foreground"
+      : "text-primary"; // Mount | Activate.
   // The MCP declaration is registry state, not carried by the event.
   // Disclosed only on a Mount whose skill is still carried -- the declaration
   // is operative only while the skill is mounted; an Unmount's declaration is
@@ -169,20 +167,14 @@ export function SkillMarker({
         event.kind.toLowerCase(),
       )}
     >
-      {/* The kind glyph rides inside a circular node (issue #721): the
-          bg-background fill punches the run-connector line behind it, the 1px
-          border carries the kind tone; relative + z-10 keeps the circle above
-          the li::before segment. The h-4 w-4 node + the row's py-0.5 are the
-          geometry contract owned by the styles.css data-run rule (single
-          source of truth for the offsets). */}
-      <span
-        className={cn(
-          "skill-node relative z-10 flex h-4 w-4 shrink-0 items-center justify-center",
-          "rounded-full border bg-background",
-          nodeTone,
-        )}
-      >
-        <MarkerIcon className="skill-icon w-2.5 h-2.5 shrink-0" aria-hidden="true" />
+      {/* The kind glyph rides in an invisible h-4 w-4 box: the box + the
+          row's py-0.5 are the geometry contract owned by the styles.css
+          data-run rule (the connector starts at the box's bottom edge), so
+          the glyph may change size without moving the offsets. relative +
+          z-10 mirrors the source sibling's box (whose highlight ring must
+          paint above the connector) so the two species cannot drift apart. */}
+      <span className="skill-node relative z-10 flex h-4 w-4 shrink-0 items-center justify-center">
+        <MarkerIcon className={cn("skill-icon w-3 h-3 shrink-0", iconTone)} aria-hidden="true" />
       </span>
       <TruncatingTooltip text={tooltipText} className="skill-text min-w-0 truncate">
         {text}

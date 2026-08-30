@@ -667,24 +667,25 @@
  * ========================================================================= */
 
 /* Lifecycle marker run connector (issue #721, ADR-0047/0086 nodification).
- * Skill/source markers render as circular nodes; consecutive lifecycle events
- * form maximal runs (skill/source mixed species count as contiguous, a turn
- * ALWAYS breaks the run -- Thread.tsx computes the positions at render time
- * via lifecycleRunMarks). A run of >=2 connects adjacent nodes with a 2px
- * segment; a lone event keeps its node bare. The connector expression rides
- * the marker <li>'s data-run="first|mid|last|single": first/mid draw DOWN
- * from this node's center to the next node's top edge (their arriving segment
- * is the previous li's), last/single draw nothing. ADR-0047's rejected
- * "draw the connector line" is scoped to stale-card <-> source-event lines
- * (interleaved knotting); these adjacent same-column run segments are outside
- * that rejection. The geometry is a contract with the component utilities
+ * Skill/source markers render as bare glyph nodes (an invisible h-4 w-4
+ * box; the circle chrome -- 1px tone border + bg-background punch -- is
+ * retired, the kind tone rides the glyph color); consecutive lifecycle
+ * events form maximal runs (skill/source mixed species count as contiguous,
+ * a turn ALWAYS breaks the run -- Thread.tsx computes the positions at
+ * render time via lifecycleRunMarks). A run of >=2 connects adjacent nodes
+ * with a 2px segment; a lone event keeps its node bare. The connector
+ * expression rides the marker <li>'s data-run="first|mid|last|single":
+ * first/mid draw DOWN from this node's bottom edge (clear of the glyph) to
+ * the next node's top edge (their arriving segment is the previous li's),
+ * last/single draw nothing. ADR-0047's rejected "draw the connector line"
+ * is scoped to stale-card <-> source-event lines (interleaved knotting);
+ * these adjacent same-column run segments are outside that rejection. The
+ * geometry is a contract with the component utilities
  * (SkillMarker/SourceMarker): node = h-4 w-4 (16px) at the row's left edge,
- * row = py-0.5 (2px vertical padding) -- so the node center sits 10px below
- * the li top (2px padding + 8px) and the next node's top edge sits 6px
- * below this li's bottom (the receiving row's 4px run gap + its 2px top
- * padding -- the margin rule below). The node circle
- * punches the line: it carries bg-background + relative z-10, so the segment
- * reads as passing behind it.
+ * row = py-0.5 (2px vertical padding) -- so the node's bottom edge sits
+ * 18px below the li top (2px padding + 16px box) and the next node's top
+ * edge sits 6px below this li's bottom (the receiving row's 4px run gap +
+ * its 2px top padding -- the margin rule below).
  * Pseudo-element geometry stays here (the ADR-0067 retirement moved box
  * visuals to utilities; ::before positioning keyed off a four-state data
  * attribute is the layout-semantics exception, same reasoning as the resize
@@ -699,7 +700,7 @@
 .source-entry[data-run="mid"]::before {
   content: "";
   position: absolute;
-  top: 10px; /* this node's center: 2px row padding + 16px node / 2 */
+  top: 18px; /* this node's bottom edge: 2px row padding + 16px node */
   bottom: -6px; /* the next node's top edge: its row's 4px run gap + 2px top padding */
   left: 7px; /* node center x (8px) minus half the 2px line width */
   width: 2px;

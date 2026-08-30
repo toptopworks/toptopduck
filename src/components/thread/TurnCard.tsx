@@ -409,15 +409,21 @@ function TurnBody({
         ) : text_kind === "Refuse" ? (
           <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
         ) : null;
+      // The body rides the conversation tier (text-sm, matching UserBubble's
+      // question and RoundProse -- the reply is discourse, not chrome).
       return (
         <p
           className={cn(
-            "turn-outcome textual mt-1 text-xs leading-snug",
+            "turn-outcome textual mt-1 text-sm leading-snug",
             text_kind.toLowerCase(),
           )}
         >
           {badge && (
-            <span className="textual-kind inline-block mr-1 text-muted-foreground">{badge}</span>
+            // The kind badge is chrome, not discourse: it keeps the caption
+            // tier instead of inheriting the body's conversation tier.
+            <span className="textual-kind inline-block mr-1 text-xs text-muted-foreground">
+              {badge}
+            </span>
           )}
           <span className="textual-body text-foreground">{body}</span>
           <AssumptionNote assumption={assumption} />
