@@ -13,7 +13,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { DatasetDescriptor, StaleAnchor, StaleReason } from "../../types/dataset";
-import type { SkillEntry } from "../../types/skills";
+import type { SourceLifecycleEvent, SourceLifecycleKind } from "../../types/lifecycle";
+import type { SkillEntry, SkillLifecycleKind } from "../../types/skills";
 import type { ThreadEntry, TurnOutcome, TurnRecord, TurnRuntime } from "../../types/thread";
 
 // A compact label slice for the active-chip match (ADR-0047): the thread only
@@ -236,26 +237,232 @@ export function selectDriftedSkills(
     .map((s) => s.name);
 }
 
+// Issue #737: the fold threshold -- a maximal same-(species × kind)
+// subsegment of at least this many markers renders as ONE collapsed row;
+// below it the markers stay scatter rows. Exported so the tests construct
+// boundary fixtures from the number itself instead of restating a literal.
+export const LIFECYCLE_FOLD_THRESHOLD = 3;
+
+// Issue #737: one collapsed same-kind group, a discriminated union on the
+// species so `kind` carries exactly its species' variants (a Source kind on
+// a Skill fold is unrepresentable). anchorIdx is the FIRST member's entry
+// index -- the thread is append-only (ADR-0028/0040), so the index is a
+// stable key for the render-local expand state. memberIdxs carries every
+// member for the jump contract (a stale-chip target inside a collapsed group
+// expands it first, ADR-0047 exact-event semantics). The two counts are the
+// group's aggregated disclosure: invalidatedCount sums the members'
+// stale-derivative counts (an Added never invalidates -- its count is
+// structurally 0 and it never contributes), and driftCount tallies the
+// members whose skill name the registry no longer carries (the SkillMarker
+// missing case, issue #366). The expanded combined member row keeps each
+// member's individual warning; the fold row carries the aggregate. No name
+// list rides the group: expanding renders it (ruled during implementation).
+interface LifecycleFoldBase {
+  readonly anchorIdx: number;
+  readonly memberIdxs: readonly number[];
+  readonly invalidatedCount: number;
+  readonly driftCount: number;
+}
+export interface SkillFoldInfo extends LifecycleFoldBase {
+  readonly species: "Skill";
+  readonly kind: SkillLifecycleKind;
+}
+export interface SourceFoldInfo extends LifecycleFoldBase {
+  readonly species: "Source";
+  readonly kind: SourceLifecycleKind;
+}
+export type LifecycleFoldInfo = SkillFoldInfo | SourceFoldInfo;
+
+// Issue #737: the render-facing visual row model. ONE projection derives
+// both consumers -- the <li> sequence Thread renders and the run positions
+// lifecycleRunMarks stamps -- so a collapsed row and its connector position
+// can never disagree (per-entry marks plus a separate grouping would be two
+// parallel segmentations of the same timeline). The four rows:
+// - turn: a Turn entry (never enters the connector line).
+// - absorbed: an agent activation its turn owns (renders inside the turn,
+//   D5 / issue #722 -- the standalone slot renders nothing).
+// - marker: a scatter lifecycle row (a subsegment below the fold threshold).
+// - fold: a collapsed group rendering as ONE row (the disclosure button);
+//   the caller renders the members underneath when expanded.
+export type LifecycleVisualRow =
+  | { readonly row: "turn"; readonly idx: number }
+  | { readonly row: "absorbed"; readonly idx: number }
+  | { readonly row: "marker"; readonly idx: number }
+  | { readonly row: "fold"; readonly group: LifecycleFoldInfo };
+
+// The aggregation inputs the fold rows disclose (issue #737). Both optional
+// and independently omittable: tests pin the grouping algebra without
+// registry/stale wiring, exactly as Thread's own props degrade.
+export interface LifecycleFoldInputs {
+  staleCountsByKey?: ReadonlyMap<string, number>;
+  skillIndex?: ReadonlyMap<string, SkillEntry>;
+}
+
+// The stale-derivative count key (issues #40/#41, ADR-0047 no-event_id
+// attribution): one template in one place so every producer and consumer
+// (the stale map's fill in Thread, the fold aggregation in buildFoldGroup,
+// the scatter suffix in Thread, the expanded member row in LifecycleFold)
+// can never drift apart silently on a format change.
+export function staleKey(
+  referenceName: string,
+  kind: SourceLifecycleKind,
+): string {
+  return `${referenceName}:${kind}`;
+}
+
+// The stale-derivative count of one source event (issues #40/#41): an Added
+// never invalidates (structurally 0 -- a stray Added key in the map must not
+// leak, pinned by tests); otherwise the (reference_name, kind) count from
+// the aggregated stale map, 0 when the map holds no entry. Extracted next to
+// staleKey so the three render surfaces (fold aggregation, scatter suffix,
+// expanded member suffix) share ONE derivation.
+export function staleDerivativeCount(
+  event: Pick<SourceLifecycleEvent, "reference_name" | "kind">,
+  staleCountsByKey: ReadonlyMap<string, number> | undefined,
+): number {
+  if (event.kind === "Added") return 0;
+  return staleCountsByKey?.get(staleKey(event.reference_name, event.kind)) ?? 0;
+}
+
+// A standalone marker's identity for segmentation: the species tag and its
+// precise kind variants. Discriminated so narrowing on species narrows
+// kind. Turn entries never reach this (the projector handles them first).
+type MarkerIdentity =
+  | { species: "Skill"; kind: SkillLifecycleKind }
+  | { species: "Source"; kind: SourceLifecycleKind };
+
+function markerIdentity(
+  entry: Extract<ThreadEntry, { entry: "Skill" | "Source" }>,
+): MarkerIdentity {
+  return entry.entry === "Skill"
+    ? { species: "Skill", kind: entry.data.kind }
+    : { species: "Source", kind: entry.data.kind };
+}
+
+// Aggregate a fold group's disclosure counts. Kept next to the projector so
+// the "which member contributes what" rules live with the segmentation they
+// summarize.
+function buildFoldGroup(
+  entries: readonly ThreadEntry[],
+  seg: {
+    species: "Skill" | "Source";
+    kind: SkillLifecycleKind | SourceLifecycleKind;
+    idxs: number[];
+  },
+  inputs: LifecycleFoldInputs,
+): LifecycleFoldInfo {
+  let invalidatedCount = 0;
+  let driftCount = 0;
+  for (const idx of seg.idxs) {
+    const entry = entries[idx];
+    if (entry.entry === "Source") {
+      // An Added contributes 0 (never invalidates); Replaced/Deleted members
+      // contribute their (reference_name, reason) counts, summed so the fold
+      // row carries the group total.
+      invalidatedCount += staleDerivativeCount(entry.data, inputs.staleCountsByKey);
+    } else if (
+      entry.entry === "Skill" &&
+      // Three-way lookup mirroring SkillMarker: only a WIRED registry that
+      // lacks the name counts as drift -- an unwired caller opted out.
+      inputs.skillIndex !== undefined &&
+      !inputs.skillIndex.has(entry.data.name)
+    ) {
+      driftCount += 1;
+    }
+  }
+  const base = {
+    anchorIdx: seg.idxs[0],
+    memberIdxs: seg.idxs,
+    invalidatedCount,
+    driftCount,
+  };
+  // Re-derive the species-precise kind from the anchor entry (the segment
+  // tracker keeps the loose union for the equality checks above); the guard
+  // enforces the projector's own invariant -- a segment opens only at a
+  // marker.
+  const anchor = entries[base.anchorIdx];
+  if (anchor.entry !== "Skill" && anchor.entry !== "Source") {
+    throw new Error("fold segment must open at a marker entry");
+  }
+  const head = markerIdentity(anchor);
+  if (head.species === "Skill") return { species: "Skill", kind: head.kind, ...base };
+  return { species: "Source", kind: head.kind, ...base };
+}
+
+// Issue #737: project the timeline entries into the visual row model --
+// maximal same-(species × kind) subsegments fold into one row at
+// LIFECYCLE_FOLD_THRESHOLD or more, everything below stays scatter. The
+// breakpoints are the ones lifecycleRunMarks has always flushed on (issues
+// #721/#722): a Turn ALWAYS breaks, and so does an agent activation its turn
+// absorbed (it renders inside the turn, not on the line). The thread is
+// append-only (ADR-0028/0040), so the projection recomputes cheaply on each
+// render from the entries alone -- no event carries fold state.
+export function lifecycleVisualRows(
+  entries: readonly ThreadEntry[],
+  owned: readonly ActivationOwner[] = [],
+  inputs: LifecycleFoldInputs = {},
+): LifecycleVisualRow[] {
+  const rows: LifecycleVisualRow[] = [];
+  // The open same-(species × kind) subsegment; null between subsegments.
+  let seg: {
+    species: "Skill" | "Source";
+    kind: SkillLifecycleKind | SourceLifecycleKind;
+    idxs: number[];
+  } | null = null;
+  // Close the open subsegment: at threshold it folds into one row, below it
+  // the members emit scatter marker rows.
+  const flush = () => {
+    if (seg === null) return;
+    if (seg.idxs.length >= LIFECYCLE_FOLD_THRESHOLD) {
+      rows.push({ row: "fold", group: buildFoldGroup(entries, seg, inputs) });
+    } else {
+      for (const idx of seg.idxs) rows.push({ row: "marker", idx });
+    }
+    seg = null;
+  };
+  entries.forEach((entry, i) => {
+    if (entry.entry === "Turn" || owned[i] != null) {
+      flush();
+      rows.push(entry.entry === "Turn" ? { row: "turn", idx: i } : { row: "absorbed", idx: i });
+      return;
+    }
+    // A standalone marker (a source event, or a skill event no turn owns):
+    // extend the open subsegment when species AND kind match, else close it.
+    const id = markerIdentity(entry);
+    if (seg !== null && seg.species === id.species && seg.kind === id.kind) {
+      seg.idxs.push(i);
+    } else {
+      flush();
+      seg = { species: id.species, kind: id.kind, idxs: [i] };
+    }
+  });
+  flush();
+  return rows;
+}
+
 // The four positions a lifecycle event can occupy within its run (issue
 // #721 run connector). Rendered as data-run on the marker <li>; styles.css
 // keys the 1px node-connector segment off the attribute: first/mid connect
 // DOWN to the next node, last/single draw nothing.
 export type LifecycleRunMark = "first" | "mid" | "last" | "single";
 
-// The maximal runs of consecutive lifecycle events (issue #721): skill and
-// source events count as ONE contiguous species (a mixed skill/source stretch
-// is one run); a turn ALWAYS breaks the run (turns never enter the line), and
-// so does an agent activation absorbed into its turn (it renders inside the
-// turn, D5 / issue #722 -- the `owned` slot per entry). Returns one mark per
-// entry, aligned by index -- null for turns and absorbed activations. A run
-// of length >=2 connects its adjacent nodes; a lone event keeps its node
-// bare. The thread is append-only (ADR-0028/0040), so the marks recompute
-// cheaply on each render from the entries alone -- no event carries run state.
+// The maximal runs of consecutive visual rows (issue #721; single-sourced over
+// the visual row model by issue #737): skill and source rows count as ONE
+// contiguous species (a mixed stretch is one run); a turn ALWAYS breaks the
+// run (turns never enter the line), and so does an agent activation absorbed
+// into its turn (it renders inside the turn, D5 / issue #722). A collapsed
+// fold row participates as its segment's SINGLE node -- the connector the
+// group carries is the fold row's, and the expanded combined member row
+// draws none (the fold row stays in place as the group's head either way,
+// so the segment's line never moves on expand). Returns one mark per visual row, aligned by
+// row index -- null for turns and absorbed activations. A run of length >=2
+// connects its adjacent nodes; a lone row keeps its node bare. The thread is
+// append-only (ADR-0028/0040), so the marks recompute cheaply on each render
+// from the projection alone -- no event carries run state.
 export function lifecycleRunMarks(
-  entries: readonly ThreadEntry[],
-  owned: readonly ActivationOwner[] = [],
+  rows: readonly LifecycleVisualRow[],
 ): Array<LifecycleRunMark | null> {
-  const marks: Array<LifecycleRunMark | null> = entries.map(() => null);
+  const marks: Array<LifecycleRunMark | null> = rows.map(() => null);
   let start = -1;
   // Close the open run [start, endExclusive): stamp each member's position.
   const flush = (endExclusive: number) => {
@@ -266,11 +473,11 @@ export function lifecycleRunMarks(
     }
     start = -1;
   };
-  entries.forEach((entry, i) => {
-    if (entry.entry === "Turn" || owned[i] != null) flush(i);
+  rows.forEach((row, i) => {
+    if (row.row === "turn" || row.row === "absorbed") flush(i);
     else if (start === -1) start = i;
   });
-  flush(entries.length);
+  flush(rows.length);
   return marks;
 }
 
