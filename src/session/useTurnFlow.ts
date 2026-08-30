@@ -3,6 +3,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import type { IntlShape } from "react-intl";
 import { askQuestion, cancelQuery, getSessionRuntime, onTurnProgress } from "../api";
 import { toAppError } from "../lib/error-presentation";
+import { log } from "../lib/log";
 import { sessionKeys } from "./queryKeys";
 import type { ApprovalEntry } from "./useApprovalEvents";
 import type { UseViewedResult } from "./useViewedResult";
@@ -114,8 +115,10 @@ export interface LiveTurn {
   /** The client's submit stamp (the live bubble's `asked_at`, ADR-0103 live
    *  isomorphism, issue #610): read at handleAsk, carried so the bubble
    *  mounts its timestamp before any progress event lands. The same value
-   *  rides the optimistic TurnRecord until a reopened mount lands the
-   *  backend's own stamps (no in-place refetch, ADR-0051). */
+   *  rides the optimistic TurnRecord until the backend's own stamps land: a
+   *  reopened mount reads them, or another domain's invalidation (ingest,
+   *  skill changes) replaces the append with the recorded row -- the turn
+   *  flow itself never invalidates the thread (ADR-0051). */
   askedAt: number;
   /** The 1-based step of the latest Thinking event (round-trip count,
    *  ADR-0081); null until the first event arrives. */
@@ -290,9 +293,19 @@ export function liveRoundsToTrace(rounds: ReadonlyArray<LiveRound>): TraceRound[
 // string vs the attribution's adapter-id object (see TurnRuntime); built-in
 // is identity.
 export function choiceToTurnRuntime(choice: SessionRuntimeChoice): TurnRuntime {
-  return choice.kind === "external"
-    ? { kind: "external", data: { adapter_id: choice.data } }
-    : { kind: "built_in" };
+  switch (choice.kind) {
+    case "external":
+      return { kind: "external", data: { adapter_id: choice.data } };
+    case "built_in":
+      return { kind: "built_in" };
+    default: {
+      // This stamps provenance, it is not a degrade-default: an unmapped
+      // choice kind must fail loudly here rather than silently mint
+      // built-in attribution.
+      const unhandled: never = choice;
+      throw new Error(`unhandled runtime choice: ${JSON.stringify(unhandled)}`);
+    }
+  }
 }
 
 export interface UseTurnFlowDeps {
@@ -592,8 +605,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       setError(null);
       // ADR-0103 (issue #608): the ask timestamp, read at submit so the
       // optimistic record carries the user's ask time (the backend stamps its
-      // own reading at record time; it lands only on reopen -- the thread
-      // never refetches in place, ADR-0051).
+      // own reading at record time; it lands on a reopened mount, or when
+      // another domain invalidates the thread -- the turn flow itself never
+      // does, ADR-0051).
       const askedAt = Date.now();
       // The live turn card mounts with the question; events grow its trace.
       commitLive({ question, askedAt, step: null, calls: [], roundTexts: [], roundThinkings: [] });
@@ -606,8 +620,14 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // the old one -- a one-turn badge lag that heals on reopen, accepted
       // over the settle-time read whose window is the turn's whole duration.
       // A failed read degrades honestly (undefined -> no runtime -> no badge
-      // until reopen); the ask itself never depends on it.
-      const runtimeRead = getSessionRuntime(sessionId).catch(() => undefined);
+      // until reopen) with the diagnostic preserved in the log (ADR-0029 --
+      // otherwise a "badge missing" report could not distinguish a failed
+      // read from a stamp that never happened); the ask itself never depends
+      // on it.
+      const runtimeRead = getSessionRuntime(sessionId).catch((e: unknown) => {
+        log.warn("useTurnFlow", "runtime choice read failed; turn appended without runtime stamp", e);
+        return undefined;
+      });
       let outcome;
       // The settled trace, snapshotted in the finally BEFORE the live state
       // folds away (the optimistic append below reads it on the success
@@ -642,11 +662,13 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // shape the backend recorded; the trace is the event stream's settled
       // rows (completed calls only); the runtime attribution is the ask-time
       // choice stamp (issue #725). Only the content_hashes and the backend's
-      // own timestamps differ from the recorded row -- and no refetch ever
-      // lands them: the thread is staleTime-Infinity and the turn flow never
-      // invalidates it (ADR-0051 -- an invalidation would wipe this append),
-      // so this optimistic form IS the final rendered form until the session
-      // reopens.
+      // own timestamps differ from the recorded row. The thread is
+      // staleTime-Infinity and the turn flow itself never invalidates it
+      // (ADR-0051 -- its own invalidation would wipe this append), so this
+      // optimistic form is final until the backend's row lands: a reopened
+      // mount reads it, or another domain's invalidation (ingest, skill
+      // changes) replaces the append with the recorded row -- expected
+      // convergence, never a wipe.
       const newEntry: ThreadEntry = {
         entry: "Turn",
         // Issue #381: the optimistic entry's provenance carries no

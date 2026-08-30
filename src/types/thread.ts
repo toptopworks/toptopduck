@@ -184,7 +184,8 @@ export interface TurnRecord {
   // for turns recorded before v5 -- rendered without a timestamp, never a
   // synthetic one (honest degrade). The optimistic append stamps the client
   // clock; the backend's own reading lands when a reopened mount reads the
-  // thread (no in-place refetch, ADR-0051).
+  // thread, or when another domain invalidates it (the turn flow itself
+  // never does, ADR-0051).
   asked_at?: number;
   // When the turn settled, Unix epoch ms (ADR-0103). Same honest-degrade
   // rule as asked_at.

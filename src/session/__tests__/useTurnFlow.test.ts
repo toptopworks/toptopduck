@@ -841,6 +841,10 @@ describe("useTurnFlow", () => {
       // keeps the only mismatch window to the read-to-dispatch gap -- a
       // settle-time read would widen it to the turn's whole duration.
       expect(getSessionRuntime).toHaveBeenCalledWith(SID);
+      // Single read, fired at ask: a settle-time re-read (the rejected
+      // compromise) would still pass the ordering pin above but not this
+      // count.
+      expect(getSessionRuntime).toHaveBeenCalledTimes(1);
       expect(vi.mocked(getSessionRuntime).mock.invocationCallOrder[0]).toBeLessThan(
         vi.mocked(askQuestion).mock.invocationCallOrder[0],
       );
