@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { clearProfileKey, setProfileKey, testProfile } from "../../../api";
 import type { ProfileTestOutcome, ProviderProfile } from "../../../types/provider";
 import { ProviderEndpointFields } from "../ProviderEndpointFields";
@@ -15,7 +16,7 @@ import {
   derivePresetId,
   findPreset,
 } from "../provider-presets";
-import { renderSettings } from "./helpers";
+import { chooseOption, openSelect, renderSettings } from "./helpers";
 
 // The three DRY field atoms (issue #235) reach the per-profile keychain surface
 // (set/clear); mock those two IPC functions so the atoms never hit Tauri. The
@@ -31,6 +32,11 @@ vi.mock("../../../api", async (importOriginal) => {
     testProfile: vi.fn(),
   };
 });
+
+// The Get key link routes through the OS opener IPC (Tauri's WebView has no
+// target=_blank navigation handler) -- mock the plugin so the click test
+// asserts the call instead of an IPC transport that jsdom cannot provide.
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const baseProfile: ProviderProfile = {
   id: "p1",
@@ -139,18 +145,23 @@ describe("ProviderPresetField (issue #235)", () => {
       <ProviderPresetField
         presetId="anthropic"
         onSelectPreset={onSelectPreset}
+        onSelectCustom={vi.fn()}
         disabled={false}
       />,
     );
     const select = screen.getByRole("combobox", { name: "Provider preset" });
+    // The derived preset reads back on the trigger.
+    expect(select).toHaveTextContent("Anthropic");
+    openSelect(select);
     // All 7 display names appear as options.
     for (const p of PROVIDER_PRESETS) {
-      expect(screen.getByText(p.display_name)).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: p.display_name })).toBeInTheDocument();
     }
-    // No Custom option while on a named preset (it is indicator-only).
-    expect(screen.queryByText("Custom")).not.toBeInTheDocument();
+    // Custom is always listed (it is the hand-fill entry point, not just a
+    // readout), and enabled while the endpoint sits on a named preset.
+    expect(screen.getByRole("option", { name: "Custom" })).not.toHaveAttribute("aria-disabled");
     // Selecting GLM applies its endpoint onto the profile.
-    fireEvent.change(select, { target: { value: "glm" } });
+    chooseOption("GLM");
     const glm = findPreset("glm")!;
     expect(onSelectPreset).toHaveBeenCalledTimes(1);
     expect(onSelectPreset.mock.calls[0][0]).toMatchObject({
@@ -161,20 +172,41 @@ describe("ProviderPresetField (issue #235)", () => {
     });
   });
 
-  it("renders the Custom option only when presetId is Custom; re-selecting it is a no-op (indicator, not action)", () => {
+  it("selecting Custom from a named preset fires onSelectCustom (hand-fill mode)", () => {
     const onSelectPreset = vi.fn();
+    const onSelectCustom = vi.fn();
+    renderSettings(
+      <ProviderPresetField
+        presetId="anthropic"
+        onSelectPreset={onSelectPreset}
+        onSelectCustom={onSelectCustom}
+        disabled={false}
+      />,
+    );
+    openSelect(screen.getByRole("combobox", { name: "Provider preset" }));
+    chooseOption("Custom");
+    expect(onSelectCustom).toHaveBeenCalledTimes(1);
+    expect(onSelectPreset).not.toHaveBeenCalled();
+  });
+
+  it("while the endpoint already reads as Custom the entry is the selected value and disabled (a re-pick must not wipe a typed base_url)", () => {
+    const onSelectPreset = vi.fn();
+    const onSelectCustom = vi.fn();
     renderSettings(
       <ProviderPresetField
         presetId={PRESET_CUSTOM}
         onSelectPreset={onSelectPreset}
+        onSelectCustom={onSelectCustom}
         disabled={false}
       />,
     );
-    expect(screen.getByText("Custom")).toBeInTheDocument();
-    // Changing to Custom (the current value) does not fire onSelectPreset.
-    fireEvent.change(screen.getByRole("combobox", { name: "Provider preset" }), {
-      target: { value: PRESET_CUSTOM },
-    });
+    const select = screen.getByRole("combobox", { name: "Provider preset" });
+    expect(select).toHaveTextContent("Custom");
+    openSelect(select);
+    const custom = screen.getByRole("option", { name: "Custom" });
+    expect(custom).toHaveAttribute("aria-disabled", "true");
+    chooseOption("Custom");
+    expect(onSelectCustom).not.toHaveBeenCalled();
     expect(onSelectPreset).not.toHaveBeenCalled();
   });
 });
@@ -244,6 +276,29 @@ describe("ProviderKeyField (issue #235, ADR-0029)", () => {
     vi.clearAllMocks();
   });
 
+  it("draft mode buffers the typed key into the parent's state; no Set/Clear buttons, no IPC", () => {
+    const onChange = vi.fn();
+    renderSettings(
+      <ProviderKeyField
+        profileId="p1"
+        hasKey={false}
+        onKeyStatusChange={vi.fn()}
+        getKeyLink={null}
+        keyPlaceholder=""
+        disabled={false}
+        draftMode={{ value: "", onChange }}
+      />,
+    );
+    fireEvent.change(screen.getByPlaceholderText("Paste key"), {
+      target: { value: "sk-draft" },
+    });
+    expect(onChange).toHaveBeenCalledWith("sk-draft");
+    // The deferred posture carries no immediate actions and fires no keychain
+    // IPC -- the parent's create flow owns the write.
+    expect(screen.queryByRole("button", { name: "Set key" })).not.toBeInTheDocument();
+    expect(vi.mocked(setProfileKey)).not.toHaveBeenCalled();
+  });
+
   it("shows the No key badge + generic 'Paste key' placeholder when hasKey=false with no preset placeholder", () => {
     renderSettings(
       <ProviderKeyField
@@ -304,6 +359,31 @@ describe("ProviderKeyField (issue #235, ADR-0029)", () => {
     );
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("clicking the Get key icon opens the URL via the OS opener (the WebView swallows target=_blank)", async () => {
+    vi.mocked(openUrl).mockResolvedValue(undefined);
+    renderSettings(
+      <ProviderKeyField
+        profileId="p1"
+        hasKey={false}
+        onKeyStatusChange={vi.fn()}
+        getKeyLink={{
+          host: "console.anthropic.com",
+          url: "https://console.anthropic.com/settings/keys",
+        }}
+        keyPlaceholder=""
+        disabled={false}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("link", { name: "Get key at console.anthropic.com" }),
+    );
+    await waitFor(() =>
+      expect(vi.mocked(openUrl)).toHaveBeenCalledWith(
+        "https://console.anthropic.com/settings/keys",
+      ),
+    );
   });
 
   it("Set key calls setProfileKey, flips the badge to Key set, lifts has_key=true up (issue #153/#235)", async () => {
@@ -647,7 +727,8 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     const select = await screen.findByRole("combobox", { name: "Model" });
-    fireEvent.change(select, { target: { value: "claude-haiku-4-5" } });
+    openSelect(select);
+    chooseOption("claude-haiku-4-5");
     expect(onUpdate).toHaveBeenLastCalledWith({ model: "claude-haiku-4-5" });
   });
 

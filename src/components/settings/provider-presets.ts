@@ -137,9 +137,11 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
 ];
 
 // The pseudo-preset id for a profile whose endpoint does not match any catalog
-// entry. Selecting "Custom" in the dropdown does NOT mutate the profile -- it
-// just surfaces the protocol RadioGroup + free-form endpoint fields so the user
-// can configure by hand.
+// entry. Selecting "Custom" in the dropdown enters hand-fill mode: the parent
+// resets the endpoint to the openai protocol + an empty base_url, surfacing the
+// protocol RadioGroup + free-form endpoint fields (the entry is disabled while
+// the endpoint already reads as custom, so re-picking it cannot wipe a typed
+// base_url -- see ProviderPresetField).
 export const PRESET_CUSTOM = "custom";
 
 // Derive the preset id a profile's current endpoint reflects (issue #235). A

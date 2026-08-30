@@ -1,84 +1,111 @@
-import type { ChangeEvent } from "react";
+import { useId } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
-import { cn } from "../../lib/utils";
 import { Label } from "../ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
+import { SettingsRow } from "./settings-chrome";
 import type { ProviderPreset } from "./provider-presets";
 import { PRESET_CUSTOM, PROVIDER_PRESETS, findPreset } from "./provider-presets";
 
-// Provider preset picker (issue #235, ADR-0071 Consequences). A native select of
-// ready-made endpoint templates. Selecting a named preset writes its
-// protocol/base_url/default_model onto the profile (the parent does the write);
-// the select's value is DERIVED from the profile's current endpoint, so it
-// tracks later field edits for free -- a hand-edited base_url flips the readout
-// to "Custom" without any stored preset_id (ADR-0038: presets never enter
-// app-config).
+// Provider preset picker (issue #235, ADR-0071 Consequences). A themed Select
+// of ready-made endpoint templates, rendered as one settings-card row (the
+// shared SettingsRow chrome every settings form rides). Selecting a named
+// preset writes its protocol/base_url/default_model onto the profile (the
+// parent does the write); the select's value is DERIVED from the profile's
+// current endpoint, so it tracks later field edits for free -- a hand-edited
+// base_url flips the readout to "Custom" without any stored preset_id
+// (ADR-0038: presets never enter app-config).
 //
-// The "Custom" option is rendered ONLY while the endpoint already reads as
-// custom: it is an indicator of the current state, not an action. The user
-// reaches Custom by editing a field (the fields are always editable in
-// ProviderEndpointFields), which avoids the controlled-select trap where
-// clicking a no-op option leaves the DOM stuck on it.
+// The "Custom" entry is ALWAYS listed, after a separator, in two postures:
+// while the endpoint sits on a named preset it is an ACTION -- picking it
+// fires onSelectCustom, which resets the endpoint into hand-fill mode; while
+// the endpoint already reads as custom it is the SELECTED value and renders
+// DISABLED (an indicator of the current state -- re-picking it must not wipe
+// a base_url the user already typed; the derived-value model means there is
+// no controlled-select trap to avoid, only a foot-gun to block).
 
 type ProviderPresetFieldProps = {
   // The derived preset id (one of PROVIDER_PRESETS[*].id, or PRESET_CUSTOM).
   presetId: string;
   // Apply a named preset's endpoint onto the profile. NOT called for Custom
-  // (Custom is derived, not selected).
+  // (Custom routes to onSelectCustom).
   onSelectPreset: (preset: ProviderPreset) => void;
+  // Enter hand-fill mode from a named preset: the parent resets the endpoint
+  // (openai protocol + an empty base_url the user must type). Never fired
+  // while the endpoint already reads as custom (the entry is disabled there).
+  onSelectCustom: () => void;
   disabled: boolean;
+  // Mirrors the Select's open state upward so the parent's commit-on-blur can
+  // hold back while the portalized option list owns focus (the listbox sits
+  // OUTSIDE the edit form's DOM subtree, so the form-level blur capture cannot
+  // tell a select-open from a genuine focus exit).
+  onOpenChange?: (open: boolean) => void;
 };
 
 export function ProviderPresetField({
   presetId,
   onSelectPreset,
+  onSelectCustom,
   disabled,
+  onOpenChange,
 }: ProviderPresetFieldProps) {
   const intl = useIntl();
+  const triggerId = useId();
 
-  function onChange(e: ChangeEvent<HTMLSelectElement>) {
-    const id = e.target.value;
-    // Custom is indicator-only (see component doc); ignore a stray select.
-    if (id === PRESET_CUSTOM) return;
+  function handleValueChange(id: string) {
+    if (id === PRESET_CUSTOM) {
+      // Custom while already custom is a disabled item (see component doc);
+      // guard the value path too so a stray event cannot wipe a typed base_url.
+      if (presetId !== PRESET_CUSTOM) onSelectCustom();
+      return;
+    }
     const preset = findPreset(id);
     if (preset) onSelectPreset(preset);
   }
 
   return (
-    <Label className="grid gap-1">
-      <FormattedMessage
-        id="settings.profiles.preset.legend"
-        defaultMessage="Provider preset"
-      />
-      {/* Native <select> (precedent: GuidedLoadDialog) styled to match Input so
-          the dropdown reads as a form field alongside base URL / model. No new
-          Select primitive or @radix-ui/react-select dependency is warranted for
-          a single 8-option picker (KISS / YAGNI); #3's composer popover will
-          revisit if it needs richer chrome. */}
-      <select
+    <SettingsRow
+      dense
+      title={(
+        <Label htmlFor={triggerId} className="text-muted-foreground">
+          <FormattedMessage
+            id="settings.profiles.preset.legend"
+            defaultMessage="Provider preset"
+          />
+        </Label>
+      )}
+    >
+      <Select
         value={presetId}
-        onChange={onChange}
+        onValueChange={handleValueChange}
+        onOpenChange={onOpenChange}
         disabled={disabled}
-        className={cn(
-          "border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none",
-          "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
-          "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50",
-        )}
       >
-        {PROVIDER_PRESETS.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.display_name}
-          </option>
-        ))}
-        {presetId === PRESET_CUSTOM && (
-          <option value={PRESET_CUSTOM}>
+        <SelectTrigger id={triggerId} className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {PROVIDER_PRESETS.map((p) => (
+            <SelectItem key={p.id} value={p.id}>
+              {p.display_name}
+            </SelectItem>
+          ))}
+          <SelectSeparator />
+          <SelectItem value={PRESET_CUSTOM} disabled={presetId === PRESET_CUSTOM}>
             {intl.formatMessage({
               id: "settings.profiles.preset.custom",
               defaultMessage: "Custom",
             })}
-          </option>
-        )}
-      </select>
-    </Label>
+          </SelectItem>
+        </SelectContent>
+      </Select>
+    </SettingsRow>
   );
 }

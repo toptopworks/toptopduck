@@ -658,6 +658,47 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(committed.provider.profiles[1].protocol).toBe("anthropic");
   });
 
+  it("add mode buffers the key; Create commits the profile first, then writes the key", async () => {
+    vi.mocked(setProfileKey).mockResolvedValue(true);
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    // Typing the key fires NO keychain IPC before Create (the deferred posture
+    // has no Set key button either).
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-with-create" },
+    });
+    expect(vi.mocked(setProfileKey)).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Set key" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
+    // The profile commit landed; the key write follows against its minted id.
+    await waitFor(() =>
+      expect(vi.mocked(setProfileKey)).toHaveBeenCalledWith(
+        expect.any(String),
+        "sk-with-create",
+      ),
+    );
+    // Ordering invariant: commit FIRST, key write SECOND -- the reverse would
+    // strand an orphaned keychain entry when the commit fails.
+    expect(onCommitAppConfig.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(setProfileKey).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("cancelling an add with a typed key never writes the keychain (no orphaned entry)", async () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: "sk-then-cancel" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // Back in edit mode with the profile list intact; nothing hit the keychain.
+    expect(await screen.findByRole("button", { name: "New profile" })).toBeEnabled();
+    expect(vi.mocked(setProfileKey)).not.toHaveBeenCalled();
+  });
+
   it("zero profiles: empty state shows, New profile prefills defaults, Create commits 0 → 1 (issue #570)", async () => {
     const { onCommitAppConfig } = renderView({ appConfig: zeroProfileConfig });
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
