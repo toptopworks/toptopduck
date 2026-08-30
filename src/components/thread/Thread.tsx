@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import { LifecycleFold, LifecycleFoldMembers } from "./LifecycleFold";
 import { LiveTurnExchange } from "./LiveTurnExchange";
 import { SourceMarker } from "./SourceMarker";
 import { SkillMarker } from "./SkillMarker";
@@ -11,8 +12,12 @@ import {
   findStaleSourceIdx,
   agentActivationOwner,
   lifecycleRunMarks,
+  lifecycleVisualRows,
   runtimeSegmentBadges,
+  staleKey,
   type DatasetLabel,
+  type LifecycleFoldInfo,
+  type LifecycleRunMark,
 } from "./turn-visual";
 import type { LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse } from "../../types/approval";
@@ -97,6 +102,8 @@ const NOOP_RESPOND: (requestId: string, response: ApprovalResponse) => void = ()
 // The empty fold-posture set, module-level for the same identity-stability
 // reason (the live swap's collector starts and resets to it).
 const NO_EXPANDED_FOLDS: ReadonlySet<ThinkingTrace> = new Set();
+// The empty lifecycle-fold posture set (issue #737), same convention.
+const NO_EXPANDED_LIFECYCLE_FOLDS: ReadonlySet<number> = new Set();
 
 export function Thread({
   entries,
@@ -113,6 +120,20 @@ export function Thread({
   // (ADR-0047 chip-trace). Persistent so the user sees which event a stale chip
   // pointed at; a subsequent jump moves it. null when no chip has been clicked.
   const [highlightedSourceIdx, setHighlightedSourceIdx] = useState<number | null>(null);
+  // Issue #737: which collapsed lifecycle groups stand expanded, keyed by the
+  // group's anchor entry index (stable under the append-only timeline,
+  // ADR-0028/0040). Render-local posture (the ADR-0103 entry-local
+  // precedent): never persisted -- a resumed session starts collapsed.
+  const [expandedFolds, setExpandedFolds] =
+    useState<ReadonlySet<number>>(NO_EXPANDED_LIFECYCLE_FOLDS);
+  const toggleFold = useCallback((anchorIdx: number) => {
+    setExpandedFolds((prev) => {
+      const next = new Set(prev);
+      // delete reports membership: absent -> this click expands.
+      if (!next.delete(anchorIdx)) next.add(anchorIdx);
+      return next;
+    });
+  }, []);
   // The live turn's open thinking folds (issue #620 settle continuity),
   // keyed by the round's thinking block REFERENCE: the settle projection
   // (liveRoundsToTrace) carries the same reference onto the optimistic
@@ -217,22 +238,56 @@ export function Thread({
     return { activationsByTurn: m, liveActivationIdxs: live };
   }, [owners]);
 
-  // Issue #721: each lifecycle entry's position within its maximal run
-  // (skill/source mixed contiguity; a turn always breaks). Rides data-run on
-  // the marker <li>; styles.css draws the 2px node connector for first/mid.
-  // Turns get null -- they never enter the line.
-  const runMarks = useMemo(() => lifecycleRunMarks(entries, owners), [entries, owners]);
+  // Issues #721/#737: the visual row projection (scatter rows + collapsed
+  // fold rows) and, derived from that SAME projection, each row's position
+  // within its maximal run (skill/source mixed contiguity; a turn always
+  // breaks; a fold row is its segment's single node). Single-sourcing the
+  // two means the fold rows and their connectors can never disagree; the
+  // marks ride data-run on the marker/fold <li> and styles.css draws the 2px
+  // node connector for first/mid. Turns get null -- they never enter the
+  // line.
+  const visualRows = useMemo(
+    () => lifecycleVisualRows(entries, owners, { staleCountsByKey, skillIndex }),
+    [entries, owners, staleCountsByKey, skillIndex],
+  );
+  const runMarks = useMemo(() => lifecycleRunMarks(visualRows), [visualRows]);
+  // The jump contract's member -> group index (issue #737): a stale-chip
+  // target inside a collapsed group must expand it before the scroll (below).
+  const foldByMember = useMemo(() => {
+    const m = new Map<number, LifecycleFoldInfo>();
+    for (const row of visualRows) {
+      if (row.row === "fold") for (const idx of row.group.memberIdxs) m.set(idx, row.group);
+    }
+    return m;
+  }, [visualRows]);
 
   // Apply a chip jump (ADR-0047): highlight the matched source event and scroll
   // it into view. Only ever called when findStaleSourceIdx already located a
   // target (the chip is disabled otherwise), so targetIdx is a valid index.
-  const jumpToSource = useCallback((targetIdx: number) => {
-    setHighlightedSourceIdx(targetIdx);
-    // Optional-call: jsdom does not implement scrollIntoView, so guard the
-    // method itself (a real browser scrolls; tests assert the data-highlighted
-    // attribute set on the line above instead).
-    sourceRefs.current[targetIdx]?.scrollIntoView?.({ behavior: "smooth", block: "center" });
-  }, []);
+  // Issue #737: a target inside a COLLAPSED fold group mounts only after the
+  // expand commits -- the exact-event semantics must not degrade to scrolling
+  // at the group, so the expand goes first and the scroll rides one frame
+  // later (post-commit). An already-expanded or scatter target scrolls in
+  // the same call, as before.
+  const jumpToSource = useCallback(
+    (targetIdx: number) => {
+      setHighlightedSourceIdx(targetIdx);
+      const scroll = () => {
+        // Optional-call: jsdom does not implement scrollIntoView, so guard the
+        // method itself (a real browser scrolls; tests assert the
+        // data-highlighted attribute set on the line above instead).
+        sourceRefs.current[targetIdx]?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      };
+      const group = foldByMember.get(targetIdx);
+      if (group !== undefined && !expandedFolds.has(group.anchorIdx)) {
+        setExpandedFolds((prev) => new Set(prev).add(group.anchorIdx));
+        requestAnimationFrame(scroll);
+        return;
+      }
+      scroll();
+    },
+    [foldByMember, expandedFolds],
+  );
 
   // One owned activation rendered as an agent-activation row (D5 / issue
   // #722) -- shared by the settled turn's head and the live exchange's head
@@ -244,6 +299,55 @@ export function Thread({
         <SkillMarker event={owned.data} skillIndex={skillIndex} />
       </div>
     ) : null;
+  };
+
+  // One scatter lifecycle row (issue #737): the subsegments below the fold
+  // threshold (a fold group's members render as ONE combined row instead,
+  // in the fold branch below). The key stays the entry index -- append-only
+  // keeps it attached to the right entry.
+  const renderMarkerRow = (idx: number, runMark: LifecycleRunMark | null) => {
+    const entry = entries[idx];
+    // The projector only points marker/member rows at Skill/Source entries
+    // (turns ride their own row, absorbed ones render nothing); the guard
+    // narrows the type for the branches below.
+    if (entry.entry !== "Skill" && entry.entry !== "Source") return null;
+    if (entry.entry === "Skill") {
+      return (
+        <li
+          key={idx}
+          className="skill-entry"
+          data-skill-kind={entry.data.kind.toLowerCase()}
+          data-run={runMark}
+        >
+          <SkillMarker event={entry.data} skillIndex={skillIndex} />
+        </li>
+      );
+    }
+    const staleCount =
+      entry.data.kind === "Added"
+        ? 0
+        : staleCountsByKey.get(staleKey(entry.data.reference_name, entry.data.kind)) ?? 0;
+    return (
+      <li
+        key={idx}
+        ref={(el) => {
+          sourceRefs.current[idx] = el;
+          return () => {
+            sourceRefs.current[idx] = null;
+          };
+        }}
+        className="source-entry"
+        data-source-kind={entry.data.kind.toLowerCase()}
+        data-run={runMark}
+        data-highlighted={highlightedSourceIdx === idx ? "true" : undefined}
+      >
+        <SourceMarker
+          event={entry.data}
+          staleCount={staleCount}
+          highlighted={highlightedSourceIdx === idx}
+        />
+      </li>
+    );
   };
 
   // A session asking its FIRST question has no entries yet but a live turn --
@@ -265,8 +369,14 @@ export function Thread({
         <FormattedMessage id="thread.title" defaultMessage="Conversation" />
       </h2>
       <ol className="list-none m-0 p-0">
-        {entries.map((entry, i) => {
-          if (entry.entry === "Turn") {
+        {visualRows.map((row, vi) => {
+          // The turn branch works on the entry the row points at; the guard
+          // narrows the type (the projector only ever mints a turn row over
+          // a Turn entry).
+          if (row.row === "turn") {
+            const i = row.idx;
+            const entry = entries[i];
+            if (entry.entry !== "Turn") return null;
             const segmentRuntime = segmentBadges[i];
             const primaryRef = primaryReferenceName(entry.data.outcome);
             const staleAnchor =
@@ -325,54 +435,48 @@ export function Thread({
               </li>
             );
           }
-          // Skill lifecycle events (ADR-0086, issue #366): node markers
-          // isomorphic to source events, a distinct species from a turn (no
-          // question, no outcome glyph). Mount = active tone + Plug glyph;
-          // Activate = primary tone + Zap glyph; Unmount = weakened tone +
-          // Unplug glyph; a name the registry no
-          // longer carries (resume drift) flips the marker to a destructive
-          // warning. The registry lookup is optional -- without skillIndex
-          // the marker renders the verb + name from the event alone.
-          if (entry.entry === "Skill") {
-            // An agent activation renders inside its owning turn's assistant
-            // stream (D5 / issue #722), not as a standalone timeline row.
-            if (owners[i] != null) return null;
-            return (
-              <li
-                key={i}
-                className="skill-entry"
-                data-skill-kind={entry.data.kind.toLowerCase()}
-                data-run={runMarks[i]}
-              >
-                <SkillMarker event={entry.data} skillIndex={skillIndex} />
-              </li>
-            );
+          // An absorbed activation renders inside its owning turn's
+          // assistant stream (D5 / issue #722), not as a standalone timeline
+          // row -- the projector already dropped it from the line.
+          if (row.row === "absorbed") return null;
+          // A collapsed same-kind group (issue #737): the fold row is the
+          // group's head; expanded, ONE combined member-name row renders
+          // underneath (the combined-member ruling -- a long stretch stays
+          // one wrapping line, it does not re-stretch the timeline N rows).
+          // The combined <li> is the scroll anchor for EVERY member index,
+          // so a chip jump lands the highlight on the name and the scroll on
+          // this row.
+          if (row.row === "fold") {
+            const g = row.group;
+            const expanded = expandedFolds.has(g.anchorIdx);
+            return [
+              <li key={g.anchorIdx} className="lifecycle-fold-entry" data-run={runMarks[vi]}>
+                <LifecycleFold
+                  group={g}
+                  expanded={expanded}
+                  onToggle={() => toggleFold(g.anchorIdx)}
+                />
+              </li>,
+              expanded ? (
+                <LifecycleFoldMembers
+                  key={`${g.anchorIdx}-members`}
+                  group={g}
+                  entries={entries}
+                  staleCountsByKey={staleCountsByKey}
+                  skillIndex={skillIndex}
+                  highlightedIdx={highlightedSourceIdx}
+                  continueConnector={runMarks[vi] === "first" || runMarks[vi] === "mid"}
+                  rowRef={(el) => {
+                    for (const idx of g.memberIdxs) sourceRefs.current[idx] = el;
+                    return () => {
+                      for (const idx of g.memberIdxs) sourceRefs.current[idx] = null;
+                    };
+                  }}
+                />
+              ) : null,
+            ];
           }
-          const staleCount =
-            entry.data.kind === "Added"
-              ? 0
-              : staleCountsByKey.get(`${entry.data.reference_name}:${entry.data.kind}`) ?? 0;
-          return (
-            <li
-              key={i}
-              ref={(el) => {
-                sourceRefs.current[i] = el;
-                return () => {
-                  sourceRefs.current[i] = null;
-                };
-              }}
-              className="source-entry"
-              data-source-kind={entry.data.kind.toLowerCase()}
-              data-run={runMarks[i]}
-              data-highlighted={highlightedSourceIdx === i ? "true" : undefined}
-            >
-              <SourceMarker
-                event={entry.data}
-                staleCount={staleCount}
-                highlighted={highlightedSourceIdx === i}
-              />
-            </li>
-          );
+          return renderMarkerRow(row.idx, runMarks[vi]);
         })}
       </ol>
       {/* The in-flight turn's chat exchange (ADR-0103, issue #610): trails

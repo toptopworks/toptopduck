@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { agentActivationOwner, lifecycleRunMarks, runtimeSegmentBadges } from "../turn-visual";
+import {
+  LIFECYCLE_FOLD_THRESHOLD,
+  agentActivationOwner,
+  lifecycleRunMarks,
+  lifecycleVisualRows,
+  runtimeSegmentBadges,
+  type ActivationOwner,
+} from "../turn-visual";
+import type { SkillEntry } from "../../../types/skills";
 import type { ThreadEntry, TurnRuntime } from "../../../types/thread";
 
 // The issue #721 run-position contract, pinned at the pure-algebra seam. The
@@ -28,6 +36,14 @@ const turn: ThreadEntry = {
   },
 };
 
+// The marks derive from the visual row projection (issue #737
+// single-sourcing), so every #721/#722 pin below goes through the projector.
+// These fixtures never reach the fold threshold (their kinds alternate), so
+// the projection is the identity over the marker rows and the pinned marks
+// read exactly as they did in the per-entry era.
+const marksOf = (entries: ThreadEntry[], owned?: ActivationOwner[]) =>
+  lifecycleRunMarks(lifecycleVisualRows(entries, owned));
+
 describe("lifecycleRunMarks (run-position contract)", () => {
   it("stamps first/mid/last across a mixed run and null on every turn", () => {
     const entries: ThreadEntry[] = [
@@ -43,7 +59,7 @@ describe("lifecycleRunMarks (run-position contract)", () => {
     // The head run spans BOTH species (mixed contiguity) from the thread's
     // very first entry; the tail run is flushed at entries.length. A turn
     // always carries null -- it never enters the line.
-    expect(lifecycleRunMarks(entries)).toEqual([
+    expect(marksOf(entries)).toEqual([
       "first",
       "mid",
       "last",
@@ -56,15 +72,15 @@ describe("lifecycleRunMarks (run-position contract)", () => {
   });
 
   it("marks a lone lifecycle event between turns single", () => {
-    expect(lifecycleRunMarks([turn, skill("Activate"), turn])).toEqual([null, "single", null]);
+    expect(marksOf([turn, skill("Activate"), turn])).toEqual([null, "single", null]);
   });
 
   it("returns all null for a turn-only thread (consecutive turns no-op)", () => {
-    expect(lifecycleRunMarks([turn, turn])).toEqual([null, null]);
+    expect(marksOf([turn, turn])).toEqual([null, null]);
   });
 
   it("returns an empty array for an empty thread", () => {
-    expect(lifecycleRunMarks([])).toEqual([]);
+    expect(marksOf([])).toEqual([]);
   });
 });
 
@@ -145,7 +161,7 @@ describe("lifecycleRunMarks (absorbed-activation contract)", () => {
     expect(agentActivationOwner(entries)).toEqual([null, 3, null, null]);
     // The Mount/Unmount on either side are lone standalone nodes -- the line
     // never crosses the turn that swallowed the activation.
-    expect(lifecycleRunMarks(entries, agentActivationOwner(entries))).toEqual([
+    expect(marksOf(entries, agentActivationOwner(entries))).toEqual([
       "single",
       null,
       "single",
@@ -159,7 +175,7 @@ describe("lifecycleRunMarks (absorbed-activation contract)", () => {
     const entries = [skill("Mount"), agentActivate("python"), skill("Unmount")];
     const owners = agentActivationOwner(entries, true);
     expect(owners).toEqual([null, "live", null]);
-    expect(lifecycleRunMarks(entries, owners)).toEqual(["single", null, "single"]);
+    expect(marksOf(entries, owners)).toEqual(["single", null, "single"]);
   });
 });
 
@@ -221,5 +237,156 @@ describe("runtimeSegmentBadges (ADR-0101 segment gate)", () => {
       bi.data.provenance.runtime,
       b.data.provenance.runtime,
     ]);
+  });
+});
+
+// The issue #737 fold segmentation, pinned at the same pure seam: which
+// subsegments collapse into one visual row and what that row aggregates.
+// The threshold pair (one below / exactly at) is the constant's mutation
+// pin -- an off-by-one in either direction turns one of the two red; the
+// owned-break fixture is the breakpoint predicate's pin (dropping the
+// owned[i] != null flush merges the halves into one fold of four).
+
+const srcNamed = (
+  name: string,
+  kind: "Added" | "Replaced" | "Deleted" = "Added",
+): ThreadEntry => ({
+  entry: "Source",
+  data: { kind, reference_name: name, display_name: name },
+});
+const skillNamed = (
+  name: string,
+  kind: "Mount" | "Activate" | "Unmount" = "Mount",
+): ThreadEntry => ({
+  entry: "Skill",
+  data: { kind, name, actor: null },
+});
+// The fold inputs only ever read has()/get() here, so a minimal cast keeps
+// the fixture light (Thread.test.tsx exercises the full SkillEntry shape).
+const registry = (...names: string[]): ReadonlyMap<string, SkillEntry> =>
+  new Map(names.map((n) => [n, { name: n } as SkillEntry]));
+
+describe("lifecycleVisualRows (fold segmentation, issue #737)", () => {
+  it("folds at the threshold exactly; one below stays scatter", () => {
+    const below = Array.from({ length: LIFECYCLE_FOLD_THRESHOLD - 1 }, (_, i) =>
+      srcNamed(`s${i}`),
+    );
+    expect(lifecycleVisualRows(below)).toEqual(
+      below.map((_, i) => ({ row: "marker", idx: i })),
+    );
+
+    const at = Array.from({ length: LIFECYCLE_FOLD_THRESHOLD }, (_, i) => srcNamed(`s${i}`));
+    const rows = lifecycleVisualRows(at);
+    expect(rows).toHaveLength(1);
+    const fold = rows[0];
+    expect(fold.row).toBe("fold");
+    if (fold.row !== "fold") return;
+    expect(fold.group.species).toBe("Source");
+    expect(fold.group.kind).toBe("Added");
+    // The FIRST member anchors the group (the expand-state key).
+    expect(fold.group.anchorIdx).toBe(0);
+    expect(fold.group.memberIdxs).toEqual([0, 1, 2]);
+  });
+
+  it("splits subsegments on species and kind; only same-(species × kind) runs fold", () => {
+    const entries = [
+      srcNamed("a"),
+      skillNamed("pdf-tools"),
+      skillNamed("pdf-tools"),
+      skillNamed("pdf-tools"),
+      srcNamed("b"),
+      srcNamed("c", "Replaced"),
+      srcNamed("d", "Replaced"),
+    ];
+    // Added(a) scatter | Mount×3 folds | Added(b) scatter | Replaced×2
+    // scatter (kind change cuts even within the source species).
+    const rows = lifecycleVisualRows(entries);
+    const shape = (r: (typeof rows)[number]) =>
+      r.row === "fold" ? { fold: [r.group.species, r.group.kind] } : r;
+    expect(rows.map(shape)).toEqual([
+      { row: "marker", idx: 0 },
+      { fold: ["Skill", "Mount"] },
+      { row: "marker", idx: 4 },
+      { row: "marker", idx: 5 },
+      { row: "marker", idx: 6 },
+    ]);
+  });
+
+  it("breaks subsegments at a turn and at an activation its turn absorbed", () => {
+    // Two Added pairs around a turn: neither half reaches the threshold and
+    // the turn keeps them from merging into one fold of four.
+    expect(
+      lifecycleVisualRows([srcNamed("a"), srcNamed("b"), turn, srcNamed("c"), srcNamed("d")]).map(
+        (r) => r.row,
+      ),
+    ).toEqual(["marker", "marker", "turn", "marker", "marker"]);
+
+    // The absorbed activation occupies its visual slot (renders nothing) and
+    // cuts the Mount run exactly like a turn: dropping the owned[i] != null
+    // condition would emit the activation as a marker row instead (the row
+    // shape above goes red), so the fixture pins the breakpoint predicate.
+    const withOwned = [
+      skillNamed("a"),
+      skillNamed("b"),
+      agentActivate("python"),
+      skillNamed("c"),
+      skillNamed("d"),
+      turn,
+    ];
+    expect(lifecycleVisualRows(withOwned, agentActivationOwner(withOwned)).map((r) => r.row)).toEqual(
+      ["marker", "marker", "absorbed", "marker", "marker", "turn"],
+    );
+  });
+
+  it("sums invalidation counts onto the fold; an Added never contributes", () => {
+    // Even a stale map keyed for an Added (impossible via StaleReason, but
+    // the input is just a map) must not leak into the fold: the aggregation
+    // skips Added members outright.
+    const added = Array.from({ length: LIFECYCLE_FOLD_THRESHOLD }, (_, i) => srcNamed(`s${i}`));
+    const noise = new Map([["s0:Added", 7]]);
+    const addedRows = lifecycleVisualRows(added, [], { staleCountsByKey: noise });
+    expect(addedRows[0].row).toBe("fold");
+    if (addedRows[0].row !== "fold") return;
+    expect(addedRows[0].group.invalidatedCount).toBe(0);
+
+    const replaced = Array.from({ length: LIFECYCLE_FOLD_THRESHOLD }, (_, i) =>
+      srcNamed(`s${i}`, "Replaced"),
+    );
+    const staleCountsByKey = new Map([
+      ["s0:Replaced", 2],
+      ["s2:Replaced", 1],
+    ]);
+    const replacedRows = lifecycleVisualRows(replaced, [], { staleCountsByKey });
+    expect(replacedRows[0].row).toBe("fold");
+    if (replacedRows[0].row !== "fold") return;
+    expect(replacedRows[0].group.invalidatedCount).toBe(3);
+  });
+
+  it("counts drift only against a wired registry that lacks the name", () => {
+    const mounts = [skillNamed("keep"), skillNamed("gone"), skillNamed("lost")];
+    // Unwired: the caller opted out of drift detection entirely.
+    const unwired = lifecycleVisualRows(mounts);
+    expect(unwired[0].row).toBe("fold");
+    if (unwired[0].row !== "fold") return;
+    expect(unwired[0].group.driftCount).toBe(0);
+    // Wired with only "keep": two of three names are gone.
+    const wired = lifecycleVisualRows(mounts, [], { skillIndex: registry("keep") });
+    expect(wired[0].row).toBe("fold");
+    if (wired[0].row !== "fold") return;
+    expect(wired[0].group.driftCount).toBe(2);
+  });
+
+  it("treats a fold row as its segment's single node (marks over the projection)", () => {
+    // marker(Added) | marker(Mount) | fold(Added×3): one mixed run of three
+    // VISUAL rows -- the fold participates like any node, so its connector
+    // derives from the same projection the render consumes (single source).
+    const entries = [
+      srcNamed("a"),
+      skillNamed("pdf-tools"),
+      srcNamed("b"),
+      srcNamed("c"),
+      srcNamed("d"),
+    ];
+    expect(marksOf(entries)).toEqual(["first", "mid", "last"]);
   });
 });

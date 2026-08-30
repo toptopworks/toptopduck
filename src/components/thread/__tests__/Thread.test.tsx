@@ -2924,4 +2924,206 @@ describe("Thread", () => {
       expect(screen.getAllByText("codex")).toHaveLength(2);
     });
   });
+
+  // Issue #737: consecutive same-kind lifecycle runs at/above the threshold
+  // fold into one collapsed disclosure row. The pure segmentation pins live
+  // in turnVisual.test.ts; these cover the DOM contract -- the
+  // default-collapsed posture, the accessible disclosure (expand keeps the
+  // head in place, members carry no connector), the aggregate suffixes, and
+  // the jump contract's expand-before-scroll (ADR-0047 exact-event semantics
+  // preserved against the group swallowing the target).
+
+  describe("lifecycle fold (issue #737)", () => {
+    const added = (name: string, display: string): ThreadEntry => ({
+      entry: "Source",
+      data: { kind: "Added", reference_name: name, display_name: display },
+    });
+    const replaced = (name: string, display: string): ThreadEntry => ({
+      entry: "Source",
+      data: { kind: "Replaced", reference_name: name, display_name: display },
+    });
+    const mount = (name: string): ThreadEntry => ({
+      entry: "Skill",
+      data: { kind: "Mount", name, actor: null },
+    });
+
+    it("folds a same-kind run at the threshold into one collapsed row; below it stays scatter", () => {
+      // Three Added events (a sequential ingest) collapse to ONE row
+      // carrying the count text; two never fold -- the boundary is the
+      // threshold pin (the constant off by one in either direction turns
+      // this red).
+      const { container } = renderThread(
+        <Thread
+          entries={[added("a", "甲"), added("b", "乙"), added("c", "丙")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(container.querySelectorAll(".lifecycle-fold-entry")).toHaveLength(1);
+      expect(container.querySelectorAll(".source-entry")).toHaveLength(0);
+      const foldBtn = screen.getByRole("button", { name: /加载了 3 个数据源/ });
+      expect(foldBtn.getAttribute("aria-expanded")).toBe("false");
+
+      const { container: below } = renderThread(
+        <Thread
+          entries={[added("a", "甲"), added("b", "乙")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      expect(below.querySelectorAll(".lifecycle-fold-entry")).toHaveLength(0);
+      expect(below.querySelectorAll(".source-entry")).toHaveLength(2);
+    });
+
+    it("expands to ONE combined member-name row under the kept-in-place head, then collapses again", () => {
+      const { container } = renderThread(
+        <Thread
+          entries={[added("a", "甲"), added("b", "乙"), added("c", "丙")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      const foldBtn = screen.getByRole("button", { name: /加载了 3 个数据源/ });
+      fireEvent.click(foldBtn);
+      expect(foldBtn.getAttribute("aria-expanded")).toBe("true");
+      // The head stays in place; the members render as ONE combined row (the
+      // combined-member ruling: a long stretch never re-stretches the
+      // timeline N rows deep) naming every member side by side -- never as
+      // scatter rows again.
+      expect(container.querySelectorAll(".lifecycle-fold-entry")).toHaveLength(1);
+      const combined = container.querySelectorAll(".lifecycle-fold-members");
+      expect(combined).toHaveLength(1);
+      expect(combined[0].textContent).toBe("甲乙丙");
+      expect(container.querySelectorAll(".source-entry")).toHaveLength(0);
+      // The combined row carries no connector: the fold row keeps the
+      // segment's line, so expanding never moves it.
+      expect(combined[0].hasAttribute("data-run")).toBe(false);
+      fireEvent.click(foldBtn);
+      expect(foldBtn.getAttribute("aria-expanded")).toBe("false");
+      expect(container.querySelectorAll(".lifecycle-fold-members")).toHaveLength(0);
+    });
+
+    it("conducts the run connector through an expanded fold that sits mid-run (issue #737)", () => {
+      // The fold's members only ever form a run with OTHER markers around
+      // them (a turn breaks), so a mid-run head is the [marker | fold |
+      // marker] shape. Expanded, the combined row must carry the
+      // through-segment (data-run-continue) so the line does not break
+      // across it; a lone fold (single) carries none -- there is no line to
+      // conduct.
+      const midRunEntries: ThreadEntry[] = [
+        added("a", "甲"),
+        mount("s1"),
+        mount("s2"),
+        mount("s3"),
+        added("b", "乙"),
+      ];
+      const midRun = renderThread(
+        <Thread
+          entries={midRunEntries}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      fireEvent.click(midRun.container.querySelector(".lifecycle-fold-entry button") as HTMLElement);
+      expect(
+        midRun.container.querySelector(".lifecycle-fold-members")?.getAttribute("data-run-continue"),
+      ).toBe("true");
+
+      const loneEntries: ThreadEntry[] = [turnEntry(materializedRecord("result_1", null)), mount("s1"), mount("s2"), mount("s3")];
+      const lone = renderThread(
+        <Thread
+          entries={loneEntries}
+          selectedResult={null}
+          onSelectResult={() => {}}
+        />,
+      );
+      fireEvent.click(lone.container.querySelector(".lifecycle-fold-entry button") as HTMLElement);
+      expect(
+        lone.container.querySelector(".lifecycle-fold-members")?.hasAttribute("data-run-continue"),
+      ).toBe(false);
+    });
+
+    it("aggregates the drift count onto a skill fold; expanded members keep their warnings", () => {
+      // A Mount fold whose registry misses two of three names carries the
+      // destructive drift suffix; expanding keeps the individual per-name
+      // warnings on the scatter rows.
+      const skillIndex = new Map([["keep", skillEntry("keep")]]);
+      const { container } = renderThread(
+        <Thread
+          entries={[mount("keep"), mount("gone"), mount("lost")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          skillIndex={skillIndex}
+        />,
+      );
+      const foldBtn = screen.getByRole("button", { name: /挂载 3 个技能.*2 个已不存在/ });
+      fireEvent.click(foldBtn);
+      // The combined row names all three members side by side; the two
+      // missing ones keep their individual drift notes beside their names.
+      const names = container.querySelectorAll(
+        ".lifecycle-fold-members span[data-entry-idx]",
+      );
+      expect(Array.from(names).map((n) => n.textContent)).toEqual([
+        "keep",
+        "gone · 已不存在",
+        "lost · 已不存在",
+      ]);
+      // The fold suffix plus the two member notes: three disclosures.
+      expect(screen.getAllByText(/已不存在/)).toHaveLength(3);
+    });
+
+    it("sums the invalidation counts onto the fold row", () => {
+      // a:Replaced invalidates 2 results, b none, c 1 -- the fold carries 3.
+      const staleByReference = new Map([
+        ["result_1", { reference_name: "a", display_name: "甲", reason: "Replaced" as const }],
+        ["result_2", { reference_name: "a", display_name: "甲", reason: "Replaced" as const }],
+        ["result_3", { reference_name: "c", display_name: "丙", reason: "Replaced" as const }],
+      ]);
+      renderThread(
+        <Thread
+          entries={[replaced("a", "甲"), replaced("b", "乙"), replaced("c", "丙")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          staleByReference={staleByReference}
+        />,
+      );
+      screen.getByRole("button", { name: /换源了 3 个数据源.*失效 3/ });
+    });
+
+    it("expands a collapsed group before a stale-chip jump lands on the exact member (ADR-0047)", () => {
+      const entries: ThreadEntry[] = [
+        turnEntry(materializedRecord("result_1", null)),
+        replaced("a", "甲"),
+        replaced("b", "乙"),
+        replaced("c", "丙"),
+      ];
+      const staleByReference = new Map([
+        ["result_1", { reference_name: "a", display_name: "甲", reason: "Replaced" as const }],
+      ]);
+      const { container } = renderThread(
+        <Thread
+          entries={entries}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          staleByReference={staleByReference}
+        />,
+      );
+      // Collapsed: the target row is not even in the DOM yet.
+      expect(container.querySelectorAll(".source-entry")).toHaveLength(0);
+      // The chip's target is the first Replaced after the turn (the 甲
+      // member) -- inside the collapsed group. The jump must expand the
+      // group AND highlight the exact member, never degrade to the fold row.
+      fireEvent.click(screen.getByRole("button", { name: /源已更新/ }));
+      // The group auto-expands to the combined row and the highlight lands
+      // on the exact member NAME (ADR-0047), not the row.
+      expect(container.querySelectorAll(".lifecycle-fold-members")).toHaveLength(1);
+      expect(
+        container.querySelector(".lifecycle-fold-entry button")?.getAttribute("aria-expanded"),
+      ).toBe("true");
+      const highlighted = container.querySelector(
+        `.lifecycle-fold-members span[data-highlighted="true"]`,
+      );
+      expect(highlighted?.textContent).toContain("甲");
+    });
+  });
 });

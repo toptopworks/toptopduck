@@ -666,14 +666,19 @@
  * etc.) are kept on the component for selector / test stability.
  * ========================================================================= */
 
-/* Lifecycle marker run connector (issue #721, ADR-0047/0086 nodification).
+/* Lifecycle marker run connector (issue #721, ADR-0047/0086 nodification;
+ * fold rows join the line by issue #737).
  * Skill/source markers render as bare glyph nodes (an invisible h-4 w-4
  * box; the circle chrome -- 1px tone border + bg-background punch -- is
  * retired, the kind tone rides the glyph color); consecutive lifecycle
  * events form maximal runs (skill/source mixed species count as contiguous,
  * a turn ALWAYS breaks the run -- Thread.tsx computes the positions at
- * render time via lifecycleRunMarks). A run of >=2 connects adjacent nodes
- * with a 2px segment; a lone event keeps its node bare. The connector
+ * render time via lifecycleRunMarks over the visual row projection). A run
+ * of >=2 connects adjacent nodes with a 2px segment; a lone event keeps its
+ * node bare. A collapsed fold row (a same-kind subsegment at/above the
+ * threshold) participates as its segment's SINGLE node with the same box
+ * geometry; its expanded combined member row holds no node and only
+ * CONDUCTS the line through (see the conduction rule below). The connector
  * expression rides the marker <li>'s data-run="first|mid|last|single":
  * first/mid draw DOWN from this node's bottom edge (clear of the glyph) to
  * the next node's top edge (their arriving segment is the previous li's),
@@ -681,7 +686,8 @@
  * is scoped to stale-card <-> source-event lines (interleaved knotting);
  * these adjacent same-column run segments are outside that rejection. The
  * geometry is a contract with the component utilities
- * (SkillMarker/SourceMarker): node = h-4 w-4 (16px) at the row's left edge,
+ * (SkillMarker/SourceMarker/LifecycleFold): node = h-4 w-4 (16px) at the
+ * row's left edge,
  * row = py-0.5 (2px vertical padding) -- so the node's bottom edge sits
  * 18px below the li top (2px padding + 16px box) and the next node's top
  * edge sits 6px below this li's bottom (the receiving row's 4px run gap +
@@ -691,13 +697,16 @@
  * attribute is the layout-semantics exception, same reasoning as the resize
  * handles above). */
 .skill-entry,
-.source-entry {
+.source-entry,
+.lifecycle-fold-entry {
   position: relative;
 }
 .skill-entry[data-run="first"]::before,
 .skill-entry[data-run="mid"]::before,
 .source-entry[data-run="first"]::before,
-.source-entry[data-run="mid"]::before {
+.source-entry[data-run="mid"]::before,
+.lifecycle-fold-entry[data-run="first"]::before,
+.lifecycle-fold-entry[data-run="mid"]::before {
   content: "";
   position: absolute;
   top: 18px; /* this node's bottom edge: 2px row padding + 16px node */
@@ -715,6 +724,30 @@
 .skill-entry[data-run="mid"],
 .skill-entry[data-run="last"],
 .source-entry[data-run="mid"],
-.source-entry[data-run="last"] {
+.source-entry[data-run="last"],
+.lifecycle-fold-entry[data-run="mid"],
+.lifecycle-fold-entry[data-run="last"] {
   margin-top: 4px;
+}
+
+/* Connector conduction across an expanded fold's combined member row
+ * (issue #737): the fold head's own down-segment (the rule above) stops
+ * 6px past its <li>, but when the head sits mid-run (first/mid) the next
+ * node lies BELOW the combined row -- without a through-segment here the
+ * line would visually break across the expansion. The combined row
+ * carries data-run-continue and draws the full-height segment at the same
+ * left offset; it holds no node of its own (the fold row is the segment's
+ * single node), so it neither breathes (no margin-top) nor stamps a
+ * position. The names start at pl-[22px], clear of the 7px line. */
+.lifecycle-fold-members {
+  position: relative;
+}
+.lifecycle-fold-members[data-run-continue="true"]::before {
+  content: "";
+  position: absolute;
+  top: 0; /* the head's segment already covered the 6px gap above */
+  bottom: -6px; /* the next node's top edge, same as the node rule above */
+  left: 7px;
+  width: 2px;
+  background-color: var(--border);
 }
