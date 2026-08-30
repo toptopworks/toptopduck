@@ -392,8 +392,11 @@ export function SettingsView({
 
   // ESC exits via the same requestClose path. While a confirm dialog is open --
   // this view's discard confirm OR the Profiles pane's delete confirm -- the
-  // AlertDialog owns ESC and this handler bails (ADR-0075 close contract). Refs
-  // keep the once-registered listener stable across renders.
+  // AlertDialog owns ESC and this handler bails (ADR-0075 close contract). The
+  // pane's open Select listboxes ride the same dialogOpen flag: Radix consumes
+  // their Escape with preventDefault only, so without the yield closing a
+  // dropdown would close the whole view. Refs keep the once-registered
+  // listener stable across renders.
   const confirmDiscardRef = useRef(false);
   useEffect(() => {
     confirmDiscardRef.current = confirmDiscardOpen;

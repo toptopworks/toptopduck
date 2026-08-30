@@ -65,8 +65,9 @@ import { PRESET_CUSTOM, derivePresetId, findPreset } from "./provider-presets";
 // top-bar quick-switcher). In EDIT mode the API-key field keeps its OWN
 // immediate Set/Clear IPC (ADR-0029 -- the key never enters app-config) and does
 // NOT participate in the blur / create commit; in ADD mode it rides the create
-// flow (profile commit first, key write second -- a failed key write must not
-// strand an orphaned entry either way).
+// flow (profile commit first, key write second -- a failed commit never
+// touches the keychain, and a failed key write leaves the created profile
+// selected with the error surfaced for an edit-mode retry).
 
 /** The control surface this pane exposes to SettingsView so the close / ESC
  *  contract (ADR-0075) can flush a focused field, detect a dirty add-mode form
@@ -85,9 +86,12 @@ export type ProfilesControls = {
   /** True while any IPC this pane owns is in flight (blur commit / create /
    *  key / test). The parent blocks close while set. */
   busy: boolean;
-  /** True while this pane's delete-confirm AlertDialog is open; the parent's
-   *  window ESC handler yields to the dialog while set (ADR-0075: a confirm
-   *  dialog owns window ESC). */
+  /** True while a modal layer this pane owns is open: the delete-confirm
+   *  AlertDialog OR one of the form's portalized Select listboxes. The
+   *  parent's window ESC handler yields while set (ADR-0075: an open layer
+   *  owns window ESC -- Radix's Select consumes Escape with preventDefault
+   *  only, never stopPropagation, so a dropdown's ESC must not close the
+   *  whole view). */
   dialogOpen: boolean;
 };
 
@@ -491,14 +495,19 @@ export function ProfilesSection({
   // unmounts this pane -- its commit-on-blur already fired on the focus move).
   // In-flight key / test IPCs keep blocking close after unmount via the
   // transitions mirrored upward through onIpcBusy, which survive this pane.
-  const addDirty = addMode && addingProfile !== null && draft !== null && !sameEndpoint(draft, addingProfile);
+  // The buffered key counts as an unsaved edit too: a fresh skeleton is fully
+  // valid, so a key-only add would otherwise bypass the discard confirm and
+  // silently drop the typed key on close.
+  const addDirty =
+    addMode && addingProfile !== null && draft !== null &&
+    (!sameEndpoint(draft, addingProfile) || draftKey.trim() !== "");
   useEffect(() => {
     controlsRef.current = {
       flush: commitDraft,
       addDirty,
       discardAdd: dropAddDraft,
       busy,
-      dialogOpen: confirmDeleteId !== null,
+      dialogOpen: confirmDeleteId !== null || selectOpen,
     };
     return () => {
       controlsRef.current = null;

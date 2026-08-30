@@ -76,11 +76,11 @@ export function ProviderEndpointFields({
             <div className="flex items-center gap-2">
               <RadioGroupItem id={`proto-anthropic-${profile.id}`} value="anthropic" />
               <Label htmlFor={`proto-anthropic-${profile.id}`} className="font-normal">
-                {/* The provider name is a locale-independent proper noun -- the
-                    same source of truth as provider-presets.ts's display_name,
-                    so it stays in JSX; the parenthetical wire detail is
-                    translatable chrome copy (ADR-0052 layer 1) and rides muted
-                    beneath it. */}
+                {/* The provider name is a locale-independent proper noun -- it
+                    matches provider-presets.ts's display_name but is an
+                    independent literal, so it stays in JSX; the parenthetical
+                    wire detail is translatable chrome copy (ADR-0052 layer 1)
+                    and rides muted beneath it. */}
                 <span>
                   Anthropic{" "}
                   <span className="text-muted-foreground">
