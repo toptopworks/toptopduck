@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { agentActivationOwner, lifecycleRunMarks } from "../turn-visual";
-import type { ThreadEntry } from "../../../types/thread";
+import { agentActivationOwner, lifecycleRunMarks, runtimeSegmentBadges } from "../turn-visual";
+import type { ThreadEntry, TurnRuntime } from "../../../types/thread";
 
 // The issue #721 run-position contract, pinned at the pure-algebra seam. The
 // Thread.test.tsx data-run pins cover the DOM wiring, but Thread never reads
@@ -160,5 +160,66 @@ describe("lifecycleRunMarks (absorbed-activation contract)", () => {
     const owners = agentActivationOwner(entries, true);
     expect(owners).toEqual([null, "live", null]);
     expect(lifecycleRunMarks(entries, owners)).toEqual(["single", null, "single"]);
+  });
+});
+
+// The ADR-0101 segment gate, pinned at the pure seam: which entries open a
+// runtime segment and carry its badge. The optimistic append stamps the
+// ask-time runtime choice (issue #725), but the choice-unknown degradation
+// and a crashed pre-read both still mint unrecorded turns -- so the
+// "unrecorded turn inside an external thread" shape is a live state, pinned
+// here alongside the gate it must break.
+
+describe("runtimeSegmentBadges (ADR-0101 segment gate)", () => {
+  // Narrowed to the Turn entry so the runtime reads below type-check without
+  // a per-assertion tag guard (the fixture always mints the Turn variant).
+  const runtimeTurn = (runtime: TurnRuntime): Extract<ThreadEntry, { entry: "Turn" }> => ({
+    ...turn,
+    data: { ...turn.data, provenance: { skills: [], runtime } },
+  });
+  const external = (adapterId: string): TurnRuntime => ({
+    kind: "external",
+    data: { adapter_id: adapterId },
+  });
+
+  it("renders no badges anywhere while the thread holds no external runtime", () => {
+    const builtIn = runtimeTurn({ kind: "built_in" });
+    // Built-in and unrecorded alike: the has-external gate stays closed, so
+    // no segment ever opens (the optimistic stamp must not flip this).
+    expect(runtimeSegmentBadges([builtIn, turn, builtIn])).toEqual([null, null, null]);
+    expect(runtimeSegmentBadges([turn])).toEqual([null]);
+  });
+
+  it("keeps one badge per segment; an unrecorded turn renders none but still breaks it", () => {
+    // external | unrecorded | same adapter again: the middle turn carries no
+    // badge (no fabrication) yet closes the segment, so the following turn
+    // re-announces the SAME adapter -- the degradation is visible as a
+    // segment break, never as a silent merge across the gap.
+    const a = runtimeTurn(external("claude-code"));
+    expect(runtimeSegmentBadges([a, turn, a])).toEqual([a.data.provenance.runtime, null, a.data.provenance.runtime]);
+    // Two consecutive recorded turns on one adapter are one segment.
+    expect(runtimeSegmentBadges([a, a])).toEqual([a.data.provenance.runtime, null]);
+  });
+
+  it("re-announces on an adapter change even while the gate stays open on one external", () => {
+    const a = runtimeTurn(external("claude-code"));
+    const b = runtimeTurn(external("codex"));
+    expect(runtimeSegmentBadges([a, b])).toEqual([
+      a.data.provenance.runtime,
+      b.data.provenance.runtime,
+    ]);
+  });
+
+  it("re-announces the built-in segment head after the common in-session switch (#725 AC2)", () => {
+    // built-in -> external is the shape an in-session switch then first ask
+    // stamps (the optimistic append carries the new choice): the built-in
+    // turn opens a segment too -- in a mixed thread the reader must be able
+    // to tell who ran which stretch.
+    const bi = runtimeTurn({ kind: "built_in" });
+    const b = runtimeTurn(external("codex"));
+    expect(runtimeSegmentBadges([bi, b])).toEqual([
+      bi.data.provenance.runtime,
+      b.data.provenance.runtime,
+    ]);
   });
 });

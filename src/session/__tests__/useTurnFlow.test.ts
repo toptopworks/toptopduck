@@ -5,6 +5,7 @@ import type { IntlShape } from "react-intl";
 import { sessionKeys } from "../queryKeys";
 import {
   buildLiveRounds,
+  choiceToTurnRuntime,
   liveRoundsToTrace,
   mergeLiveTrace,
   useTurnFlow,
@@ -40,6 +41,11 @@ vi.mock("../../api", async (importOriginal) => {
   return {
     ...actual,
     askQuestion: vi.fn(),
+    // Defaults to a FAILED read (the catch-path degradation: no runtime
+    // stamped) so the pre-existing asks stay runtime-less unless a test
+    // resolves a value. (The real API never resolves undefined -- a fresh
+    // session resolves built_in, the server-side degradation.)
+    getSessionRuntime: vi.fn(async () => undefined),
     cancelQuery: vi.fn(async () => {}),
     // Capture the listener callback so a test can emit phases; the returned
     // unlisten is a no-op (jsdom has no real Tauri event bus).
@@ -50,7 +56,7 @@ vi.mock("../../api", async (importOriginal) => {
   };
 });
 
-import { askQuestion, cancelQuery } from "../../api";
+import { askQuestion, cancelQuery, getSessionRuntime } from "../../api";
 
 const SID = "sess-1";
 const STRANGER = "sess-other";
@@ -542,8 +548,8 @@ describe("useTurnFlow", () => {
         },
       ]);
       // The optimistic record carries client-clock timestamps (the ask
-      // read at submit, the settle at fold time) until the refetch
-      // replaces them with the backend's stamps.
+      // read at submit, the settle at fold time) until a reopened mount
+      // lands the backend's stamps (no in-place refetch, ADR-0051).
       expect(typeof entry.data.asked_at).toBe("number");
       expect(typeof entry.data.settled_at).toBe("number");
       expect(entry.data.asked_at).toBeLessThanOrEqual(entry.data.settled_at!);
@@ -551,6 +557,17 @@ describe("useTurnFlow", () => {
   });
 
   describe("mergeLiveTrace + buildLiveRounds + liveRoundsToTrace (pure helpers)", () => {
+    it("choiceToTurnRuntime maps both choice forms onto the attribution shape (#725)", () => {
+      // built-in is identity; external lifts the bare adapter string into
+      // the attribution's adapter-id object (the only payload difference,
+      // per TurnRuntime).
+      expect(choiceToTurnRuntime({ kind: "built_in" })).toEqual({ kind: "built_in" });
+      expect(choiceToTurnRuntime({ kind: "external", data: "claude-code" })).toEqual({
+        kind: "external",
+        data: { adapter_id: "claude-code" },
+      });
+    });
+
     const call = (over: Partial<LiveCall> = {}): LiveCall => ({
       key: "call-0",
       step: 1,
@@ -805,6 +822,79 @@ describe("useTurnFlow", () => {
       const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
       expect(thread).toHaveLength(1);
       expect(thread?.[0]).toMatchObject({ entry: "Turn" });
+    });
+
+    it("stamps the ask-time external choice onto the optimistic record (#725)", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "external", data: "claude-code" });
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("why?");
+      });
+
+      // The choice read precedes the ask dispatch: the stamped value mirrors
+      // the turn-top snapshot as of submit. set_session_runtime is
+      // lock-light (never blocks on a turn), so ordering the read this way
+      // keeps the only mismatch window to the read-to-dispatch gap -- a
+      // settle-time read would widen it to the turn's whole duration.
+      expect(getSessionRuntime).toHaveBeenCalledWith(SID);
+      // Single read, fired at ask: a settle-time re-read (the rejected
+      // compromise) would still pass the ordering pin above but not this
+      // count.
+      expect(getSessionRuntime).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(getSessionRuntime).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(askQuestion).mock.invocationCallOrder[0],
+      );
+
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread?.[0]).toMatchObject({
+        entry: "Turn",
+        data: {
+          provenance: { runtime: { kind: "external", data: { adapter_id: "claude-code" } } },
+        },
+      });
+    });
+
+    it("stamps a built_in choice as the built-in runtime", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread?.[0]).toMatchObject({
+        entry: "Turn",
+        data: { provenance: { runtime: { kind: "built_in" } } },
+      });
+    });
+
+    it("degrades honestly (no runtime stamped) when the choice read fails", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(getSessionRuntime).mockRejectedValue(new Error("ipc down"));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      // The ask still succeeds; only the attribution is absent -- the
+      // unrecorded-turn degradation, rendered badgeless until reopened.
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      const first = thread?.[0];
+      expect(first?.entry).toBe("Turn");
+      if (first?.entry === "Turn") {
+        expect(first.data.provenance.runtime).toBeUndefined();
+      }
     });
 
     it("invalidates workingSet + active on a Materialized outcome", async () => {
