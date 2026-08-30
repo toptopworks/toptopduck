@@ -6,6 +6,7 @@ import { SettingsView } from "../SettingsView";
 import {
   listProviderProfiles,
   setProfileKey,
+  testProfile,
   setSessionsDir,
   getSessionsDir,
   getAppConfig,
@@ -21,8 +22,10 @@ import { chooseOption, openSelect, renderSettings } from "./helpers";
 // SettingsView reaches the per-profile keychain surface (issue #153); mock the
 // IPC functions so the view never hits Tauri. listProviderProfiles feeds the
 // Profiles pane key-status overlay; setProfileKey feeds the immediate key IPC
-// (ADR-0029 one-shot). listAdapters / rescanAdapters feed the Runtime section's
-// Local CLI tab (issue #489) -- always mounted, so must resolve in every test.
+// (ADR-0029 one-shot); testProfile feeds the add-mode probe (issue #735 --
+// asserted at the integration level, one hop above ProviderFields' own pins).
+// listAdapters / rescanAdapters feed the Runtime section's Local CLI tab
+// (issue #489) -- always mounted, so must resolve in every test.
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
   return {
@@ -30,6 +33,7 @@ vi.mock("../../../api", async (importOriginal) => {
     listProviderProfiles: vi.fn(),
     setProfileKey: vi.fn(),
     clearProfileKey: vi.fn(),
+    testProfile: vi.fn(),
     setSessionsDir: vi.fn(),
     getSessionsDir: vi.fn(),
     getAppConfig: vi.fn(),
@@ -161,6 +165,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     vi.mocked(getSessionsDir).mockResolvedValue("/home/user/Documents/toptopduck/sessions");
     vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
     vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(testProfile).mockResolvedValue({ kind: "Ok", data: { models: [] } });
   });
 
   // Shared render harness: SettingsView requires a controlled section (issue
@@ -665,6 +670,24 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onCommitAppConfig).not.toHaveBeenCalled();
   });
 
+  it("an empty or whitespace model fails validation at the field instead of committing (issue #735)", async () => {
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    const model = await screen.findByLabelText("Model");
+    fireEvent.change(model, { target: { value: "" } });
+    fireEvent.blur(model, { relatedTarget: document.body });
+    expect(await screen.findByText("Model is required.")).toBeInTheDocument();
+    expect(model).toHaveAttribute("aria-invalid", "true");
+    expect(onCommitAppConfig).not.toHaveBeenCalled();
+    // Whitespace-only is the same state as empty: the trim lives at the
+    // validation boundary, so "   " must refuse like "" (a lost trim would
+    // pass validation and commit, flipping the not-called assertion red).
+    fireEvent.change(model, { target: { value: "   " } });
+    fireEvent.blur(model, { relatedTarget: document.body });
+    expect(await screen.findByText("Model is required.")).toBeInTheDocument();
+    expect(onCommitAppConfig).not.toHaveBeenCalled();
+  });
+
   it("an open preset dropdown holds back the blur commit until the select closes", async () => {
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
@@ -762,6 +785,31 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onCommitAppConfig.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(setProfileKey).mock.invocationCallOrder[0],
     );
+  });
+
+  it("an add-mode Test connection probes with the buffered draft key (issue #735)", async () => {
+    const { onCommitAppConfig } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Runtime" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.change(screen.getByPlaceholderText("sk-ant-api03-…"), {
+      target: { value: " sk-add-probe " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+    // The profile has no keychain entry yet, so the probe's only reachable
+    // key is the buffered draft -- threaded through ProfilesSection ->
+    // ProviderEndpointFields -> ProviderModelField and passed RAW (trim
+    // normalization is Rust-side, resolve_probe_key). Edit mode's undefined
+    // fifth argument is pinned one hop down in ProviderFields.test.tsx.
+    await waitFor(() =>
+      expect(vi.mocked(testProfile)).toHaveBeenCalledWith(
+        expect.any(String),
+        "anthropic",
+        "https://api.anthropic.com",
+        "claude-sonnet-4-6",
+        " sk-add-probe ",
+      ),
+    );
+    expect(onCommitAppConfig).not.toHaveBeenCalled();
   });
 
   it("cancelling an add with a typed key never writes the keychain (no orphaned entry)", async () => {

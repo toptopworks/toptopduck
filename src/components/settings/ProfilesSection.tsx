@@ -370,6 +370,11 @@ export function ProfilesSection({
       setFieldError(validationError);
       return false;
     }
+    // Validation passed: any earlier field error is stale from here on --
+    // the field is valid as typed, and whatever fails next (IPC,
+    // revert-on-fail) is submit-level and reports through formError
+    // (issue #735: fieldError stays field-scoped).
+    setFieldError(null);
     const next = draft;
     setCommitBusy(true);
     const err = await onCommit((cfg) => ({
@@ -381,10 +386,6 @@ export function ProfilesSection({
     }));
     setCommitBusy(false);
     setFormError(err);
-    // A validation-passing commit clears the field error even when the IPC
-    // failed -- the remaining failure is submit-level (formError), and the
-    // field itself is valid as typed.
-    if (err === null) setFieldError(null);
     return err === null;
   }
 
@@ -438,6 +439,11 @@ export function ProfilesSection({
       setFieldError(validationError);
       return;
     }
+    // Validation passed: any earlier field error is stale from here on --
+    // create-time failures (commit, key write) are submit-level and report
+    // through formError (issue #735: fieldError stays field-scoped), and
+    // the created profile is valid as created.
+    setFieldError(null);
     const next = draft;
     const keyToWrite = draftKey.trim();
     setCommitBusy(true);

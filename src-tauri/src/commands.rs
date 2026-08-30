@@ -1323,10 +1323,12 @@ pub async fn test_profile(
     let live = live.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let id = ProfileId(profile_id);
-        let key_read = crate::provider::preflight::resolve_probe_key(
-            key.as_deref(),
-            live.key_for_profile(&id),
-        );
+        // Lazy closure: the keychain read runs only in the fallback arm, so
+        // an add-mode probe with an explicit key never touches the keychain
+        // at all.
+        let key_read = crate::provider::preflight::resolve_probe_key(key.as_deref(), || {
+            live.key_for_profile(&id)
+        });
         crate::provider::preflight::run(key_read, protocol, &base_url, &model)
     })
     .await

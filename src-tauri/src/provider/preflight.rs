@@ -78,19 +78,20 @@ const PING_MAX_TOKENS: u32 = 1;
 /// Resolve which key a probe uses (issue #735, ADR-0070 calibration).
 /// `explicit` is the caller's one-shot key (the add-mode form's buffered
 /// draft key, which has not reached the keychain yet): when it trims to a
-/// non-empty value it WINS and the keychain is never consulted -- so a locked
-/// or faulted keychain cannot block an add-mode probe, and the verdict
-/// predicts the created profile's real behavior because the frontend writes
-/// the same trimmed value on create. When it is absent or blank the probe
-/// falls back to the keychain read verbatim (edit mode passes no explicit
-/// key, preserving store-then-test unchanged).
+/// non-empty value it WINS and the keychain read is never even invoked --
+/// `keychain_read` is a lazy closure only the fallback arm calls, so a
+/// locked or faulted keychain cannot block an add-mode probe, and the
+/// verdict predicts the created profile's real behavior because the
+/// frontend writes the same trimmed value on create. When it is absent or
+/// blank the probe falls back to the keychain read verbatim (edit mode
+/// passes no explicit key, preserving store-then-test unchanged).
 pub(crate) fn resolve_probe_key(
     explicit: Option<&str>,
-    keychain_read: Result<Option<String>, String>,
+    keychain_read: impl FnOnce() -> Result<Option<String>, String>,
 ) -> Result<Option<String>, String> {
     match explicit.map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => Ok(Some(k.to_string())),
-        None => keychain_read,
+        None => keychain_read(),
     }
 }
 
@@ -366,14 +367,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_probe_key_explicit_key_wins_over_keychain_without_reading_it() {
+    fn resolve_probe_key_explicit_key_wins_without_invoking_the_keychain_read() {
         // Issue #735 (ADR-0070 calibration): an add-mode probe carries the
         // buffered draft key, which trims to what the frontend will write on
-        // create. The explicit key WINS: even a faulted keychain read is
-        // never consulted (a locked keychain must not block an add-mode
-        // probe -- the keychain is not needed when the key is in hand).
-        let resolved =
-            resolve_probe_key(Some(" sk-test-123 "), Err("keychain access failed".into()));
+        // create. The explicit key WINS and the read closure is never
+        // invoked -- it panics if it runs, so a green test proves the
+        // keychain is not even consulted (a locked keychain cannot block an
+        // add-mode probe -- the keychain is not needed when the key is in
+        // hand).
+        let resolved = resolve_probe_key(Some(" sk-test-123 "), || {
+            panic!("keychain read must not run when the explicit key wins")
+        });
         assert_eq!(resolved, Ok(Some("sk-test-123".into())));
     }
 
@@ -385,10 +389,10 @@ mod tests {
         // path. The fault propagates untouched (KeychainUnavailable stays
         // classifiable upstream).
         for explicit in [None, Some(""), Some("   ")] {
-            let resolved = resolve_probe_key(explicit, Err("keychain access failed".into()));
+            let resolved = resolve_probe_key(explicit, || Err("keychain access failed".into()));
             assert_eq!(resolved, Err("keychain access failed".into()));
         }
-        let resolved = resolve_probe_key(None, Ok(Some("stored".into())));
+        let resolved = resolve_probe_key(None, || Ok(Some("stored".into())));
         assert_eq!(resolved, Ok(Some("stored".into())));
     }
 
