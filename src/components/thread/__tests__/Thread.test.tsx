@@ -188,7 +188,7 @@ describe("Thread", () => {
     // -- the body IS the reply, so the turn renders without the clarify /
     // refuse action badge; the kind still reads off the outcome icon's
     // aria-label (ADR-0050).
-    renderThread(
+    const { container } = renderThread(
       <Thread
         entries={[
           turnEntry({
@@ -209,6 +209,12 @@ describe("Thread", () => {
     expect(screen.getByText("总共有多少客户")).toBeInTheDocument();
     expect(screen.getByText("共 128 位客户。")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "已回答" })).toBeInTheDocument();
+    // The reply body rides the conversation tier (text-sm, matching the user
+    // bubble's question and RoundProse) -- the answer is discourse, not
+    // chrome.
+    expect(
+      container.querySelector(".turn-outcome.textual")?.className.split(/\s+/),
+    ).toContain("text-sm");
     // No action-signaling badge -- neither a clarify nor a refuse.
     expect(screen.queryByText("需要澄清")).not.toBeInTheDocument();
     expect(screen.queryByText("无法处理")).not.toBeInTheDocument();

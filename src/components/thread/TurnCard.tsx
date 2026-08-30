@@ -409,10 +409,12 @@ function TurnBody({
         ) : text_kind === "Refuse" ? (
           <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
         ) : null;
+      // The body rides the conversation tier (text-sm, matching UserBubble's
+      // question and RoundProse -- the reply is discourse, not chrome).
       return (
         <p
           className={cn(
-            "turn-outcome textual mt-1 text-xs leading-snug",
+            "turn-outcome textual mt-1 text-sm leading-snug",
             text_kind.toLowerCase(),
           )}
         >
