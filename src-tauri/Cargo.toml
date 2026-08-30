@@ -154,9 +154,16 @@ ureq = { version = "2", features = ["json"] }
 url = "2"
 # OS keychain access (ADR-0029 invariant 3): the decrypted API key lives only
 # in the Rust core process. The frontend never holds it ("is it set?" returns a
-# bool); Rust fetches it per turn and attaches it to the LLM call. Cross-
-# platform (Windows Credential Manager / macOS Keychain / Linux Secret Service).
-keyring = "3"
+# bool); Rust fetches it per turn and attaches it to the LLM call. The platform
+# features are load-bearing: v3 gates every real store behind one, and without
+# any it silently falls back to the in-memory mock whose entries live only
+# inside each `Entry::new` handle -- a key "write" then lands in a dropped
+# entry and every later read sees `NoEntry`, so Set key never persisted (the
+# bug this line fixed). Windows gets the Credential Manager, macOS the
+# Keychain; Linux stays on the mock fallback until a persistent store is
+# picked (secret-service needs a daemon + dbus in CI; keyutils does not
+# survive a reboot) -- a deliberate follow-up, not an oversight.
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
 # `log` facade for diagnostic warnings (silent type-inference degradation on
 # Excel error/undecodable-date cells, rollback failures). calamine already
 # pulls `log` in transitively; declaring it explicitly makes the call sites
