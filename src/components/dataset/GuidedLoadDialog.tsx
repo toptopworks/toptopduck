@@ -256,7 +256,7 @@ function GuidedSheetSection({
           onValueChange={(v) => onHeaderRow(Number(v))}
           disabled={loading}
         >
-          <SelectTrigger id={selectId} size="sm" className="w-32">
+          <SelectTrigger id={selectId} className="w-32">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
