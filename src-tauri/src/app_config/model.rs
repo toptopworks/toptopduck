@@ -15,7 +15,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::cli_tools::config::CliToolRegistry;
-use crate::guardrail::{DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT};
+use crate::guardrail::{
+    is_well_formed_memory_limit, DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT,
+};
 use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
 use crate::skills::BuiltinSkillBaseline;
@@ -146,6 +148,30 @@ impl Default for EngineDefaults {
             threads: MAX_THREADS,
             row_cap: DEFAULT_MAX_RESULT_ROWS,
         }
+    }
+}
+
+impl EngineDefaults {
+    /// Repair the three fields to their stated domain (ADR-0005: lower
+    /// bound 1, no upper bound). Called from BOTH config paths --
+    /// [`AppConfig::normalize`] (write) and the parse entry (every read) --
+    /// so a hand-edited file degrades to the constants honestly instead of
+    /// reaching a live session snapshot: a `memory_limit` the engine would
+    /// parse as unlimited (`none`, a leading `-`) or execute as extra
+    /// statements (an embedded quote/semicolon) reverts to [`MEMORY_LIMIT`],
+    /// and a 0 `threads` / `row_cap` clamps to 1 (a 0 `row_cap` would refuse
+    /// every non-empty materialization).
+    pub(crate) fn sanitize(&mut self) {
+        if !is_well_formed_memory_limit(&self.memory_limit) {
+            log::warn!(
+                "app-config engine.memory_limit {:?} is malformed; \
+                 reverting to {MEMORY_LIMIT}",
+                self.memory_limit
+            );
+            self.memory_limit = MEMORY_LIMIT.to_string();
+        }
+        self.threads = self.threads.max(1);
+        self.row_cap = self.row_cap.max(1);
     }
 }
 
@@ -388,7 +414,10 @@ impl AppConfig {
     /// - empty/whitespace `base_url` / `model` on the ACTIVE profile (when one
     ///   exists) -> the canonical defaults (so the provider always has a valid
     ///   endpoint);
-    /// - `threads` clamped to >= 1 (DuckDB rejects `PRAGMA threads=0`);
+    /// - the engine fields repaired to their domain via
+    ///   [`EngineDefaults::sanitize`] (`memory_limit` reverted to the
+    ///   constant when ill-formed, `threads` clamped to >= 1 -- DuckDB
+    ///   rejects `PRAGMA threads=0` -- and `row_cap` clamped to >= 1);
     /// - `window_turns` clamped to >= 1 (0 would summarize every turn, which is
     ///   nonsensical rather than dangerous);
     /// - `last_model_postures` shape-repaired only (whitespace trimmed, an
@@ -427,7 +456,7 @@ impl AppConfig {
                 model
             };
         }
-        self.engine.threads = self.engine.threads.max(1);
+        self.engine.sanitize();
         self.tunables.window_turns = self.tunables.window_turns.max(1);
         // Drop duplicate MCP server ids so the keychain-account suffix
         // (`mcp-<id>-<env_key>`, issue #301) stays unambiguous. A hand-edited
@@ -787,14 +816,39 @@ mod tests {
 
     #[test]
     fn normalize_clamps_counts_to_at_least_one() {
-        // threads=0 would make DuckDB reject the PRAGMA; window_turns=0 would
-        // summarize every turn. Both clamp to >=1.
+        // threads=0 would make DuckDB reject the PRAGMA; row_cap=0 would
+        // refuse every non-empty materialization; window_turns=0 would
+        // summarize every turn. All clamp to >=1.
         let mut cfg = AppConfig::defaults();
         cfg.engine.threads = 0;
+        cfg.engine.row_cap = 0;
         cfg.tunables.window_turns = 0;
         cfg.normalize();
         assert_eq!(cfg.engine.threads, 1);
+        assert_eq!(cfg.engine.row_cap, 1);
         assert_eq!(cfg.tunables.window_turns, 1);
+    }
+
+    #[test]
+    fn sanitize_reverts_a_malformed_memory_limit() {
+        // `none` parses as UNLIMITED inside DuckDB; an embedded quote would
+        // execute as extra statements; garbage just gets the PRAGMA refused
+        // (looser engine default). All revert to the constant; a well-formed
+        // value passes through untouched.
+        for bad in ["none", "512MB'; ATTACH 'x' AS leak; --", "abc", ""] {
+            let mut engine = EngineDefaults {
+                memory_limit: bad.to_string(),
+                ..Default::default()
+            };
+            engine.sanitize();
+            assert_eq!(engine.memory_limit, MEMORY_LIMIT, "should revert {bad:?}");
+        }
+        let mut engine = EngineDefaults {
+            memory_limit: "1024MB".to_string(),
+            ..Default::default()
+        };
+        engine.sanitize();
+        assert_eq!(engine.memory_limit, "1024MB");
     }
 
     #[test]

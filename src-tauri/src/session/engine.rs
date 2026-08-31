@@ -50,7 +50,10 @@ impl AdminEngine {
     /// The session-level engine-defaults snapshot. The sandbox lifecycle
     /// projects this into its instances so admin + sandbox consume one
     /// snapshot (issue #741: the LLM SQL the caps constrain runs in the
-    /// sandbox -- that face must not cap differently than admin).
+    /// sandbox -- that face must not cap differently than admin). `row_cap`
+    /// is the exception: the enforced ceiling lives on
+    /// `Session::result_row_cap` (mutable via `set_result_row_cap`), seeded
+    /// from this snapshot once at construction and not read here again.
     pub(crate) fn engine_defaults(&self) -> &EngineDefaults {
         &self.engine_defaults
     }
@@ -153,14 +156,7 @@ mod tests {
     fn materialize_opens_a_capped_connection() {
         let engine = AdminEngine::new(EngineDefaults::default());
         engine.materialize().expect("materialize");
-        let threads: String = engine
-            .conn()
-            .query_row(
-                "SELECT value FROM duckdb_settings() WHERE name='threads'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("threads setting");
+        let (_, threads) = crate::guardrail::tests::read_caps(engine.conn());
         assert_eq!(threads, crate::guardrail::MAX_THREADS.to_string());
     }
 
@@ -176,23 +172,8 @@ mod tests {
         };
         let engine = AdminEngine::new(snapshot);
         engine.materialize().expect("materialize");
-        let (memory_limit, threads): (String, String) = engine
-            .conn()
-            .query_row(
-                "SELECT max(value) FILTER (WHERE name='memory_limit'), \
-                 max(value) FILTER (WHERE name='threads') \
-                 FROM duckdb_settings()",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .expect("settings readback");
-        // DuckDB stores '256MB' as 256e6 bytes and reports it in its own
-        // display unit ("244.1 MiB"), so assert at the byte level; a refused
-        // PRAGMA would read back as the default percentage-of-RAM instead.
-        assert!(
-            (crate::guardrail::tests::parse_memory_display(&memory_limit) - 256e6).abs() < 1e5,
-            "memory_limit PRAGMA lands (got {memory_limit})"
-        );
+        crate::guardrail::tests::assert_memory_cap_lands(engine.conn(), 256e6);
+        let (_, threads) = crate::guardrail::tests::read_caps(engine.conn());
         assert_eq!(threads, "2", "threads PRAGMA lands");
     }
 
@@ -211,23 +192,18 @@ mod tests {
         let b = AdminEngine::new(EngineDefaults::default());
         a.materialize().expect("a materializes");
         b.materialize().expect("b materializes");
-        let read_threads = |e: &AdminEngine| -> String {
-            e.conn()
-                .query_row(
-                    "SELECT value FROM duckdb_settings() WHERE name='threads'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or_default()
-        };
+        let read_threads =
+            |e: &AdminEngine| -> String { crate::guardrail::tests::read_caps(e.conn()).1 };
         assert_eq!(read_threads(&a), "1");
         assert_eq!(read_threads(&b), crate::guardrail::MAX_THREADS.to_string());
         // The accessor hands back the same snapshot the sandbox face reads.
         assert_eq!(a.engine_defaults(), &tuned);
     }
 
-    /// Issue #741 AC: a malformed memory_limit ("abc") is refused by the
-    /// engine at apply time -- logged, engine default kept, session usable.
+    /// Issue #741 AC: an ill-formed memory_limit ("abc") never reaches the
+    /// engine -- the apply-time gate reverts to the tightened constant
+    /// (DuckDB's own default would be looser), the session stays usable, and
+    /// the well-formed sibling still lands.
     #[test]
     fn a_malformed_memory_limit_falls_back_at_apply_time() {
         let snapshot = EngineDefaults {
@@ -244,16 +220,12 @@ mod tests {
             .query_row("SELECT 1", [], |r| r.get(0))
             .expect("session stays usable");
         assert_eq!(one, 1);
-        // The threads PRAGMA (well-formed sibling) still landed.
-        let threads: String = engine
-            .conn()
-            .query_row(
-                "SELECT value FROM duckdb_settings() WHERE name='threads'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("threads setting");
-        assert_eq!(threads, "3");
+        crate::guardrail::tests::assert_memory_cap_lands(
+            engine.conn(),
+            512e6, // the `MEMORY_LIMIT` constant, not DuckDB's default
+        );
+        let (_, threads) = crate::guardrail::tests::read_caps(engine.conn());
+        assert_eq!(threads, "3", "the well-formed threads PRAGMA still lands");
     }
 
     /// ADR-0104 Decision 3: one-way transition. A second materialize must not

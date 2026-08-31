@@ -218,24 +218,15 @@ mod tests {
             row_cap: 500,
         };
         let conn = open(&snapshot).expect("sandbox opens");
-        let (memory_limit, threads): (String, String) = conn
-            .query_row(
-                "SELECT max(value) FILTER (WHERE name='memory_limit'), \
-                 max(value) FILTER (WHERE name='threads') \
-                 FROM duckdb_settings()",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .expect("settings readback");
-        assert!(
-            (crate::guardrail::tests::parse_memory_display(&memory_limit) - 256e6).abs() < 1e5,
-            "memory_limit PRAGMA lands (got {memory_limit})"
-        );
+        crate::guardrail::tests::assert_memory_cap_lands(&conn, 256e6);
+        let (_, threads) = crate::guardrail::tests::read_caps(&conn);
         assert_eq!(threads, "2", "threads PRAGMA lands");
     }
 
-    /// Issue #741 AC: a malformed memory_limit degrades at apply time -- the
-    /// sandbox still opens and serves queries on the engine default.
+    /// Issue #741 AC: an ill-formed memory_limit never reaches the sandbox
+    /// either -- the shared apply-time gate reverts to the tightened
+    /// constant, the sandbox still opens and serves queries, and the
+    /// well-formed sibling still lands.
     #[test]
     fn open_survives_a_malformed_memory_limit() {
         let snapshot = EngineDefaults {
@@ -248,6 +239,11 @@ mod tests {
             .query_row("SELECT 1", [], |r| r.get(0))
             .expect("usable");
         assert_eq!(one, 1);
+        crate::guardrail::tests::assert_memory_cap_lands(
+            &conn, 512e6, // the `MEMORY_LIMIT` constant, not DuckDB's default
+        );
+        let (_, threads) = crate::guardrail::tests::read_caps(&conn);
+        assert_eq!(threads, "1", "the well-formed threads PRAGMA still lands");
     }
 
     // The shared mirror primitive carries prior results into the sandbox AND the

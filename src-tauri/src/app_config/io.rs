@@ -238,7 +238,13 @@ pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
         });
     }
 
-    serde_json::from_value(value).map_err(|e| AppConfigReadError::Parse(e.to_string()))
+    let mut cfg: AppConfig =
+        serde_json::from_value(value).map_err(|e| AppConfigReadError::Parse(e.to_string()))?;
+    // Read-path domain repair (issue #741): `normalize` only runs on writes,
+    // but the engine fields are live-consumed now, so a hand-edited
+    // out-of-domain value must never reach a session snapshot.
+    cfg.engine.sanitize();
+    Ok(cfg)
 }
 
 /// Recursively scan a JSON value for any object key matching a secret name
@@ -369,6 +375,31 @@ mod tests {
         assert!(
             !on_disk.contains("statement_timeout_ms"),
             "rewritten file drops the retired key (got {on_disk})"
+        );
+    }
+
+    #[test]
+    fn hand_edited_engine_fields_are_sanitized_on_read() {
+        // A hand-edited file can carry values the UI would never write: a
+        // `memory_limit` DuckDB would parse as unlimited (`none`) or execute
+        // as extra statements (embedded quote), and 0 counts that would
+        // brick every non-empty materialization. The read path repairs all
+        // three to their domain instead of threading them live.
+        let (_dir, path) = temp("hand-edited.json");
+        let hand_edited = format!(
+            "{{\"format_version\":{v},\"engine\":{{\"memory_limit\":\
+             \"none'; ATTACH 'x' AS leak; --\",\"threads\":0,\"row_cap\":0}}}}",
+            v = APP_CONFIG_FORMAT_VERSION
+        );
+        fs::write(&path, &hand_edited).expect("write");
+        let cfg = read_at(&path);
+        assert_eq!(
+            cfg.engine,
+            EngineDefaults {
+                memory_limit: crate::guardrail::MEMORY_LIMIT.to_string(),
+                threads: 1,
+                row_cap: 1,
+            }
         );
     }
 

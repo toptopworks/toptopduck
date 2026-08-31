@@ -279,7 +279,7 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
   });
 
   it("engine field Save persists app-config without closing (per-field save, ADR-0075)", async () => {
-    // The global footer Save is retired (ADR-0075): the engine pane carries four
+    // The global footer Save is retired (ADR-0075): the engine pane carries three
     // independent per-field Save buttons. Saving one writes app-config and keeps
     // the overlay open (there is no Save-and-close any more).
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());

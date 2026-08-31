@@ -2656,6 +2656,34 @@ mod tests {
         );
     }
 
+    /// Issue #741: the construction seam itself applies the snapshot. The
+    /// unit-level pins cover `AdminEngine::new` in isolation, but the seam is
+    /// where a revert to the compile-time default would still compile (the
+    /// `row_cap` seed keeps the parameter "used") and keep every suite
+    /// green -- so force the real first SQL need through the seam and read
+    /// the cap back off the live connection.
+    #[test]
+    fn the_construction_seam_applies_the_snapshot_caps() {
+        let snapshot = crate::app_config::model::EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+        };
+        let session = Session::with_provider_and_cancel(
+            Box::new(crate::provider::UnwiredProvider),
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            snapshot,
+        )
+        .expect("session");
+        let conn = session.admin_engine.acquire().expect("first SQL need");
+        crate::guardrail::tests::assert_memory_cap_lands(conn, 256e6);
+        let (_, threads) = crate::guardrail::tests::read_caps(conn);
+        assert_eq!(
+            threads, "2",
+            "the seam threads the snapshot, not a constant"
+        );
+    }
+
     #[test]
     fn build_recipe_for_a_fresh_session_is_empty() {
         // ADR-0034: a brand-new session has no sources, no turns, no active
