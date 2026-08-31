@@ -99,7 +99,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     format_version: 2,
     theme: "system",
     locale: "system",
-    engine: { memory_limit: "512MB", threads: 2, row_cap: 1000, statement_timeout_ms: 30000 },
+    engine: { memory_limit: "512MB", threads: 2, row_cap: 1000 },
     privacy: { send_samples: true },
     provider: {
       profiles: [
@@ -479,13 +479,13 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("each engine field has its own Save that commits only that field", async () => {
     const { onCommitAppConfig } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
-    // The pane copy stays truthful (issue #739): defaults persist, but nothing
-    // is applied to sessions yet -- EngineDefaults has no live consumer, the
-    // guardrail constants are what sessions run under.
-    expect(screen.getByText(/persist across restarts/)).toBeInTheDocument();
-    expect(screen.getByText(/saved but not applied yet/)).toBeInTheDocument();
-    // Four independent Save buttons (memory limit / threads / row cap / timeout).
-    expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(4);
+    // The pane copy stays truthful (issue #741 flipped the #739 statement):
+    // saved values now reach sessions -- as the snapshot taken at session
+    // creation, so only sessions created after a change see it.
+    expect(screen.getByText(/apply to newly created sessions/)).toBeInTheDocument();
+    expect(screen.getByText(/Changes affect new sessions only/)).toBeInTheDocument();
+    // Three independent Save buttons (memory limit / threads / row cap).
+    expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(3);
     // Edit the threads input (the first spinbutton) and save just that field.
     fireEvent.change(screen.getAllByRole("spinbutton")[0], { target: { value: "8" } });
     fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);

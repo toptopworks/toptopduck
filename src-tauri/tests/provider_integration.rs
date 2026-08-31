@@ -318,8 +318,12 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
 
     let cancel = Arc::new(CancelToken::new());
     let provider = anthropic_live_provider(server.url(), Some("sk-test"));
-    let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
-        .expect("session");
+    let mut session = Session::with_provider_and_cancel(
+        Box::new(provider),
+        Arc::clone(&cancel),
+        Default::default(),
+    )
+    .expect("session");
 
     let people = fixtures_dir().join("people.csv");
     match session.ingest(&people) {
@@ -535,8 +539,12 @@ fn openai_cancel_during_http_block_lands_cancelled() {
 
     let cancel = Arc::new(CancelToken::new());
     let provider = openai_live_provider(server.url(), Some("sk-test"));
-    let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
-        .expect("session");
+    let mut session = Session::with_provider_and_cancel(
+        Box::new(provider),
+        Arc::clone(&cancel),
+        Default::default(),
+    )
+    .expect("session");
 
     let people = fixtures_dir().join("people.csv");
     match session.ingest(&people) {

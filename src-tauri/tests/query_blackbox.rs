@@ -1173,7 +1173,8 @@ fn cancelling_an_in_flight_turn_lands_as_cancelled_with_working_set_unchanged() 
         .with_cancel(cancel.clone())
         .scripted_tool_turn_blocking("慢查询", answer("never"));
     let session =
-        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
     let session = Arc::new(Mutex::new(session));
     {
         let mut s = session.lock().unwrap();
@@ -1214,7 +1215,8 @@ fn a_cancelled_turn_is_recorded_in_the_thread_but_advances_no_result_number() {
             productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         );
     let session =
-        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
     let session = Arc::new(Mutex::new(session));
     {
         let mut s = session.lock().unwrap();
@@ -1259,7 +1261,8 @@ fn a_turn_after_a_cancelled_turn_starts_clean_with_no_stale_request() {
             productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
         );
     let session =
-        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
     let session = Arc::new(Mutex::new(session));
     {
         let mut s = session.lock().unwrap();
@@ -1294,7 +1297,8 @@ fn cancelling_when_no_turn_is_in_flight_is_a_harmless_noop() {
         productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
     );
     let mut session =
-        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
     cancel.request(); // no turn running
@@ -1320,7 +1324,8 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
         materialize("SELECT count(*) AS n FROM range(200000000) t1 CROSS JOIN range(10) t2"),
     );
     let session =
-        Session::with_provider_and_cancel(Box::new(provider), cancel.clone()).expect("session");
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
     let session = Arc::new(Mutex::new(session));
     {
         let mut s = session.lock().unwrap();
@@ -1528,7 +1533,8 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
         productive(r#"SELECT COUNT(*) AS n FROM "people".data"#),
     );
     let mut session =
-        Session::with_provider_and_cancel(Box::new(provider), cancel).expect("session");
+        Session::with_provider_and_cancel(Box::new(provider), cancel, Default::default())
+            .expect("session");
     load_source(&mut session, &fixture("people.csv"));
     session.ask("建结果"); // result_1
     session
@@ -1545,6 +1551,7 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(FakeProvider::new()),
+        Default::default(),
         |ev| {
             addressed.push(ResumeProgress {
                 session_id: sid.clone(),

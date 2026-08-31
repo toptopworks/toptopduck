@@ -65,7 +65,6 @@ function makeAppConfig(tools: ReturnType<typeof makeTool>[]): AppConfig {
       memory_limit: "1GB",
       threads: 1,
       row_cap: 1000,
-      statement_timeout_ms: 30000,
     },
     privacy: { send_samples: true },
     provider: {

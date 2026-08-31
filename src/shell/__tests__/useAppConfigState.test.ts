@@ -36,7 +36,7 @@ function baseAppConfig(shell: Pick<AppConfig["shell"], "sidebar_collapsed">): Ap
     format_version: 1,
     theme: "system",
     locale: "system",
-    engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
+    engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
     privacy: { send_samples: true },
     provider: {
       profiles: [

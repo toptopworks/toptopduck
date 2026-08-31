@@ -6,16 +6,17 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 
-// Engine pane (ADR-0075, issue #281): the four DuckDB engine defaults
-// (ADR-0005) as four INDEPENDENT explicit-save rows (governing principle case
+// Engine pane (ADR-0075, issue #281): the three DuckDB engine defaults
+// (ADR-0005) as three INDEPENDENT explicit-save rows (governing principle case
 // c -- restart / explicit-apply fields keep a per-field Save). Each field owns
 // its own local draft + Save button and commits ONLY its own field via a
 // read-modify-write over the latest app-config (save-unit = coupling boundary:
-// the four numbers are independent, so saving one must not clobber or smuggle
-// the others' pending edits). A failed save surfaces an inline error and keeps
+// the numbers are independent, so saving one must not clobber or smuggle the
+// others' pending edits). A failed save surfaces an inline error and keeps
 // the typed draft so the user can retry (the parent's onCommit reverts the
-// optimistic app-config write; the draft is unaffected either way). Applying
-// these to the live DuckDB engine is still a follow-up slice.
+// optimistic app-config write; the draft is unaffected either way). Saved
+// values are consumed at session construction as the session-level snapshot
+// (issue #741): a change only reaches sessions created after it.
 
 /** Local string draft of the engine defaults. Numeric fields are held as the
  *  raw text the user typed (including "") so a number field can be cleared and
@@ -26,7 +27,6 @@ type EngineDraft = {
   memory_limit: string;
   threads: string;
   row_cap: string;
-  statement_timeout_ms: string;
 };
 
 function toEngineDraft(e: EngineDefaults): EngineDraft {
@@ -34,7 +34,6 @@ function toEngineDraft(e: EngineDefaults): EngineDraft {
     memory_limit: e.memory_limit,
     threads: String(e.threads),
     row_cap: String(e.row_cap),
-    statement_timeout_ms: String(e.statement_timeout_ms),
   };
 }
 
@@ -101,7 +100,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
         description={(
           <FormattedMessage
             id="settings.engine.description"
-            defaultMessage="Engine defaults. Saved values persist across restarts."
+            defaultMessage="Engine defaults. Saved values apply to newly created sessions."
           />
         )}
       />
@@ -163,37 +162,12 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
             disabled={saving}
           />
         </SettingsRow>
-
-        <SettingsRow
-          title={(
-            <FormattedMessage
-              id="settings.engine.statementTimeout"
-              defaultMessage="Statement timeout (ms):"
-            />
-          )}
-          description={(
-            <FormattedMessage
-              id="settings.engine.statementTimeout.description"
-              defaultMessage="Per-statement timeout in milliseconds."
-            />
-          )}
-          action={saveButton("statement_timeout_ms")}
-        >
-          <Input
-            type="number"
-            min={1}
-            value={draft.statement_timeout_ms}
-            onChange={(e) =>
-              setDraft({ ...draft, statement_timeout_ms: e.target.value })}
-            disabled={saving}
-          />
-        </SettingsRow>
       </SettingsCard>
 
       <p className="text-muted-foreground mt-3 text-sm">
         <FormattedMessage
           id="settings.engine.hint"
-          defaultMessage="These values are saved but not applied yet; sessions keep the built-in engine limits."
+          defaultMessage="Changes affect new sessions only; existing sessions keep the limits they were created with."
         />
       </p>
       {error && <p className="settings-error mt-3 text-destructive text-sm">{error}</p>}

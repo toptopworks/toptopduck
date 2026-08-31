@@ -638,10 +638,12 @@ impl SessionStore {
         &self,
         cancel: Arc<CancelToken>,
         provider: Box<dyn Provider>,
+        engine_defaults: crate::app_config::model::EngineDefaults,
     ) -> Result<SessionId, SessionError> {
         let closing = ClosingFlag::new();
-        let mut session = Session::with_provider_and_cancel(provider, Arc::clone(&cancel))
-            .map_err(|e| SessionError::Engine(e.to_string()))?;
+        let mut session =
+            Session::with_provider_and_cancel(provider, Arc::clone(&cancel), engine_defaults)
+                .map_err(|e| SessionError::Engine(e.to_string()))?;
         session.set_closing_flag(closing.clone());
         // ADR-0063: allocate the close-and-wait-release drop signal pair. The
         // sender travels into the Session (fired from its Drop); the receiver
@@ -804,6 +806,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let wire = id.to_string();
@@ -944,6 +947,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("handle");
@@ -1001,6 +1005,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("get handle");
@@ -1048,6 +1053,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("get handle");
@@ -1085,6 +1091,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("get handle");
@@ -1142,6 +1149,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("session");
         let handle = store.get(&id).expect("handle");
@@ -1201,6 +1209,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("get handle");

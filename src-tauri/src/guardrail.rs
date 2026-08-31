@@ -114,42 +114,68 @@ pub(crate) fn classify_duckdb_error(detail: &str) -> ExecErrorKind {
     ExecErrorKind::Runtime
 }
 
-/// Hard memory ceiling per session (ADR-0005 L3). Engine-enforced: DuckDB
-/// aborts a query whose intermediate state exceeds it. Conservative for a
-/// desktop tool and deliberately below typical RAM so the app cannot
-/// monopolize the user's memory.
+/// Default memory ceiling per session (ADR-0005 L3). Engine-enforced: DuckDB
+/// aborts a query whose intermediate state exceeds it. The DEFAULT, not a
+/// hardwired ceiling: a user-tuned value arrives per session from the
+/// app-config engine defaults (session-level snapshot, issue #741), with this
+/// constant as the fresh-install / no-config source.
 pub(crate) const MEMORY_LIMIT: &str = "512MB";
 
-/// Max worker threads a query may use (ADR-0005 L3). Caps CPU use so a heavy
-/// query leaves the rest of the app responsive.
+/// Default max worker threads a query may use (ADR-0005 L3). Caps CPU use so
+/// a heavy query leaves the rest of the app responsive. The DEFAULT of the
+/// user-adjustable app-config engine default (see [`MEMORY_LIMIT`]).
 pub(crate) const MAX_THREADS: u32 = 4;
 
 /// Default ceiling on a materialized result's row count (ADR-0005 L3). A
 /// runaway cross-join that would balloon memory is aborted at this size rather
-/// than OOM the machine. Distinct from the 10k DISPLAY window
+/// than OOM the machine. The DEFAULT of the user-adjustable app-config engine
+/// default (see [`MEMORY_LIMIT`]); the engine-enforced memory ceiling is what
+/// bounds the risk of a user-raised cap. Distinct from the 10k DISPLAY window
 /// (`session::MAX_READ_ROWS`): results up to this cap are materialized in full
 /// (full export preserved, ADR-0030); only beyond it does the turn abort with a
 /// resource error -- silent truncation is forbidden (ADR-0030).
 pub(crate) const DEFAULT_MAX_RESULT_ROWS: u64 = 1_000_000;
 
-/// Apply the engine-level resource caps to a connection (ADR-0005 L3).
-/// Idempotent; safe on the session's main connection -- caps only bound, they
-/// never enable new capability. Best-effort: if DuckDB rejects a setting the
-/// warning is logged and the session continues with the engine's default
-/// limits (the read-only / wrapping guarantees still hold; only the ceiling is
-/// loose).
-pub(crate) fn apply_resource_caps(conn: &Connection) {
-    if let Err(e) = conn.execute_batch(&format!("PRAGMA memory_limit='{MEMORY_LIMIT}';")) {
+/// Apply the engine-level resource caps to a connection (ADR-0005 L3): the
+/// session-level snapshot's values, threaded from the app-config engine
+/// defaults at session creation (issue #741). Idempotent; safe on the
+/// session's main connection -- caps only bound, they never enable new
+/// capability. Best-effort: if DuckDB rejects a setting (e.g. a malformed
+/// `memory_limit` string) the warning is logged and the session continues
+/// with the engine's default limits (the read-only / wrapping guarantees
+/// still hold; only the ceiling is loose).
+pub(crate) fn apply_resource_caps(conn: &Connection, memory_limit: &str, threads: u32) {
+    if let Err(e) = conn.execute_batch(&format!("PRAGMA memory_limit='{memory_limit}';")) {
         log::warn!("failed to set memory_limit guardrail: {e}");
     }
-    if let Err(e) = conn.execute_batch(&format!("PRAGMA threads={MAX_THREADS};")) {
+    if let Err(e) = conn.execute_batch(&format!("PRAGMA threads={threads};")) {
         log::warn!("failed to set threads guardrail: {e}");
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Test-only: parse DuckDB's normalized `memory_limit` display value
+    /// (e.g. `"244.1 MiB"`) back into bytes. DuckDB stores `'256MB'` as
+    /// 256×10⁶ bytes and REPORTS it in its own display unit, so a landed
+    /// PRAGMA can only be asserted after this conversion, independent of the
+    /// unit a DuckDB version happens to choose.
+    pub(crate) fn parse_memory_display(s: &str) -> f64 {
+        let (num, unit) = s.split_once(' ').unwrap_or((s, ""));
+        let num: f64 = num.parse().unwrap_or(0.0);
+        let factor = match unit.trim() {
+            "GiB" => 1024.0 * 1024.0 * 1024.0,
+            "GB" => 1e9,
+            "MiB" => 1024.0 * 1024.0,
+            "MB" => 1e6,
+            "KiB" => 1024.0,
+            "KB" => 1e3,
+            _ => 1.0,
+        };
+        num * factor
+    }
 
     #[test]
     fn missing_table_is_schema() {

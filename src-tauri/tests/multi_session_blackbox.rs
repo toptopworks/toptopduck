@@ -71,6 +71,7 @@ fn fresh_session(store: &SessionStore) -> SessionId {
         .create(
             Arc::new(CancelToken::new()),
             Box::new(toptopduck_lib::UnwiredProvider),
+            Default::default(),
         )
         .expect("create session")
 }
@@ -134,7 +135,7 @@ fn two_sessions_are_physically_isolated() {
     let provider_a =
         FakeProvider::new().scripted_tool_turn_seq("建结果", productive("SELECT 1 AS n"));
     let a = store
-        .create(cancel_a, Box::new(provider_a))
+        .create(cancel_a, Box::new(provider_a), Default::default())
         .expect("create a");
     let handle_a = store.get(&a).expect("handle a");
     {
@@ -183,7 +184,7 @@ fn two_sessions_are_physically_isolated() {
     let provider_b =
         FakeProvider::new().scripted_tool_turn("引用A的表", materialize("SELECT * FROM people"));
     let b2 = store
-        .create(cancel_b, Box::new(provider_b))
+        .create(cancel_b, Box::new(provider_b), Default::default())
         .expect("create b2");
     let handle_b2 = store.get(&b2).expect("handle b2");
     {
@@ -216,7 +217,7 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
         // A long, cancellable turn that close_session will interrupt.
         .scripted_tool_turn_blocking("慢查询", answer("never"));
     let id = store
-        .create(cancel.clone(), Box::new(provider))
+        .create(cancel.clone(), Box::new(provider), Default::default())
         .expect("create");
     let handle = store.get(&id).expect("handle");
 
@@ -295,7 +296,9 @@ fn bound_session(store: &SessionStore, duck: &std::path::Path) -> SessionId {
     let cancel = Arc::new(CancelToken::new());
     let provider =
         FakeProvider::new().scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"));
-    let id = store.create(cancel, Box::new(provider)).expect("create");
+    let id = store
+        .create(cancel, Box::new(provider), Default::default())
+        .expect("create");
     let handle = store.get(&id).expect("handle");
     let mut s = handle.session_lock().unwrap();
     s.bind_duck(duck.to_path_buf(), "测试".into())
@@ -365,7 +368,7 @@ fn close_wait_release_waits_for_inflight_ask_then_releases_canonical_key() {
         // The long, cancellable turn the close-wait will interrupt.
         .scripted_tool_turn_blocking("慢查询", answer("never"));
     let id = store
-        .create(cancel.clone(), Box::new(provider))
+        .create(cancel.clone(), Box::new(provider), Default::default())
         .expect("create");
 
     // Bind + run the successful turn so the canonical key is held.
@@ -481,7 +484,7 @@ fn pure_close_does_not_release_canonical_key_while_ask_in_flight() {
         .scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"))
         .scripted_tool_turn_blocking("慢查询", answer("never"));
     let id = store
-        .create(cancel.clone(), Box::new(provider))
+        .create(cancel.clone(), Box::new(provider), Default::default())
         .expect("create");
     {
         let handle = store.get(&id).expect("handle");
@@ -561,7 +564,7 @@ fn store_lock_not_held_during_a_long_turn() {
         .with_cancel(cancel_a.clone())
         .scripted_tool_turn_blocking("慢查询", answer("never"));
     let a = store
-        .create(cancel_a.clone(), Box::new(provider_a))
+        .create(cancel_a.clone(), Box::new(provider_a), Default::default())
         .expect("create a");
     let handle_a = store.get(&a).expect("handle a");
 
@@ -582,6 +585,7 @@ fn store_lock_not_held_during_a_long_turn() {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(toptopduck_lib::UnwiredProvider),
+                Default::default(),
             )
             .expect("create b");
         store_for_b.close(&b).expect("close b");
@@ -628,7 +632,7 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
     let provider_p =
         FakeProvider::new().scripted_tool_turn_seq("建结果", productive("SELECT 1 AS n"));
     let producer = store
-        .create(cancel_p, Box::new(provider_p))
+        .create(cancel_p, Box::new(provider_p), Default::default())
         .expect("create producer");
     let handle_p = store.get(&producer).expect("handle producer");
     {
@@ -666,6 +670,7 @@ fn open_duck_replaces_contents_in_place_other_sessions_unaffected() {
         &duck,
         handle_a.cancel_token(),
         Box::new(toptopduck_lib::UnwiredProvider),
+        Default::default(),
         |_| {},
         |_| SourceResolution::Abort,
         |_| ActiveResolution::Abort,
@@ -724,7 +729,7 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
     let provider_p =
         FakeProvider::new().scripted_tool_turn_seq("建结果", productive("SELECT 1 AS n"));
     let producer = store
-        .create(cancel_p, Box::new(provider_p))
+        .create(cancel_p, Box::new(provider_p), Default::default())
         .expect("create producer");
     let handle_p = store.get(&producer).expect("handle producer");
     {
@@ -749,7 +754,11 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
         .scripted_tool_turn_seq("好查询", productive("SELECT 1 AS n"))
         .scripted_tool_turn_blocking("慢查询", answer("never"));
     let a = store
-        .create(cancel.clone(), Box::new(toptopduck_lib::UnwiredProvider))
+        .create(
+            cancel.clone(),
+            Box::new(toptopduck_lib::UnwiredProvider),
+            Default::default(),
+        )
         .expect("create a");
     let handle = store.get(&a).expect("handle a");
 
@@ -760,6 +769,7 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
         &duck,
         handle.cancel_token(),
         Box::new(provider),
+        Default::default(),
         |_| {},
         |_| SourceResolution::Abort,
         |_| ActiveResolution::Abort,

@@ -35,7 +35,7 @@ const updatedConfig: AppConfig = {
   format_version: 1,
   theme: "system",
   locale: "system",
-  engine: { memory_limit: "512MB", threads: 4, row_cap: 10_000, statement_timeout_ms: 30_000 },
+  engine: { memory_limit: "512MB", threads: 4, row_cap: 10_000 },
   privacy: { send_samples: false },
   provider: {
     profiles: [

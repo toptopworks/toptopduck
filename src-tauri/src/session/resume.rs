@@ -697,6 +697,7 @@ impl super::Session {
         path: &Path,
         cancel: Arc<CancelToken>,
         provider: Box<dyn Provider>,
+        engine_defaults: crate::app_config::model::EngineDefaults,
         mut on_progress: impl FnMut(ResumeEvent),
         mut on_source_issue: impl FnMut(SourceIssue) -> SourceResolution,
         mut on_active_abandoned: impl FnMut(ActiveAbandoned) -> ActiveResolution,
@@ -735,7 +736,13 @@ impl super::Session {
         // hash check, never as a silent clobber of the edited file.
         let resume_baseline = super::recipe_persister::hash_file(path)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
-        let mut session = Self::with_provider_and_cancel(provider, cancel)
+        // The resumed session seeds from the CURRENT app-config snapshot
+        // (issue #741), same source as a new session: runtime identity
+        // continues from the recipe (ADR-0102), but the engine defaults are
+        // a resource ceiling, not semantic identity, so a resume takes what
+        // the config says NOW. The recipe deliberately carries no engine
+        // fields.
+        let mut session = Self::with_provider_and_cancel(provider, cancel, engine_defaults)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
         session.persister.adopt_resumed(
             path.to_path_buf(),
@@ -1482,7 +1489,7 @@ mod tests {
         let recipe = recipe_with(vec![], None);
         let cancel = Arc::new(CancelToken::new());
         let mut fake = FakeMaterializer::new(vec![]);
-        let engine = AdminEngine::new();
+        let engine = AdminEngine::new(crate::app_config::model::EngineDefaults::default());
         assert!(!engine.is_materialized());
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
@@ -1505,7 +1512,7 @@ mod tests {
         let recipe = recipe_with(vec![materialized_turn("result_1", "SELECT 1 AS n")], None);
         let cancel = Arc::new(CancelToken::new());
         let mut real = RealMaterializer;
-        let engine = AdminEngine::new();
+        let engine = AdminEngine::new(crate::app_config::model::EngineDefaults::default());
         assert!(!engine.is_materialized());
         let temp = tempfile::tempdir().expect("tempdir");
         let mut ws = WorkingSet::default();

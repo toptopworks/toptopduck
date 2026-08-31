@@ -136,6 +136,11 @@ pub(crate) struct SandboxDeps<'a> {
     /// The row-count ceiling (ADR-0005 L3). A result exceeding it is refused
     /// (silent truncation forbidden, ADR-0030).
     pub result_row_cap: u64,
+    /// The session-level engine-defaults snapshot (issue #741), projected
+    /// from the admin engine's own copy so both execution faces cap from one
+    /// snapshot: the sandbox the provider SQL runs on is the object these
+    /// caps constrain.
+    pub engine_defaults: &'a crate::app_config::model::EngineDefaults,
 }
 
 /// A sandbox table the runner hands back to the caller for its tail. Owns the
@@ -206,7 +211,7 @@ pub(crate) fn run_sandboxed_read(
     // prior results. Dropped at end of scope (per-turn isolation, ADR-0027).
     // The engine-level disabled_filesystems lockdown was removed (ADR-0088):
     // FsAcl + non-literal refusal in preflight is the sole read_* constraint.
-    let sandbox_conn = sandbox::open().map_err(lift_exec_error)?;
+    let sandbox_conn = sandbox::open(deps.engine_defaults).map_err(lift_exec_error)?;
     sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)
         .map_err(lift_exec_error)?;
     sandbox::mirror_results(&sandbox_conn, deps.admin_conn, deps.working_set)

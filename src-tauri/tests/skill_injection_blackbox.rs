@@ -673,6 +673,7 @@ fn agent_activation_persists_midturn_and_survives_turn_failure() {
         &duck_path,
         Arc::new(toptopduck_lib::CancelToken::new()),
         Box::new(toptopduck_lib::UnwiredProvider),
+        Default::default(),
         |_| {},
         |_| toptopduck_lib::SourceResolution::Abort,
         |_| toptopduck_lib::ActiveResolution::Abort,

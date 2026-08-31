@@ -43,10 +43,6 @@ use crate::window::WINDOW_TURNS;
 /// the wild (the app is unreleased -- the ADR-0064 no-migrator stance).
 pub const APP_CONFIG_FORMAT_VERSION: u32 = 2;
 
-/// V1 default per-statement timeout (ms). No prior constant existed; 30s is a
-/// conservative ceiling for a local DuckDB query under the resource caps.
-const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 30_000;
-
 /// V1 default far-window cap M (ADR-0028). Mirrors the M=100 invariant; not a
 /// named constant elsewhere, so pinned here with the ADR pointer.
 const DEFAULT_FAR_WINDOW: u32 = 100;
@@ -122,9 +118,13 @@ pub struct ModelPosture {
 }
 
 /// Engine default parameters (ADR-0005 L3). Persisted so a user's preferred
-/// resource ceiling survives a restart. Applying these to the live DuckDB
-/// (threading them through every Session constructor) is a follow-up slice; this
-/// artifact stores + round-trips them faithfully per issue #53 AC.
+/// resource ceiling survives a restart, and consumed at session construction
+/// (issue #741): each new/resumed session reads the CURRENT config as its
+/// session-level snapshot, so a settings change only reaches later sessions.
+/// A stale `statement_timeout_ms` key in a pre-retirement file is harmless
+/// (ignored at parse, never re-written) -- the field was retired with the
+/// timeout mechanism itself: the engine has no native per-statement timeout,
+/// and one built on the interrupt slot would collide with user cancel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineDefaults {
     /// DuckDB memory limit string (e.g. `"512MB"`). Applied verbatim as a
@@ -134,19 +134,17 @@ pub struct EngineDefaults {
     pub threads: u32,
     /// Ceiling on a materialized result's row count (ADR-0005/0030).
     pub row_cap: u64,
-    /// Per-statement timeout in milliseconds.
-    pub statement_timeout_ms: u64,
 }
 
 impl Default for EngineDefaults {
     fn default() -> Self {
-        // Mirrors the v1 `guardrail` constants so the persisted default matches
-        // the live engine's current behavior (issue #53 stores; follow-up applies).
+        // Derives from the `guardrail` constants: the persisted default IS the
+        // fresh-install engine default, and the constants stay the single
+        // default/fallback source (missing or corrupt config degrades here).
         Self {
             memory_limit: MEMORY_LIMIT.to_string(),
             threads: MAX_THREADS,
             row_cap: DEFAULT_MAX_RESULT_ROWS,
-            statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
         }
     }
 }
