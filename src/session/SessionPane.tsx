@@ -204,7 +204,7 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // whole batch loaded. A NeedsGuidance PARKS the batch on the guidance
   // dialog (#748): handleIngestMany stays pending until the queue drains or
   // halts terminally, so the auto-ask cannot fire underneath the dialog. A
-  // terminal halt (cancel / Error) settles the Promise false and hands the
+  // terminal halt (cancel / Error / IPC reject) settles the Promise false and hands the
   // question back to the bar draft via onSeedDraft so it is never silently
   // lost.
   // handleAsk catches its own failures internally (sets the session error

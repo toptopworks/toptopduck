@@ -23,9 +23,9 @@ import type { GuidanceRequest, LoadOutcome, SheetGuidance } from "../types/datas
 // - A multi-file batch PARKS on NeedsGuidance instead of halting: the
 //   handleIngestMany Promise stays pending (#500 gate: no auto-ask fires
 //   underneath the dialog), and a guided Loaded auto-resumes the queued
-//   remainder through the same LoadOutcome routing. Only a user cancel or an
-//   Error route halts terminally; both surface the remaining-file count
-//   (haltedRemaining) when files were left unprocessed.
+//   remainder through the same LoadOutcome routing. Only a user cancel, an
+//   Error route, or an IPC reject halts terminally; all three surface the
+//   remaining-file count (haltedRemaining) when files were left unprocessed.
 //
 // Pending-ingest consumption (#500): the drop-on-cold-start / cold-start file
 // list consumption moved UP to SessionPane, which coordinates the two pending
@@ -75,27 +75,29 @@ export interface UseIngestFlow {
    *  routed guidance opens. */
   guidanceError: AppError | null;
   /** Files left unprocessed by a terminally halted batch (issue #748), or
-   *  null. Set by the cancel-halt and Error-halt paths when files remain past
-   *  the halt; rendered as a workspace notice (with the error banner on the
-   *  Error-halt screen). Cleared at the start of the next ingest. */
+   *  null. Set by the cancel-halt, Error-halt, and reject-halt paths when
+   *  files remain past the halt; rendered as a workspace notice (with the
+   *  error banner on the Error-halt screen). Cleared at the start of the
+   *  next ingest. */
   haltedRemaining: number | null;
   // Declared Promise<void> (not void) so the contract reflects the async
   // implementation: the cold-start drop effect fire-and-forgets it via `void`,
-  // and external callers (WorkspaceResult onIngest) accept it through
-  // TypeScript's void-return covariance once useSessionState re-exports it.
+  // and the composer's file-section consumer (handleIngestFiles) accepts it
+  // through TypeScript's void-return covariance once useSessionState
+  // re-exports it.
   handleIngest: (path: string) => Promise<void>;
   /** Multi-file ingest (ADR-0083, issue #351; #748 auto-resume): the composer
    *  "+" file section picks N files and hands them here. Files ingest
    *  SEQUENTIALLY through the same LoadOutcome routing as handleIngest; on a
    *  NeedsGuidance the batch PARKS (the guidance dialog opens) and the Promise
    *  stays PENDING -- a guided Loaded then resumes the queued remainder, while
-   *  only a user cancel or an Error route halts terminally (both settle the
-   *  Promise false and surface the remaining count). Resolves true when EVERY
-   *  file loaded (#500): the SessionPane's pending-payload consumption gates
-   *  the cold-start auto-ask on it -- while the dialog parks the batch the
-   *  pending question must not fire underneath it. An IPC reject resolves
-   *  false too (the error banner owns the same gate). An empty list resolves
-   *  true (nothing to halt on). */
+   *  only a user cancel, an Error route, or an IPC reject halts terminally
+   *  (all settle the Promise false and surface the remaining count).
+   *  Resolves true when EVERY file loaded (#500): the SessionPane's
+   *  pending-payload consumption gates the cold-start auto-ask on it -- while
+   *  the dialog parks the batch the pending question must not fire underneath
+   *  it. An IPC reject resolves false too (the error banner owns the same
+   *  gate). An empty list resolves true (nothing to halt on). */
   handleIngestMany: (paths: string[]) => Promise<boolean>;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => Promise<void>;
   handleGuidedCancel: () => void;
@@ -146,9 +148,11 @@ export function useIngestFlow(
         return "Loaded";
       } else if (result.kind === "NeedsGuidance") {
         // A fresh dialog opens clean (#748): a stale inline error from an
-        // earlier guided submit must not ride into the next file's guidance
-        // (the auto-resume re-park path makes this a live case, not just a
-        // defensive one).
+        // earlier guided submit must not ride into the next file's guidance.
+        // Load-bearing on the supersede path -- a webview drop starting a new
+        // batch while a parked dialog still shows an inline error -- since
+        // every re-park is preceded by a guided submit that already cleared
+        // it on its first line.
         setGuidanceError(null);
         setGuidance({ request: result.data, path });
         return "NeedsGuidance";
@@ -166,9 +170,10 @@ export function useIngestFlow(
     [intl, setError],
   );
 
-  // Terminal-halt surface (#748), shared by the Error/reject halt in
-  // runBatchSegment and the cancel halt in handleGuidedCancel so both paths
-  // stay in lockstep: the skipped count surfaces (the workspace notice,
+  // Terminal-halt surface (#748), shared by the Error/reject halt and the
+  // guarded post-refresh escape in runBatchSegment, the cancel halt in
+  // handleGuidedCancel, and the supersede in handleIngestMany so every path
+  // stays in lockstep: the skipped count surfaces (the workspace notice,
   // screen-mate of the banner on an Error halt), the diagnostic carries the
   // halt reason, and the #500 gate settles false. ADR-0029: operation
   // semantics only, no source DATA -- the paths themselves are intentionally
@@ -176,7 +181,7 @@ export function useIngestFlow(
   const haltBatch = useCallback(
     (
       remaining: string[],
-      reason: "error" | "reject" | "cancelled",
+      reason: "error" | "reject" | "cancelled" | "superseded",
       resolve: (allLoaded: boolean) => void,
     ) => {
       if (remaining.length > 0) {
@@ -198,8 +203,11 @@ export function useIngestFlow(
   // IN that segment -- the pre-park run and each post-guidance continuation
   // are separate segments. Settlement order matters: resolve runs AFTER the
   // refresh so the #500 gate's pending question can never race the
-  // working-set invalidation. A PARK leaves the Promise pending: the batch
-  // handle moves into parkedBatchRef for the post-Loaded resume.
+  // working-set invalidation, and the refresh itself is guarded so an
+  // exception settles the gate instead of rejecting the segment unhandled.
+  // A PARK writes its handle at the loop decision point -- before the
+  // refresh, while nothing else can race it -- and leaves the Promise
+  // pending for the post-Loaded resume.
   const runBatchSegment = useCallback(
     async (paths: string[], resolve: (allLoaded: boolean) => void): Promise<void> => {
       let loadedAny = false;
@@ -224,7 +232,18 @@ export function useIngestFlow(
             loadedAny = true;
             continue;
           }
-          outcome = route === "NeedsGuidance" ? "parked" : "halted";
+          if (route === "NeedsGuidance") {
+            // Write the park handle AT the decision point, before the
+            // post-segment refresh: the refresh is a real IPC round trip
+            // during which the dialog is already interactive (loading false),
+            // so a cancel or ESC in that window must find the handle here --
+            // writing it only after the refresh orphaned the batch (gate hung
+            // forever, remainder silently dropped).
+            parkedBatchRef.current = { remaining: rest, resolve };
+            outcome = "parked";
+          } else {
+            outcome = "halted";
+          }
           break;
         }
       } catch (e) {
@@ -237,14 +256,26 @@ export function useIngestFlow(
         outcome = "halted";
       }
       if (loadedAny) {
-        await refreshServerState("load");
-        clearForNewSource();
+        try {
+          await refreshServerState("load");
+          clearForNewSource();
+        } catch (e) {
+          // Post-loop escape guard: everything past the ingest loop was
+          // otherwise unguarded -- an exception here would reject the segment
+          // unhandled and never settle the #500 gate. Mirror the Loaded
+          // branch's settle-on-catch: the banner owns the error, the halt
+          // path owns the count, and a park handle written in-loop must not
+          // outlive the terminated batch.
+          parkedBatchRef.current = null;
+          setError(toAppError(e, intl, "load"));
+          haltBatch(unattempted, haltReason, resolve);
+          void pollPersistError();
+          return;
+        }
       }
-      if (outcome === "parked") {
-        parkedBatchRef.current = { remaining: unattempted, resolve };
-      } else if (outcome === "halted") {
+      if (outcome === "halted") {
         haltBatch(unattempted, haltReason, resolve);
-      } else {
+      } else if (outcome === "drained") {
         resolve(true);
       }
       void pollPersistError();
@@ -287,12 +318,17 @@ export function useIngestFlow(
   const handleIngestMany = useCallback(
     (paths: string[]): Promise<boolean> => {
       if (paths.length === 0) return Promise.resolve(true);
-      // Defensive supersede (the modal dialog makes this unreachable through
-      // the UI): settle a parked batch's stale #500 gate instead of leaking a
-      // forever-pending Promise.
+      // Supersede a parked batch: reachable by a webview file drop onto the
+      // window while the guidance dialog is open (the drag-drop event is
+      // OS-level -- a modal scrim blocks pointer events, not drops), and
+      // defensive for any other re-entry. The stale gate settles through the
+      // shared halt path so the drop is observable in logs; the halt's
+      // count surface is immediately retired by the start-of-batch clear
+      // below, keeping the new batch the sole owner.
       if (parkedBatchRef.current !== null) {
-        parkedBatchRef.current.resolve(false);
+        const stale = parkedBatchRef.current;
         parkedBatchRef.current = null;
+        haltBatch(stale.remaining, "superseded", stale.resolve);
       }
       setHaltedRemaining(null);
       setError(null);
@@ -300,7 +336,7 @@ export function useIngestFlow(
         void runBatchSegment(paths, resolve);
       });
     },
-    [runBatchSegment, setError],
+    [runBatchSegment, haltBatch, setError],
   );
 
   // Submit explicit header/skip picks from the guidance dialog. Loaded clears

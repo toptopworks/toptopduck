@@ -16,9 +16,9 @@ import type {
 // shared IPC-reject path via toAppError. Issue #748 adds: inline guided errors
 // (guidanceError, NOT the shared workspace banner), the parked-batch queue with
 // a Promise that stays pending until the queue drains or halts terminally
-// (#500 gate), the Loaded-triggered auto-resume, and the cancel / Error halt
-// remaining-count (haltedRemaining). Runs offline via vi.mock on the two api
-// entry points.
+// (#500 gate), the Loaded-triggered auto-resume, and the cancel / Error /
+// reject halt remaining-count (haltedRemaining). Runs offline via vi.mock on
+// the two api entry points.
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -156,7 +156,9 @@ describe("useIngestFlow", () => {
     it("a freshly routed guidance opens without a stale inline error (#748)", async () => {
       // A failed guided submit leaves guidanceError set; the NEXT file's
       // NeedsGuidance route must open the dialog clean (no stale error from
-      // the previous workbook).
+      // the previous workbook). No cancel and no re-submit runs in between,
+      // so the routed clear at the NeedsGuidance branch is the only thing
+      // retiring the stale error.
       const { deps } = setup();
       const { result } = renderHook(() => useIngestFlow(SID, deps));
       await primeGuidance(result);
@@ -165,9 +167,6 @@ describe("useIngestFlow", () => {
         await result.current.handleGuidedSubmit(sheetGuidance);
       });
       expect(result.current.guidanceError).not.toBeNull();
-      act(() => {
-        result.current.handleGuidedCancel();
-      });
 
       vi.mocked(ingestFile).mockResolvedValueOnce(needsGuidance());
       await act(async () => {
@@ -290,6 +289,85 @@ describe("useIngestFlow", () => {
       // The parked queue is invisible to loading state: the dialog is
       // interactive (submit / cancel enabled).
       expect(deps.setLoading).toHaveBeenLastCalledWith(false);
+    });
+
+    it("a cancel during the post-park refresh halt-settles the parked batch (#748)", async () => {
+      // The park handle must be readable the moment the dialog becomes
+      // interactive: the post-park refresh is a real IPC round trip during
+      // which Cancel / ESC are enabled (loading false), so a cancel in that
+      // window must settle-halt instead of orphaning the batch.
+      const { deps } = setup();
+      let releaseRefresh: (() => void) | null = null;
+      deps.refreshServerState.mockImplementation(
+        () => new Promise<void>((r) => { releaseRefresh = r; }),
+      );
+      vi.mocked(ingestFile)
+        .mockResolvedValueOnce(loaded("result_1"))
+        .mockResolvedValueOnce(needsGuidance());
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+      let promise!: Promise<boolean>;
+      await act(async () => {
+        promise = result.current.handleIngestMany(["/a.csv", "/x.xlsx", "/c.csv"]);
+      });
+      const tracker = trackResolution(promise);
+      // The segment is parked inside the pending refresh; the dialog is open
+      // and interactive.
+      expect(result.current.guidance).not.toBeNull();
+      expect(tracker.resolved).toBeNull();
+
+      act(() => {
+        result.current.handleGuidedCancel();
+      });
+      await act(async () => {});
+      expect(tracker.resolved).toBe(false);
+      expect(result.current.haltedRemaining).toBe(1);
+      expect(log.warn).toHaveBeenCalledWith(
+        "useIngestFlow",
+        "batch halted; remaining files skipped",
+        { reason: "cancelled", remaining: 1 },
+      );
+
+      // Releasing the refresh must not resurrect the consumed park handle.
+      await act(async () => {
+        releaseRefresh?.();
+      });
+      expect(tracker.resolved).toBe(false);
+      expect(result.current.haltedRemaining).toBe(1);
+    });
+
+    it("a rejecting post-park refresh settles the gate instead of rejecting unhandled (#748)", async () => {
+      // Everything past the ingest loop used to be unguarded: an exception
+      // there rejected the segment unhandled and the #500 gate never
+      // settled. The escape guard routes it to the banner + halt path.
+      const { deps, setError } = setup();
+      deps.refreshServerState.mockRejectedValueOnce(new Error("refresh down"));
+      vi.mocked(ingestFile)
+        .mockResolvedValueOnce(loaded("result_1"))
+        .mockResolvedValueOnce(needsGuidance());
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
+
+      let promise!: Promise<boolean>;
+      await act(async () => {
+        promise = result.current.handleIngestMany(["/a.csv", "/x.xlsx", "/c.csv"]);
+      });
+      const tracker = trackResolution(promise);
+      await act(async () => {});
+
+      expect(tracker.resolved).toBe(false);
+      expect(setError).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: "load" }),
+      );
+      expect(result.current.haltedRemaining).toBe(1);
+      expect(result.current.guidance).not.toBeNull();
+
+      // The in-loop park handle did not outlive the terminated batch:
+      // cancelling the still-open dialog halts nothing further (exactly one
+      // diagnostic).
+      act(() => {
+        result.current.handleGuidedCancel();
+      });
+      expect(log.warn).toHaveBeenCalledTimes(1);
     });
 
     it("stops the batch on Error but keeps the earlier Loaded files", async () => {
@@ -433,6 +511,33 @@ describe("useIngestFlow", () => {
       vi.mocked(ingestFile).mockResolvedValue(loaded("result_2"));
       await act(async () => {
         await result.current.handleIngestMany(["/d.csv"]);
+      });
+
+      expect(result.current.haltedRemaining).toBeNull();
+    });
+
+    it("clears a stale halt count when the next single-file ingest starts (#748)", async () => {
+      // A cancel-halt leaves the count on screen; the next single-file drop
+      // routes through handleIngest, whose start-of-ingest clear is the only
+      // thing retiring the notice on that path.
+      const { deps } = setup();
+      vi.mocked(ingestFile).mockResolvedValueOnce(needsGuidance());
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
+      let promise!: Promise<boolean>;
+      await act(async () => {
+        promise = result.current.handleIngestMany(["/x.xlsx", "/b.csv", "/c.csv"]);
+      });
+      const tracker = trackResolution(promise);
+      act(() => {
+        result.current.handleGuidedCancel();
+      });
+      await act(async () => {});
+      expect(tracker.resolved).toBe(false);
+      expect(result.current.haltedRemaining).toBe(2);
+
+      vi.mocked(ingestFile).mockResolvedValueOnce(loaded("result_1"));
+      await act(async () => {
+        await result.current.handleIngest("/d.csv");
       });
 
       expect(result.current.haltedRemaining).toBeNull();

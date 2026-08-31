@@ -34,9 +34,9 @@ interface SheetChoice {
 // the shared workspace ErrorBanner sits in the workspace body BEHIND the modal
 // scrim, so it was invisible; the failure had no visible feedback at all. The
 // dialog stays open on failure (in-place retry keeps the sheet choices), the
-// parent clears the error on re-submit / cancel, and remounts this component
-// keyed on the source path so a resumed batch's next file starts from clean
-// choices (the `choices` init runs at mount only).
+// parent clears the error on re-submit / cancel / a freshly routed guidance,
+// and remounts this component keyed on the source path so a resumed batch's
+// next file starts from clean choices (the `choices` init runs at mount only).
 export function GuidedLoadDialog({
   request,
   loading,
