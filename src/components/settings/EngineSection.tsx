@@ -97,11 +97,11 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
   return (
     <div>
       <PaneHeader
-        title={<FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Database Engine" />}
+        title={<FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Analysis Engine" />}
         description={(
           <FormattedMessage
             id="settings.engine.description"
-            defaultMessage="DuckDB engine defaults. Saved values persist and apply to new sessions."
+            defaultMessage="Engine defaults. Saved values persist across restarts."
           />
         )}
       />
@@ -112,7 +112,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
           description={(
             <FormattedMessage
               id="settings.engine.memoryLimit.description"
-              defaultMessage="Maximum memory DuckDB may use, e.g. 512MB."
+              defaultMessage="Maximum memory the engine may use, e.g. 512MB."
             />
           )}
           action={saveButton("memory_limit")}
@@ -131,7 +131,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
           description={(
             <FormattedMessage
               id="settings.engine.threads.description"
-              defaultMessage="Parallel worker threads DuckDB may schedule."
+              defaultMessage="Parallel worker threads the engine may schedule."
             />
           )}
           action={saveButton("threads")}
@@ -193,7 +193,7 @@ export function EngineSection({ appConfig, onCommit }: EngineSectionProps) {
       <p className="text-muted-foreground mt-3 text-sm">
         <FormattedMessage
           id="settings.engine.hint"
-          defaultMessage="This slice persists and restores these values across restarts; applying them to the live DuckDB engine is a follow-up slice."
+          defaultMessage="These values are saved but not applied yet; sessions keep the built-in engine limits."
         />
       </p>
       {error && <p className="settings-error mt-3 text-destructive text-sm">{error}</p>}

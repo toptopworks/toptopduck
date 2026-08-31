@@ -478,7 +478,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("each engine field has its own Save that commits only that field", async () => {
     const { onCommitAppConfig } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
     // Four independent Save buttons (memory limit / threads / row cap / timeout).
     expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(4);
     // Edit the threads input (the first spinbutton) and save just that field.
@@ -495,7 +495,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("a failed engine save shows an inline error without closing", async () => {
     const onCommitAppConfig = vi.fn<CommitFn>().mockRejectedValue(new Error("read-only"));
     const { onClose } = renderView({ onCommitAppConfig });
-    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
     expect(await screen.findByText("read-only")).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
@@ -515,7 +515,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       .fn<CommitFn>()
       .mockImplementation(() => new Promise<void>(() => {}));
     const { onClose } = renderView({ onCommitAppConfig });
-    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalled());
     fireEvent.keyDown(window, { key: "Escape" });
@@ -592,7 +592,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("switches panes via the icon rail nav", async () => {
     renderView();
     await screen.findByRole("combobox", { name: "Theme" });
-    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
     expect(screen.getAllByRole("button", { name: "Save" }).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
     expect(screen.getByRole("note")).toBeInTheDocument();
@@ -1080,7 +1080,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
   it("a numeric engine field can be cleared; an empty save clamps to the minimum", async () => {
     const { onCommitAppConfig } = renderView();
-    fireEvent.click(screen.getByRole("button", { name: "Database Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
     const threads = screen.getAllByRole("spinbutton")[0];
     fireEvent.change(threads, { target: { value: "" } });
     // The field stays clearable (no snap back to 1). RTL's toHaveValue reads an

@@ -59,7 +59,7 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
               <FormattedMessage id="column.col" defaultMessage="Column" />
             </TableHead>
             <TableHead>
-              <FormattedMessage id="column.type" defaultMessage="DuckDB type" />
+              <FormattedMessage id="column.type" defaultMessage="Data type" />
             </TableHead>
           </TableRow>
         </TableHeader>
