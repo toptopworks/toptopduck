@@ -150,6 +150,7 @@
   "header.nav.forward": "Forward",
   "header.settings": "Settings",
   "header.softCap": "Many sessions open — close some to free memory.",
+  "ingest.batchHalted": "Import stopped — {count, plural, one {# file} other {# files}} not loaded.",
   "privacy.heading": "Privacy controls",
   "privacy.note.localOnly": "The full dataset never leaves this machine; the controls above decide what is sent alongside the schema when you ask.",
   "privacy.note.typeOnly": "Columns marked \"Type only\": neither their names nor their values are sent to the cloud LLM (only the type, so the LLM can still reason about the schema shape). When samples are on, these columns are also dropped from the samples.",

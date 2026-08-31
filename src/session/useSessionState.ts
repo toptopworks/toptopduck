@@ -89,6 +89,15 @@ export interface UseSessionState {
    *  banner. null after a clean save or once read. */
   persistError: SaveError | null;
   guidance: { request: GuidanceRequest; path: string } | null;
+  /** Issue #748: the guided-submit failure rendered inline inside the
+   *  GuidedLoadDialog (the workspace banner would sit behind the modal
+   *  scrim). null outside a failed guided submit; cleared on re-submit /
+   *  cancel / a freshly routed guidance. */
+  guidanceError: AppError | null;
+  /** Issue #748: files left unprocessed by a terminally halted batch
+   *  (cancel-halt / Error-halt), rendered as a workspace notice; null
+   *  otherwise and cleared at the start of the next ingest. */
+  haltedRemaining: number | null;
   pendingActiveDelete: DatasetDescriptor | null;
   // Actions.
   // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
@@ -97,10 +106,13 @@ export interface UseSessionState {
   handleCancel: () => Promise<void>;
   handleIngest: (path: string) => void;
   /** Multi-file ingest from the composer "+" file section (ADR-0083, issue
-   *  #351). Sequential with halt-on-guidance/error; see useIngestFlow.
-   *  Resolves true when every file loaded (#500): the SessionPane's
-   *  pending-payload consumption gates the cold-start auto-ask on it. The
-   *  bar's handleIngestFiles consumer accepts it via void-return covariance. */
+   *  #351; #748 auto-resume). Sequential with park-on-guidance: a
+   *  NeedsGuidance parks the batch on the dialog and the Promise stays
+   *  pending until the guided Loaded resumes + drains the queue, or a cancel
+   *  / Error halts terminally; see useIngestFlow. Resolves true when every
+   *  file loaded (#500): the SessionPane's pending-payload consumption gates
+   *  the cold-start auto-ask on it. The bar's handleIngestFiles consumer
+   *  accepts it via void-return covariance. */
   handleIngestMany: (paths: string[]) => Promise<boolean>;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => void;
   handleGuidedCancel: () => void;
@@ -301,7 +313,15 @@ export function useSessionState(
   // the raw guidance setter or the viewed setter for ingest work. Pending-ingest
   // consumption (#500) lives one level up in SessionPane, which sequences the
   // files BEFORE the pending question.
-  const { guidance, handleIngest, handleIngestMany, handleGuidedSubmit, handleGuidedCancel } = useIngestFlow(
+  const {
+    guidance,
+    guidanceError,
+    haltedRemaining,
+    handleIngest,
+    handleIngestMany,
+    handleGuidedSubmit,
+    handleGuidedCancel,
+  } = useIngestFlow(
     sessionId,
     {
       intl,
@@ -455,6 +475,8 @@ export function useSessionState(
     error,
     persistError,
     guidance,
+    guidanceError,
+    haltedRemaining,
     pendingActiveDelete,
     handleAsk: handleAskWithAutoName,
     handleCancel,

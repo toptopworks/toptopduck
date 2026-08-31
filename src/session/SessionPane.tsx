@@ -41,9 +41,9 @@ import { sessionKeys, skillKeys } from "./queryKeys";
 // Pending payloads from a cold-start submit (#500) are consumed on mount in ONE
 // coordinated effect: pendingIngestPaths ingest first (handleIngestMany), then
 // the pendingQuestion fires via handleAsk — but only when the whole batch
-// loaded; a halted batch (guidance dialog / error banner) owns the user's
-// attention, and the question is handed back to the bar draft via onSeedDraft
-// instead of firing underneath the dialog / banner.
+// loaded; a guidance PARK keeps handleIngestMany pending (#748) so the
+// question cannot fire underneath the dialog, and a terminal halt hands it
+// back to the bar draft via onSeedDraft instead.
 
 interface SessionPaneProps {
   sessionId: string;
@@ -201,10 +201,12 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // cancel would fire when the upfront clear flips the props and kill the
   // in-flight consumption). Ordering is the contract: files ingest FIRST so
   // the first turn sees the loaded sources; the question fires only when the
-  // whole batch loaded. A halted batch (NeedsGuidance opens the dialog / Error
-  // shows the banner) suppresses the auto-ask -- the dialog or banner owns the
-  // user's attention -- and hands the question back to the bar draft via
-  // onSeedDraft so it is never silently lost.
+  // whole batch loaded. A NeedsGuidance PARKS the batch on the guidance
+  // dialog (#748): handleIngestMany stays pending until the queue drains or
+  // halts terminally, so the auto-ask cannot fire underneath the dialog. A
+  // terminal halt (cancel / Error / IPC reject) settles the Promise false and hands the
+  // question back to the bar draft via onSeedDraft so it is never silently
+  // lost.
   // handleAsk catches its own failures internally (sets the session error
   // state) and never intentionally rejects; the `.catch` below is a defensive
   // log so an unexpected throw surfaces instead of becoming an unhandled
@@ -453,6 +455,26 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
             move too, but the hook stays for selector / test stability. */}
           <div className="workspace-body flex-1 overflow-y-auto p-4">
             {s.error && <ErrorBanner error={s.error} />}
+            {s.haltedRemaining !== null && (
+              // Issue #748: a terminally halted batch (user cancelled the
+              // guidance / Error route) surfaces the skipped-file count here.
+              // On an Error halt this shares the screen with the banner above;
+              // on a cancel halt it is the only signal that files were left
+              // unprocessed. Same disclosure pairing as the persist-warning
+              // (alert-variants.ts): cautionary content -> warning variant +
+              // role="status" (polite), not an assertive emergency.
+              <Alert variant="warning" role="status" className="mt-1.5">
+                <AlertDescription>
+                  <p className="m-0">
+                    <FormattedMessage
+                      id="ingest.batchHalted"
+                      defaultMessage="Import stopped — {count, plural, one {# file} other {# files}} not loaded."
+                      values={{ count: s.haltedRemaining }}
+                    />
+                  </p>
+                </AlertDescription>
+              </Alert>
+            )}
             {s.persistError && (
               // ADR-0067 (issue #172): the bespoke .persist-warning container
               // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
@@ -500,9 +522,15 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
 
       {/* --- Dialogs (guidance + active-source delete) ---------------------- */}
       {s.guidance && (
+        // key={path} (#748): the batch auto-resume replaces the guidance with
+        // the NEXT parked file; the dialog's `choices` init runs at mount
+        // only, so the path key remounts it into clean choices instead of
+        // carrying the previous workbook's picks onto the new one.
         <GuidedLoadDialog
+          key={s.guidance.path}
           request={s.guidance.request}
           loading={s.loading}
+          error={s.guidanceError}
           onSubmit={s.handleGuidedSubmit}
           onCancel={s.handleGuidedCancel}
         />

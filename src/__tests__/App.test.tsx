@@ -1029,10 +1029,12 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     expect(askQuestion).not.toHaveBeenCalled();
   });
 
-  it("holds the question back into the bar draft when the batch halts on guidance (#500)", async () => {
-    // First file loads, second needs guidance -> the batch halts; the
-    // auto-ask is suppressed and the question is seeded back into the
-    // session's draft so it is never silently lost.
+  it("holds the question fully pending while the batch parks on guidance, seeding the draft on cancel-halt (#500, #748)", async () => {
+    // First file loads, second needs guidance -> the batch PARKS (#748): the
+    // handleIngestMany Promise stays pending while the dialog is open, so the
+    // auto-ask neither fires NOR seeds the draft underneath the dialog.
+    // Cancelling the dialog cancel-halts the batch -- the question is then
+    // seeded back into the session's draft so it is never silently lost.
     vi.mocked(ingestFile)
       .mockResolvedValueOnce({ kind: "Loaded", data: loadedDataset })
       .mockResolvedValueOnce({
@@ -1048,12 +1050,55 @@ describe("SessionPane pending-payload consumption (#500)", () => {
       pendingQuestion: "how many rows?",
     });
 
+    // The guidance dialog owns the user's attention; the question is held
+    // back entirely until the park resolves.
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(onSeedDraft).not.toHaveBeenCalled();
+    expect(askQuestion).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /取消/ }),
+    );
     await waitFor(() =>
       expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"),
     );
     expect(askQuestion).not.toHaveBeenCalled();
-    // The guidance dialog owns the user's attention.
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("fires the pending question after a guided load drains the parked batch (#500, #748)", async () => {
+    // Same park, but the user resolves the guidance: the guided file loads,
+    // the queued remainder drains, and the #500 gate releases the auto-ask.
+    vi.mocked(ingestFile)
+      .mockResolvedValueOnce({ kind: "Loaded", data: loadedDataset })
+      .mockResolvedValueOnce({
+        kind: "NeedsGuidance",
+        data: {
+          source_path: "/x/m.xlsx",
+          workbook_name: "m.xlsx",
+          sheets: [{ name: "Sheet1", preview: [["a"]] }],
+        },
+      });
+    vi.mocked(ingestFileGuided).mockResolvedValueOnce({
+      kind: "Loaded",
+      data: loadedDataset,
+    });
+    renderPaneWithPending({
+      pendingIngestPaths: ["/x/a.csv", "/x/m.xlsx"],
+      pendingQuestion: "how many rows?",
+    });
+
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(askQuestion).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /按选择加载/ }),
+    );
+
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
   });
 
   it("holds the question back when the first file errors", async () => {
