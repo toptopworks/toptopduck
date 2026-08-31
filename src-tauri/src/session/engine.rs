@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 
 use duckdb::Connection;
 
+use crate::app_config::model::EngineDefaults;
 use crate::guardrail::apply_resource_caps;
 
 /// The single acquisition point for a session's admin engine connection.
@@ -25,29 +26,54 @@ use crate::guardrail::apply_resource_caps;
 /// needs no lock beyond whatever the caller already holds.
 pub(crate) struct AdminEngine {
     conn: OnceLock<Connection>,
+    /// The session-level engine-defaults snapshot (issue #741), taken from the
+    /// app-config at session construction. The engine applies it at first
+    /// materialization; the per-turn sandboxes read the SAME snapshot via
+    /// [`Self::engine_defaults`] so both execution faces cap identically.
+    /// Immutable for the engine's life -- a settings change after construction
+    /// only reaches later sessions.
+    engine_defaults: EngineDefaults,
 }
 
 impl AdminEngine {
-    /// An unmaterialized engine: no DuckDB instance exists yet (ADR-0104
+    /// An unmaterialized engine holding the session's engine-defaults
+    /// snapshot (issue #741): no DuckDB instance exists yet (ADR-0104
     /// Decision 1: a session that never executes SQL stays at zero
     /// instances, zero thread pools, from creation to close).
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(engine_defaults: EngineDefaults) -> Self {
         Self {
             conn: OnceLock::new(),
+            engine_defaults,
         }
     }
 
+    /// The session-level engine-defaults snapshot. The sandbox lifecycle
+    /// projects this into its instances so admin + sandbox consume one
+    /// snapshot (issue #741: the LLM SQL the caps constrain runs in the
+    /// sandbox -- that face must not cap differently than admin). `row_cap`
+    /// is the exception: the enforced ceiling lives on
+    /// `Session::result_row_cap` (mutable via `set_result_row_cap`), seeded
+    /// from this snapshot once at construction and not read here again.
+    pub(crate) fn engine_defaults(&self) -> &EngineDefaults {
+        &self.engine_defaults
+    }
+
     /// Materialize the engine: open the in-memory connection and apply the
-    /// engine-level resource caps (ADR-0005 L3), one step (ADR-0104 Decision 1).
-    /// A no-op once materialized (Decision 3: held until session close, no idle
-    /// reclaim). Cap application is best-effort as before -- a rejected setting
-    /// logs and the session continues with the engine's default limits.
+    /// engine-level resource caps (ADR-0005 L3) from the session snapshot
+    /// (issue #741), one step (ADR-0104 Decision 1). A no-op once
+    /// materialized (Decision 3: held until session close, no idle reclaim).
+    /// Cap application is best-effort as before -- a rejected setting logs
+    /// and the session continues with the engine's default limits.
     fn materialize(&self) -> anyhow::Result<()> {
         if self.conn.get().is_some() {
             return Ok(());
         }
         let conn = Connection::open_in_memory()?;
-        apply_resource_caps(&conn);
+        apply_resource_caps(
+            &conn,
+            &self.engine_defaults.memory_limit,
+            self.engine_defaults.threads,
+        );
         // First-materialization observability (PR #654 deferred note): a
         // materialization nobody expected shows up in the log instead of
         // silently re-eagering the engine at some assembly point.
@@ -88,11 +114,12 @@ impl AdminEngine {
     }
 
     /// Test convenience: construct + materialize in one step -- the eager
-    /// shape unit fixtures want without a Session. Session-level tests go
+    /// shape unit fixtures want without a Session (default caps: the fixture
+    /// asserts behavior, not a tuned snapshot). Session-level tests go
     /// through a real first need instead (ADR-0104 Decision 2).
     #[cfg(test)]
     pub(crate) fn materialized() -> Self {
-        let engine = Self::new();
+        let engine = Self::new(EngineDefaults::default());
         engine.materialize().expect("test engine materializes");
         engine
     }
@@ -123,20 +150,82 @@ mod tests {
     use std::ptr;
 
     /// ADR-0104 Decision 1 / ADR-0005 L3: materialization opens the connection
-    /// and applies the resource caps in the same step.
+    /// and applies the resource caps in the same step. The default snapshot
+    /// derives from the guardrail constants, so a default engine pins them.
     #[test]
     fn materialize_opens_a_capped_connection() {
-        let engine = AdminEngine::new();
+        let engine = AdminEngine::new(EngineDefaults::default());
         engine.materialize().expect("materialize");
-        let threads: String = engine
-            .conn()
-            .query_row(
-                "SELECT value FROM duckdb_settings() WHERE name='threads'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("threads setting");
+        let (_, threads) = crate::guardrail::tests::read_caps(engine.conn());
         assert_eq!(threads, crate::guardrail::MAX_THREADS.to_string());
+    }
+
+    /// Issue #741 AC: a saved snapshot's memory_limit / threads take effect at
+    /// first materialization -- read back from the live connection's settings
+    /// (the admin face of the two execution surfaces).
+    #[test]
+    fn materialize_applies_the_session_snapshot_caps() {
+        let snapshot = EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+        };
+        let engine = AdminEngine::new(snapshot);
+        engine.materialize().expect("materialize");
+        crate::guardrail::tests::assert_memory_cap_lands(engine.conn(), 256e6);
+        let (_, threads) = crate::guardrail::tests::read_caps(engine.conn());
+        assert_eq!(threads, "2", "threads PRAGMA lands");
+    }
+
+    /// Issue #741: the snapshot is per-engine and immutable -- two engines
+    /// built from different snapshots cap independently, which is what makes
+    /// "a settings change only reaches later sessions" hold (the snapshot
+    /// semantics AC).
+    #[test]
+    fn each_engine_caps_its_own_snapshot() {
+        let tuned = EngineDefaults {
+            memory_limit: "128MB".to_string(),
+            threads: 1,
+            row_cap: 10,
+        };
+        let a = AdminEngine::new(tuned.clone());
+        let b = AdminEngine::new(EngineDefaults::default());
+        a.materialize().expect("a materializes");
+        b.materialize().expect("b materializes");
+        let read_threads =
+            |e: &AdminEngine| -> String { crate::guardrail::tests::read_caps(e.conn()).1 };
+        assert_eq!(read_threads(&a), "1");
+        assert_eq!(read_threads(&b), crate::guardrail::MAX_THREADS.to_string());
+        // The accessor hands back the same snapshot the sandbox face reads.
+        assert_eq!(a.engine_defaults(), &tuned);
+    }
+
+    /// Issue #741 AC: an ill-formed memory_limit ("abc") never reaches the
+    /// engine -- the apply-time gate reverts to the tightened constant
+    /// (DuckDB's own default would be looser), the session stays usable, and
+    /// the well-formed sibling still lands.
+    #[test]
+    fn a_malformed_memory_limit_falls_back_at_apply_time() {
+        let snapshot = EngineDefaults {
+            memory_limit: "abc".to_string(),
+            threads: 3,
+            row_cap: 100,
+        };
+        let engine = AdminEngine::new(snapshot);
+        engine
+            .materialize()
+            .expect("malformed memory_limit never fails materialization");
+        let one: i64 = engine
+            .conn()
+            .query_row("SELECT 1", [], |r| r.get(0))
+            .expect("session stays usable");
+        assert_eq!(one, 1);
+        crate::guardrail::tests::assert_memory_cap_lands(
+            engine.conn(),
+            512e6, // the `MEMORY_LIMIT` constant, not DuckDB's default
+        );
+        let (_, threads) = crate::guardrail::tests::read_caps(engine.conn());
+        assert_eq!(threads, "3", "the well-formed threads PRAGMA still lands");
     }
 
     /// ADR-0104 Decision 3: one-way transition. A second materialize must not
@@ -144,7 +233,7 @@ mod tests {
     /// for the unit's whole life.
     #[test]
     fn rematerialize_reuses_the_same_connection() {
-        let engine = AdminEngine::new();
+        let engine = AdminEngine::new(EngineDefaults::default());
         engine.materialize().expect("first materialize");
         let first = engine.conn();
         engine.materialize().expect("second materialize");
@@ -156,7 +245,7 @@ mod tests {
     /// then borrows; a second acquire reuses the same connection.
     #[test]
     fn acquire_materializes_on_first_need_and_reuses() {
-        let engine = AdminEngine::new();
+        let engine = AdminEngine::new(EngineDefaults::default());
         assert!(!engine.is_materialized(), "starts unmaterialized");
         let first = engine.acquire().expect("first acquire materializes");
         assert!(engine.is_materialized());
@@ -169,6 +258,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "admin engine materialized")]
     fn conn_before_materialize_panics() {
-        let _ = AdminEngine::new().conn();
+        let _ = AdminEngine::new(EngineDefaults::default()).conn();
     }
 }

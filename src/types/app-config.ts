@@ -22,16 +22,18 @@ export type Theme = "system" | "light" | "dark";
 // the frontend) for the canonical-prompt locale directive.
 export type LocalePreference = "system" | "zh-CN" | "en-US";
 
-// Engine default parameters (ADR-0005 L3). Stored + round-tripped here;
-// applying them to the live DuckDB is a follow-up slice.
+// Engine default parameters (ADR-0005 L3). Consumed at session construction
+// as the session-level snapshot: each new/resumed session reads the current
+// config, so a change only reaches later sessions. A stale
+// `statement_timeout_ms` key in an older config file is ignored at parse and
+// dropped on the next write -- the field was retired with the timeout
+// mechanism itself (same precedent as `retry_budget`).
 export interface EngineDefaults {
   // DuckDB memory limit string (e.g. "512MB").
   memory_limit: string;
   threads: number;
   // Ceiling on a materialized result's row count.
   row_cap: number;
-  // Per-statement timeout in milliseconds.
-  statement_timeout_ms: number;
 }
 
 // Default-for-new-datasets privacy knob (ADR-0011). Per-dataset overrides still

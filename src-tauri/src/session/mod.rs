@@ -29,7 +29,6 @@ use engine::AdminEngine;
 
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState};
 use crate::cancel::CancelToken;
-use crate::guardrail::DEFAULT_MAX_RESULT_ROWS;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
@@ -449,8 +448,10 @@ pub struct Session {
     timeline: Vec<TimelineEntry>,
     /// Ceiling on a materialized result's row count (ADR-0005 L3). A query whose
     /// result would exceed it is aborted with a resource error rather than
-    /// allowed to balloon memory. Defaults to [`DEFAULT_MAX_RESULT_ROWS`];
-    /// tunable via [`Self::set_result_row_cap`] (e.g. tests lower it for a fast,
+    /// allowed to balloon memory. Seeded from the session-level engine-defaults
+    /// snapshot at construction (issue #741; default
+    /// [`crate::guardrail::DEFAULT_MAX_RESULT_ROWS`]); tunable via
+    /// [`Self::set_result_row_cap`] (e.g. tests lower it for a fast,
     /// deterministic cap-hit).
     result_row_cap: u64,
     /// Ceiling on the number of registered `result_N` (ADR-0013 M=100). When a
@@ -746,13 +747,19 @@ impl<'a> TurnInputs<'a> {
 
 impl Session {
     pub fn new() -> anyhow::Result<Self> {
-        Self::with_provider_and_cancel(Box::new(UnwiredProvider), Arc::new(CancelToken::new()))
+        Self::with_provider_and_cancel(
+            Box::new(UnwiredProvider),
+            Arc::new(CancelToken::new()),
+            crate::app_config::model::EngineDefaults::default(),
+        )
     }
 
     /// Tune the materialized-result row ceiling (ADR-0005 L3, "可调"). A query
     /// whose result would exceed `cap` rows aborts with a resource error. The
-    /// default is [`DEFAULT_MAX_RESULT_ROWS`]; tests lower it for a fast,
-    /// deterministic cap-hit, and a future preferences surface may expose it.
+    /// session seeds this from the engine-defaults snapshot at construction
+    /// (issue #741 -- the persisted `row_cap`, default
+    /// [`DEFAULT_MAX_RESULT_ROWS`]); tests lower it after construction for a
+    /// fast, deterministic cap-hit.
     pub fn set_result_row_cap(&mut self, cap: u64) {
         self.result_row_cap = cap;
     }
@@ -851,18 +858,30 @@ impl Session {
     /// the real LLM client wires in #29). The default [`Self::new`] uses
     /// [`UnwiredProvider`] -- every turn is refused until a provider is set.
     pub fn with_provider(provider: Box<dyn Provider>) -> anyhow::Result<Self> {
-        Self::with_provider_and_cancel(provider, Arc::new(CancelToken::new()))
+        Self::with_provider_and_cancel(
+            provider,
+            Arc::new(CancelToken::new()),
+            crate::app_config::model::EngineDefaults::default(),
+        )
     }
 
     /// Build a session with an explicit provider AND a shared cancel token
-    /// (ADR-0021, issue #28). The token is `Arc`-cloned to the cancel command
-    /// and the timeout watchdog so a cancel fires without the session lock;
-    /// `with_provider` / `new` allocate a private token for callers that don't
-    /// need cross-thread cancel. Tests that drive cancel/timeout inject a token
-    /// they also hold, so they can observe `is_in_flight` / fire `request`.
+    /// (ADR-0021, issue #28), seeded from the session-level engine-defaults
+    /// snapshot (issue #741): the caller reads the CURRENT app-config at the
+    /// construction point, so the snapshot semantics fall out -- settings
+    /// changes after construction only reach later sessions, and a resumed
+    /// session takes the current config exactly like a new one (the recipe
+    /// carries no engine fields). `row_cap` seeds from the snapshot; the caps
+    /// ride the admin engine's copy of it. The token is `Arc`-cloned to the
+    /// cancel command and the timeout watchdog so a cancel fires without the
+    /// session lock; `with_provider` / `new` allocate a private token for
+    /// callers that don't need cross-thread cancel. Tests that drive
+    /// cancel/timeout inject a token they also hold, so they can observe
+    /// `is_in_flight` / fire `request`.
     pub fn with_provider_and_cancel(
         provider: Box<dyn Provider>,
         cancel: Arc<CancelToken>,
+        engine_defaults: crate::app_config::model::EngineDefaults,
     ) -> anyhow::Result<Self> {
         // Box -> Arc: the signature keeps taking the Box every call site
         // builds; the conversion happens once here (issue #669) because the
@@ -884,8 +903,11 @@ impl Session {
         // The admin engine is an on-demand unit (ADR-0104 Decision 1): the
         // session is constructed with no DuckDB instance; the first SQL need
         // resolves through the unit's acquisition point, and the connection
-        // is then held until session close (no idle reclaim).
-        let admin_engine = AdminEngine::new();
+        // is then held until session close (no idle reclaim). It carries the
+        // session-level engine-defaults snapshot (issue #741) and applies it
+        // at first materialization; the per-turn sandboxes read the same
+        // snapshot through it.
+        let admin_engine = AdminEngine::new(engine_defaults.clone());
         // The provider (Arc, see the field doc) + materializer (`Box<dyn>`)
         // live on the Session (dyn, not generic) so this struct does not
         // parameterize the IPC layer (ADR-0053). The turn's runner borrows
@@ -901,7 +923,7 @@ impl Session {
             provider,
             materializer: Box::new(RealMaterializer),
             timeline: Vec::new(),
-            result_row_cap: DEFAULT_MAX_RESULT_ROWS,
+            result_row_cap: engine_defaults.row_cap,
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
@@ -2607,6 +2629,58 @@ mod tests {
         assert!(
             session.temp_path.join(TOOL_OUTPUT_DIR_NAME).is_dir(),
             "tool_output/ must exist after session construction"
+        );
+    }
+
+    /// Issue #741 AC: the snapshot's `row_cap` seeds the session's row ceiling
+    /// at construction (the cap-hit path itself is pinned by the blackbox
+    /// tests that lower the cap and assert the resource abort).
+    #[test]
+    fn row_cap_seeds_from_the_session_snapshot() {
+        let snapshot = crate::app_config::model::EngineDefaults {
+            row_cap: 7,
+            ..Default::default()
+        };
+        let session = Session::with_provider_and_cancel(
+            Box::new(crate::provider::UnwiredProvider),
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            snapshot,
+        )
+        .expect("session");
+        assert_eq!(session.result_row_cap, 7);
+        // The no-snapshot convenience constructors stay on the constants.
+        let default_session = Session::new().expect("default session");
+        assert_eq!(
+            default_session.result_row_cap,
+            crate::guardrail::DEFAULT_MAX_RESULT_ROWS
+        );
+    }
+
+    /// Issue #741: the construction seam itself applies the snapshot. The
+    /// unit-level pins cover `AdminEngine::new` in isolation, but the seam is
+    /// where a revert to the compile-time default would still compile (the
+    /// `row_cap` seed keeps the parameter "used") and keep every suite
+    /// green -- so force the real first SQL need through the seam and read
+    /// the cap back off the live connection.
+    #[test]
+    fn the_construction_seam_applies_the_snapshot_caps() {
+        let snapshot = crate::app_config::model::EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+        };
+        let session = Session::with_provider_and_cancel(
+            Box::new(crate::provider::UnwiredProvider),
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            snapshot,
+        )
+        .expect("session");
+        let conn = session.admin_engine.acquire().expect("first SQL need");
+        crate::guardrail::tests::assert_memory_cap_lands(conn, 256e6);
+        let (_, threads) = crate::guardrail::tests::read_caps(conn);
+        assert_eq!(
+            threads, "2",
+            "the seam threads the snapshot, not a constant"
         );
     }
 

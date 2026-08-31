@@ -41,6 +41,7 @@ fn resume_defaults(
         duck,
         cancel,
         Box::new(UnwiredProvider),
+        Default::default(),
         on_progress,
         |_| SourceResolution::Abort,
         |_| ActiveResolution::Abort,
@@ -833,6 +834,7 @@ fn resume_is_cancellable_mid_replay() {
         &duck,
         cancel,
         Box::new(UnwiredProvider),
+        Default::default(),
         move |_ev| {
             if !fired {
                 fired = true;
@@ -907,6 +909,7 @@ fn resume_relinks_a_missing_source_and_updates_recipe_path() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         move |issue| {
             issues_for_cb.borrow_mut().push(issue.clone());
@@ -970,6 +973,7 @@ fn resume_abort_in_relink_dialog_stops_resume_and_leaves_recipe_untouched() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         |_| SourceResolution::Abort,
         |_| ActiveResolution::Abort,
@@ -1008,6 +1012,7 @@ fn resume_reports_drift_without_silently_replaying() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         move |issue| match issue {
             SourceIssue::Drift { reference_name, .. } => {
@@ -1075,6 +1080,7 @@ fn resume_aborts_on_drift_without_replaying() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         move |issue| match issue {
             SourceIssue::Drift { reference_name, .. } => {
@@ -1147,6 +1153,7 @@ fn resume_handles_each_source_independently_multi_source() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         move |issue| match issue {
             SourceIssue::Missing { reference_name, .. } if reference_name == "people" => {
@@ -1214,6 +1221,7 @@ fn resume_blocks_when_active_source_abandoned_until_user_picks() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         // Rebuild the missing active source.
         |issue| match issue {
@@ -1274,6 +1282,7 @@ fn resume_active_abandoned_no_sources_left_resumes_empty_without_callback() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         |_| SourceResolution::Rebuild,
         move |_| {
@@ -1336,6 +1345,7 @@ fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         |issue| match issue {
             SourceIssue::Missing { reference_name, .. } if reference_name == "orders" => {
@@ -1768,6 +1778,7 @@ fn external_edit_during_resume_surfaces_conflict_at_post_resume_persist() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |ev| {
             if !injected {
                 if let ResumeEvent::Source { .. } = ev {
@@ -2408,6 +2419,7 @@ fn resume_relinks_when_both_relative_and_absolute_paths_fail() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         move |issue| match issue {
             SourceIssue::Missing { reference_name, .. } => {
@@ -2953,6 +2965,7 @@ fn resume_does_not_call_the_cloud_llm() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(provider),
+        Default::default(),
         cb,
         |_| SourceResolution::Abort,
         |_| ActiveResolution::Abort,
@@ -3161,6 +3174,7 @@ fn resume_drift_issue_reports_expected_and_found_in_correct_order() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         move |issue| {
             *captured_for_cb.borrow_mut() = Some(issue.clone());
@@ -3210,6 +3224,7 @@ fn resume_missing_issue_carries_the_recorded_absolute_path() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         |_| {},
         move |issue| {
             *captured_for_cb.borrow_mut() = Some(issue.clone());
@@ -3256,6 +3271,7 @@ fn is_resuming_flag_is_true_during_open_duck_and_cleared_after() {
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(UnwiredProvider),
+        Default::default(),
         move |_ev| {
             // Capture the flag on the first progress event (mid-resume).
             if flag_for_cb.borrow().is_none() {
@@ -3466,8 +3482,12 @@ fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
         cancel: Arc::clone(&cancel),
         mid_flight: Arc::clone(&mid_flight),
     };
-    let mut session = Session::with_provider_and_cancel(Box::new(provider), Arc::clone(&cancel))
-        .expect("session");
+    let mut session = Session::with_provider_and_cancel(
+        Box::new(provider),
+        Arc::clone(&cancel),
+        Default::default(),
+    )
+    .expect("session");
     load_source(&mut session, &csv);
     session
         .bind_duck(duck.clone(), "in-flight".into())

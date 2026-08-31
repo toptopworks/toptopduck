@@ -221,7 +221,11 @@ pub fn create_session(
     // LiveProviderConfig. A fresh session starts usable once a key is stored;
     // before that every turn refuses honestly as not-wired.
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
-    let id = store.create(cancel, provider)?;
+    // Session-level engine-defaults snapshot (issue #741): read the CURRENT
+    // app-config at the construction point -- later settings changes only
+    // reach sessions created after them.
+    let engine_defaults = live.load().engine.clone();
+    let id = store.create(cancel, provider, engine_defaults)?;
     // ADR-0098 Decision 2 (issue #569): a fresh session starts on the
     // RESOLVED default runtime, not the hardcoded built-in -- the same
     // resolution resume falls back to (`startup_runtime_choice`), so both
@@ -320,7 +324,11 @@ pub async fn prepare_import_session(
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     let provider = Box::new(crate::LiveProvider::new(live.inner().clone()));
-    let id = store.create(cancel, provider)?;
+    // Same snapshot source as `create_session` (issue #741): the placeholder
+    // session takes the current config; the later `open_duck` re-reads the
+    // config at ITS construction point, same rule.
+    let engine_defaults = live.load().engine.clone();
+    let id = store.create(cancel, provider, engine_defaults)?;
     let session_dir = sessions_root.path().join(id.to_string());
     let duck_path = session_dir.join("session.duck");
     let src = PathBuf::from(&external_path);
@@ -1968,6 +1976,12 @@ pub async fn open_duck(
     // recipe whose header carries no `last_runtime` (the ADR-0098 Decision 2
     // semantics, unchanged for old files).
     let startup = startup_runtime_choice(live.inner());
+    // One config read feeds both the session-level engine-defaults snapshot
+    // (issue #741: same source as create_session, resolved BEFORE the
+    // blocking task -- the State handle must not cross into the 'static
+    // closure; the snapshot is plain data) and the auto-include fold below.
+    let cfg = live.load();
+    let engine_defaults = cfg.engine.clone();
     // Auto-include recomputed at resume (issue #677, ADR-0109 Decision 6):
     // a tool disabled since the session last ran drops its skill from the
     // initial set; the recipe's own Mount/Unmount events still fold over
@@ -1976,7 +1990,7 @@ pub async fn open_duck(
     // keeps a reverse-conflict user file out.
     let auto_skills = crate::skills::builtin::auto_included_names(
         &live.cli_tools(),
-        &crate::skills::BuiltinSkillMark::from_config(&live.load()),
+        &crate::skills::BuiltinSkillMark::from_config(&cfg),
         &skills_root.0,
     );
     let inner = tauri::async_runtime::spawn_blocking(move || {
@@ -1984,6 +1998,7 @@ pub async fn open_duck(
             &path,
             cancel_token,
             provider,
+            engine_defaults,
             |ev: ResumeEvent| {
                 // ADR-0056 (issue #76): address the resume-progress event by
                 // sessionId so a multi-session frontend filters the global
@@ -3720,6 +3735,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("get handle");
@@ -3897,6 +3913,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("handle");
@@ -4348,7 +4365,7 @@ mod tests {
         let store = SessionStore::new();
         let cancel = Arc::new(CancelToken::new());
         let id = store
-            .create(cancel, Box::new(crate::UnwiredProvider))
+            .create(cancel, Box::new(crate::UnwiredProvider), Default::default())
             .expect("create session");
         let handle = store.get(&id).expect("handle");
         handle.set_resuming(true);
@@ -4365,12 +4382,14 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create a");
         let b = store
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create b");
         store.get(&a).expect("a handle").set_resuming(true);
@@ -4386,7 +4405,7 @@ mod tests {
         let store = SessionStore::new();
         let cancel = Arc::new(CancelToken::new());
         let id = store
-            .create(cancel, Box::new(crate::UnwiredProvider))
+            .create(cancel, Box::new(crate::UnwiredProvider), Default::default())
             .expect("create session");
         let handle = store.get(&id).expect("handle");
         // Without a turn in flight, an ask is allowed.
@@ -4441,6 +4460,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("handle");
@@ -4477,6 +4497,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("handle");
@@ -4509,6 +4530,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("handle");
@@ -4541,6 +4563,7 @@ mod tests {
             .create(
                 Arc::new(CancelToken::new()),
                 Box::new(crate::UnwiredProvider),
+                Default::default(),
             )
             .expect("create session");
         let handle = store.get(&id).expect("handle");

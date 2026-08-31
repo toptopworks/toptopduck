@@ -238,7 +238,13 @@ pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
         });
     }
 
-    serde_json::from_value(value).map_err(|e| AppConfigReadError::Parse(e.to_string()))
+    let mut cfg: AppConfig =
+        serde_json::from_value(value).map_err(|e| AppConfigReadError::Parse(e.to_string()))?;
+    // Read-path domain repair (issue #741): `normalize` only runs on writes,
+    // but the engine fields are live-consumed now, so a hand-edited
+    // out-of-domain value must never reach a session snapshot.
+    cfg.engine.sanitize();
+    Ok(cfg)
 }
 
 /// Recursively scan a JSON value for any object key matching a secret name
@@ -302,7 +308,6 @@ mod tests {
             memory_limit: "1024MB".into(),
             threads: 8,
             row_cap: 500_000,
-            statement_timeout_ms: 10_000,
         };
         // Seed the ACTIVE profile's endpoint (the ADR-0098 defaults ship zero
         // profiles) so a successful round-trip is distinguishable from a
@@ -340,6 +345,62 @@ mod tests {
         write_at(&path, &cfg).expect("write");
         let back = read_at(&path);
         assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn retired_statement_timeout_key_is_ignored_and_dropped() {
+        // A pre-#741 file carries `engine.statement_timeout_ms`. The field was
+        // retired WITH the timeout mechanism (the `retry_budget` precedent):
+        // parse must ignore the stale key (the rest of the engine block still
+        // loads) and a rewrite must not carry it -- one load/save cycle and the
+        // file converges to the current shape.
+        let (_dir, path) = temp("legacy.json");
+        let legacy = format!(
+            "{{\"format_version\":{v},\"engine\":{{\"memory_limit\":\"1024MB\",\
+             \"threads\":8,\"row_cap\":500,\"statement_timeout_ms\":7777}}}}",
+            v = APP_CONFIG_FORMAT_VERSION
+        );
+        fs::write(&path, &legacy).expect("write");
+        let cfg = read_at(&path);
+        assert_eq!(
+            cfg.engine,
+            EngineDefaults {
+                memory_limit: "1024MB".into(),
+                threads: 8,
+                row_cap: 500,
+            }
+        );
+        write_at(&path, &cfg).expect("rewrite");
+        let on_disk = fs::read_to_string(&path).expect("read back");
+        assert!(
+            !on_disk.contains("statement_timeout_ms"),
+            "rewritten file drops the retired key (got {on_disk})"
+        );
+    }
+
+    #[test]
+    fn hand_edited_engine_fields_are_sanitized_on_read() {
+        // A hand-edited file can carry values the UI would never write: a
+        // `memory_limit` DuckDB would parse as unlimited (`none`) or execute
+        // as extra statements (embedded quote), and 0 counts that would
+        // brick every non-empty materialization. The read path repairs all
+        // three to their domain instead of threading them live.
+        let (_dir, path) = temp("hand-edited.json");
+        let hand_edited = format!(
+            "{{\"format_version\":{v},\"engine\":{{\"memory_limit\":\
+             \"none'; ATTACH 'x' AS leak; --\",\"threads\":0,\"row_cap\":0}}}}",
+            v = APP_CONFIG_FORMAT_VERSION
+        );
+        fs::write(&path, &hand_edited).expect("write");
+        let cfg = read_at(&path);
+        assert_eq!(
+            cfg.engine,
+            EngineDefaults {
+                memory_limit: crate::guardrail::MEMORY_LIMIT.to_string(),
+                threads: 1,
+                row_cap: 1,
+            }
+        );
     }
 
     #[test]
@@ -526,7 +587,6 @@ mod tests {
         // is a substring of any collapsed field token.
         assert!(!is_secret_name("base_url"));
         assert!(!is_secret_name("memory_limit"));
-        assert!(!is_secret_name("statement_timeout_ms"));
         assert!(!is_secret_name("format_version"));
         assert!(!is_secret_name("default_format"));
         assert!(!is_secret_name("window_turns"));

@@ -232,6 +232,7 @@ impl Materializer for RealMaterializer {
                 source_files: deps.source_files,
                 working_set: deps.working_set,
                 result_row_cap: deps.result_row_cap,
+                engine_defaults: deps.engine.engine_defaults(),
             },
             cancel,
         )

@@ -114,42 +114,160 @@ pub(crate) fn classify_duckdb_error(detail: &str) -> ExecErrorKind {
     ExecErrorKind::Runtime
 }
 
-/// Hard memory ceiling per session (ADR-0005 L3). Engine-enforced: DuckDB
-/// aborts a query whose intermediate state exceeds it. Conservative for a
-/// desktop tool and deliberately below typical RAM so the app cannot
-/// monopolize the user's memory.
+/// Default memory ceiling per session (ADR-0005 L3). Engine-enforced: DuckDB
+/// aborts a query whose intermediate state exceeds it. The DEFAULT, not a
+/// hardwired ceiling: a user-tuned value arrives per session from the
+/// app-config engine defaults (session-level snapshot, issue #741), with this
+/// constant as the fresh-install / no-config source.
 pub(crate) const MEMORY_LIMIT: &str = "512MB";
 
-/// Max worker threads a query may use (ADR-0005 L3). Caps CPU use so a heavy
-/// query leaves the rest of the app responsive.
+/// Default max worker threads a query may use (ADR-0005 L3). Caps CPU use so
+/// a heavy query leaves the rest of the app responsive. The DEFAULT of the
+/// user-adjustable app-config engine default (see [`MEMORY_LIMIT`]).
 pub(crate) const MAX_THREADS: u32 = 4;
 
 /// Default ceiling on a materialized result's row count (ADR-0005 L3). A
 /// runaway cross-join that would balloon memory is aborted at this size rather
-/// than OOM the machine. Distinct from the 10k DISPLAY window
+/// than OOM the machine. The DEFAULT of the user-adjustable app-config engine
+/// default (see [`MEMORY_LIMIT`]); the engine-enforced memory ceiling is what
+/// bounds the risk of a user-raised cap. Distinct from the 10k DISPLAY window
 /// (`session::MAX_READ_ROWS`): results up to this cap are materialized in full
 /// (full export preserved, ADR-0030); only beyond it does the turn abort with a
 /// resource error -- silent truncation is forbidden (ADR-0030).
 pub(crate) const DEFAULT_MAX_RESULT_ROWS: u64 = 1_000_000;
 
-/// Apply the engine-level resource caps to a connection (ADR-0005 L3).
-/// Idempotent; safe on the session's main connection -- caps only bound, they
-/// never enable new capability. Best-effort: if DuckDB rejects a setting the
-/// warning is logged and the session continues with the engine's default
-/// limits (the read-only / wrapping guarantees still hold; only the ceiling is
-/// loose).
-pub(crate) fn apply_resource_caps(conn: &Connection) {
-    if let Err(e) = conn.execute_batch(&format!("PRAGMA memory_limit='{MEMORY_LIMIT}';")) {
+/// True iff `s` is a well-formed memory-limit value this crate threads into
+/// the engine: `<number><unit>` over the explicit byte-multiple units
+/// (case-insensitive, matching the UI's `"512MB"` idiom). The gate exists
+/// because the value reaches `execute_batch` as interpolated text, so
+/// anything else would loosen or break the cap instead of bounding it:
+/// DuckDB parses `none` (and a leading `-`) as UNLIMITED, an embedded quote
+/// or semicolon would execute as extra statements, a zero quantity is a
+/// degenerate 0-byte ceiling, and bare garbage just gets the PRAGMA refused
+/// -- leaving the engine on DuckDB's own default, which is looser than the
+/// constants here.
+pub(crate) fn is_well_formed_memory_limit(s: &str) -> bool {
+    let s = s.trim();
+    let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
+    let (number, unit) = s.split_at(split);
+    let number = number.trim_end();
+    let well_formed_number = !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && number.matches('.').count() <= 1
+        && number.parse::<f64>().is_ok_and(|n| n > 0.0);
+    let well_formed_unit = matches!(
+        unit.to_ascii_lowercase().as_str(),
+        "b" | "kb" | "kib" | "mb" | "mib" | "gb" | "gib" | "tb" | "tib"
+    );
+    well_formed_number && well_formed_unit
+}
+
+/// Apply the engine-level resource caps to a connection (ADR-0005 L3): the
+/// session-level snapshot's values, threaded from the app-config engine
+/// defaults at session creation (issue #741). Idempotent; safe on the
+/// session's main connection -- caps only bound, they never enable new
+/// capability. An ill-formed `memory_limit` never reaches DuckDB: the config
+/// layer sanitizes before the value gets here, and this apply-point gate is
+/// the defense-in-depth both faces share -- the value reverts to
+/// [`MEMORY_LIMIT`] (the tightened default) rather than letting the engine
+/// widen the cap. Best-effort beyond that: a setting DuckDB still rejects
+/// (e.g. a value this build refuses) is logged and the session continues
+/// with the engine's default limits (the read-only / wrapping guarantees
+/// still hold; only the ceiling is loose).
+pub(crate) fn apply_resource_caps(conn: &Connection, memory_limit: &str, threads: u32) {
+    let memory_limit = if is_well_formed_memory_limit(memory_limit) {
+        memory_limit
+    } else {
+        log::warn!(
+            "malformed memory_limit {memory_limit:?} rejected; \
+             falling back to {MEMORY_LIMIT}"
+        );
+        MEMORY_LIMIT
+    };
+    if let Err(e) = conn.execute_batch(&format!("PRAGMA memory_limit='{memory_limit}';")) {
         log::warn!("failed to set memory_limit guardrail: {e}");
     }
-    if let Err(e) = conn.execute_batch(&format!("PRAGMA threads={MAX_THREADS};")) {
+    if let Err(e) = conn.execute_batch(&format!("PRAGMA threads={threads};")) {
         log::warn!("failed to set threads guardrail: {e}");
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Test-only: parse DuckDB's normalized `memory_limit` display value
+    /// (e.g. `"244.1 MiB"`) back into bytes. DuckDB stores `'256MB'` as
+    /// 256×10⁶ bytes and REPORTS it in its own display unit, so a landed
+    /// PRAGMA can only be asserted after this conversion, independent of the
+    /// unit a DuckDB version happens to choose.
+    pub(crate) fn parse_memory_display(s: &str) -> f64 {
+        let (num, unit) = s.split_once(' ').unwrap_or((s, ""));
+        let num: f64 = num.parse().unwrap_or(0.0);
+        let factor = match unit.trim() {
+            "GiB" => 1024.0 * 1024.0 * 1024.0,
+            "GB" => 1e9,
+            "MiB" => 1024.0 * 1024.0,
+            "MB" => 1e6,
+            "KiB" => 1024.0,
+            "KB" => 1e3,
+            _ => 1.0,
+        };
+        num * factor
+    }
+
+    /// Test-only: read the live `(memory_limit, threads)` pair off a capped
+    /// connection's settings -- the shared readback both faces' cap pins use.
+    pub(crate) fn read_caps(conn: &Connection) -> (String, String) {
+        conn.query_row(
+            "SELECT max(value) FILTER (WHERE name='memory_limit'), \
+             max(value) FILTER (WHERE name='threads') \
+             FROM duckdb_settings()",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("settings readback")
+    }
+
+    /// Test-only: assert a memory cap landed, at the byte level -- DuckDB
+    /// reports the setting in its own display unit (see
+    /// [`parse_memory_display`]), and a PRAGMA that never landed reads back
+    /// as the default percentage-of-RAM instead.
+    pub(crate) fn assert_memory_cap_lands(conn: &Connection, expected_bytes: f64) {
+        let (memory_limit, _) = read_caps(conn);
+        assert!(
+            (parse_memory_display(&memory_limit) - expected_bytes).abs() < 1e5,
+            "memory_limit PRAGMA lands (got {memory_limit})"
+        );
+    }
+
+    #[test]
+    fn memory_limit_whitelist_accepts_and_rejects() {
+        for good in [
+            "512MB", "244.1MiB", "1GB", "0.5TB", "1.5 GiB", "2kb", "300B", "512 MB",
+        ] {
+            assert!(is_well_formed_memory_limit(good), "should accept {good:?}");
+        }
+        // `none` / a leading `-` parse as UNLIMITED inside DuckDB; an
+        // embedded quote or semicolon would execute as extra statements; a
+        // zero quantity, a missing half, and units outside the explicit set
+        // are out of domain.
+        for bad in [
+            "none",
+            "null",
+            "-1MB",
+            "512MB'; ATTACH 'x' AS leak; --",
+            "abc",
+            "",
+            "0MB",
+            "0.0GB",
+            "512",
+            "MB",
+            "1EB",
+        ] {
+            assert!(!is_well_formed_memory_limit(bad), "should reject {bad:?}");
+        }
+    }
 
     #[test]
     fn missing_table_is_schema() {

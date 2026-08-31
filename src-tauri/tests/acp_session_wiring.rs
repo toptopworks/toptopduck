@@ -416,6 +416,7 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
         &duck_path,
         Arc::new(toptopduck_lib::CancelToken::new()),
         Box::new(toptopduck_lib::UnwiredProvider),
+        Default::default(),
         |_| {},
         |_| toptopduck_lib::SourceResolution::Abort,
         |_| toptopduck_lib::ActiveResolution::Abort,

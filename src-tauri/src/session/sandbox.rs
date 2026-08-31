@@ -33,15 +33,23 @@ use std::path::PathBuf;
 use duckdb::types::Value;
 use duckdb::{appender_params_from_iter, Connection};
 
+use crate::app_config::model::EngineDefaults;
 use crate::guardrail::{apply_resource_caps, classify_duckdb_error, ExecError, ExecErrorKind};
 use crate::ingest::schema::quote_ident;
 use crate::workingset::WorkingSet;
 
-/// Open a fresh sandbox instance with the engine resource caps applied.
-/// Sources and results are attached/mirrored after opening.
-pub(crate) fn open() -> Result<Connection, ExecError> {
+/// Open a fresh sandbox instance with the engine resource caps from the
+/// session-level engine-defaults snapshot applied (issue #741: the LLM SQL
+/// the caps constrain runs HERE, so the sandbox must cap from the same
+/// snapshot the admin engine holds). Sources and results are
+/// attached/mirrored after opening.
+pub(crate) fn open(engine_defaults: &EngineDefaults) -> Result<Connection, ExecError> {
     let conn = Connection::open_in_memory().map_err(duck_err)?;
-    apply_resource_caps(&conn);
+    apply_resource_caps(
+        &conn,
+        &engine_defaults.memory_limit,
+        engine_defaults.threads,
+    );
     Ok(conn)
 }
 
@@ -198,6 +206,45 @@ fn duck_err(e: duckdb::Error) -> ExecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #741 AC (sandbox face): the session snapshot's caps land on the
+    /// sandbox instance the provider SQL actually runs on. Same readback the
+    /// admin-face test uses, so the two surfaces are pinned to one snapshot.
+    #[test]
+    fn open_applies_the_session_snapshot_caps() {
+        let snapshot = EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+        };
+        let conn = open(&snapshot).expect("sandbox opens");
+        crate::guardrail::tests::assert_memory_cap_lands(&conn, 256e6);
+        let (_, threads) = crate::guardrail::tests::read_caps(&conn);
+        assert_eq!(threads, "2", "threads PRAGMA lands");
+    }
+
+    /// Issue #741 AC: an ill-formed memory_limit never reaches the sandbox
+    /// either -- the shared apply-time gate reverts to the tightened
+    /// constant, the sandbox still opens and serves queries, and the
+    /// well-formed sibling still lands.
+    #[test]
+    fn open_survives_a_malformed_memory_limit() {
+        let snapshot = EngineDefaults {
+            memory_limit: "not-a-limit".to_string(),
+            threads: 1,
+            row_cap: 100,
+        };
+        let conn = open(&snapshot).expect("sandbox opens despite malformed limit");
+        let one: i64 = conn
+            .query_row("SELECT 1", [], |r| r.get(0))
+            .expect("usable");
+        assert_eq!(one, 1);
+        crate::guardrail::tests::assert_memory_cap_lands(
+            &conn, 512e6, // the `MEMORY_LIMIT` constant, not DuckDB's default
+        );
+        let (_, threads) = crate::guardrail::tests::read_caps(&conn);
+        assert_eq!(threads, "1", "the well-formed threads PRAGMA still lands");
+    }
 
     // The shared mirror primitive carries prior results into the sandbox AND the
     // new result back to admin, so it must preserve column types AND NULLs

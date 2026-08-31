@@ -9,7 +9,7 @@
 
 **app-config IN（可落盘）**：
 - 导出起始目录（「上次用过的目录」，ADR-0004）/ 默认导出格式
-- 引擎默认参数：`memory_limit` / `threads` / 行数上限（ADR-0005）/ 语句超时
+- 引擎默认参数：`memory_limit` / `threads` / 行数上限（ADR-0005）
 - 隐私默认：样本默认行数、按列脱敏的**默认**开关（ADR-0011）
 - 接入配置：`baseURL` / endpoint（ADR-0019，**不含 key**）
 - UI 偏好：最近文件列表（路径指针）、主题

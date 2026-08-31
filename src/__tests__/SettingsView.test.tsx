@@ -76,7 +76,7 @@ function baseAppConfig(): AppConfig {
     format_version: 2,
     theme: "system" as const,
     locale: "system" as const,
-    engine: { memory_limit: "512MB", threads: 1, row_cap: 100, statement_timeout_ms: 30000 },
+    engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
     privacy: { send_samples: true },
     provider: {
       profiles: [
@@ -279,7 +279,7 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
   });
 
   it("engine field Save persists app-config without closing (per-field save, ADR-0075)", async () => {
-    // The global footer Save is retired (ADR-0075): the engine pane carries four
+    // The global footer Save is retired (ADR-0075): the engine pane carries three
     // independent per-field Save buttons. Saving one writes app-config and keeps
     // the overlay open (there is no Save-and-close any more).
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());

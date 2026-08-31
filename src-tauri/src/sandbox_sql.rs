@@ -136,6 +136,11 @@ pub(crate) struct SandboxDeps<'a> {
     /// The row-count ceiling (ADR-0005 L3). A result exceeding it is refused
     /// (silent truncation forbidden, ADR-0030).
     pub result_row_cap: u64,
+    /// The session-level engine-defaults snapshot (issue #741), projected
+    /// from the admin engine's own copy so both execution faces cap from one
+    /// snapshot: the sandbox the provider SQL runs on is the object these
+    /// caps constrain.
+    pub engine_defaults: &'a crate::app_config::model::EngineDefaults,
 }
 
 /// A sandbox table the runner hands back to the caller for its tail. Owns the
@@ -206,7 +211,7 @@ pub(crate) fn run_sandboxed_read(
     // prior results. Dropped at end of scope (per-turn isolation, ADR-0027).
     // The engine-level disabled_filesystems lockdown was removed (ADR-0088):
     // FsAcl + non-literal refusal in preflight is the sole read_* constraint.
-    let sandbox_conn = sandbox::open().map_err(lift_exec_error)?;
+    let sandbox_conn = sandbox::open(deps.engine_defaults).map_err(lift_exec_error)?;
     sandbox::attach_sources(&sandbox_conn, deps.working_set, deps.source_files)
         .map_err(lift_exec_error)?;
     sandbox::mirror_results(&sandbox_conn, deps.admin_conn, deps.working_set)
@@ -306,6 +311,40 @@ mod tests {
     use crate::workingset::WorkingSet;
     use std::fs;
     use tempfile::TempDir;
+
+    /// Issue #741 (sandbox projection): `SandboxDeps.engine_defaults` is what
+    /// the runner threads into `sandbox::open` -- the seam where a revert to
+    /// a hardcoded default would leave the sandbox capping on the constants
+    /// while admin tracks the config, with no test noticing. Run a real
+    /// sandboxed read and read the setting back off the sandbox instance.
+    #[test]
+    fn the_sandbox_projection_applies_the_deps_snapshot() {
+        let admin = Connection::open_in_memory().unwrap();
+        let snapshot = crate::app_config::model::EngineDefaults {
+            memory_limit: "256MB".to_string(),
+            threads: 2,
+            row_cap: 500,
+        };
+        let deps = SandboxDeps {
+            admin_conn: &admin,
+            source_files: &HashMap::new(),
+            working_set: &WorkingSet::default(),
+            result_row_cap: 500,
+            engine_defaults: &snapshot,
+        };
+        let table = run_sandboxed_read(
+            "SELECT value AS threads FROM duckdb_settings() WHERE name='threads'",
+            "_probe",
+            &deps,
+            &CancelToken::new(),
+        )
+        .expect("sandboxed read");
+        let threads: String = table
+            .conn
+            .query_row("SELECT threads FROM _probe", [], |r| r.get(0))
+            .expect("probe row");
+        assert_eq!(threads, "2", "the sandbox caps from the deps snapshot");
+    }
 
     /// A working set with one live source member named `people`.
     fn ws_with_people() -> WorkingSet {

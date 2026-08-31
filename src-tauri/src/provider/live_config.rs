@@ -1714,7 +1714,6 @@ mod tests {
             memory_limit: "2048MB".into(),
             threads: 0, // invalid -> normalize clamps to 1
             row_cap: 1000,
-            statement_timeout_ms: 5000,
         };
         cfg.provider
             .active_mut()
