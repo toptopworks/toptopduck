@@ -24,6 +24,41 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
+// Radix Select's portal + animation model does not cooperate with jsdom's
+// synchronous fireEvent (the dropdown portal never mounts before findByRole
+// times out). Mock the primitives as plain <select>s (same convention as
+// GuidedLoadDialog.test.tsx). The composer's auth/runtime chips also ride
+// these primitives and stay mounted in every App render, so the mock carries
+// no shared data-testid -- flows scope the select they drive, e.g. via
+// within(dialog).getByRole("combobox").
+vi.mock("../components/ui/select", () => ({
+  Select: ({
+    value,
+    onValueChange,
+    disabled,
+    children,
+  }: {
+    value: string;
+    onValueChange: (v: string) => void;
+    disabled?: boolean;
+    children: ReactNode;
+  }) => (
+    <select
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onValueChange(e.currentTarget.value)}
+    >
+      {children}
+    </select>
+  ),
+  SelectTrigger: ({ children }: { children?: ReactNode }) => <>{children}</>,
+  SelectContent: ({ children }: { children?: ReactNode }) => <>{children}</>,
+  SelectItem: ({ value, children }: { value: string; children?: ReactNode }) => (
+    <option value={value}>{children}</option>
+  ),
+  SelectValue: () => null,
+}));
+
 // Mutable working set the api mock reflects after a guided load (the dialog
 // flow's end state). vi.hoisted keeps it alive across the hoisted vi.mock.
 const state = vi.hoisted(() => ({ workingSet: [] as DatasetDescriptor[] }));
@@ -282,10 +317,13 @@ describe("App guided-load flow", () => {
     expect(screen.getByText(/引导加载：m/)).toBeInTheDocument();
 
     // Choose the real header (row 2) and submit -> guided ingest (AC3/AC7 seam).
-    fireEvent.change(screen.getByLabelText(/表头所在行/), {
-      target: { value: "2" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /按选择加载/ }));
+    // The mocked header-row Select is the only combobox INSIDE the dialog (the
+    // composer's mocked selects live outside it).
+    fireEvent.change(
+      within(screen.getByRole("dialog")).getByRole("combobox"),
+      { target: { value: "2" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "加载" }));
 
     await waitFor(() =>
       expect(ingestFileGuided).toHaveBeenCalledWith("sess-1", "/x/m.xlsx", [
@@ -1090,7 +1128,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
     expect(askQuestion).not.toHaveBeenCalled();
     fireEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", { name: /按选择加载/ }),
+      within(screen.getByRole("dialog")).getByRole("button", { name: "加载" }),
     );
 
     await waitFor(() =>

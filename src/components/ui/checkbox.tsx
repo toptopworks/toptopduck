@@ -1,0 +1,43 @@
+import { type ComponentProps } from "react";
+import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
+import { Check } from "lucide-react";
+
+import { cn } from "@/lib/utils";
+
+// shadcn/ui v4 new-york copy-in (ADR-0049; issue #749 guided-load control
+// sweep). Radix checkbox is a button-typed role="checkbox" toggle with
+// built-in keyboard (Space) + aria-checked; the checked state paints the
+// teal box (bg-primary / border-primary) that flips with .dark via tokens.
+// The Table primitive's [&:has([role=checkbox])] alignment hooks (ADR-0067)
+// pick this role up inside table cells.
+//
+// Known gap kept for copy-in fidelity (ADR-0049): the props surface admits
+// checked="indeterminate", but only data-[state=checked] is styled and the
+// Indicator renders a lone Check icon — an indeterminate value would draw a
+// checkmark on an unfilled box. No consumer passes it today; extend the
+// variants + a Minus indicator here before relying on it.
+
+function Checkbox({
+  className,
+  ...props
+}: ComponentProps<typeof CheckboxPrimitive.Root>) {
+  return (
+    <CheckboxPrimitive.Root
+      data-slot="checkbox"
+      className={cn(
+        "peer border-input data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=checked]:border-primary focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 size-4 shrink-0 rounded-xs border shadow-xs transition-shadow outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50",
+        className,
+      )}
+      {...props}
+    >
+      <CheckboxPrimitive.Indicator
+        data-slot="checkbox-indicator"
+        className="flex items-center justify-center text-current transition-none"
+      >
+        <Check className="size-3.5" />
+      </CheckboxPrimitive.Indicator>
+    </CheckboxPrimitive.Root>
+  );
+}
+
+export { Checkbox };
