@@ -65,9 +65,10 @@ describe("PrivacyControls", () => {
     renderI18n(
       <PrivacyControls dataset={dataset} loading={false} onPrivacyChange={() => {}} />,
     );
-    // Samples off + one type-only column reflected honestly.
+    // Samples off + one type-only column reflected honestly. The parenthetical
+    // stays brand-neutral: "only the data type", never the engine brand (#739).
     expect(screen.getByText(/不发送任何样本值/)).toBeInTheDocument();
-    expect(screen.getByText(/1 列仅类型/)).toBeInTheDocument();
+    expect(screen.getByText(/1 列仅类型.*仅数据类型/)).toBeInTheDocument();
     // The type-only column name is NOT listed among sent columns.
     expect(screen.getByText(/id）/)).toBeInTheDocument();
   });

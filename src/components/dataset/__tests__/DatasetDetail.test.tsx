@@ -10,6 +10,8 @@ describe("DatasetDetail", () => {
     renderI18n(<DatasetDetail dataset={mockDataset} />);
     expect(screen.getByText("BIGINT")).toBeInTheDocument();
     expect(screen.getByText("VARCHAR")).toBeInTheDocument();
+    // The type column header is brand-neutral (issue #739).
+    expect(screen.getByRole("columnheader", { name: "数据类型" })).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText(/行数：5/)).toBeInTheDocument();
     // Privacy controls are absent when onPrivacyChange is not supplied.
