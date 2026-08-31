@@ -292,6 +292,8 @@ describe("App guided-load flow", () => {
               ["id", "name"],
               ["1", "Alice"],
             ],
+            total_rows: 3,
+            state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
           },
         ],
       },
@@ -1084,7 +1086,14 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         data: {
           source_path: "/x/m.xlsx",
           workbook_name: "m.xlsx",
-          sheets: [{ name: "Sheet1", preview: [["a"]], total_rows: 1, reason: "MultipleHeaderRows" }],
+          sheets: [
+            {
+              name: "Sheet1",
+              preview: [["a"]],
+              total_rows: 1,
+              state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
+            },
+          ],
         },
       });
     const { onSeedDraft } = renderPaneWithPending({
@@ -1117,7 +1126,14 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         data: {
           source_path: "/x/m.xlsx",
           workbook_name: "m.xlsx",
-          sheets: [{ name: "Sheet1", preview: [["a"]], total_rows: 1, reason: "MultipleHeaderRows" }],
+          sheets: [
+            {
+              name: "Sheet1",
+              preview: [["a"]],
+              total_rows: 1,
+              state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
+            },
+          ],
         },
       });
     vi.mocked(ingestFileGuided).mockResolvedValueOnce({

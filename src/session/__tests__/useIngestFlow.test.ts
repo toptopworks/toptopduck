@@ -54,7 +54,14 @@ const SID = "sess-1";
 const guidanceRequest: GuidanceRequest = {
   source_path: "/x.xlsx",
   workbook_name: "x.xlsx",
-  sheets: [{ name: "Sheet1", preview: [["a", "b"]], total_rows: 2, reason: "MultipleHeaderRows" }],
+  sheets: [
+    {
+      name: "Sheet1",
+      preview: [["a", "b"]],
+      total_rows: 2,
+      state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
+    },
+  ],
 };
 
 const sheetGuidance: SheetGuidance[] = [

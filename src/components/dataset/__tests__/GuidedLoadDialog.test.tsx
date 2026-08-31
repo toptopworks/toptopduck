@@ -2,9 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { GuidedLoadDialog } from "../GuidedLoadDialog";
-import type { GuidanceRequest, SheetGuidance } from "../../../types/dataset";
+import type {
+  GuidanceReason,
+  GuidanceRequest,
+  GuidanceSheet,
+  SheetGuidance,
+} from "../../../types/dataset";
 import type { AppError } from "../../../types/error";
 import { renderI18n, withIntl } from "../../common/__tests__/helpers";
+
+// Compact two-state constructors for readable fixtures (#751).
+function needsGuidance(reason: GuidanceReason): GuidanceSheet["state"] {
+  return { kind: "NeedsGuidance", data: { reason } };
+}
+function autoTidied(headerRow: number): GuidanceSheet["state"] {
+  return { kind: "AutoTidied", data: { header_row: headerRow } };
+}
 
 // Radix Select's portal + animation model does not cooperate with jsdom's
 // synchronous fireEvent inside a Dialog (the dropdown portal never mounts
@@ -55,7 +68,7 @@ describe("GuidedLoadDialog", () => {
           ["1", "Alice"],
         ],
         total_rows: 3,
-        reason: "MultipleHeaderRows",
+        state: needsGuidance("MultipleHeaderRows"),
       },
     ],
   };
@@ -297,8 +310,18 @@ describe("GuidedLoadDialog", () => {
         source_path: "/x/two.xlsx",
         workbook_name: "two",
         sheets: [
-          { name: "people", preview: [["meta"], ["id"], ["1"]], total_rows: 3, reason: null },
-          { name: "orders", preview: [["junk"], ["qty"], ["7"]], total_rows: 3, reason: null },
+          {
+            name: "people",
+            preview: [["meta"], ["id"], ["1"]],
+            total_rows: 3,
+            state: needsGuidance("AmbiguousHeaderZone"),
+          },
+          {
+            name: "orders",
+            preview: [["junk"], ["qty"], ["7"]],
+            total_rows: 3,
+            state: needsGuidance("NoHeaderRow"),
+          },
         ],
       };
       renderGuided({ request: twoSheets, onSubmit });
@@ -393,7 +416,7 @@ describe("GuidedLoadDialog", () => {
             name: "big",
             preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
             total_rows: 30,
-            reason: null,
+            state: needsGuidance("MultipleHeaderRows"),
           },
         ],
       };
@@ -559,7 +582,7 @@ describe("GuidedLoadDialog", () => {
                   name: "big",
                   preview: Array.from({ length: 8 }, (_, i) => [`n${i + 1}`]),
                   total_rows: 8,
-                  reason: null,
+                  state: needsGuidance("MultipleHeaderRows"),
                 },
               ],
             }}
@@ -588,14 +611,128 @@ describe("GuidedLoadDialog", () => {
           source_path: "/x/two.xlsx",
           workbook_name: "two",
           sheets: [
-            { name: "clean", preview: [["id"], ["1"]], total_rows: 2, reason: null },
-            { name: "rough", preview: [["x"], ["2"]], total_rows: 2, reason: "NoHeaderRow" },
+            { name: "clean", preview: [["id"], ["1"]], total_rows: 2, state: autoTidied(1) },
+            {
+              name: "rough",
+              preview: [["x"], ["2"]],
+              total_rows: 2,
+              state: needsGuidance("NoHeaderRow"),
+            },
           ],
         },
       });
       const dialog = screen.getByRole("dialog");
       expect(dialog).toHaveTextContent("数据从第一行开始");
       expect(dialog).not.toHaveTextContent("检测到多个疑似表头行");
+      // The resolved sheet collapses to its auto-detected summary instead of
+      // a reason line (#751).
+      expect(dialog).toHaveTextContent("表头第 1 行（自动检测）");
+    });
+  });
+
+  describe("auto-tidied sheets: prefill + sectioned presentation (issue #751)", () => {
+    // A mixed workbook in workbook order: "clean" resolved (header detected on
+    // row 2, below a banner title), "rough" deferred.
+    function mixedRequest(): GuidanceRequest {
+      return {
+        source_path: "/x/mixed.xlsx",
+        workbook_name: "mixed",
+        sheets: [
+          {
+            name: "clean",
+            preview: [["Report"], ["id", "name"], ["1", "Alice"]],
+            total_rows: 3,
+            state: autoTidied(2),
+          },
+          {
+            name: "rough",
+            preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
+            total_rows: 3,
+            state: needsGuidance("MultipleHeaderRows"),
+          },
+        ],
+      };
+    }
+
+    it("collapses auto sheets into a summary row; deferred sheets stay expanded", () => {
+      renderGuided({ request: mixedRequest() });
+      const dialog = screen.getByRole("dialog");
+      // Summary = sheet name + detected header row + the Adjust button.
+      expect(dialog).toHaveTextContent("clean");
+      expect(dialog).toHaveTextContent("表头第 2 行（自动检测）");
+      expect(screen.getByRole("button", { name: "调整" })).toBeInTheDocument();
+      // Collapsed: no preview table rows -> no skip checkboxes for "clean".
+      expect(screen.queryByRole("checkbox", { name: "跳过 clean 第 1 行" })).toBeNull();
+      // The deferred sheet keeps its expanded form + reason line (unchanged).
+      expect(dialog).toHaveTextContent("检测到多个疑似表头行");
+      expect(screen.getByRole("checkbox", { name: "跳过 rough 第 3 行" })).toBeInTheDocument();
+      // Workbook order rides the section stack: clean's heading precedes rough's.
+      const headings = Array.from(dialog.querySelectorAll("h3")).map((h) => h.textContent);
+      expect(headings).toEqual(["clean", "rough"]);
+    });
+
+    it("Adjust expands the auto sheet into the full form with the header pre-filled", () => {
+      renderGuided({ request: mixedRequest() });
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      // The full form renders the preview table with the guess in the select.
+      expect(screen.getByRole("checkbox", { name: "跳过 clean 第 1 行" })).toBeInTheDocument();
+      const cleanSelect = screen.getAllByTestId("header-row-select")[0]!;
+      expect(cleanSelect).toHaveValue("2"); // the guess, not the blind row 1
+      // The guessed row carries the accent mark in the preview.
+      const secondRow = document.querySelectorAll("table.preview tr")[1]!;
+      expect(secondRow.className.split(/\s+/)).toContain("bg-accent");
+    });
+
+    it("an expanded auto sheet that outgrows one window shows the pager", () => {
+      renderGuided({
+        request: {
+          source_path: "/x/tallauto.xlsx",
+          workbook_name: "tallauto",
+          sheets: [
+            {
+              name: "tall",
+              preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
+              total_rows: 30,
+              state: autoTidied(1),
+            },
+            { name: "rough", preview: [["x"], ["1"]], total_rows: 2, state: needsGuidance("NoHeaderRow") },
+          ],
+        },
+      });
+      // No pager while collapsed.
+      expect(screen.queryByRole("button", { name: "下一页" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
+    });
+
+    it("submitting from the summary covers every sheet, the auto one with its guess", () => {
+      const onSubmit = vi.fn();
+      renderGuided({ request: mixedRequest(), onSubmit });
+      // No expansion, no adjustment: the guess rides as an explicit rectify.
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 2, skip_rows: [] } },
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("an adjusted auto sheet submits the user's value, not the guess", () => {
+      const onSubmit = vi.fn();
+      renderGuided({ request: mixedRequest(), onSubmit });
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      const cleanSelect = screen.getAllByTestId("header-row-select")[0]!;
+      fireEvent.change(cleanSelect, { target: { value: "1" } });
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 1, skip_rows: [] } },
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("disables Adjust while loading, like every other control", () => {
+      renderGuided({ request: mixedRequest(), loading: true });
+      expect(screen.getByRole("button", { name: "调整" })).toBeDisabled();
     });
   });
 });

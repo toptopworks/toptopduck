@@ -9,8 +9,8 @@
 //! side changes, the other must follow, and these tests make that coupling loud.
 
 use toptopduck_lib::{
-    DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet, LoadError,
-    LoadOutcome, RectifyProvenance, SheetRectify,
+    DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet,
+    GuidanceSheetState, LoadError, LoadOutcome, RectifyProvenance, SheetRectify,
 };
 
 /// Serialize `value`, assert the JSON equals `expected` (the pinned wire
@@ -176,29 +176,32 @@ fn load_outcome_needs_guidance_carries_request_in_data() {
 }
 
 #[test]
-fn guidance_sheet_carries_total_rows_and_reason_wire_shape() {
-    // Issue #750: the pager drives off total_rows, and the per-sheet failure
-    // reason crosses as a plain string (unit variants) or null for a sheet
-    // that tidied confidently (mirrored in src/types/dataset.ts).
+fn guidance_sheet_carries_total_rows_and_state_wire_shape() {
+    // Issues #750/#751: the pager drives off total_rows, and the per-sheet
+    // two-state crosses adjacently tagged -- the failure reason (a plain
+    // string, unit variants) for a deferred sheet, the detected header row
+    // for a sheet the auto-tidy resolved (mirrored in src/types/dataset.ts).
     let failing = GuidanceSheet {
         name: "report".into(),
         preview: vec![vec!["a".into()]],
         total_rows: 1024,
-        reason: Some(GuidanceReason::MultipleHeaderRows),
+        state: GuidanceSheetState::NeedsGuidance {
+            reason: GuidanceReason::MultipleHeaderRows,
+        },
     };
     assert_wire(
         &failing,
-        r#"{"name":"report","preview":[["a"]],"total_rows":1024,"reason":"MultipleHeaderRows"}"#,
+        r#"{"name":"report","preview":[["a"]],"total_rows":1024,"state":{"kind":"NeedsGuidance","data":{"reason":"MultipleHeaderRows"}}}"#,
     );
     let tidied = GuidanceSheet {
         name: "clean".into(),
         preview: vec![],
         total_rows: 3,
-        reason: None,
+        state: GuidanceSheetState::AutoTidied { header_row: 2 },
     };
     assert_wire(
         &tidied,
-        r#"{"name":"clean","preview":[],"total_rows":3,"reason":null}"#,
+        r#"{"name":"clean","preview":[],"total_rows":3,"state":{"kind":"AutoTidied","data":{"header_row":2}}}"#,
     );
 }
 

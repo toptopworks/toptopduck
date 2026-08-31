@@ -23,7 +23,9 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
           ["1", "Alice"],
         ],
         total_rows: 3,
-        reason: null,
+        // Deferred state -> the full form renders (a resolved sheet would
+        // start collapsed on its summary, #751).
+        state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
       },
     ],
   };
@@ -120,7 +122,7 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
             name: "big",
             preview: [["r1"], ["r2"], ["r3"]],
             total_rows: 8,
-            reason: null,
+            state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
           },
         ],
       },

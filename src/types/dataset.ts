@@ -117,6 +117,15 @@ export type GuidanceReason =
   | "NoHeaderRow"
   | "AmbiguousHeaderZone";
 
+// One sheet's two-state on the guidance wire (issues #750/#751), mirroring
+// the Rust GuidanceSheetState (serde adjacently tagged): auto-tidy resolved
+// the sheet (the detected header row rides as the dialog's pre-fill guess)
+// or deferred to the user (the failure reason rides instead). Guess and
+// reason are mutually exclusive at the type level.
+export type GuidanceSheetState =
+  | { kind: "AutoTidied"; data: { header_row: number } }
+  | { kind: "NeedsGuidance"; data: { reason: GuidanceReason } };
+
 export interface GuidanceSheet {
   name: string;
   // The FIRST preview window's raw rows (rendered strings), inlined so the
@@ -126,9 +135,9 @@ export interface GuidanceSheet {
   // Total row count of the sheet (issue #750): drives the pager's position
   // indicator, next-page disable, and visibility (fits-one-window -> hidden).
   total_rows: number;
-  // Why auto-tidy failed on THIS sheet; null = this sheet tidied confidently
-  // and only rides the request because another sheet in the workbook failed.
-  reason: GuidanceReason | null;
+  // This sheet's two-state (issue #750/#751): auto-resolved with a header
+  // pre-fill guess, or deferred to the user with the failure reason.
+  state: GuidanceSheetState;
 }
 
 export interface GuidanceRequest {

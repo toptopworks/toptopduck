@@ -229,6 +229,28 @@ pub enum GuidanceReason {
     AmbiguousHeaderZone,
 }
 
+/// One sheet's state on the guided-load wire (issues #750/#751): auto-tidy
+/// resolved it confidently -- then the detected header row rides the request
+/// as the dialog's pre-fill guess -- or it deferred to the user, and the
+/// failure reason rides instead. The tagged union keeps guess and reason
+/// mutually exclusive at the type level (`RectifyProvenance` precedent); the
+/// pre-#751 `reason: Option<...>` could name the failure but couldn't carry
+/// the resolved sheets' guess. Crosses IPC adjacently tagged, mirrored in
+/// `src/types/dataset.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum GuidanceSheetState {
+    /// Auto-tidy succeeded (issue #751): this sheet only rides the request
+    /// because ANOTHER sheet in the workbook deferred (transactional
+    /// no-partial-load, ADR-0015). Carries the detected header row -- 1-based
+    /// absolute, [`SheetRectify::header_row`] semantics -- as the dialog's
+    /// pre-fill guess.
+    AutoTidied { header_row: u32 },
+    /// Auto-tidy gave up on this sheet (issue #750); carries WHY, so the
+    /// dialog can surface it under the sheet heading.
+    NeedsGuidance { reason: GuidanceReason },
+}
+
 /// One visible Excel sheet's raw preview for the guided-load dialog: enough rows
 /// (rendered as strings) for the user to locate the header row and mark skips.
 /// Pre-rectify, so merged cells appear as their top-left value with blanks below
@@ -244,11 +266,9 @@ pub struct GuidanceSheet {
     /// indicator, its next-page disable, and its visibility (a sheet that fits
     /// one window shows no pager).
     pub total_rows: usize,
-    /// Why auto-tidy failed on THIS sheet (issue #750); `None` = this sheet
-    /// tidied confidently and only rides the request because ANOTHER sheet in
-    /// the workbook failed (transactional no-partial-load, ADR-0015). The
-    /// `Option` shape also leaves room for future header pre-fill.
-    pub reason: Option<GuidanceReason>,
+    /// This sheet's two-state (issue #750/#751): auto-resolved with a header
+    /// pre-fill guess, or deferred to the user with the failure reason.
+    pub state: GuidanceSheetState,
 }
 
 /// A workbook the auto-tidy could not confidently rectify (ADR-0015 guided

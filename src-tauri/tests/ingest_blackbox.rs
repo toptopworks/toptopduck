@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use rust_xlsxwriter::{Formula, Workbook};
 use toptopduck_lib::{
-    DatasetDescriptor, DatasetPrivacy, GuidanceReason, LoadError, LoadOutcome, RectifyProvenance,
-    RenameError, Session, SheetGuidance, SheetRectify,
+    DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceSheetState, LoadError, LoadOutcome,
+    RectifyProvenance, RenameError, Session, SheetGuidance, SheetRectify,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -663,8 +663,10 @@ fn multi_row_header_requests_guidance() {
     // auto algorithm deferred (two header-like rows above the data).
     assert_eq!(guidance.sheets[0].total_rows, 3);
     assert_eq!(
-        guidance.sheets[0].reason,
-        Some(GuidanceReason::MultipleHeaderRows)
+        guidance.sheets[0].state,
+        GuidanceSheetState::NeedsGuidance {
+            reason: GuidanceReason::MultipleHeaderRows
+        }
     );
 }
 
@@ -1291,18 +1293,19 @@ fn expect_guidance(session: &mut Session, path: &Path) -> toptopduck_lib::Guidan
     }
 }
 
-#[test]
-fn guidance_marks_only_the_failing_sheets_with_a_reason() {
-    // A workbook where one sheet tidies confidently and another defers: the
-    // transactional no-partial-load sends BOTH to the dialog, but only the
-    // failing sheet carries a reason (issue #750).
+/// A mixed workbook (issue #750/#751 fixture): sheet "clean" tidies
+/// confidently -- a single-cell banner title above the real header, so the
+/// header sits on RAW row 2 -- while sheet "rough" defers (two header-like
+/// rows above the data). Returns the path + the owning TempDir.
+fn mixed_guided_xlsx() -> (PathBuf, tempfile::TempDir) {
     let mut wb = Workbook::new();
     let clean = wb.add_worksheet();
     clean.set_name("clean").expect("name");
-    clean.write_string(0, 0, "id").unwrap();
-    clean.write_string(0, 1, "name").unwrap();
-    clean.write_number(1, 0, 1.0).unwrap();
-    clean.write_string(1, 1, "Alice").unwrap();
+    clean.write_string(0, 0, "Report").unwrap(); // single-cell banner title
+    clean.write_string(1, 0, "id").unwrap();
+    clean.write_string(1, 1, "name").unwrap();
+    clean.write_number(2, 0, 1.0).unwrap();
+    clean.write_string(2, 1, "Alice").unwrap();
     let rough = wb.add_worksheet();
     rough.set_name("rough").expect("name");
     rough.write_string(0, 0, "meta").unwrap();
@@ -1311,17 +1314,88 @@ fn guidance_marks_only_the_failing_sheets_with_a_reason() {
     rough.write_string(1, 1, "name").unwrap();
     rough.write_number(2, 0, 1.0).unwrap();
     rough.write_string(2, 1, "Bob").unwrap();
-    let (xlsx, _dir) = save_xlsx(wb, "mixed.xlsx");
+    save_xlsx(wb, "mixed.xlsx")
+}
 
+#[test]
+fn guidance_marks_failing_sheets_and_carries_the_resolved_sheets_guess() {
+    // A workbook where one sheet tidies confidently and another defers: the
+    // transactional no-partial-load sends BOTH to the dialog. The failing
+    // sheet carries the reason (issue #750); the resolved sheet carries the
+    // auto-detected header row as the dialog's pre-fill guess (issue #751) --
+    // in the RAW row semantics, so the banner title's row counts.
+    let (xlsx, _dir) = mixed_guided_xlsx();
     let mut session = Session::new().expect("session");
     let guidance = expect_guidance(&mut session, &xlsx);
     assert_eq!(guidance.sheets.len(), 2);
-    let clean_sheet = guidance.sheets.iter().find(|s| s.name == "clean").unwrap();
-    assert_eq!(clean_sheet.reason, None); // tidied confidently; rides along only
-    assert_eq!(clean_sheet.total_rows, 2);
-    let rough_sheet = guidance.sheets.iter().find(|s| s.name == "rough").unwrap();
-    assert_eq!(rough_sheet.reason, Some(GuidanceReason::MultipleHeaderRows));
+    // Workbook order rides the request unchanged.
+    assert_eq!(guidance.sheets[0].name, "clean");
+    assert_eq!(guidance.sheets[1].name, "rough");
+    let clean_sheet = &guidance.sheets[0];
+    assert_eq!(
+        clean_sheet.state,
+        GuidanceSheetState::AutoTidied { header_row: 2 } // below the banner
+    );
+    assert_eq!(clean_sheet.total_rows, 3);
+    let rough_sheet = &guidance.sheets[1];
+    assert_eq!(
+        rough_sheet.state,
+        GuidanceSheetState::NeedsGuidance {
+            reason: GuidanceReason::MultipleHeaderRows
+        }
+    );
     assert_eq!(rough_sheet.total_rows, 3);
+}
+
+#[test]
+fn guided_commit_covers_every_sheet_including_the_auto_tidied_guess() {
+    // Issue #751 AC: the guided submit covers ALL of the workbook's sheets --
+    // a resolved sheet rides with its guess (or the user's adjustment) as an
+    // explicit rectify, a deferred sheet with the user's pick -- and the whole
+    // workbook loads. The guess enters the recipe as the USER's choice
+    // (ADR-0042: the config is visible at load time, which counts as consent).
+    let (xlsx, _dir) = mixed_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    let guidance = expect_guidance(&mut session, &xlsx);
+    // Mirror the dialog's defaults: the resolved sheet's guess + the deferred
+    // sheet's user pick (row 2 is "rough"'s real header).
+    let clean_guess = match guidance.sheets[0].state {
+        GuidanceSheetState::AutoTidied { header_row } => header_row,
+        other => panic!("expected AutoTidied, got {other:?}"),
+    };
+    let picks = vec![
+        SheetGuidance {
+            name: "clean".into(),
+            rectify: SheetRectify {
+                header_row: clean_guess,
+                skip_rows: vec![],
+            },
+        },
+        SheetGuidance {
+            name: "rough".into(),
+            rectify: SheetRectify {
+                header_row: 2,
+                skip_rows: vec![],
+            },
+        },
+    ];
+    match session.ingest_guided(&xlsx, &picks) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    }
+    // Every sheet materialized; the guess-driven rectify is recorded as an
+    // explicit user decision, not Auto.
+    let clean = session.get("clean").expect("clean loaded");
+    assert_eq!(
+        clean.rectify,
+        RectifyProvenance::User(SheetRectify {
+            header_row: 2,
+            skip_rows: vec![]
+        })
+    );
+    assert_eq!(clean.row_count, 1); // header row 2 + 1 data row, banner dropped
+    let rough = session.get("rough").expect("rough loaded");
+    assert_eq!(rough.row_count, 1);
 }
 
 #[test]

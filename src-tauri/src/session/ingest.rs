@@ -26,8 +26,8 @@ use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet, LoadError,
-    LoadOutcome, RectifyProvenance, SheetGuidance, SheetRectify, SourceLifecycleKind,
+    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, GuidanceSheetState,
+    LoadError, LoadOutcome, RectifyProvenance, SheetGuidance, SheetRectify, SourceLifecycleKind,
 };
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
@@ -233,26 +233,30 @@ impl super::Session {
 
         // Auto-tidy EVERY sheet (issue #750): any sheet that can't be
         // confidently tidied sends the whole workbook to guided loading (no
-        // partial load -- transactional), and each sheet's failure reason rides
-        // the guidance so the dialog can surface it under the sheet heading.
+        // partial load -- transactional). Each sheet's two-state rides the
+        // guidance: the failure reason (surfaced under the sheet heading) or,
+        // for the resolved sheets, the detected header row as a pre-fill guess
+        // (issue #751).
         let mut entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)> =
             Vec::with_capacity(sheets.len());
-        let mut reasons: Vec<Option<GuidanceReason>> = Vec::with_capacity(sheets.len());
+        let mut states: Vec<GuidanceSheetState> = Vec::with_capacity(sheets.len());
         let mut needs_guidance = false;
         for sheet in &sheets {
             match auto_tidy(sheet) {
                 TidyOutcome::Tidied(t) => {
-                    reasons.push(None);
+                    states.push(GuidanceSheetState::AutoTidied {
+                        header_row: t.header_row,
+                    });
                     entries.push((sheet.name.clone(), t.rows, RectifyProvenance::Auto));
                 }
                 TidyOutcome::NeedsGuidance(reason) => {
                     needs_guidance = true;
-                    reasons.push(Some(reason));
+                    states.push(GuidanceSheetState::NeedsGuidance { reason });
                 }
             }
         }
         if needs_guidance {
-            let request = Self::build_guidance(path, &sheets, &reasons);
+            let request = Self::build_guidance(path, &sheets, &states);
             // Retain the parse for zero-reparse preview paging (issue #750);
             // dropped on guided commit / dialog cancel (see GuidanceRetention).
             self.guidance_retained = Some(GuidanceRetention {
@@ -508,12 +512,13 @@ impl super::Session {
 
     /// Build a [`GuidanceRequest`] from a workbook's sheets: each visible
     /// non-blank sheet's raw top rows rendered as strings (pre-rectify preview)
-    /// plus the total row count + the per-sheet auto-tidy failure reason
-    /// (issue #750). `reasons` is index-aligned with `sheets`.
+    /// plus the total row count + the per-sheet two-state (issue #750/#751:
+    /// the failure reason or the auto-detected header guess). `states` is
+    /// index-aligned with `sheets`.
     fn build_guidance(
         path: &Path,
         sheets: &[ingest::excel::SheetRows],
-        reasons: &[Option<GuidanceReason>],
+        states: &[GuidanceSheetState],
     ) -> GuidanceRequest {
         let workbook_name = path
             .file_stem()
@@ -522,15 +527,15 @@ impl super::Session {
             .to_string();
         // The zip below truncates silently on a length mismatch; both vecs
         // are filled in the same loop, so make that alignment loud.
-        debug_assert_eq!(sheets.len(), reasons.len());
+        debug_assert_eq!(sheets.len(), states.len());
         let sheets_preview = sheets
             .iter()
-            .zip(reasons)
-            .map(|(s, reason)| GuidanceSheet {
+            .zip(states)
+            .map(|(s, state)| GuidanceSheet {
                 name: s.name.clone(),
                 preview: ingest::excel::render_preview(s, GUIDANCE_PREVIEW_ROWS),
                 total_rows: s.rows.len(),
-                reason: *reason,
+                state: *state,
             })
             .collect();
         GuidanceRequest {
