@@ -150,6 +150,7 @@
   "header.nav.forward": "前进",
   "header.settings": "设置",
   "header.softCap": "打开的会话较多——关闭一些以释放内存。",
+  "ingest.batchHalted": "导入已停止，剩余 {count} 个文件未加载。",
   "privacy.heading": "隐私控制",
   "privacy.note.localOnly": "完整数据集永不离开本机；以上控制决定提问时随 schema 一并发送的内容。",
   "privacy.note.typeOnly": "标为「仅类型」的列：其列名与取值都不会发给云端 LLM（仅类型发送，便于 LLM 了解 schema 形状）；样本开启时，这些列在样本中同样被剔除。",

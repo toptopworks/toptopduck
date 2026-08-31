@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, screen } from "@testing-library/react";
 import { GuidedLoadDialog } from "../GuidedLoadDialog";
 import type { GuidanceRequest } from "../../../types/dataset";
+import type { AppError } from "../../../types/error";
 import { renderI18n } from "../../common/__tests__/helpers";
 
 describe("GuidedLoadDialog", () => {
@@ -26,6 +27,7 @@ describe("GuidedLoadDialog", () => {
       <GuidedLoadDialog
         request={request}
         loading={false}
+        error={null}
         onSubmit={onSubmit}
         onCancel={() => {}}
       />,
@@ -46,6 +48,7 @@ describe("GuidedLoadDialog", () => {
       <GuidedLoadDialog
         request={request}
         loading={false}
+        error={null}
         onSubmit={onSubmit}
         onCancel={onCancel}
       />,
@@ -65,6 +68,7 @@ describe("GuidedLoadDialog", () => {
       <GuidedLoadDialog
         request={request}
         loading={false}
+        error={null}
         onSubmit={onSubmit}
         onCancel={onCancel}
       />,
@@ -84,6 +88,7 @@ describe("GuidedLoadDialog", () => {
       <GuidedLoadDialog
         request={request}
         loading={true}
+        error={null}
         onSubmit={() => {}}
         onCancel={onCancel}
       />,
@@ -111,6 +116,7 @@ describe("GuidedLoadDialog", () => {
       <GuidedLoadDialog
         request={request}
         loading={false}
+        error={null}
         onSubmit={() => {}}
         onCancel={() => {}}
       />,
@@ -122,5 +128,55 @@ describe("GuidedLoadDialog", () => {
     expect(document.querySelectorAll("table.preview tr")).toHaveLength(
       request.sheets[0]!.preview.length,
     );
+  });
+
+  describe("inline error (issue #748)", () => {
+    const guidanceError: AppError = {
+      message: "加载失败：文件无法解析",
+      kind: "load",
+      detail: "parse boom",
+    };
+
+    it("renders the error banner inside the dialog, above the footer", () => {
+      // The workspace banner sits behind the modal scrim, so a guided-submit
+      // failure must surface INSIDE the dialog. ErrorBanner renders a
+      // role="alert" Alert with the message + the technical-details fold.
+      renderI18n(
+        <GuidedLoadDialog
+          request={request}
+          loading={false}
+          error={guidanceError}
+          onSubmit={() => {}}
+          onCancel={() => {}}
+        />,
+      );
+      const dialog = screen.getByRole("dialog");
+      const alert = screen.getByRole("alert");
+      expect(dialog.contains(alert)).toBe(true);
+      expect(alert).toHaveTextContent("加载失败：文件无法解析");
+      // The technical detail rides the shared collapsed fold.
+      const fold = document.querySelector(".error-details");
+      expect(fold).not.toBeNull();
+      expect(fold).toHaveTextContent("parse boom");
+      // Above the footer: the banner precedes the footer in document order.
+      const footer = document.querySelector("[data-slot=\"dialog-footer\"]");
+      expect(footer).not.toBeNull();
+      expect(
+        alert.compareDocumentPosition(footer!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+
+    it("renders no alert when error is null", () => {
+      renderI18n(
+        <GuidedLoadDialog
+          request={request}
+          loading={false}
+          error={null}
+          onSubmit={() => {}}
+          onCancel={() => {}}
+        />,
+      );
+      expect(document.querySelector("[role=\"alert\"]")).toBeNull();
+    });
   });
 });

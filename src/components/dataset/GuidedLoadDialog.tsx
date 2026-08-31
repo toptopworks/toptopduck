@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import type { GuidanceRequest, SheetGuidance, SheetRectify } from "../../types/dataset";
+import type { AppError } from "../../types/error";
+import { ErrorBanner } from "../common/ErrorBanner";
 import {
   Dialog,
   DialogContent,
@@ -27,14 +29,28 @@ interface SheetChoice {
 // hand-written overlay div + window keydown listener. The inner controls
 // (native select + checkbox + preview table) are bespoke to this flow and stay
 // as-is -- the issue scope is the dialog chrome, not a form-control sweep.
+//
+// Issue #748: a guided-submit failure renders INLINE via the `error` prop --
+// the shared workspace ErrorBanner sits in the workspace body BEHIND the modal
+// scrim, so it was invisible; the failure had no visible feedback at all. The
+// dialog stays open on failure (in-place retry keeps the sheet choices), the
+// parent clears the error on re-submit / cancel, and remounts this component
+// keyed on the source path so a resumed batch's next file starts from clean
+// choices (the `choices` init runs at mount only).
 export function GuidedLoadDialog({
   request,
   loading,
+  error,
   onSubmit,
   onCancel,
 }: {
   request: GuidanceRequest;
   loading: boolean;
+  /** The guided-submit failure to render inline above the footer (#748), or
+   *  null. The parent owns the lifecycle: written by the guided-submit
+   *  Error / NeedsGuidance-recur / IPC-reject branches, cleared on re-submit
+   *  and cancel. */
+  error: AppError | null;
   onSubmit: (guidance: SheetGuidance[]) => void;
   onCancel: () => void;
 }) {
@@ -172,6 +188,7 @@ export function GuidedLoadDialog({
             </section>
           );
         })}
+        {error && <ErrorBanner error={error} />}
         <DialogFooter>
           <Button variant="outline" onClick={onCancel} disabled={loading}>
             <FormattedMessage id="guidedLoad.cancel" defaultMessage="Cancel" />
