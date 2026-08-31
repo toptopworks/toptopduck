@@ -208,6 +208,27 @@ pub struct StaleAnchor {
     pub reason: StaleReason,
 }
 
+/// Why auto-tidy couldn't confidently rectify one sheet (issue #750). The
+/// variants mirror `auto_tidy`'s [`NeedsGuidance`](crate::ingest::tidy::TidyOutcome)
+/// discrimination points one for one, so the guided-load dialog can name under
+/// each sheet heading what the user should be looking at instead of leaving
+/// them to guess (ADR-0042 -- an informed explicit decision). Crosses IPC as a
+/// plain string (unit variants), mirrored in `src/types/dataset.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuidanceReason {
+    /// Every row is blank -- the sheet carries no content to anchor on.
+    EmptySheet,
+    /// Two or more header-like rows above the first data row: a multi-row
+    /// header the auto algorithm won't guess how to splice.
+    MultipleHeaderRows,
+    /// The first non-blank row already carries data -- no header zone above
+    /// it to anchor on.
+    NoHeaderRow,
+    /// Several non-header-like rows sit above the first data row -- the auto
+    /// algorithm can't tell which (if any) is the header.
+    AmbiguousHeaderZone,
+}
+
 /// One visible Excel sheet's raw preview for the guided-load dialog: enough rows
 /// (rendered as strings) for the user to locate the header row and mark skips.
 /// Pre-rectify, so merged cells appear as their top-left value with blanks below
@@ -215,8 +236,19 @@ pub struct StaleAnchor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuidanceSheet {
     pub name: String,
-    /// Raw top-of-sheet cell rows as rendered strings (ADR-0026 rendering).
+    /// The FIRST preview window's raw cell rows as rendered strings (ADR-0026
+    /// rendering) -- inlined so the initial dialog render needs no extra round
+    /// trip (issue #750). Later windows ride the `guidance_window` command.
     pub preview: Vec<Vec<String>>,
+    /// Total row count of the sheet (issue #750): drives the pager's position
+    /// indicator, its next-page disable, and its visibility (a sheet that fits
+    /// one window shows no pager).
+    pub total_rows: usize,
+    /// Why auto-tidy failed on THIS sheet (issue #750); `None` = this sheet
+    /// tidied confidently and only rides the request because ANOTHER sheet in
+    /// the workbook failed (transactional no-partial-load, ADR-0015). The
+    /// `Option` shape also leaves room for future header pre-fill.
+    pub reason: Option<GuidanceReason>,
 }
 
 /// A workbook the auto-tidy could not confidently rectify (ADR-0015 guided

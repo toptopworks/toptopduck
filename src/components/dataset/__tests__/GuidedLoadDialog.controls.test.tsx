@@ -22,11 +22,13 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
           ["id", "name"],
           ["1", "Alice"],
         ],
+        total_rows: 3,
+        reason: null,
       },
     ],
   };
 
-  function renderDialog() {
+  function renderDialog(overrides?: Partial<{ request: GuidanceRequest }>) {
     renderI18n(
       <GuidedLoadDialog
         request={request}
@@ -34,6 +36,8 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
         error={null}
         onSubmit={() => {}}
         onCancel={() => {}}
+        onFetchWindow={() => Promise.resolve([])}
+        {...overrides}
       />,
     );
   }
@@ -101,5 +105,39 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
     expect(label).toHaveTextContent("3");
     fireEvent.click(label!);
     expect(box).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("renders the pager as Button primitives + a polite live position (issue #750)", () => {
+    // A sheet that outgrows one 3-row window: the pager appears, built from
+    // the design-system Button (outline/icon), with the position indicator
+    // as the live region a page swap announces through.
+    renderDialog({
+      request: {
+        source_path: "/x/big.xlsx",
+        workbook_name: "big",
+        sheets: [
+          {
+            name: "big",
+            preview: [["r1"], ["r2"], ["r3"]],
+            total_rows: 8,
+            reason: null,
+          },
+        ],
+      },
+    });
+    const prev = screen.getByRole("button", { name: "上一页" });
+    const next = screen.getByRole("button", { name: "下一页" });
+    for (const button of [prev, next]) {
+      expect(button.getAttribute("data-slot")).toBe("button");
+      const classes = button.className.split(/\s+/);
+      // Outline variant (border + background surface) at the icon size --
+      // the 36px size-9 hit target stays over the 24px minimum.
+      expect(classes).toContain("border");
+      expect(classes).toContain("bg-background");
+      expect(classes).toContain("size-9");
+    }
+    const live = document.querySelector("[aria-live=\"polite\"]");
+    expect(live).not.toBeNull();
+    expect(live).toHaveTextContent("第 1–3 行 / 共 8 行");
   });
 });

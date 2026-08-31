@@ -72,6 +72,10 @@ vi.mock("../api", async (importOriginal) => {
     createSession: vi.fn(async () => "sess-1"),
     ingestFile: vi.fn(),
     ingestFileGuided: vi.fn(),
+    // The guided dialog cancel fires the retention discard + the pager fetches
+    // windows (issue #750); no-op stubs keep jsdom off the real invoke.
+    discardGuidedRetention: vi.fn(async () => {}),
+    guidanceWindow: vi.fn(async () => []),
     listWorkingSet: vi.fn(),
     activeDataset: vi.fn(async () => null),
     renameDataset: vi.fn(),
@@ -1080,7 +1084,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         data: {
           source_path: "/x/m.xlsx",
           workbook_name: "m.xlsx",
-          sheets: [{ name: "Sheet1", preview: [["a"]] }],
+          sheets: [{ name: "Sheet1", preview: [["a"]], total_rows: 1, reason: "MultipleHeaderRows" }],
         },
       });
     const { onSeedDraft } = renderPaneWithPending({
@@ -1113,7 +1117,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         data: {
           source_path: "/x/m.xlsx",
           workbook_name: "m.xlsx",
-          sheets: [{ name: "Sheet1", preview: [["a"]] }],
+          sheets: [{ name: "Sheet1", preview: [["a"]], total_rows: 1, reason: "MultipleHeaderRows" }],
         },
       });
     vi.mocked(ingestFileGuided).mockResolvedValueOnce({

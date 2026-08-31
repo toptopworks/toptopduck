@@ -111,6 +111,35 @@ export async function ingestFileGuided(
   return invoke<LoadOutcome>("ingest_file_guided", { sessionId, path, guidance });
 }
 
+// Fetch one preview window for a sheet parked on the guided-load dialog
+// (issue #750): rows [offset, offset + limit) rendered as strings, served
+// from the parse the NeedsGuidance outcome retained server-side -- zero
+// workbook re-parse per page. Rejects when the (path, sheet) pair no longer
+// matches the retained guidance (committed / discarded / superseded).
+export async function guidanceWindow(
+  sessionId: string,
+  path: string,
+  sheetName: string,
+  offset: number,
+  limit: number,
+): Promise<string[][]> {
+  return invoke<string[][]>("guidance_window", {
+    sessionId,
+    path,
+    sheetName,
+    offset,
+    limit,
+  });
+}
+
+// Drop the session's retained guided-load parse (issue #750): the dialog's
+// cancel path. Commit already drops it server-side; this covers cancel. The
+// caller fires it best-effort (a reject means nothing leaks -- the retention
+// is session-ephemeral).
+export async function discardGuidedRetention(sessionId: string): Promise<void> {
+  await invoke<void>("discard_guided_retention", { sessionId });
+}
+
 export async function listWorkingSet(sessionId: string): Promise<DatasetDescriptor[]> {
   return invoke<DatasetDescriptor[]>("list_working_set", { sessionId });
 }

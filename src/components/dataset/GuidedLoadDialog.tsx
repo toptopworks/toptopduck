@@ -1,13 +1,15 @@
 import { useId, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Loader2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import type {
+  GuidanceReason,
   GuidanceRequest,
   GuidanceSheet,
   SheetGuidance,
   SheetRectify,
 } from "../../types/dataset";
 import type { AppError } from "../../types/error";
+import { log } from "../../lib/log";
 import { ErrorBanner } from "../common/ErrorBanner";
 import {
   Dialog,
@@ -35,6 +37,38 @@ interface SheetChoice {
   headerRow: number;
   skipRows: number[];
 }
+
+// One sheet's currently rendered preview window (issue #750): the absolute
+// 0-based row offset plus the window's rendered rows. Selections are NEVER
+// stored here -- choices live in absolute row numbers, so paging a window
+// never disturbs them.
+interface SheetWindow {
+  offset: number;
+  rows: string[][];
+}
+
+// The auto-tidy failure reasons surfaced under each sheet heading (issue
+// #750), keyed by the wire enum (GuidanceReason). defaultMessage stays
+// English; the zh-CN counterparts live in the locale catalog.
+const REASON_MESSAGES: Record<GuidanceReason, { id: string; defaultMessage: string }> = {
+  EmptySheet: {
+    id: "guidedLoad.reason.EmptySheet",
+    defaultMessage: "The sheet is blank — no data rows were found.",
+  },
+  MultipleHeaderRows: {
+    id: "guidedLoad.reason.MultipleHeaderRows",
+    defaultMessage: "Multiple header-like rows detected — point at the real header row.",
+  },
+  NoHeaderRow: {
+    id: "guidedLoad.reason.NoHeaderRow",
+    defaultMessage: "Data starts on the first row — no header row detected.",
+  },
+  AmbiguousHeaderZone: {
+    id: "guidedLoad.reason.AmbiguousHeaderZone",
+    defaultMessage:
+      "Several rows above the data don't look like a header — point at the header row and tick the rows to skip.",
+  },
+};
 
 // Guided-load dialog (ADR-0015): shown when auto-tidy can't confidently rectify
 // a workbook. For each sheet the user points at the header row and ticks any
@@ -66,6 +100,7 @@ export function GuidedLoadDialog({
   error,
   onSubmit,
   onCancel,
+  onFetchWindow,
 }: {
   request: GuidanceRequest;
   loading: boolean;
@@ -76,6 +111,10 @@ export function GuidedLoadDialog({
   error: AppError | null;
   onSubmit: (guidance: SheetGuidance[]) => void;
   onCancel: () => void;
+  /** Fetch one preview window for a sheet (issue #750): rows [offset, offset
+   *  + limit) rendered as strings, served from the backend's retained parse.
+   *  A reject keeps the current window (logged, never thrown into the UI). */
+  onFetchWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
 }) {
   const intl = useIntl();
   const [choices, setChoices] = useState<Record<string, SheetChoice>>(() => {
@@ -191,6 +230,7 @@ export function GuidedLoadDialog({
               loading={loading}
               onHeaderRow={(row) => setHeaderRow(sheet.name, row)}
               onToggleSkip={(row) => toggleSkip(sheet.name, row)}
+              onFetchWindow={onFetchWindow}
             />
           ))}
         </div>
@@ -221,31 +261,85 @@ export function GuidedLoadDialog({
   );
 }
 
-// One sheet's guidance block (#749): a headline-sm heading, the Select-driven
-// header row, and the preview table with dual-channel row states. useId gives
-// every sheet its own heading / select ids -- hooks cannot run inside the
-// parent's map callback, hence the component split.
+// One sheet's guidance block (#749): a headline-sm heading, the auto-tidy
+// failure reason (issue #750), the Select-driven header row, the preview
+// window pager (issue #750), and the preview table with dual-channel row
+// states. useId gives every sheet its own heading / select ids -- hooks cannot
+// run inside the parent's map callback, hence the component split.
+//
+// Paging model (issue #750): the FIRST window rides the inlined
+// `sheet.preview`; the pager (visible only when the sheet outgrows one
+// window) swaps `windowState` for fetched windows. The window size is read
+// off the inlined first window, so the backend constant and the pager can
+// never drift. Selections live in ABSOLUTE row numbers (choices) -- a window
+// swap never disturbs them, and picks made across different windows coexist.
+// Both the header Select and the skip checkboxes offer ONLY the current
+// window's rows: a row that isn't rendered is not selectable.
 function GuidedSheetSection({
   sheet,
   choice,
   loading,
   onHeaderRow,
   onToggleSkip,
+  onFetchWindow,
 }: {
   sheet: GuidanceSheet;
   choice: SheetChoice;
   loading: boolean;
   onHeaderRow: (row: number) => void;
   onToggleSkip: (row: number) => void;
+  onFetchWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
 }) {
   const intl = useIntl();
   const headingId = useId();
   const selectId = useId();
+  // The first window is the inlined preview; its height IS the page size.
+  const pageSize = Math.max(sheet.preview.length, 1);
+  const pageCount = Math.ceil(sheet.total_rows / pageSize);
+  const canPage = pageCount > 1;
+  const [windowState, setWindowState] = useState<SheetWindow>({
+    offset: 0,
+    rows: sheet.preview,
+  });
+  const [isFetchingWindow, setIsFetchingWindow] = useState(false);
+  const currentPage = Math.floor(windowState.offset / pageSize);
+
+  async function gotoPage(page: number) {
+    const offset = page * pageSize;
+    if (page < 0 || page >= pageCount || offset === windowState.offset) return;
+    setIsFetchingWindow(true);
+    try {
+      const rows = await onFetchWindow(sheet.name, offset, pageSize);
+      setWindowState({ offset, rows });
+    } catch (e) {
+      // A miss (retention committed / discarded / superseded) or IPC failure
+      // keeps the current window -- the user can still submit what they see.
+      log.warn("GuidedLoadDialog", "preview window fetch failed; keeping current window", {
+        sheet: sheet.name,
+        offset,
+        error: String(e),
+      });
+    } finally {
+      setIsFetchingWindow(false);
+    }
+  }
+
+  // Absolute 1-based row numbers of the window's first / last rendered row
+  // (the last one honors a short final window).
+  const firstRow = windowState.offset + 1;
+  const lastRow = windowState.offset + windowState.rows.length;
+  const rowOptionLabel = (row: number) =>
+    intl.formatMessage({ id: "guidedLoad.rowOption", defaultMessage: "Row {n}" }, { n: row });
   return (
     <section className="py-4" aria-labelledby={headingId}>
       <h3 id={headingId} className="text-base font-semibold">
         {sheet.name}
       </h3>
+      {sheet.reason && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          {intl.formatMessage(REASON_MESSAGES[sheet.reason])}
+        </p>
+      )}
       <div className="mt-3 flex items-center gap-2">
         <Label htmlFor={selectId}>
           <FormattedMessage
@@ -256,33 +350,79 @@ function GuidedSheetSection({
         <Select
           value={String(choice.headerRow)}
           onValueChange={(v) => onHeaderRow(Number(v))}
-          disabled={loading}
+          disabled={loading || isFetchingWindow}
         >
           <SelectTrigger id={selectId} className="w-32">
-            <SelectValue />
+            {/* The placeholder doubles as the label for a selection that sits
+                in ANOTHER window: Radix falls back to it when the value
+                matches no rendered item, so the trigger never reads empty. */}
+            <SelectValue placeholder={rowOptionLabel(choice.headerRow)} />
           </SelectTrigger>
           <SelectContent>
-            {sheet.preview.map((_, i) => (
-              <SelectItem key={i} value={String(i + 1)}>
-                {intl.formatMessage(
-                  { id: "guidedLoad.rowOption", defaultMessage: "Row {n}" },
-                  { n: i + 1 },
-                )}
-              </SelectItem>
-            ))}
+            {windowState.rows.map((_, i) => {
+              const rowNo = windowState.offset + i + 1;
+              return (
+                <SelectItem key={rowNo} value={String(rowNo)}>
+                  {rowOptionLabel(rowNo)}
+                </SelectItem>
+              );
+            })}
           </SelectContent>
         </Select>
       </div>
+      {canPage && (
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => void gotoPage(currentPage - 1)}
+            disabled={loading || isFetchingWindow || currentPage === 0}
+            aria-label={intl.formatMessage({
+              id: "guidedLoad.prevPage",
+              defaultMessage: "Previous page",
+            })}
+          >
+            <ChevronLeft className="size-4" aria-hidden />
+          </Button>
+          {/* The position indicator is the pager's live region: a page swap
+              announces the new range without moving focus. */}
+          <span aria-live="polite" className="text-xs text-muted-foreground">
+            {intl.formatMessage(
+              {
+                id: "guidedLoad.pagePosition",
+                defaultMessage: "Rows {start}–{end} of {total}",
+              },
+              {
+                start: intl.formatNumber(firstRow),
+                end: intl.formatNumber(lastRow),
+                total: intl.formatNumber(sheet.total_rows),
+              },
+            )}
+          </span>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => void gotoPage(currentPage + 1)}
+            disabled={loading || isFetchingWindow || currentPage >= pageCount - 1}
+            aria-label={intl.formatMessage({
+              id: "guidedLoad.nextPage",
+              defaultMessage: "Next page",
+            })}
+          >
+            <ChevronRight className="size-4" aria-hidden />
+          </Button>
+        </div>
+      )}
       <Table className="preview" aria-labelledby={headingId}>
         <TableBody>
-          {sheet.preview.map((cells, i) => {
-            const rowNo = i + 1;
+          {windowState.rows.map((cells, i) => {
+            const rowNo = windowState.offset + i + 1;
             const isHeader = rowNo === choice.headerRow;
             const isSkip = choice.skipRows.includes(rowNo);
             const skipId = `${selectId}-skip-${rowNo}`;
             return (
               <TableRow
-                key={i}
+                key={rowNo}
                 className={
                   isHeader
                     ? "group bg-accent text-accent-foreground hover:bg-accent"
@@ -326,7 +466,7 @@ function GuidedSheetSection({
                       id={skipId}
                       checked={isSkip}
                       onCheckedChange={() => onToggleSkip(rowNo)}
-                      disabled={loading || rowNo <= choice.headerRow}
+                      disabled={loading || isFetchingWindow || rowNo <= choice.headerRow}
                       aria-label={intl.formatMessage(
                         {
                           id: "guidedLoad.skipRowAria",

@@ -107,10 +107,28 @@ export type LoadError =
   | { kind: "UnknownDataset"; data: { reference_name: string } }
   | { kind: "Other"; data: { detail: string } };
 
+// Why auto-tidy couldn't confidently rectify a sheet (issue #750): mirrors
+// the Rust GuidanceReason (plain-string unit variants on the wire). The dialog
+// renders one reason line under each failing sheet's heading so the user sees
+// WHAT to look for instead of guessing (ADR-0042 informed decisions).
+export type GuidanceReason =
+  | "EmptySheet"
+  | "MultipleHeaderRows"
+  | "NoHeaderRow"
+  | "AmbiguousHeaderZone";
+
 export interface GuidanceSheet {
   name: string;
-  // Raw top-of-sheet rows (rendered strings) for the user to locate the header.
+  // The FIRST preview window's raw rows (rendered strings), inlined so the
+  // initial render needs no round trip (issue #750). Later windows ride
+  // guidanceWindow.
   preview: string[][];
+  // Total row count of the sheet (issue #750): drives the pager's position
+  // indicator, next-page disable, and visibility (fits-one-window -> hidden).
+  total_rows: number;
+  // Why auto-tidy failed on THIS sheet; null = this sheet tidied confidently
+  // and only rides the request because another sheet in the workbook failed.
+  reason: GuidanceReason | null;
 }
 
 export interface GuidanceRequest {

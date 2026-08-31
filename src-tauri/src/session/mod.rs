@@ -477,6 +477,13 @@ pub struct Session {
     /// does not need this: recipe SQL already has catalog refs, so process()'s
     /// extract_read_paths finds no read_* calls.
     tool_output_refs: HashMap<String, CachedDerivedRef>,
+    /// The parsed sheets of a workbook parked on the guided-load dialog (issue
+    /// #750): auto-tidy parsed the workbook fully for the `NeedsGuidance`
+    /// outcome, and holding the parse until the dialog resolves makes
+    /// preview-window paging zero-reparse. Set on `NeedsGuidance`, dropped on
+    /// guided commit and on the dialog-cancel discard command (see
+    /// [`ingest::GuidanceRetention`]).
+    guidance_retained: Option<ingest::GuidanceRetention>,
     /// Cancellation + single-in-flight signal for the query loop (ADR-0021,
     /// issue #28). `Arc`-shared with the cancel command (and the timeout
     /// watchdog) so a cancel fires WITHOUT the session lock -- `ask` holds it
@@ -927,6 +934,7 @@ impl Session {
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
+            guidance_retained: None,
             cancel,
             closing: ClosingFlag::new(),
             persister: recipe_persister::RecipePersister::new(),

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { GuidedLoadDialog } from "../GuidedLoadDialog";
 import type { GuidanceRequest, SheetGuidance } from "../../../types/dataset";
@@ -54,6 +54,8 @@ describe("GuidedLoadDialog", () => {
           ["id", "name"],
           ["1", "Alice"],
         ],
+        total_rows: 3,
+        reason: "MultipleHeaderRows",
       },
     ],
   };
@@ -64,10 +66,12 @@ describe("GuidedLoadDialog", () => {
     error: AppError | null;
     onSubmit: (guidance: SheetGuidance[]) => void;
     onCancel: () => void;
+    onFetchWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
   };
 
   function renderGuided(props: Partial<DialogProps> = {}) {
     const onSubmit = props.onSubmit ?? vi.fn();
+    const onFetchWindow = props.onFetchWindow ?? vi.fn().mockResolvedValue([]);
     renderI18n(
       <GuidedLoadDialog
         request={request}
@@ -75,10 +79,11 @@ describe("GuidedLoadDialog", () => {
         error={null}
         onSubmit={onSubmit}
         onCancel={() => {}}
+        onFetchWindow={onFetchWindow}
         {...props}
       />,
     );
-    return { onSubmit };
+    return { onSubmit, onFetchWindow };
   }
 
   const previewRows = () => document.querySelectorAll("table.preview tr");
@@ -292,8 +297,8 @@ describe("GuidedLoadDialog", () => {
         source_path: "/x/two.xlsx",
         workbook_name: "two",
         sheets: [
-          { name: "people", preview: [["meta"], ["id"], ["1"]] },
-          { name: "orders", preview: [["junk"], ["qty"], ["7"]] },
+          { name: "people", preview: [["meta"], ["id"], ["1"]], total_rows: 3, reason: null },
+          { name: "orders", preview: [["junk"], ["qty"], ["7"]], total_rows: 3, reason: null },
         ],
       };
       renderGuided({ request: twoSheets, onSubmit });
@@ -371,6 +376,150 @@ describe("GuidedLoadDialog", () => {
     it("renders no alert when error is null", () => {
       renderGuided();
       expect(document.querySelector("[role=\"alert\"]")).toBeNull();
+    });
+  });
+
+  describe("preview-window paging (issue #750)", () => {
+    // A 30-row sheet: the first 12-row window rides the inlined preview, the
+    // rest arrive through onFetchWindow. The fetch mock fabricates the rows
+    // for whatever [offset, limit) the pager asks, so every window renders
+    // with absolute numbering.
+    function bigRequest(): GuidanceRequest {
+      return {
+        source_path: "/x/big.xlsx",
+        workbook_name: "big",
+        sheets: [
+          {
+            name: "big",
+            preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
+            total_rows: 30,
+            reason: null,
+          },
+        ],
+      };
+    }
+
+    const windowRows = (_sheet: string, offset: number, limit: number) =>
+      Promise.resolve(
+        Array.from({ length: Math.min(limit, 30 - offset) }, (_, i) => [`r${offset + i + 1}`]),
+      );
+
+    it("shows the pager with an accurate position when the sheet outgrows one window", () => {
+      renderGuided({ request: bigRequest() });
+      expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
+    });
+
+    it("hides the pager entirely for a sheet that fits one window", () => {
+      // The default fixture's 3 rows fit one window -- the experience stays
+      // exactly what it was before paging landed (no pager, no indicator).
+      renderGuided();
+      expect(screen.queryByRole("button", { name: "上一页" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "下一页" })).toBeNull();
+    });
+
+    it("next fetches the next window and re-numbers rows absolutely", async () => {
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onFetchWindow });
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await waitFor(() => expect(onFetchWindow).toHaveBeenCalledWith("big", 12, 12));
+      await screen.findByText("r13");
+      // The position indicator moves with the window (polite live region).
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 13–24 行 / 共 30 行");
+      // Row numbers stay ABSOLUTE -- the window's first row reads 13, not 1.
+      expect(
+        screen.getByRole("checkbox", { name: "跳过 big 第 13 行" }),
+      ).toBeInTheDocument();
+    });
+
+    it("disables next on the last window and prev on the first", async () => {
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onFetchWindow });
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      // The final window is short: rows 25–30, and next-page disables.
+      await screen.findByText("r25");
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 25–30 行 / 共 30 行");
+      expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "上一页" })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+      await screen.findByText("r13");
+      fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+      await screen.findByText("r1");
+      expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+    });
+
+    it("a failed window fetch keeps the current window", async () => {
+      // A retention miss (committed / discarded / superseded) or IPC failure
+      // must not blank the preview: the dialog keeps the window it has, the
+      // pager re-arms, and the user can still submit what they see.
+      const onFetchWindow = vi.fn(() => Promise.reject(new Error("retention gone")));
+      renderGuided({ request: bigRequest(), onFetchWindow });
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await waitFor(() => expect(onFetchWindow).toHaveBeenCalledWith("big", 12, 12));
+      // The fetch flag clears -> the pager re-arms on the original window.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled(),
+      );
+      expect(screen.getByText("r1")).toBeInTheDocument();
+      expect(screen.queryByText("r13")).toBeNull();
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
+    });
+
+    it("the header dropdown offers only the current window's rows", async () => {
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onFetchWindow });
+      const select = screen.getByTestId("header-row-select");
+      const optionValues = () =>
+        Array.from(select.querySelectorAll("option")).map((o) => o.getAttribute("value"));
+      expect(optionValues()).toEqual(Array.from({ length: 12 }, (_, i) => String(i + 1)));
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      // After paging, rows 1–12 are invisible -> unselectable.
+      expect(optionValues()).toEqual(Array.from({ length: 12 }, (_, i) => String(i + 13)));
+    });
+
+    it("selections made across windows coexist and submit as absolute rows", async () => {
+      const onSubmit = vi.fn();
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onSubmit, onFetchWindow });
+      // Window 1: header row 3 + skip row 5.
+      fireEvent.change(screen.getByTestId("header-row-select"), { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("checkbox", { name: "跳过 big 第 5 行" }));
+      // Window 2: skip row 15 -- row 5's tick must survive the page swap.
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      fireEvent.click(screen.getByRole("checkbox", { name: "跳过 big 第 15 行" }));
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "big", rectify: { header_row: 3, skip_rows: [5, 15] } },
+      ]);
+    });
+  });
+
+  describe("auto-tidy failure reasons (issue #750)", () => {
+    it("renders the sheet's failure reason under its heading", () => {
+      // The default fixture sheet carries MultipleHeaderRows.
+      renderGuided();
+      expect(screen.getByRole("dialog")).toHaveTextContent("检测到多个疑似表头行");
+    });
+
+    it("renders no reason line for a sheet that tidied confidently", () => {
+      renderGuided({
+        request: {
+          source_path: "/x/two.xlsx",
+          workbook_name: "two",
+          sheets: [
+            { name: "clean", preview: [["id"], ["1"]], total_rows: 2, reason: null },
+            { name: "rough", preview: [["x"], ["2"]], total_rows: 2, reason: "NoHeaderRow" },
+          ],
+        },
+      });
+      const dialog = screen.getByRole("dialog");
+      expect(dialog).toHaveTextContent("数据从第一行开始");
+      expect(dialog).not.toHaveTextContent("检测到多个疑似表头行");
     });
   });
 });

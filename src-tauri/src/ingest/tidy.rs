@@ -21,6 +21,7 @@
 use calamine::Data;
 
 use crate::ingest::excel::SheetRows;
+use crate::model::GuidanceReason;
 
 /// A sheet auto-tidied into a single-header table: the materialized rows (first
 /// row = header) still as `Data` cells, so the shared CSV renderer + DuckDB type
@@ -36,8 +37,10 @@ pub enum TidyOutcome {
     /// The sheet tidied confidently into a single-header table.
     Tidied(TidiedSheet),
     /// The structure can't be confidently read -- the UI must gather explicit
-    /// header/skip choices (ADR-0015 guided fallback).
-    NeedsGuidance,
+    /// header/skip choices (ADR-0015 guided fallback). Carries WHY the auto
+    /// algorithm gave up (issue #750) so the dialog can surface it under the
+    /// sheet heading instead of leaving the user to guess.
+    NeedsGuidance(GuidanceReason),
 }
 
 /// Auto-tidy one sheet (ADR-0015). See the module docs for the transform
@@ -51,7 +54,7 @@ pub fn auto_tidy(sheet: &SheetRows) -> TidyOutcome {
     // counts as non-blank).
     let non_blank: Vec<usize> = (0..rows.len()).filter(|&i| !is_blank(&rows[i])).collect();
     if non_blank.is_empty() {
-        return TidyOutcome::NeedsGuidance;
+        return TidyOutcome::NeedsGuidance(GuidanceReason::EmptySheet);
     }
 
     // First row carrying a data-typed cell (Int/Float/DateTime/Bool). Its
@@ -86,10 +89,19 @@ pub fn auto_tidy(sheet: &SheetRows) -> TidyOutcome {
                 // No multi-column header, but exactly one row above the data:
                 // accept it as a single-column header (a legit narrow table).
                 0 if header_zone.len() == 1 => header_zone[0],
-                // 2+ header-like rows (multi-row header), an empty header zone
-                // (data starts at row 0), or several non-header rows above the
-                // data -- the auto algorithm won't guess; defer to the user.
-                _ => return TidyOutcome::NeedsGuidance,
+                // The first non-blank row already carries data -- no header
+                // zone above it to anchor on (issue #750 reason).
+                0 if header_zone.is_empty() => {
+                    return TidyOutcome::NeedsGuidance(GuidanceReason::NoHeaderRow);
+                }
+                // Several non-header-like rows above the data -- the auto
+                // algorithm can't tell which (if any) is the header.
+                0 => {
+                    return TidyOutcome::NeedsGuidance(GuidanceReason::AmbiguousHeaderZone);
+                }
+                // 2+ header-like rows: a multi-row header the auto algorithm
+                // won't guess how to splice -- defer to the user.
+                _ => return TidyOutcome::NeedsGuidance(GuidanceReason::MultipleHeaderRows),
             }
         }
     };
@@ -211,7 +223,7 @@ mod tests {
     fn tidied_rows(o: TidyOutcome) -> Vec<Vec<Data>> {
         match o {
             TidyOutcome::Tidied(t) => t.rows,
-            TidyOutcome::NeedsGuidance => panic!("expected Tidied, got NeedsGuidance"),
+            TidyOutcome::NeedsGuidance(r) => panic!("expected Tidied, got NeedsGuidance({r:?})"),
         }
     }
 
@@ -295,7 +307,10 @@ mod tests {
             ],
             vec![],
         );
-        assert_eq!(auto_tidy(&g), TidyOutcome::NeedsGuidance);
+        assert_eq!(
+            auto_tidy(&g),
+            TidyOutcome::NeedsGuidance(GuidanceReason::MultipleHeaderRows)
+        );
     }
 
     #[test]
@@ -305,7 +320,29 @@ mod tests {
             vec![row(&[i(1), s("Alice")]), row(&[i(2), s("Bob")])],
             vec![],
         );
-        assert_eq!(auto_tidy(&g), TidyOutcome::NeedsGuidance);
+        assert_eq!(
+            auto_tidy(&g),
+            TidyOutcome::NeedsGuidance(GuidanceReason::NoHeaderRow)
+        );
+    }
+
+    #[test]
+    fn auto_tidy_ambiguous_rows_above_data_needs_guidance() {
+        // Two non-header-like rows (single-cell notes) above the first data
+        // row: no candidate header at all, but not an empty header zone either
+        // -- the third NeedsGuidance discrimination point (issue #750).
+        let g = sheet(
+            vec![
+                row(&[s("quarterly notes")]),
+                row(&[s("draft copy")]),
+                row(&[i(1), s("Alice")]),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            auto_tidy(&g),
+            TidyOutcome::NeedsGuidance(GuidanceReason::AmbiguousHeaderZone)
+        );
     }
 
     #[test]
@@ -357,7 +394,10 @@ mod tests {
     #[test]
     fn auto_tidy_empty_sheet_needs_guidance() {
         let g = sheet(vec![row(&[Data::Empty, Data::Empty])], vec![]);
-        assert_eq!(auto_tidy(&g), TidyOutcome::NeedsGuidance);
+        assert_eq!(
+            auto_tidy(&g),
+            TidyOutcome::NeedsGuidance(GuidanceReason::EmptySheet)
+        );
     }
 
     #[test]
