@@ -33,6 +33,13 @@ export type DatasetLabel = Pick<DatasetDescriptor, "reference_name" | "display_n
 export const HOVER_REVEAL_CLASS =
   "opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100";
 
+// The code-block copy affordance's reveal (issue #746): the same
+// choreography as HOVER_REVEAL_CLASS, keyed on the block's own named group
+// instead of the turn-card group so only the hovered/focused block's copy
+// button reveals (a bare group-hover: would fire for the whole turn).
+export const CODE_BLOCK_REVEAL_CLASS =
+  "opacity-0 transition-opacity duration-150 group-hover/code-block:opacity-100 group-focus-within/code-block:opacity-100 [@media(hover:none)]:opacity-100";
+
 // The reference name of a Materialized turn's primary result (ADR-0084): the
 // promotion chain's tail -- the result the turn's answer references. The stale
 // ghost and the result link both key on the primary; antecedent promotions

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "默认能力：核心 + 文件拾取对话框 + 日志 + 窗口状态持久化 + 自定义 titlebar 窗控 + 平台检测 + 资源管理器定位 + 打开 https 外链（#5 / #98 / #100 / #261 / #262 / #362）",
+  "description": "默认能力：核心 + 文件拾取对话框 + 日志 + 窗口状态持久化 + 自定义 titlebar 窗控 + 平台检测 + 资源管理器定位 + 打开 http(s) 外链（#5 / #98 / #100 / #261 / #262 / #362 / #746）",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "log:default", "window-state:default", "core:window:allow-minimize", "core:window:allow-maximize", "core:window:allow-unmaximize", "core:window:allow-toggle-maximize", "core:window:allow-close", "core:window:allow-start-dragging", "os:default", "opener:allow-reveal-item-in-dir", { "identifier": "opener:allow-open-url", "allow": [{ "url": "https://**" }] }]
+  "permissions": ["core:default", "dialog:default", "log:default", "window-state:default", "core:window:allow-minimize", "core:window:allow-maximize", "core:window:allow-unmaximize", "core:window:allow-toggle-maximize", "core:window:allow-close", "core:window:allow-start-dragging", "os:default", "opener:allow-reveal-item-in-dir", { "identifier": "opener:allow-open-url", "allow": [{ "url": "https://**" }, { "url": "http://**" }] }]
 }

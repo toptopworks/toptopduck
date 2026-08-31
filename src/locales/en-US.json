@@ -483,6 +483,7 @@
   "thread.approval.resolved.deny": "Denied",
   "thread.ariaLabel": "Conversation history",
   "thread.assumption": "Assumption: {text}",
+  "thread.copy.code": "Copy code",
   "thread.copy.copied": "Copied",
   "thread.copy.question": "Copy message",
   "thread.copy.reply": "Copy reply",
