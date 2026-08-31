@@ -145,13 +145,6 @@ export function SkillsSection({
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The entry a successful create returned, held until the drawer closes or
-  // the next create opens: the post-create drawer switches straight to edit
-  // mode, and the refetch the invalidate kicked off has not landed yet --
-  // this stashed entry is the edit draft's source until allSkills carries it
-  // (so the user lands on the full editor immediately instead of a closed
-  // dialog they would have to find + reopen to write the body).
-  const [justCreated, setJustCreated] = useState<SkillEntry | null>(null);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: skillKeys.all() });
@@ -167,8 +160,8 @@ export function SkillsSection({
       // Straight into the edit drawer for the minted skill: the backend
       // wrote the skeleton body, and authoring the real one is the natural
       // next step. The key flip ("" -> the name) remounts the drawer seeded
-      // from the returned entry.
-      setJustCreated(entry);
+      // from the returned entry (createMutation.data bridges the refetch
+      // gap until allSkills carries it).
       setDrawer({ mode: "edit", name: entry.name });
     },
     onError: (e) => setError(fmtError(e, intl)),
@@ -179,10 +172,9 @@ export function SkillsSection({
       updateSkill(name, update),
     onSuccess: () => {
       invalidate();
-      // Drop a stale reject (and the create stash) so a reopened drawer
-      // never seeds off an outdated error / snapshot.
+      // Drop a stale reject so a reopened drawer never seeds off an
+      // outdated error.
       setError(null);
-      setJustCreated(null);
       setDrawer({ mode: "closed" });
     },
     onError: (e) => setError(fmtError(e, intl)),
@@ -298,12 +290,14 @@ export function SkillsSection({
       };
     }
     if (drawer.mode === "edit") {
-      // The justCreated fallback bridges the refetch gap after a create:
-      // once the invalidated query lands, allSkills carries the entry and
-      // the stash is never read again.
+      // The create result bridges the refetch gap after a create: once the
+      // invalidated query lands, allSkills carries the entry and the
+      // mutation result is never read again. The name guard keeps the
+      // bridge scoped to the freshly minted skill only.
+      const created = createMutation.data;
       const skill =
         allSkills.find((s) => s.name === drawer.name) ??
-        (justCreated?.name === drawer.name ? justCreated : null);
+        (created?.name === drawer.name ? created : null);
       if (!skill) return null;
       return {
         currentName: skill.name,
@@ -319,7 +313,7 @@ export function SkillsSection({
       };
     }
     return null;
-  }, [drawer, allSkills, justCreated]);
+  }, [drawer, allSkills, createMutation.data]);
 
   const saving = createMutation.isPending || updateMutation.isPending;
 
@@ -340,7 +334,6 @@ export function SkillsSection({
               size="sm"
               onClick={() => {
                 setError(null);
-                setJustCreated(null);
                 setDrawer({ mode: "create" });
               }}
             >
@@ -483,10 +476,7 @@ export function SkillsSection({
           configuredCliIds={configuredCliIds}
           saving={saving}
           error={error}
-          onCancel={() => {
-            setJustCreated(null);
-            setDrawer({ mode: "closed" });
-          }}
+          onCancel={() => setDrawer({ mode: "closed" })}
           onCreate={(name, description) => createMutation.mutate({ name, description })}
           onSave={(update) => updateMutation.mutate({ name: drawerDraft.currentName, update })}
           onOpenSource={(target) => void openSource(target)}
@@ -1003,10 +993,12 @@ function SkillDrawer({
                           onChange={() => toggleMcp(id)}
                         />
                         {/* The renamable display name is the row's face; the
-                            bare id only shows as the fallback for a stale
-                            reference no longer configured. */}
+                            bare id shows for a stale reference no longer
+                            configured, and for a configured server whose
+                            display_name loaded empty (a legal wire value
+                            from a hand-edited config). */}
                         <span className="truncate">
-                          {mcpServerLabels[id] ?? id}
+                          {mcpServerLabels[id] || id}
                         </span>
                       </label>
                     ))}

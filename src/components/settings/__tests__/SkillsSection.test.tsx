@@ -225,6 +225,35 @@ describe("SkillsSection (issue #362)", () => {
     expect(save).toBeEnabled();
   });
 
+  it("gates the edit drawer's Save on a non-blank body", async () => {
+    // Only edit mode owns a body field; clearing it must gate Save behind
+    // the same client-side rule the backend enforces.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{}}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    const bodyInput = await screen.findByLabelText("Instructions");
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeEnabled();
+
+    fireEvent.change(bodyInput, { target: { value: "" } });
+    fireEvent.blur(bodyInput);
+    expect(save).toBeDisabled();
+    expect(await screen.findByText(/can't be empty/)).toBeInTheDocument();
+
+    // Re-filling re-opens the gate.
+    fireEvent.change(bodyInput, { target: { value: "Restored body.\n" } });
+    expect(save).toBeEnabled();
+  });
+
   it("opens a local skill in the edit drawer and saves via updateSkill", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
@@ -253,6 +282,40 @@ describe("SkillsSection (issue #362)", () => {
           body: "Updated body.\n",
         }),
       );
+    });
+  });
+
+  it("keeps the drawer open and Cancel disabled while a save is in flight", async () => {
+    // The drawer cannot be dismissed mid-write: Escape, the close request,
+    // and Cancel are all gated while the mutation is pending.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    let resolveUpdate!: (entry: SkillEntry) => void;
+    vi.mocked(updateSkill).mockImplementation(
+      () => new Promise<SkillEntry>((resolve) => { resolveUpdate = resolve; }),
+    );
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{}}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    });
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByLabelText("Instructions")).toBeInTheDocument();
+
+    resolveUpdate(localSkill);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
   });
 
@@ -297,6 +360,29 @@ describe("SkillsSection (issue #362)", () => {
         }),
       );
     });
+  });
+
+  it("falls back to the id when a configured server's display name is empty", async () => {
+    // A hand-edited config can load a server with an empty display_name
+    // (a legal wire value under the Rust serde default) -- the row must
+    // stay labeled with the id, not render blank.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [{ ...localSkill, mcp_servers: ["9b41-uuid-id"] }],
+      ignored: [],
+      root_error: null,
+    });
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{ "9b41-uuid-id": "" }}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    expect(await screen.findByLabelText("9b41-uuid-id")).toBeInTheDocument();
   });
 
   it("edits a skill's CLI tool references through the multi-select", async () => {
