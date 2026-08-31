@@ -251,7 +251,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
           <DialogDescription>
             <FormattedMessage
               id="settings.skills.importDescription"
-              defaultMessage="Link or copy skills from external agent libraries. Linked skills are read-only; copied skills are editable."
+              defaultMessage="Import skills from other apps on this computer. Link to the original folder, or make an editable copy."
             />
           </DialogDescription>
         </DialogHeader>
@@ -267,7 +267,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             <p className="text-muted-foreground px-4 py-8 text-center text-sm">
               <FormattedMessage
                 id="settings.skills.importEmpty"
-                defaultMessage={"No skill sources found. Click \"+ Add custom path\" to browse."}
+                defaultMessage={"No skills found yet. Click \"+ Add custom path\" to choose a folder."}
               />
             </p>
           ) : (
@@ -358,9 +358,9 @@ export function ImportSkillsDialog({ onClose }: Props) {
                 </p>
                 <p className="text-muted-foreground text-sm">
                   {mode === "link" ? (
-                    <FormattedMessage id="settings.skills.importModeLinkHint" defaultMessage="Creates a link to the external Agent skill directory. Follows subsequent changes in the source directory, but the skill depends on the source path remaining available." />
+                    <FormattedMessage id="settings.skills.importModeLinkHint" defaultMessage="Uses the skill in its original folder. Changes there apply automatically, but the skill stops working if the folder moves or is deleted." />
                   ) : (
-                    <FormattedMessage id="settings.skills.importModeCopyHint" defaultMessage="Copies the complete skill directory. Subsequent changes in the external Agent directory will not sync automatically." />
+                    <FormattedMessage id="settings.skills.importModeCopyHint" defaultMessage="Copies the skill into the app. Later changes in the original folder won't apply." />
                   )}
                 </p>
               </div>

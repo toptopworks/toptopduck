@@ -160,7 +160,12 @@ function SectionContent({
     case "skills":
       return (
         <SkillsSection
-          configuredMcpIds={appConfig.mcp_servers.servers.map((s) => s.id)}
+          // id -> display name: the drawer's reference list shows the
+          // renamable name, not the raw uuid id. Ids are registry-unique
+          // (server-side invariant), so the map is well-defined.
+          mcpServerLabels={Object.fromEntries(
+            appConfig.mcp_servers.servers.map((s) => [s.id, s.display_name]),
+          )}
           configuredCliIds={appConfig.cli_tools.tools.map((t) => t.name)}
           builtinSkillBaselines={appConfig.builtin_skill_baselines}
           onAppConfigSync={onCliToolsChanged}

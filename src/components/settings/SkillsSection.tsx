@@ -40,6 +40,7 @@ import {
   DialogContent,
   DialogDescription,
   DialogFooter,
+  DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
@@ -79,6 +80,15 @@ type DrawerDraft = {
   linkTarget: string | null;
 };
 
+// The Agent Skills spec ceilings + name rule, mirrored client-side from the
+// backend's validate_skill_name / validate_description (skills/model.rs) so
+// the drawer can gate Save BEFORE an IPC round-trip instead of surfacing the
+// typed reject after one. The backend remains the authority; these only move
+// the feedback earlier.
+const SKILL_NAME_MAX = 64;
+const SKILL_DESCRIPTION_MAX = 1024;
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
 const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
   "all",
   "linked",
@@ -100,12 +110,16 @@ function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
 }
 
 export function SkillsSection({
-  configuredMcpIds,
+  mcpServerLabels,
   configuredCliIds,
   builtinSkillBaselines,
   onAppConfigSync,
 }: {
-  configuredMcpIds: string[];
+  /** The configured MCP servers as id -> display-name pairs: the drawer's
+   *  reference list shows the renamable display name, NOT the raw id (a
+   *  uuid); a stale reference no longer configured falls back to the bare
+   *  id so it stays visible + removable. */
+  mcpServerLabels: Record<string, string>;
   configuredCliIds: string[];
   /** The builtin-skill baseline side table (issue #677): the anchor the
    *  Edited derivation on builtin rows compares each skill's
@@ -131,6 +145,13 @@ export function SkillsSection({
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The entry a successful create returned, held until the drawer closes or
+  // the next create opens: the post-create drawer switches straight to edit
+  // mode, and the refetch the invalidate kicked off has not landed yet --
+  // this stashed entry is the edit draft's source until allSkills carries it
+  // (so the user lands on the full editor immediately instead of a closed
+  // dialog they would have to find + reopen to write the body).
+  const [justCreated, setJustCreated] = useState<SkillEntry | null>(null);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: skillKeys.all() });
@@ -139,9 +160,16 @@ export function SkillsSection({
   const createMutation = useMutation({
     mutationFn: ({ name, description }: { name: string; description: string }) =>
       createSkill(name, description),
-    onSuccess: () => {
+    onSuccess: (entry) => {
       invalidate();
-      setDrawer({ mode: "closed" });
+      // A stale reject must not ride into the post-create edit drawer.
+      setError(null);
+      // Straight into the edit drawer for the minted skill: the backend
+      // wrote the skeleton body, and authoring the real one is the natural
+      // next step. The key flip ("" -> the name) remounts the drawer seeded
+      // from the returned entry.
+      setJustCreated(entry);
+      setDrawer({ mode: "edit", name: entry.name });
     },
     onError: (e) => setError(fmtError(e, intl)),
   });
@@ -151,6 +179,10 @@ export function SkillsSection({
       updateSkill(name, update),
     onSuccess: () => {
       invalidate();
+      // Drop a stale reject (and the create stash) so a reopened drawer
+      // never seeds off an outdated error / snapshot.
+      setError(null);
+      setJustCreated(null);
       setDrawer({ mode: "closed" });
     },
     onError: (e) => setError(fmtError(e, intl)),
@@ -206,7 +238,7 @@ export function SkillsSection({
       return intl.formatMessage(
         {
           id: "settings.skills.scanFailed",
-          defaultMessage: "Failed to scan the skills registry: {detail}",
+          defaultMessage: "Couldn't load your skills: {detail}",
         },
         { detail: rootError },
       );
@@ -222,6 +254,10 @@ export function SkillsSection({
   );
 
   function openEdit(skill: SkillEntry) {
+    // The drawer owns the error face while open: a leftover pane error
+    // (e.g. an earlier failed save) would otherwise replay inside an
+    // unrelated edit drawer.
+    setError(null);
     setDrawer({ mode: "edit", name: skill.name });
   }
 
@@ -262,7 +298,12 @@ export function SkillsSection({
       };
     }
     if (drawer.mode === "edit") {
-      const skill = allSkills.find((s) => s.name === drawer.name);
+      // The justCreated fallback bridges the refetch gap after a create:
+      // once the invalidated query lands, allSkills carries the entry and
+      // the stash is never read again.
+      const skill =
+        allSkills.find((s) => s.name === drawer.name) ??
+        (justCreated?.name === drawer.name ? justCreated : null);
       if (!skill) return null;
       return {
         currentName: skill.name,
@@ -278,7 +319,7 @@ export function SkillsSection({
       };
     }
     return null;
-  }, [drawer, allSkills]);
+  }, [drawer, allSkills, justCreated]);
 
   const saving = createMutation.isPending || updateMutation.isPending;
 
@@ -289,7 +330,7 @@ export function SkillsSection({
         description={(
           <FormattedMessage
             id="settings.skills.description"
-            defaultMessage="Agent Skills live as directories under the app-data folder. Local skills are editable; linked skills are read-only."
+            defaultMessage="Skills add capabilities to your agent. Create your own or import them from other apps."
           />
         )}
         action={(
@@ -299,6 +340,7 @@ export function SkillsSection({
               size="sm"
               onClick={() => {
                 setError(null);
+                setJustCreated(null);
                 setDrawer({ mode: "create" });
               }}
             >
@@ -347,7 +389,7 @@ export function SkillsSection({
         <Label htmlFor="skills-acquired-filter" className="sr-only">
           <FormattedMessage
             id="settings.skills.filterLabel"
-            defaultMessage="Filter by acquired"
+            defaultMessage="Filter by skill type"
           />
         </Label>
         <select
@@ -388,7 +430,7 @@ export function SkillsSection({
             {allSkills.length === 0 ? (
               <FormattedMessage
                 id="settings.skills.empty"
-                defaultMessage="No skills yet. Click New to author one."
+                defaultMessage="No skills yet. Click New to create one."
               />
             ) : (
               <FormattedMessage
@@ -424,7 +466,10 @@ export function SkillsSection({
         )}
       </SettingsCard>
 
-      {displayError && (
+      {/* While the drawer is open it OWNS the error face: the modal covers
+          this line, and rendering the same text twice would read as a
+          duplicated alert. The drawer renders `error` itself. */}
+      {displayError && !drawerDraft && (
         <p className="settings-error mt-3 text-destructive text-sm">{displayError}</p>
       )}
 
@@ -434,10 +479,14 @@ export function SkillsSection({
         <SkillDrawer
           key={drawerDraft.currentName}
           draft={drawerDraft}
-          configuredMcpIds={configuredMcpIds}
+          mcpServerLabels={mcpServerLabels}
           configuredCliIds={configuredCliIds}
           saving={saving}
-          onCancel={() => setDrawer({ mode: "closed" })}
+          error={error}
+          onCancel={() => {
+            setJustCreated(null);
+            setDrawer({ mode: "closed" });
+          }}
           onCreate={(name, description) => createMutation.mutate({ name, description })}
           onSave={(update) => updateMutation.mutate({ name: drawerDraft.currentName, update })}
           onOpenSource={(target) => void openSource(target)}
@@ -456,7 +505,7 @@ export function SkillsSection({
               <AlertDialogTitle>
                 <FormattedMessage
                   id="settings.skills.confirmDeleteTitle"
-                  defaultMessage="Delete skill?"
+                  defaultMessage="Delete skill {name}?"
                   values={{ name: confirmDelete }}
                 />
               </AlertDialogTitle>
@@ -638,7 +687,13 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
             size="sm"
             variant="ghost"
             className="text-muted-foreground hover:text-destructive shrink-0"
-            aria-label={skill.name}
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.skills.deleteLabel",
+                defaultMessage: "Delete skill {name}",
+              },
+              { name: skill.name },
+            )}
             onClick={(e) => {
               e.stopPropagation();
               onDelete();
@@ -654,9 +709,14 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
 
 type SkillDrawerProps = {
   draft: DrawerDraft;
-  configuredMcpIds: string[];
+  mcpServerLabels: Record<string, string>;
   configuredCliIds: string[];
   saving: boolean;
+  /** The pane's live error (the create / update reject, or a failed source
+   *  reveal). Rendered INSIDE the dialog: the modal covers the section-level
+   *  error line, so this is the only visible error face while the drawer is
+   *  open. */
+  error: string | null;
   onCancel: () => void;
   onCreate: (name: string, description: string) => void;
   onSave: (update: SkillUpdate) => void;
@@ -665,9 +725,10 @@ type SkillDrawerProps = {
 
 function SkillDrawer({
   draft,
-  configuredMcpIds,
+  mcpServerLabels,
   configuredCliIds,
   saving,
+  error,
   onCancel,
   onCreate,
   onSave,
@@ -690,20 +751,40 @@ function SkillDrawer({
   const [mcpServers, setMcpServers] = useState<string[]>(draft.mcpServers);
   const [cliTools, setCliTools] = useState<string[]>(draft.cliTools);
   const [body, setBody] = useState(draft.body);
+  // Touched flags gate the invalid hints: a freshly opened drawer stays
+  // quiet (every field starts "invalid-able"), the hint appears once the
+  // user has been in the field and left it.
+  const [nameTouched, setNameTouched] = useState(false);
+  const [descriptionTouched, setDescriptionTouched] = useState(false);
+  const [bodyTouched, setBodyTouched] = useState(false);
   // No effect syncs draft -> local state: the parent keys this drawer by the
   // skill name, so switching skills (or opening create) REMOUNTS it and the
   // useState initializers above re-seed from the new draft. Typing edits only
   // local state -- the key stays stable, no remount, no clobber (React 19
   // "reset state with a key" pattern, cf. react-hooks/set-state-in-effect).
 
+  // Client-side mirror of the backend's spec validation (skills/model.rs):
+  // gate Save here so the user gets immediate feedback instead of an IPC
+  // round-trip reject. The backend stays the authority -- this only moves
+  // the feedback earlier.
+  const trimmedName = name.trim();
+  const nameInvalid =
+    !nameLocked &&
+    (trimmedName === "" ||
+      trimmedName.length > SKILL_NAME_MAX ||
+      !SKILL_NAME_PATTERN.test(trimmedName));
+  const descriptionInvalid = description.trim() === "";
+  const bodyInvalid = !isCreate && body.trim() === "";
+  const formInvalid = nameInvalid || descriptionInvalid || bodyInvalid;
+
   // The mcp multi-select lists every configured server plus any id the skill
   // already references that is no longer configured (so a stale reference
   // stays visible + removable rather than silently dropping).
   const mcpOptions = useMemo(() => {
-    const merged = new Set<string>(configuredMcpIds);
+    const merged = new Set<string>(Object.keys(mcpServerLabels));
     mcpServers.forEach((id) => merged.add(id));
     return [...merged];
-  }, [configuredMcpIds, mcpServers]);
+  }, [mcpServerLabels, mcpServers]);
 
   // The cli multi-select mirrors the mcp one: every registered tool plus any
   // stale name the skill still references (issue #674).
@@ -745,34 +826,48 @@ function SkillDrawer({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onCancel();
+        // Gate dismissal while saving (the ImportSkillsDialog pattern): a
+        // mid-flight IPC keeps the drawer up so the busy state stays visible
+        // and the draft cannot be abandoned halfway through a write.
+        if (!open && !saving) onCancel();
       }}
     >
-      <DialogContent className="sm:max-w-lg" showCloseButton>
-        <DialogTitle className="sr-only">
-          {isCreate ? (
-            <FormattedMessage
-              id="settings.skills.drawerCreateTitle"
-              defaultMessage="New skill"
-            />
-          ) : (
-            <FormattedMessage
-              id="settings.skills.drawerEditTitle"
-              defaultMessage="Edit skill {name}"
-              values={{ name: draft.currentName }}
-            />
-          )}
-        </DialogTitle>
+      <DialogContent
+        className="sm:max-w-lg"
+        showCloseButton
+        onEscapeKeyDown={(e) => {
+          if (saving) e.preventDefault();
+        }}
+        onPointerDownOutside={(e) => {
+          if (saving) e.preventDefault();
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>
+            {isCreate ? (
+              <FormattedMessage
+                id="settings.skills.drawerCreateTitle"
+                defaultMessage="New skill"
+              />
+            ) : (
+              <FormattedMessage
+                id="settings.skills.drawerEditTitle"
+                defaultMessage="Edit skill {name}"
+                values={{ name: draft.currentName }}
+              />
+            )}
+          </DialogTitle>
+        </DialogHeader>
         <DialogDescription className="sr-only">
           {isLinked ? (
             <FormattedMessage
               id="settings.skills.readOnlyHint"
-              defaultMessage="Linked skills are read-only. Edit the source instead."
+              defaultMessage="This skill is linked to another folder and can't be edited here."
             />
           ) : (
             <FormattedMessage
               id="settings.skills.drawerDescription"
-              defaultMessage="Edit the skill's declaration."
+              defaultMessage="Change the skill's details."
             />
           )}
         </DialogDescription>
@@ -789,19 +884,33 @@ function SkillDrawer({
               id="skill-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              onBlur={() => setNameTouched(true)}
               disabled={readOnly || nameLocked}
               placeholder="pdf-tools"
+              maxLength={SKILL_NAME_MAX}
             />
-            <p className="text-muted-foreground text-xs">
+            <p
+              className={cn(
+                "text-xs",
+                !nameLocked && nameTouched && nameInvalid
+                  ? "text-destructive"
+                  : "text-muted-foreground",
+              )}
+            >
               {nameLocked ? (
                 <FormattedMessage
                   id="settings.skills.fieldNameLockedHint"
                   defaultMessage="Built-in skill names are locked"
                 />
+              ) : nameTouched && nameInvalid ? (
+                <FormattedMessage
+                  id="settings.skills.fieldNameInvalid"
+                  defaultMessage="Use only lowercase letters, numbers, and hyphens (example: pdf-tools), up to 64 characters."
+                />
               ) : (
                 <FormattedMessage
                   id="settings.skills.fieldNameHint"
-                  defaultMessage="kebab-case (lowercase a-z / 0-9 + hyphens); equals the directory name"
+                  defaultMessage="Use lowercase letters, numbers, and hyphens — for example: pdf-tools"
                 />
               )}
             </p>
@@ -814,12 +923,23 @@ function SkillDrawer({
                 defaultMessage="Description"
               />
             </Label>
-            <Input
+            <Textarea
               id="skill-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              onBlur={() => setDescriptionTouched(true)}
               disabled={readOnly}
+              maxLength={SKILL_DESCRIPTION_MAX}
+              rows={3}
             />
+            {descriptionTouched && descriptionInvalid && (
+              <p className="text-destructive text-xs">
+                <FormattedMessage
+                  id="settings.skills.fieldDescriptionRequired"
+                  defaultMessage="Description is required."
+                />
+              </p>
+            )}
           </div>
 
           {!isCreate && (
@@ -882,7 +1002,12 @@ function SkillDrawer({
                           disabled={readOnly}
                           onChange={() => toggleMcp(id)}
                         />
-                        {id}
+                        {/* The renamable display name is the row's face; the
+                            bare id only shows as the fallback for a stale
+                            reference no longer configured. */}
+                        <span className="truncate">
+                          {mcpServerLabels[id] ?? id}
+                        </span>
                       </label>
                     ))}
                   </div>
@@ -927,17 +1052,26 @@ function SkillDrawer({
                 <Label htmlFor="skill-body">
                   <FormattedMessage
                     id="settings.skills.fieldBody"
-                    defaultMessage="Body"
+                    defaultMessage="Instructions"
                   />
                 </Label>
                 <Textarea
                   id="skill-body"
                   value={body}
                   onChange={(e) => setBody(e.target.value)}
+                  onBlur={() => setBodyTouched(true)}
                   disabled={readOnly}
                   rows={10}
                   className="font-mono text-sm"
                 />
+                {bodyTouched && bodyInvalid && (
+                  <p className="text-destructive text-xs">
+                    <FormattedMessage
+                      id="settings.skills.fieldBodyRequired"
+                      defaultMessage="Instructions can't be empty."
+                    />
+                  </p>
+                )}
               </div>
             </>
           )}
@@ -947,8 +1081,18 @@ function SkillDrawer({
           <p className="text-muted-foreground text-xs">
             <FormattedMessage
               id="settings.skills.readOnlyHint"
-              defaultMessage="Linked skills are read-only. Edit the source instead."
+              defaultMessage="This skill is linked to another folder and can't be edited here."
             />
+          </p>
+        )}
+
+        {/* The in-drawer error face: while the modal is open it covers the
+            section-level error line, so a create / update reject (or a
+            failed source reveal) surfaces HERE -- right under the form the
+            user just submitted, not behind the overlay. */}
+        {error && (
+          <p className="text-destructive text-sm" role="alert">
+            {error}
           </p>
         )}
 
@@ -962,15 +1106,15 @@ function SkillDrawer({
             >
               <FormattedMessage
                 id="settings.skills.openSource"
-                defaultMessage="Open source location"
+                defaultMessage="Open original folder"
               />
             </Button>
           )}
-          <Button type="button" variant="ghost" onClick={onCancel}>
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>
             <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
           {!isLinked && (
-            <Button type="button" onClick={handleSave} disabled={saving}>
+            <Button type="button" onClick={handleSave} disabled={saving || formInvalid}>
               {saving ? (
                 <FormattedMessage
                   id="common.saving"
@@ -1021,7 +1165,7 @@ function IgnoredDirectoriesSection({ skipped }: IgnoredDirectoriesSectionProps) 
         <p className="text-muted-foreground mb-2 text-xs">
           <FormattedMessage
             id="settings.skills.ignoredDescription"
-            defaultMessage="These directories failed spec validation and were skipped during the scan. Fix the directory or its SKILL.md and rescan."
+            defaultMessage="These skill folders couldn't be loaded. Fix the folder or its SKILL.md file, then rescan."
           />
         </p>
         <ul className="grid gap-1.5">

@@ -69,7 +69,7 @@ function renderSection(baselines: Record<string, { hash: string; locale: string 
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
           <SkillsSection
-            configuredMcpIds={[]}
+            mcpServerLabels={{}}
             configuredCliIds={["pandoc"]}
             builtinSkillBaselines={baselines}
             onAppConfigSync={onSync}
@@ -96,7 +96,7 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     const row = await screen.findByTestId("skill-row");
     expect(row).toHaveTextContent("system");
     // Undeletable: the trash button does not render on a builtin row.
-    expect(row.querySelector("button[aria-label='pandoc']")).toBeNull();
+    expect(row.querySelector("button[aria-label='Delete skill pandoc']")).toBeNull();
   });
 
   it("shows no Edited badge on a row agreeing with its recorded baseline", async () => {
