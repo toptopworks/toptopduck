@@ -297,7 +297,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     // Initially empty.
     expect(
       await screen.findByText(
-        "No skill sources found. Click \"+ Add custom path\" to browse.",
+        "No skills found yet. Click \"+ Add custom path\" to choose a folder.",
       ),
     ).toBeInTheDocument();
 
@@ -316,7 +316,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
     renderWithProviders(<ImportSkillsDialog onClose={() => {}} />);
     expect(
       await screen.findByText(
-        "No skill sources found. Click \"+ Add custom path\" to browse.",
+        "No skills found yet. Click \"+ Add custom path\" to choose a folder.",
       ),
     ).toBeInTheDocument();
   });

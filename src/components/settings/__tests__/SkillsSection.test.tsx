@@ -89,7 +89,7 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -111,7 +111,7 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -132,13 +132,13 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
-    await screen.findByText("No skills yet. Click New to author one.");
+    await screen.findByText("No skills yet. Click New to create one.");
 
     fireEvent.click(screen.getByRole("button", { name: /New/i }));
 
@@ -153,12 +153,113 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
+  it("lands on the edit drawer for the freshly created skill", async () => {
+    // The create dialog only captures name + description; the natural next
+    // step is authoring the body, so the drawer switches straight into edit
+    // mode for the minted skill instead of closing.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    vi.mocked(createSkill).mockResolvedValue(localSkill);
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{}}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("No skills yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: /New/i }));
+    fireEvent.change(await screen.findByLabelText("Name"), {
+      target: { value: "pdf-tools" },
+    });
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "Work with PDF files." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(createSkill).toHaveBeenCalledWith("pdf-tools", "Work with PDF files.");
+    });
+    // The drawer stays open, now in edit mode, seeded from the created
+    // entry -- the body is immediately authorable.
+    const bodyInput = await screen.findByLabelText("Instructions");
+    expect(bodyInput).toHaveValue(localSkill.body);
+  });
+
+  it("gates the create drawer's Save on a valid name and a non-blank description", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{}}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("No skills yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: /New/i }));
+    const nameInput = await screen.findByLabelText("Name");
+    const descInput = screen.getByLabelText("Description");
+    const save = screen.getByRole("button", { name: "Save" });
+
+    // Empty form: gated off before any IPC round-trip can reject it.
+    expect(save).toBeDisabled();
+
+    // An invalid name keeps the gate shut and surfaces the rule once the
+    // field has been touched.
+    fireEvent.change(nameInput, { target: { value: "Bad Name" } });
+    fireEvent.blur(nameInput);
+    expect(
+      await screen.findByText(/Use only lowercase letters/),
+    ).toBeInTheDocument();
+    expect(save).toBeDisabled();
+
+    // Valid name, still no description: gated off.
+    fireEvent.change(nameInput, { target: { value: "pdf-tools" } });
+    expect(save).toBeDisabled();
+
+    // Both required fields valid: the gate opens.
+    fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
+    expect(save).toBeEnabled();
+  });
+
+  it("gates the edit drawer's Save on a non-blank body", async () => {
+    // Only edit mode owns a body field; clearing it must gate Save behind
+    // the same client-side rule the backend enforces.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{}}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    const bodyInput = await screen.findByLabelText("Instructions");
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeEnabled();
+
+    fireEvent.change(bodyInput, { target: { value: "" } });
+    fireEvent.blur(bodyInput);
+    expect(save).toBeDisabled();
+    expect(await screen.findByText(/can't be empty/)).toBeInTheDocument();
+
+    // Re-filling re-opens the gate.
+    fireEvent.change(bodyInput, { target: { value: "Restored body.\n" } });
+    expect(save).toBeEnabled();
+  });
+
   it("opens a local skill in the edit drawer and saves via updateSkill", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -169,7 +270,7 @@ describe("SkillsSection (issue #362)", () => {
     // Click the skill's name text -- it sits inside the row's click surface.
     fireEvent.click(screen.getByText("pdf-tools"));
 
-    const bodyInput = await screen.findByLabelText("Body");
+    const bodyInput = await screen.findByLabelText("Instructions");
     fireEvent.change(bodyInput, { target: { value: "Updated body.\n" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -184,6 +285,106 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
+  it("keeps the drawer open and Cancel disabled while a save is in flight", async () => {
+    // The drawer cannot be dismissed mid-write: Escape, the close request,
+    // and Cancel are all gated while the mutation is pending.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    let resolveUpdate!: (entry: SkillEntry) => void;
+    vi.mocked(updateSkill).mockImplementation(
+      () => new Promise<SkillEntry>((resolve) => { resolveUpdate = resolve; }),
+    );
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{}}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    });
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByLabelText("Instructions")).toBeInTheDocument();
+
+    resolveUpdate(localSkill);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows MCP server display names in the drawer's reference list and saves ids", async () => {
+    // The reference list renders the renamable display name, not the raw
+    // uuid id; a stale reference no longer configured falls back to the
+    // bare id and stays visible + removable. The stored value is always
+    // the id, regardless of the display face.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [{ ...localSkill, mcp_servers: ["a3f2-stale-id"] }],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(updateSkill).mockResolvedValue(localSkill);
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{ "9b41-uuid-id": "GitHub MCP" }}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    expect(await screen.findByLabelText("GitHub MCP")).toBeInTheDocument();
+    // The stale reference carries no display name -- the id is its face, and
+    // it starts checked (the skill references it).
+    const stale = screen.getByLabelText("a3f2-stale-id") as HTMLInputElement;
+    expect(stale.checked).toBe(true);
+
+    // Swap the stale reference for the configured one and save.
+    fireEvent.click(stale);
+    fireEvent.click(screen.getByLabelText("GitHub MCP"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(updateSkill).toHaveBeenCalledWith(
+        "pdf-tools",
+        expect.objectContaining({
+          mcp_servers: ["9b41-uuid-id"],
+        }),
+      );
+    });
+  });
+
+  it("falls back to the id when a configured server's display name is empty", async () => {
+    // A hand-edited config can load a server with an empty display_name
+    // (a legal wire value under the Rust serde default) -- the row must
+    // stay labeled with the id, not render blank.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [{ ...localSkill, mcp_servers: ["9b41-uuid-id"] }],
+      ignored: [],
+      root_error: null,
+    });
+    renderWithProviders(
+      <SkillsSection
+        mcpServerLabels={{ "9b41-uuid-id": "" }}
+        configuredCliIds={[]}
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+
+    expect(await screen.findByLabelText("9b41-uuid-id")).toBeInTheDocument();
+  });
+
   it("edits a skill's CLI tool references through the multi-select", async () => {
     // Issue #674: the drawer's CLI multi-select mirrors the MCP one. The
     // option list merges the registered names with the skill's existing
@@ -196,7 +397,7 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={["pandoc", "office-cli"]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -225,12 +426,12 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
-  it("renders a linked skill read-only with an Open source location button", async () => {
+  it("renders a linked skill read-only with an Open original folder button", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [linkedSkill], ignored: [], root_error: null });
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -241,12 +442,12 @@ describe("SkillsSection (issue #362)", () => {
     fireEvent.click(screen.getByText("external-skill"));
 
     expect(
-      await screen.findByRole("button", { name: "Open source location" }),
+      await screen.findByRole("button", { name: "Open original folder" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open source location" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open original folder" }));
     await waitFor(() => {
       expect(revealItemInDir).toHaveBeenCalledWith(linkedSkill.link_target);
     });
@@ -257,7 +458,7 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -265,9 +466,10 @@ describe("SkillsSection (issue #362)", () => {
     );
     await screen.findByText("pdf-tools");
 
-    // The delete icon button's aria-label is the skill name (exact match
-    // disambiguates from the row, whose accessible name is multi-word).
-    fireEvent.click(screen.getByRole("button", { name: "pdf-tools" }));
+    // The delete icon button carries an action-verb aria-label naming the
+    // skill (exact match disambiguates from the row, whose accessible name
+    // is multi-word).
+    fireEvent.click(screen.getByRole("button", { name: "Delete skill pdf-tools" }));
     // Confirm dialog opens; click its Delete action.
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
@@ -284,13 +486,13 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
-    await screen.findByText("No skills yet. Click New to author one.");
+    await screen.findByText("No skills yet. Click New to create one.");
 
     fireEvent.click(screen.getByRole("button", { name: /New/i }));
     const nameInput = await screen.findByLabelText("Name");
@@ -304,6 +506,19 @@ describe("SkillsSection (issue #362)", () => {
         screen.getByText("A skill named \"pdf-tools\" already exists"),
       ).toBeInTheDocument();
     });
+    // The drawer stays open and OWNS the error face while it is up (the
+    // modal covers the section-level line), so the reject is visible where
+    // the user is working -- as an alert, not only as text.
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+
+    // A retry that succeeds clears the stale reject: the alert must not
+    // ride into the post-create edit drawer.
+    vi.mocked(createSkill).mockResolvedValue(localSkill);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
   });
 
   it("opens the import dialog when the Import button is clicked (issue #367)", async () => {
@@ -311,13 +526,13 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([]);
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
-    await screen.findByText("No skills yet. Click New to author one.");
+    await screen.findByText("No skills yet. Click New to create one.");
 
     // The Import button is now enabled (was disabled before #367); clicking it
     // opens the two-stage drill-down dialog, surfaced by its title.
@@ -332,7 +547,7 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -361,7 +576,7 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -391,7 +606,7 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockRejectedValue("IPC transport error");
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -413,7 +628,7 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        configuredMcpIds={[]}
+        mcpServerLabels={{}}
         configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
@@ -422,7 +637,7 @@ describe("SkillsSection (issue #362)", () => {
 
     // The locale-catalog prefix renders, and the dynamic root_error detail
     // rides verbatim so the user sees the OS-level reason.
-    expect(await screen.findByText(/Failed to scan the skills registry/)).toBeInTheDocument();
+    expect(await screen.findByText(/Couldn't load your skills/)).toBeInTheDocument();
     expect(
       screen.getByText(/Permission denied \(os error 13\)/),
     ).toBeInTheDocument();
