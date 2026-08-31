@@ -47,28 +47,43 @@ interface SheetWindow {
   rows: string[][];
 }
 
-// The auto-tidy failure reasons surfaced under each sheet heading (issue
-// #750), keyed by the wire enum (GuidanceReason). defaultMessage stays
-// English; the zh-CN counterparts live in the locale catalog.
-const REASON_MESSAGES: Record<GuidanceReason, { id: string; defaultMessage: string }> = {
-  EmptySheet: {
-    id: "guidedLoad.reason.EmptySheet",
-    defaultMessage: "The sheet is blank — no data rows were found.",
-  },
-  MultipleHeaderRows: {
-    id: "guidedLoad.reason.MultipleHeaderRows",
-    defaultMessage: "Multiple header-like rows detected — point at the real header row.",
-  },
-  NoHeaderRow: {
-    id: "guidedLoad.reason.NoHeaderRow",
-    defaultMessage: "Data starts on the first row — no header row detected.",
-  },
-  AmbiguousHeaderZone: {
-    id: "guidedLoad.reason.AmbiguousHeaderZone",
-    defaultMessage:
-      "Several rows above the data don't look like a header — point at the header row and tick the rows to skip.",
-  },
-};
+// The auto-tidy failure reason surfaced under a sheet heading (issue #750).
+// The four id / defaultMessage pairs stay LITERAL at their FormattedMessage
+// sites -- a descriptor map indirection would hide them from the formatjs
+// extractor and break the i18n catalog guard. defaultMessage stays English;
+// the zh-CN counterparts live in the locale catalog.
+function GuidanceReasonMessage({ reason }: { reason: GuidanceReason }) {
+  switch (reason) {
+    case "EmptySheet":
+      return (
+        <FormattedMessage
+          id="guidedLoad.reason.EmptySheet"
+          defaultMessage="The sheet is blank — no data rows were found."
+        />
+      );
+    case "MultipleHeaderRows":
+      return (
+        <FormattedMessage
+          id="guidedLoad.reason.MultipleHeaderRows"
+          defaultMessage="Multiple header-like rows detected — point at the real header row."
+        />
+      );
+    case "NoHeaderRow":
+      return (
+        <FormattedMessage
+          id="guidedLoad.reason.NoHeaderRow"
+          defaultMessage="Data starts on the first row — no header row detected."
+        />
+      );
+    case "AmbiguousHeaderZone":
+      return (
+        <FormattedMessage
+          id="guidedLoad.reason.AmbiguousHeaderZone"
+          defaultMessage="Several rows above the data don't look like a header — point at the header row and tick the rows to skip."
+        />
+      );
+  }
+}
 
 // Guided-load dialog (ADR-0015): shown when auto-tidy can't confidently rectify
 // a workbook. For each sheet the user points at the header row and ticks any
@@ -337,7 +352,7 @@ function GuidedSheetSection({
       </h3>
       {sheet.reason && (
         <p className="mt-1 text-xs text-muted-foreground">
-          {intl.formatMessage(REASON_MESSAGES[sheet.reason])}
+          <GuidanceReasonMessage reason={sheet.reason} />
         </p>
       )}
       <div className="mt-3 flex items-center gap-2">
