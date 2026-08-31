@@ -323,7 +323,9 @@ impl super::Session {
     /// Serve one preview window for a sheet parked on the guided-load dialog
     /// (issue #750), from the retained parse -- no workbook re-read. Rows are
     /// `[offset .. offset + limit)` clamped to the sheet's row count, rendered
-    /// exactly like the first inlined window. `None` when nothing is retained
+    /// exactly like the first inlined window. `limit` is clamped to the
+    /// preview window size, pinning the pager's window contract at this
+    /// boundary (IPC input is untrusted). `None` when nothing is retained
     /// for the (path, sheet) pair -- a stale dialog whose guidance was
     /// committed, discarded, or superseded; the command layer maps the miss to
     /// an engine error.
@@ -339,7 +341,11 @@ impl super::Session {
             return None;
         }
         let sheet = retained.sheets.iter().find(|s| s.name == sheet_name)?;
-        Some(ingest::excel::render_preview_window(sheet, offset, limit))
+        Some(ingest::excel::render_preview_window(
+            sheet,
+            offset,
+            limit.min(GUIDANCE_PREVIEW_ROWS),
+        ))
     }
 
     /// Drop the retained guidance parse (issue #750): the dialog-cancel path.
@@ -514,6 +520,9 @@ impl super::Session {
             .and_then(|s| s.to_str())
             .unwrap_or("workbook")
             .to_string();
+        // The zip below truncates silently on a length mismatch; both vecs
+        // are filled in the same loop, so make that alignment loud.
+        debug_assert_eq!(sheets.len(), reasons.len());
         let sheets_preview = sheets
             .iter()
             .zip(reasons)

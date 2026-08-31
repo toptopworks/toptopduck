@@ -82,6 +82,13 @@ function GuidanceReasonMessage({ reason }: { reason: GuidanceReason }) {
           defaultMessage="Several rows above the data don't look like a header — point at the header row and tick the rows to skip."
         />
       );
+    default: {
+      // Exhaustiveness guard (mirrors useIngestFlow's LoadOutcome guard): a
+      // GuidanceReason variant added on the Rust side without a TS case must
+      // fail the build, not render a blank reason line.
+      const unhandled: never = reason;
+      throw new Error(`unhandled GuidanceReason: ${JSON.stringify(unhandled)}`);
+    }
   }
 }
 
@@ -309,6 +316,9 @@ function GuidedSheetSection({
   const headingId = useId();
   const selectId = useId();
   // The first window is the inlined preview; its height IS the page size.
+  // The max-1 clamp keeps pageCount finite for a zero-preview sheet (an
+  // EmptySheet guidance) -- the backend drops rowless sheets, so the clamp
+  // is belt-and-braces, but removing it would divide by zero.
   const pageSize = Math.max(sheet.preview.length, 1);
   const pageCount = Math.ceil(sheet.total_rows / pageSize);
   const canPage = pageCount > 1;
@@ -317,6 +327,16 @@ function GuidedSheetSection({
     rows: sheet.preview,
   });
   const [isFetchingWindow, setIsFetchingWindow] = useState(false);
+  const [previewAtMount, setPreviewAtMount] = useState(sheet.preview);
+  // A same-path re-route re-parks the dialog WITHOUT remounting it (the
+  // remount key is the path, #748), replacing the inlined preview in place:
+  // reset the window to the new first window the moment the preview's
+  // identity changes, or the table keeps rendering the old parse (issue
+  // #750 review: stale-window dead end on a fixed-and-re-dropped workbook).
+  if (previewAtMount !== sheet.preview) {
+    setPreviewAtMount(sheet.preview);
+    setWindowState({ offset: 0, rows: sheet.preview });
+  }
   const currentPage = Math.floor(windowState.offset / pageSize);
 
   async function gotoPage(page: number) {

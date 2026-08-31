@@ -501,8 +501,9 @@ pub async fn ingest_file_guided(
 /// from the parse the `NeedsGuidance` outcome retained on the session -- zero
 /// workbook re-parse per page. The (path, sheet) pair must match the retained
 /// guidance; a miss (committed, discarded, or superseded) rejects so a stale
-/// dialog can never render window rows from a different workbook. Read-only +
-/// lock-light in effect (a plain retention read under the session lock).
+/// dialog can never render window rows from a different workbook. Read-only:
+/// takes the session lock like any command, but holds it only for the
+/// retention read (not a SessionHandle lock-light read).
 #[tauri::command]
 pub fn guidance_window(
     store: State<'_, Arc<SessionStore>>,

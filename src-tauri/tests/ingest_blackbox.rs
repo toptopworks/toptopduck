@@ -1408,6 +1408,48 @@ fn guidance_retention_drops_on_successful_guided_commit() {
 }
 
 #[test]
+fn guided_commit_loads_a_header_beyond_the_first_window() {
+    // AC3 end to end, backend side: a header sitting past the 12-row first
+    // window (row 15, third row of window 2) is served by the pager, picked,
+    // and commits successfully -- no suite ever committed a header beyond the
+    // first window before (review finding 1).
+    let (xlsx, _dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &xlsx);
+    let path_key = xlsx.to_string_lossy().to_string();
+
+    // Window 2 serves rows 13..=24; row 15 is the pick.
+    let window = session
+        .guidance_window(&path_key, "tall", 12, 12)
+        .expect("window 2");
+    assert_eq!(window[0], vec!["12", "v12"]); // absolute row 13
+                                              // The window contract pins at the boundary: an oversized limit clamps to
+                                              // the preview window size, never returning a taller slice.
+    assert_eq!(
+        session
+            .guidance_window(&path_key, "tall", 12, 100)
+            .expect("clamped window")
+            .len(),
+        12
+    );
+
+    let picks = vec![SheetGuidance {
+        name: "tall".into(),
+        rectify: SheetRectify {
+            header_row: 15,
+            skip_rows: vec![],
+        },
+    }];
+    match session.ingest_guided(&xlsx, &picks) {
+        // Rows 1..=14 dropped; row 15 heads the table, rows 16..=30 the data
+        // -- 16 materialized rows (header included) survive.
+        LoadOutcome::Loaded(active) => assert_eq!(active.row_count, 16),
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    }
+    assert_eq!(session.get("tall").unwrap().row_count, 16);
+}
+
+#[test]
 fn guidance_retention_survives_a_failed_guided_commit() {
     // A failed commit keeps the dialog open for retry -- its paging must keep
     // working, so the retention stays.
