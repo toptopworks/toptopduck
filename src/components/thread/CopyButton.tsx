@@ -17,6 +17,7 @@ import { useIntl } from "react-intl";
 import { Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { log } from "../../lib/log";
 
 // How long the copied acknowledgment holds before the glyph reverts (ms).
 const COPIED_HOLD_MS = 1500;
@@ -49,8 +50,11 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
         timer.current = null;
         setCopied(false);
       }, COPIED_HOLD_MS);
-    } catch {
-      // Clipboard unavailable (permissions / non-secure context): no ack flip.
+    } catch (e) {
+      // Clipboard unavailable (permissions / non-secure context): no ack
+      // flip -- an honest no-op, but the lane stays diagnosable in the log
+      // sink (VegaChart's precedent for a degraded user action).
+      log.warn("CopyButton", "clipboard write failed", e);
     }
   }
 
