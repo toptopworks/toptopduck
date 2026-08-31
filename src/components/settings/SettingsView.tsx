@@ -107,7 +107,7 @@ function SectionLabel({ section }: { section: SettingsSection }) {
     case "runtime":
       return <FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />;
     case "database-engine":
-      return <FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Database Engine" />;
+      return <FormattedMessage id="settings.nav.databaseEngine" defaultMessage="Analysis Engine" />;
     case "privacy":
       return <FormattedMessage id="settings.nav.privacy" defaultMessage="Privacy" />;
     case "mcp":

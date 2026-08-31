@@ -9,9 +9,11 @@ import { renderI18n } from "./helpers";
 
 describe("DisclosureBanner", () => {
   it("discloses the default-to-send payload and local-only guarantee", () => {
-    renderI18n(<DisclosureBanner />);
+    const { container } = renderI18n(<DisclosureBanner />);
     expect(screen.getByText(/完整数据集永不离开本机/)).toBeInTheDocument();
     expect(screen.getByText(/首 3 行样本/)).toBeInTheDocument();
+    // The schema segment is brand-neutral: "data types", never the engine (#739).
+    expect(container).toHaveTextContent(/列名 \+ 数据类型/);
   });
 
   it("discloses Excel formula cells use cached snapshot values (issue #7 AC4)", () => {

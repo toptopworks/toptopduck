@@ -115,7 +115,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
               <FormattedMessage id="column.col" defaultMessage="Column" />
             </TableHead>
             <TableHead scope="col">
-              <FormattedMessage id="column.type" defaultMessage="DuckDB type" />
+              <FormattedMessage id="column.type" defaultMessage="Data type" />
             </TableHead>
             <TableHead scope="col" className="w-[1%] whitespace-nowrap text-center">
               <FormattedMessage
@@ -180,7 +180,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
               {
                 id: "privacy.summary.typeOnlySuffix",
                 defaultMessage:
-                  ", {count, plural, one {# column type-only — neither its name nor its value is sent (only the DuckDB type).} other {# columns type-only — neither their names nor their values are sent (only the DuckDB types).}}",
+                  ", {count, plural, one {# column type-only — neither its name nor its value is sent (only the data type).} other {# columns type-only — neither their names nor their values are sent (only the data types).}}",
               },
               { count: hiddenNames.length },
             )
