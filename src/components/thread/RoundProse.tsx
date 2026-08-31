@@ -7,10 +7,10 @@
 // Rendered as markdown (issue #746): agent answers carry headings, lists,
 // code fences, tables, and inline emphasis. react-markdown renders to React
 // elements (no innerHTML); URLs pass the library's default urlTransform
-// allowlist. Embedded HTML never renders: the default pipeline drops html
-// nodes entirely (which would silently eat answer content), so the remark
-// plugin below flips them to text nodes and their tag characters show
-// verbatim -- the safe posture plus honest content.
+// allowlist. Embedded HTML never renders and never vanishes either: the
+// library's own post transform flips raw hast nodes to text, so the tag
+// characters show verbatim -- the safe posture plus honest content, pinned
+// by the component tests.
 //
 // Streaming contract: the plugin list and the components map are MODULE-LEVEL
 // constants. A fresh array/object identity per render would make
@@ -18,14 +18,13 @@
 // delta, dropping interaction state (a code block's copy ack). The i18n reads
 // therefore live inside the subcomponents so the map closes over nothing.
 
-import { memo, type MouseEvent, type ReactNode } from "react";
+import { memo, useState, type MouseEvent, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components, ExtraProps, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useIntl } from "react-intl";
-import { cn } from "@/lib/utils";
 import { log } from "../../lib/log";
 import { CopyButton } from "./CopyButton";
 import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
@@ -34,67 +33,8 @@ import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
 // from its own typings so no hast package import is needed.
 type HastElement = NonNullable<ExtraProps["node"]>;
 
-// Structural mdast node: the html→text walker reads only `type`, `value`, and
-// `children`. Typing against the upstream type packages would import mdast
-// directly, beyond the issue's three-package dependency budget (#746).
-type MdastNode = { type: string; value?: string; children?: MdastNode[] };
-
-// Flip mdast `html` nodes to `text` nodes so embedded HTML shows as its raw
-// tag characters instead of being dropped by the safe default pipeline.
-function rewriteHtmlToText(node: MdastNode): void {
-  if (node.children === undefined) return;
-  const children = node.children;
-  for (let i = 0; i < children.length; i += 1) {
-    const child = children[i];
-    if (child === undefined) continue;
-    if (child.type === "html") {
-      children[i] = { type: "text", value: child.value ?? "" };
-    } else {
-      rewriteHtmlToText(child);
-    }
-  }
-}
-
-function remarkHtmlAsText() {
-  return (tree: MdastNode): void => {
-    rewriteHtmlToText(tree);
-  };
-}
-
 // Module-level constant: see the streaming contract in the file header.
-const REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [
-  remarkGfm,
-  remarkBreaks,
-  remarkHtmlAsText,
-];
-
-// The chat-stream heading ladder: full-size document headings would shout
-// over the discourse in the 320px rail, so markdown headings compress -- h1
-// lands at 17px and each level steps down 1px; h4 and below stay at body
-// size and only gain weight. Weight caps at 600 (DESIGN.md forbids 700).
-const HEADING_CLASSES = {
-  h1: "text-[1.0625rem] font-semibold",
-  h2: "text-base font-semibold",
-  h3: "text-[0.9375rem] font-semibold",
-  h4: "text-sm font-semibold",
-  h5: "text-sm font-semibold",
-  h6: "text-sm font-semibold",
-} as const;
-
-type HeadingTag = keyof typeof HEADING_CLASSES;
-
-function ProseHeading({
-  tag,
-  className,
-  children,
-}: {
-  tag: HeadingTag;
-  className: string;
-  children?: ReactNode;
-}) {
-  const Tag = tag;
-  return <Tag className={cn("m-0", className)}>{children}</Tag>;
-}
+const REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [remarkGfm, remarkBreaks];
 
 // The hast subtree's concatenated text (a fence's code text lives in one
 // text node under pre > code, but walk generically).
@@ -113,8 +53,8 @@ function codeLanguage(pre: HastElement | undefined): string | null {
   const code = pre?.children.find(
     (child): child is HastElement => child.type === "element" && child.tagName === "code",
   );
-  const classes = code?.properties.className;
-  const list = classes === undefined ? [] : Array.isArray(classes) ? classes : [classes];
+  const classes = code?.properties.className ?? [];
+  const list = Array.isArray(classes) ? classes : [classes];
   for (const entry of list) {
     if (typeof entry === "string" && entry.startsWith("language-")) {
       return entry.slice("language-".length);
@@ -158,26 +98,46 @@ function CodeBlock({ node }: { node?: HastElement }) {
 }
 
 // http(s) links open in the OS default browser through the opener plugin --
-// the WebView has no navigation handler for plain anchors (same channel the
-// settings key link uses). Every other shape -- mailto:, relative refs, or
-// what the default urlTransform stripped to empty (javascript:, file:, ...)
-// -- degrades to plain text instead of a dead link.
+// the WebView has no navigation handler for plain anchors (the same channel
+// ProviderKeyField's get-key link uses). Every other shape -- mailto:,
+// relative refs, or what the default urlTransform stripped to empty
+// (javascript:, file:, ...) -- degrades to plain text instead of a dead
+// link. An opener rejection surfaces as a caption-sized live note beside
+// the link (role=status so screen readers announce it): the click already
+// swallowed the default navigation, so silence would read as a dead button.
 function ProseLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const intl = useIntl();
+  const [failed, setFailed] = useState(false);
   if (typeof href === "string" && /^https?:\/\//i.test(href)) {
     const handleClick = (event: MouseEvent<HTMLAnchorElement>): void => {
       event.preventDefault();
-      openUrl(href).catch((e: unknown) => {
-        log.warn("RoundProse", "openUrl failed", e);
-      });
+      openUrl(href)
+        .then(() => {
+          setFailed(false);
+        })
+        .catch((e: unknown) => {
+          log.warn("RoundProse", "openUrl failed", e);
+          setFailed(true);
+        });
     };
     return (
-      <a
-        href={href}
-        className="text-primary underline decoration-primary/50 underline-offset-2 hover:decoration-primary"
-        onClick={handleClick}
-      >
-        {children}
-      </a>
+      <>
+        <a
+          href={href}
+          className="text-primary underline decoration-primary/50 underline-offset-2 hover:decoration-primary"
+          onClick={handleClick}
+        >
+          {children}
+        </a>
+        {failed && (
+          <span role="status" className="ml-1 align-baseline text-xs text-destructive">
+            {intl.formatMessage({
+              id: "thread.link.openFailed",
+              defaultMessage: "Could not open link",
+            })}
+          </span>
+        )}
+      </>
     );
   }
   return <span>{children}</span>;
@@ -185,36 +145,16 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
 
 // Module-level constant: see the streaming contract in the file header.
 const MARKDOWN_COMPONENTS: Components = {
-  h1: ({ children }) => (
-    <ProseHeading tag="h1" className={HEADING_CLASSES.h1}>
-      {children}
-    </ProseHeading>
-  ),
-  h2: ({ children }) => (
-    <ProseHeading tag="h2" className={HEADING_CLASSES.h2}>
-      {children}
-    </ProseHeading>
-  ),
-  h3: ({ children }) => (
-    <ProseHeading tag="h3" className={HEADING_CLASSES.h3}>
-      {children}
-    </ProseHeading>
-  ),
-  h4: ({ children }) => (
-    <ProseHeading tag="h4" className={HEADING_CLASSES.h4}>
-      {children}
-    </ProseHeading>
-  ),
-  h5: ({ children }) => (
-    <ProseHeading tag="h5" className={HEADING_CLASSES.h5}>
-      {children}
-    </ProseHeading>
-  ),
-  h6: ({ children }) => (
-    <ProseHeading tag="h6" className={HEADING_CLASSES.h6}>
-      {children}
-    </ProseHeading>
-  ),
+  // The chat-stream heading ladder: full-size document headings would shout
+  // over the discourse in the 320px rail, so markdown headings compress -- h1
+  // lands at 17px and each level steps down 1px; h4 and below stay at body
+  // size and only gain weight. Weight caps at 600 (DESIGN.md forbids 700).
+  h1: ({ children }) => <h1 className="m-0 text-[1.0625rem] font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="m-0 text-base font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="m-0 text-[0.9375rem] font-semibold">{children}</h3>,
+  h4: ({ children }) => <h4 className="m-0 text-sm font-semibold">{children}</h4>,
+  h5: ({ children }) => <h5 className="m-0 text-sm font-semibold">{children}</h5>,
+  h6: ({ children }) => <h6 className="m-0 text-sm font-semibold">{children}</h6>,
   p: ({ children }) => <p className="m-0">{children}</p>,
   ul: ({ children }) => <ul className="m-0 list-disc space-y-1 pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="m-0 list-decimal space-y-1 pl-5">{children}</ol>,
@@ -223,11 +163,15 @@ const MARKDOWN_COMPONENTS: Components = {
       {children}
     </blockquote>
   ),
-  pre: ({ node }) => <CodeBlock node={node} />,
+  pre: CodeBlock,
   code: ({ children }) => (
     <code className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[13px]">{children}</code>
   ),
-  a: ({ href, children }) => <ProseLink href={href}>{children}</ProseLink>,
+  a: ProseLink,
+  // Remote images never load (the CSP allows only self/data/blob/asset), so a
+  // default img would render as a broken placeholder -- the alt text carries
+  // the content the way every other degraded shape here does.
+  img: ({ alt }) => (alt ? <span>{alt}</span> : null),
   table: ({ children }) => (
     <div className="overflow-x-auto rounded-md border border-border">
       <table className="w-full border-collapse [&_tr:last-child>td]:border-b-0">{children}</table>

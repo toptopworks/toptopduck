@@ -4,7 +4,9 @@ import { IntlProvider } from "react-intl";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
+import { log } from "../../../lib/log";
 import { RoundProse } from "../RoundProse";
+import { CODE_BLOCK_REVEAL_CLASS } from "../turn-visual";
 
 // The link channel is the opener plugin IPC (mocked so clicks are pinned
 // without Tauri); the openUrl failure lane logs through the shared sink,
@@ -124,6 +126,13 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(p?.textContent).toContain("第一行");
       expect(p?.textContent).toContain("第二行");
     });
+
+    it("renders a thematic break as a hairline rule", () => {
+      const { container } = renderProse("上\n\n---\n\n下");
+      const hr = container.querySelector("hr");
+      expect(hr).not.toBeNull();
+      expect(hr?.className).toContain("border-t");
+    });
   });
 
   describe("safety", () => {
@@ -161,6 +170,13 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(prose.textContent).toContain("<b>胞内</b>");
       expect(prose.textContent).toContain("<i>斜注</i>");
     });
+
+    it("degrades images to their alt text, never an img element", () => {
+      const view = renderProse("前 ![标志图](https://example.com/i.png) 后");
+      const prose = proseOf(view);
+      expect(prose.querySelector("img")).toBeNull();
+      expect(screen.getByText("标志图")).toBeInTheDocument();
+    });
   });
 
   describe("links", () => {
@@ -195,6 +211,44 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(container.querySelector("a")).toBeNull();
       expect(screen.getByText("本地")).toBeInTheDocument();
       expect(vi.mocked(openUrl)).not.toHaveBeenCalled();
+    });
+
+    it("degrades relative links to plain text", () => {
+      const { container } = renderProse("[相对](docs/x.md)");
+      expect(container.querySelector("a")).toBeNull();
+      expect(screen.getByText("相对")).toBeInTheDocument();
+    });
+
+    it("autolinks a bare https URL through the opener", () => {
+      renderProse("详见 https://example.com/docs 后续");
+      fireEvent.click(screen.getByRole("link", { name: "https://example.com/docs" }));
+      expect(vi.mocked(openUrl)).toHaveBeenCalledWith("https://example.com/docs");
+    });
+
+    it("autolinks a bare www host as http and degrades a bare email", () => {
+      renderProse("www.example.com 与 a@b.example.com");
+      fireEvent.click(screen.getByRole("link", { name: "www.example.com" }));
+      expect(vi.mocked(openUrl)).toHaveBeenCalledWith("http://www.example.com");
+      expect(screen.getByText("a@b.example.com").closest("a")).toBeNull();
+    });
+
+    it("passes an uppercase-scheme https link through the gate as written", () => {
+      renderProse("[大写](HTTPS://example.com/x)");
+      fireEvent.click(screen.getByRole("link", { name: "大写" }));
+      expect(vi.mocked(openUrl)).toHaveBeenCalledWith("HTTPS://example.com/x");
+    });
+
+    it("surfaces an opener failure as a live note beside the link and logs it", async () => {
+      vi.mocked(openUrl).mockRejectedValueOnce(new Error("no browser"));
+      renderProse("[文档](https://example.com/docs)");
+      fireEvent.click(screen.getByRole("link", { name: "文档" }));
+      const note = await screen.findByRole("status");
+      expect(note.textContent).toBe("无法打开链接");
+      expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+        "RoundProse",
+        "openUrl failed",
+        expect.any(Error),
+      );
     });
   });
 
@@ -238,6 +292,14 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       const { container } = renderProse("```python\nprint(1)");
       expect(container.querySelector("pre")).not.toBeNull();
       expect(container.querySelector("pre")?.textContent).toContain("print(1)");
+    });
+
+    it("reveals the copy affordance through the code block's named-group reveal class", () => {
+      renderProse("```\nplain\n```");
+      const copy = screen.getByRole("button", { name: "复制代码" });
+      // Assert against the imported constant so a same-meaning rewrite of
+      // the class string cannot silently pass.
+      expect(copy.parentElement?.className).toBe(CODE_BLOCK_REVEAL_CLASS);
     });
 
     it("keeps the copy ack across a streamed delta (stable component identity)", async () => {

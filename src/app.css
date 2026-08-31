@@ -111,6 +111,7 @@
   --color-ring: var(--ring);
 
   /* Radius scale derived from the single compact --radius token. */
+  --radius-xs: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
   --radius-lg: calc(var(--radius) + 2px);
