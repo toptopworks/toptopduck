@@ -10,6 +10,12 @@ import { cn } from "@/lib/utils";
 // teal box (bg-primary / border-primary) that flips with .dark via tokens.
 // The Table primitive's [&:has([role=checkbox])] alignment hooks (ADR-0067)
 // pick this role up inside table cells.
+//
+// Known gap kept for copy-in fidelity (ADR-0049): the props surface admits
+// checked="indeterminate", but only data-[state=checked] is styled and the
+// Indicator renders a lone Check icon — an indeterminate value would draw a
+// checkmark on an unfilled box. No consumer passes it today; extend the
+// variants + a Minus indicator here before relying on it.
 
 function Checkbox({
   className,

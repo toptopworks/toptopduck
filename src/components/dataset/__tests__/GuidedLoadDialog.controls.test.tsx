@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { GuidedLoadDialog } from "../GuidedLoadDialog";
 import type { GuidanceRequest } from "../../../types/dataset";
 import { renderI18n } from "../../common/__tests__/helpers";
@@ -89,5 +89,17 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
     expect(
       screen.getByRole("checkbox", { name: "跳过 people 第 3 行" }),
     ).toBeInTheDocument();
+  });
+
+  it("joins the checkbox and its row number into one hit target", () => {
+    renderDialog();
+    const box = screen.getByRole("checkbox", { name: "跳过 people 第 3 行" });
+    const label = document.querySelector(`label[for="${box.id}"]`);
+    // The row number + state mark ride a label bound to the checkbox, so the
+    // whole first cell is clickable — not just the 16px button (#749 review).
+    expect(label).not.toBeNull();
+    expect(label).toHaveTextContent("3");
+    fireEvent.click(label!);
+    expect(box).toHaveAttribute("aria-checked", "true");
   });
 });

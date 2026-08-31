@@ -47,7 +47,8 @@ interface SheetChoice {
 // sheet stack scrolls), design-system controls (Select primitive for the
 // header row, Checkbox copy-in for the skip ticks, headline-sm sheet
 // headings), dual-channel row states (accent/muted token tints + caption
-// 表头/跳过 text marks), and a setter-level contradiction invariant -- skips
+// Header/Skipped text marks), and a setter-level contradiction invariant --
+// skips
 // can only live below the header row, so a header move clears any skip it
 // overtakes and the submitted payload can never pair the header row with an
 // at/above skip.
@@ -101,9 +102,10 @@ export function GuidedLoadDialog({
           headerRow: row,
           // Contradiction invariant (#749): skips can only sit BELOW the header
           // row -- rows at/above it never enter the data, and before #749 the
-          // backend silently dropped such skips (excel.rs only honors rows
-          // below header_row). Moving the header clears every skip it
-          // overtakes so the pair never reaches submit.
+          // backend silently dropped such skips (the rectify filter in
+          // session/ingest.rs only honors rows below header_row). Moving the
+          // header clears every skip it overtakes so the pair never reaches
+          // submit.
           skipRows: c.skipRows.filter((r) => r > row),
         },
       };
@@ -277,15 +279,16 @@ function GuidedSheetSection({
             const rowNo = i + 1;
             const isHeader = rowNo === choice.headerRow;
             const isSkip = choice.skipRows.includes(rowNo);
+            const skipId = `${selectId}-skip-${rowNo}`;
             return (
               <TableRow
                 key={i}
                 className={
                   isHeader
-                    ? "bg-accent text-accent-foreground hover:bg-accent"
+                    ? "group bg-accent text-accent-foreground hover:bg-accent"
                     : isSkip
-                      ? "bg-muted text-muted-foreground hover:bg-muted"
-                      : undefined
+                      ? "group bg-muted text-muted-foreground hover:bg-muted"
+                      : "group"
                 }
               >
                 {/* Row-state dual channel (#749): the tint rides a token bg on
@@ -293,7 +296,10 @@ function GuidedSheetSection({
                     column names the state in text, not color alone. The first
                     column stays sticky across a wide table's horizontal
                     scroll; the opaque per-state bg keeps the scrolled cells
-                    from shining through. */}
+                    from shining through. Plain rows layer the row hover tint
+                    as a veil UNDER the content: the resting bg must stay
+                    opaque (occlusion), and a direct group-hover bg would turn
+                    translucent mid-scroll. */}
                 <TableCell
                   className={cn(
                     "sticky left-0 z-10",
@@ -304,8 +310,20 @@ function GuidedSheetSection({
                         : "bg-background",
                   )}
                 >
+                  {!isHeader && !isSkip && (
+                    <span
+                      aria-hidden
+                      className="pointer-events-none absolute inset-0 -z-10 bg-muted/50 opacity-0 transition-opacity group-hover:opacity-100"
+                    />
+                  )}
+                  {/* The checkbox and its row number + state mark share one
+                      label so the whole first cell is the hit target (#749
+                      review: a bare 16px button sits under the 24px WCAG
+                      2.5.8 minimum). font-normal drops the Label primitive's
+                      medium weight so the number reads as table text. */}
                   <div className="flex items-center gap-2">
                     <Checkbox
+                      id={skipId}
                       checked={isSkip}
                       onCheckedChange={() => onToggleSkip(rowNo)}
                       disabled={loading || rowNo <= choice.headerRow}
@@ -317,23 +335,25 @@ function GuidedSheetSection({
                         { row: rowNo, sheet: sheet.name },
                       )}
                     />
-                    <span>{rowNo}</span>
-                    {isHeader && (
-                      <span className="text-xs">
-                        <FormattedMessage
-                          id="guidedLoad.headerRowMark"
-                          defaultMessage="Header"
-                        />
-                      </span>
-                    )}
-                    {isSkip && (
-                      <span className="text-xs">
-                        <FormattedMessage
-                          id="guidedLoad.skipRowMark"
-                          defaultMessage="Skipped"
-                        />
-                      </span>
-                    )}
+                    <Label htmlFor={skipId} className="cursor-pointer font-normal">
+                      <span>{rowNo}</span>
+                      {isHeader && (
+                        <span className="text-xs">
+                          <FormattedMessage
+                            id="guidedLoad.headerRowMark"
+                            defaultMessage="Header"
+                          />
+                        </span>
+                      )}
+                      {isSkip && (
+                        <span className="text-xs">
+                          <FormattedMessage
+                            id="guidedLoad.skipRowMark"
+                            defaultMessage="Skipped"
+                          />
+                        </span>
+                      )}
+                    </Label>
                   </div>
                 </TableCell>
                 {cells.map((cell, j) => (

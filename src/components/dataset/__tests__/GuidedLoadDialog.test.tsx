@@ -221,6 +221,29 @@ describe("GuidedLoadDialog", () => {
       expect(classes).toContain("text-muted-foreground");
       expect(third).toHaveTextContent("跳过");
     });
+
+    it("pins the sticky first column with its per-state opaque background", () => {
+      renderGuided();
+      // Skip row 3 so all three row states are present at once.
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: "跳过 people 第 3 行" }),
+      );
+      const cellClasses = Array.from(previewRows()).map(
+        (row) => row.querySelector("td")!.className.split(/\s+/),
+      );
+      // Every state: sticky positioning + z-lift, so the column survives the
+      // table's horizontal scroll instead of scrolling away with the data.
+      for (const classes of cellClasses) {
+        expect(classes).toContain("sticky");
+        expect(classes).toContain("left-0");
+        expect(classes).toContain("z-10");
+      }
+      // The opaque fill matches the row state — this is the occlusion that
+      // keeps scrolled-past cells from shining through the first column.
+      expect(cellClasses[0]).toContain("bg-accent");
+      expect(cellClasses[1]).toContain("bg-background");
+      expect(cellClasses[2]).toContain("bg-muted");
+    });
   });
 
   describe("header/skip contradiction invariant (issue #749)", () => {
@@ -261,6 +284,41 @@ describe("GuidedLoadDialog", () => {
       expect(onSubmit).toHaveBeenCalledWith([
         { name: "people", rectify: { header_row: 2, skip_rows: [3] } },
       ]);
+    });
+
+    it("keeps each sheet's choices independent across sheets", () => {
+      const onSubmit = vi.fn();
+      const twoSheets: GuidanceRequest = {
+        source_path: "/x/two.xlsx",
+        workbook_name: "two",
+        sheets: [
+          { name: "people", preview: [["meta"], ["id"], ["1"]] },
+          { name: "orders", preview: [["junk"], ["qty"], ["7"]] },
+        ],
+      };
+      renderGuided({ request: twoSheets, onSubmit });
+      // The mocked Select renders one native select per sheet, in workbook
+      // order — index 0 is "people".
+      const peopleSelect = screen.getAllByTestId("header-row-select")[0]!;
+      // Independent choices per sheet: header + skip on people, a skip on orders.
+      fireEvent.change(peopleSelect, { target: { value: "2" } });
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: "跳过 people 第 3 行" }),
+      );
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: "跳过 orders 第 2 行" }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "people", rectify: { header_row: 2, skip_rows: [3] } },
+        { name: "orders", rectify: { header_row: 1, skip_rows: [2] } },
+      ]);
+      // Moving sheet A's header cannot disturb sheet B's skips — a toggle
+      // that clobbers the other sheets' entries fails here.
+      fireEvent.change(peopleSelect, { target: { value: "3" } });
+      expect(
+        screen.getByRole("checkbox", { name: "跳过 orders 第 2 行" }),
+      ).toHaveAttribute("aria-checked", "true");
     });
   });
 
