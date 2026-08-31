@@ -26,6 +26,8 @@ vi.mock("../../api", async (importOriginal) => {
     ...actual,
     ingestFile: vi.fn(),
     ingestFileGuided: vi.fn(),
+    guidanceWindow: vi.fn().mockResolvedValue([["w1"], ["w2"]]),
+    discardGuidedRetention: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -42,7 +44,7 @@ vi.mock("../../lib/log", () => ({
   },
 }));
 
-import { ingestFile, ingestFileGuided } from "../../api";
+import { discardGuidedRetention, guidanceWindow, ingestFile, ingestFileGuided } from "../../api";
 import { log } from "../../lib/log";
 
 const SID = "sess-1";
@@ -52,7 +54,7 @@ const SID = "sess-1";
 const guidanceRequest: GuidanceRequest = {
   source_path: "/x.xlsx",
   workbook_name: "x.xlsx",
-  sheets: [{ name: "Sheet1", preview: [["a", "b"]] }],
+  sheets: [{ name: "Sheet1", preview: [["a", "b"]], total_rows: 2, reason: "MultipleHeaderRows" }],
 };
 
 const sheetGuidance: SheetGuidance[] = [
@@ -922,6 +924,47 @@ describe("useIngestFlow", () => {
       expect(tracker.resolved).toBe(false);
       expect(result.current.haltedRemaining).toBeNull();
       expect(log.warn).not.toHaveBeenCalled();
+    });
+
+    it("cancel discards the backend retention (issue #750)", async () => {
+      // The dialog's cancel path frees the session's retained parse; commit
+      // already drops it server-side. Best-effort fire -- the mock resolves.
+      const { deps } = setup();
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
+      await primeGuidance(result);
+
+      act(() => {
+        result.current.handleGuidedCancel();
+      });
+
+      expect(discardGuidedRetention).toHaveBeenCalledWith(SID);
+    });
+  });
+
+  describe("preview-window paging feed (issue #750)", () => {
+    it("fetchGuidanceWindow delegates to guidanceWindow bound to the parked path", async () => {
+      const { deps } = setup();
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
+      await primeGuidance(result);
+
+      let rows!: string[][];
+      await act(async () => {
+        rows = await result.current.fetchGuidanceWindow("Sheet1", 12, 12);
+      });
+
+      expect(guidanceWindow).toHaveBeenCalledWith(SID, "/x.xlsx", "Sheet1", 12, 12);
+      expect(rows).toEqual([["w1"], ["w2"]]);
+    });
+
+    it("fetchGuidanceWindow rejects when no guidance is parked", async () => {
+      const { deps } = setup();
+      const { result } = renderHook(() => useIngestFlow(SID, deps));
+      expect(result.current.guidance).toBeNull();
+
+      await expect(result.current.fetchGuidanceWindow("Sheet1", 0, 12)).rejects.toThrow(
+        "fetchGuidanceWindow without parked guidance",
+      );
+      expect(guidanceWindow).not.toHaveBeenCalled();
     });
   });
 });

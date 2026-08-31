@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use rust_xlsxwriter::{Formula, Workbook};
 use toptopduck_lib::{
-    DatasetDescriptor, DatasetPrivacy, LoadError, LoadOutcome, RectifyProvenance, RenameError,
-    Session, SheetGuidance, SheetRectify,
+    DatasetDescriptor, DatasetPrivacy, GuidanceReason, LoadError, LoadOutcome, RectifyProvenance,
+    RenameError, Session, SheetGuidance, SheetRectify,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -659,6 +659,13 @@ fn multi_row_header_requests_guidance() {
     assert_eq!(guidance.sheets[0].name, "people");
     // Preview exposes the raw rows so the user can locate the header.
     assert!(guidance.sheets[0].preview.len() >= 3);
+    // Issue #750: the sheet reports its full row count + the exact reason the
+    // auto algorithm deferred (two header-like rows above the data).
+    assert_eq!(guidance.sheets[0].total_rows, 3);
+    assert_eq!(
+        guidance.sheets[0].reason,
+        Some(GuidanceReason::MultipleHeaderRows)
+    );
 }
 
 #[test]
@@ -1250,4 +1257,254 @@ fn setting_privacy_on_one_dataset_does_not_affect_another() {
     // B still has the default.
     let b_after = session.get(&b.reference_name).unwrap();
     assert_eq!(b_after.privacy, DatasetPrivacy::default());
+}
+
+// --- Guided-load preview windows + retention lifecycle (issue #750) ---------
+//
+// A NeedsGuidance outcome retains the workbook's parse on the session so the
+// dialog's pager serves windows without re-reading the file; the retention
+// drops on guided commit, on the dialog-cancel discard, and survives a FAILED
+// commit (the dialog stays open for retry).
+
+/// One sheet whose auto-tidy defers (two header-like rows on top) and that
+/// carries 30 rows total -- enough to page past one 12-row window.
+fn tall_guided_xlsx() -> (PathBuf, tempfile::TempDir) {
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("tall").expect("name");
+    ws.write_string(0, 0, "meta").unwrap();
+    ws.write_string(0, 1, "info").unwrap();
+    ws.write_string(1, 0, "id").unwrap();
+    ws.write_string(1, 1, "value").unwrap();
+    for r in 2..30u32 {
+        ws.write_number(r, 0, f64::from(r)).unwrap();
+        ws.write_string(r, 1, format!("v{r}")).unwrap();
+    }
+    save_xlsx(wb, "tall.xlsx")
+}
+
+/// Ingest `path` and unwrap the NeedsGuidance outcome.
+fn expect_guidance(session: &mut Session, path: &Path) -> toptopduck_lib::GuidanceRequest {
+    match session.ingest(path) {
+        LoadOutcome::NeedsGuidance(g) => g,
+        other => panic!("expected NeedsGuidance, got {other:?}"),
+    }
+}
+
+#[test]
+fn guidance_marks_only_the_failing_sheets_with_a_reason() {
+    // A workbook where one sheet tidies confidently and another defers: the
+    // transactional no-partial-load sends BOTH to the dialog, but only the
+    // failing sheet carries a reason (issue #750).
+    let mut wb = Workbook::new();
+    let clean = wb.add_worksheet();
+    clean.set_name("clean").expect("name");
+    clean.write_string(0, 0, "id").unwrap();
+    clean.write_string(0, 1, "name").unwrap();
+    clean.write_number(1, 0, 1.0).unwrap();
+    clean.write_string(1, 1, "Alice").unwrap();
+    let rough = wb.add_worksheet();
+    rough.set_name("rough").expect("name");
+    rough.write_string(0, 0, "meta").unwrap();
+    rough.write_string(0, 1, "info").unwrap();
+    rough.write_string(1, 0, "id").unwrap();
+    rough.write_string(1, 1, "name").unwrap();
+    rough.write_number(2, 0, 1.0).unwrap();
+    rough.write_string(2, 1, "Bob").unwrap();
+    let (xlsx, _dir) = save_xlsx(wb, "mixed.xlsx");
+
+    let mut session = Session::new().expect("session");
+    let guidance = expect_guidance(&mut session, &xlsx);
+    assert_eq!(guidance.sheets.len(), 2);
+    let clean_sheet = guidance.sheets.iter().find(|s| s.name == "clean").unwrap();
+    assert_eq!(clean_sheet.reason, None); // tidied confidently; rides along only
+    assert_eq!(clean_sheet.total_rows, 2);
+    let rough_sheet = guidance.sheets.iter().find(|s| s.name == "rough").unwrap();
+    assert_eq!(rough_sheet.reason, Some(GuidanceReason::MultipleHeaderRows));
+    assert_eq!(rough_sheet.total_rows, 3);
+}
+
+#[test]
+fn guidance_window_serves_windows_from_the_retained_parse() {
+    let (xlsx, _dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    let guidance = expect_guidance(&mut session, &xlsx);
+    let sheet = &guidance.sheets[0];
+    assert_eq!(sheet.total_rows, 30);
+    assert_eq!(sheet.preview.len(), 12); // the first window rides the request
+    let path_key = xlsx.to_string_lossy().to_string();
+
+    // First window == the inlined preview (same renderer, same rows).
+    assert_eq!(
+        session
+            .guidance_window(&path_key, "tall", 0, 12)
+            .expect("first window"),
+        sheet.preview
+    );
+    // Middle window: absolute rows 13..=24; sheet row 13 is the written r=12.
+    let mid = session
+        .guidance_window(&path_key, "tall", 12, 12)
+        .expect("mid window");
+    assert_eq!(mid.len(), 12);
+    assert_eq!(mid[0], vec!["12", "v12"]);
+    assert_eq!(mid[11], vec!["23", "v23"]);
+    // Last window: rows 25..=30 -- shorter than the window size.
+    let last = session
+        .guidance_window(&path_key, "tall", 24, 12)
+        .expect("last window");
+    assert_eq!(last.len(), 6);
+    assert_eq!(last[0], vec!["24", "v24"]);
+    // Out-of-range offset: past the last row -> empty window, no panic.
+    assert_eq!(
+        session.guidance_window(&path_key, "tall", 30, 12),
+        Some(vec![])
+    );
+    // Misses: an unknown sheet or a different path yields None (stale dialog).
+    assert_eq!(session.guidance_window(&path_key, "nope", 0, 12), None);
+    assert_eq!(session.guidance_window("/other.xlsx", "tall", 0, 12), None);
+}
+
+#[test]
+fn guidance_window_does_not_reparse_the_workbook() {
+    // The pager must read the RETAINED parse, never the file: rewriting the
+    // path after the NeedsGuidance outcome cannot change the served windows.
+    let (xlsx, dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &xlsx);
+    let path_key = xlsx.to_string_lossy().to_string();
+    let before = session
+        .guidance_window(&path_key, "tall", 0, 12)
+        .expect("window");
+
+    fs::write(dir.path().join("tall.xlsx"), b"not a workbook anymore").expect("overwrite fixture");
+
+    let after = session
+        .guidance_window(&path_key, "tall", 0, 12)
+        .expect("window after overwrite");
+    assert_eq!(before, after); // still the original rows -- zero re-parse
+}
+
+#[test]
+fn guidance_retention_drops_on_successful_guided_commit() {
+    let (xlsx, _dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &xlsx);
+    let path_key = xlsx.to_string_lossy().to_string();
+    assert!(session.guidance_window(&path_key, "tall", 0, 12).is_some());
+
+    let picks = vec![SheetGuidance {
+        name: "tall".into(),
+        rectify: SheetRectify {
+            header_row: 2,
+            skip_rows: vec![],
+        },
+    }];
+    match session.ingest_guided(&xlsx, &picks) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    }
+    // The dialog resolves on commit -> the retention is gone.
+    assert_eq!(session.guidance_window(&path_key, "tall", 0, 12), None);
+}
+
+#[test]
+fn guided_commit_loads_a_header_beyond_the_first_window() {
+    // AC3 end to end, backend side: a header sitting past the 12-row first
+    // window (row 15, third row of window 2) is served by the pager, picked,
+    // and commits successfully -- no suite ever committed a header beyond the
+    // first window before (review finding 1).
+    let (xlsx, _dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &xlsx);
+    let path_key = xlsx.to_string_lossy().to_string();
+
+    // Window 2 serves rows 13..=24; row 15 is the pick.
+    let window = session
+        .guidance_window(&path_key, "tall", 12, 12)
+        .expect("window 2");
+    assert_eq!(window[0], vec!["12", "v12"]); // absolute row 13
+                                              // The window contract pins at the boundary: an oversized limit clamps to
+                                              // the preview window size, never returning a taller slice.
+    assert_eq!(
+        session
+            .guidance_window(&path_key, "tall", 12, 100)
+            .expect("clamped window")
+            .len(),
+        12
+    );
+
+    let picks = vec![SheetGuidance {
+        name: "tall".into(),
+        rectify: SheetRectify {
+            header_row: 15,
+            skip_rows: vec![],
+        },
+    }];
+    match session.ingest_guided(&xlsx, &picks) {
+        // Rows 1..=14 dropped; row 15 heads the table, rows 16..=30 the data
+        // -- 16 materialized rows (header included) survive.
+        LoadOutcome::Loaded(active) => assert_eq!(active.row_count, 16),
+        other => panic!("expected guided load to succeed, got {other:?}"),
+    }
+    assert_eq!(session.get("tall").unwrap().row_count, 16);
+}
+
+#[test]
+fn guidance_retention_survives_a_failed_guided_commit() {
+    // A failed commit keeps the dialog open for retry -- its paging must keep
+    // working, so the retention stays.
+    let (xlsx, _dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &xlsx);
+    let path_key = xlsx.to_string_lossy().to_string();
+
+    let picks = vec![SheetGuidance {
+        name: "tall".into(),
+        rectify: SheetRectify {
+            header_row: 999, // out of range -> the commit refuses
+            skip_rows: vec![],
+        },
+    }];
+    match session.ingest_guided(&xlsx, &picks) {
+        LoadOutcome::Error(_) => {}
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert!(session.guidance_window(&path_key, "tall", 0, 12).is_some());
+}
+
+#[test]
+fn discard_guidance_retention_drops_the_retained_parse() {
+    // The dialog-cancel path: idempotent, and paging stops afterwards.
+    let (xlsx, _dir) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &xlsx);
+    let path_key = xlsx.to_string_lossy().to_string();
+    assert!(session.guidance_window(&path_key, "tall", 0, 12).is_some());
+
+    session.discard_guidance_retention();
+    assert_eq!(session.guidance_window(&path_key, "tall", 0, 12), None);
+    session.discard_guidance_retention(); // a second discard is a no-op
+}
+
+#[test]
+fn a_second_needs_guidance_supersedes_the_first_retention() {
+    // The retention is a single slot: parking a SECOND workbook replaces the
+    // first -- the stale first dialog's windows miss (path key), the new
+    // workbook's windows are served.
+    let (first, _keep1) = tall_guided_xlsx();
+    let mut session = Session::new().expect("session");
+    expect_guidance(&mut session, &first);
+    let first_key = first.to_string_lossy().to_string();
+    assert!(session.guidance_window(&first_key, "tall", 0, 12).is_some());
+
+    let (second, _keep2) = tall_guided_xlsx();
+    expect_guidance(&mut session, &second);
+    let second_key = second.to_string_lossy().to_string();
+    assert_eq!(session.guidance_window(&first_key, "tall", 0, 12), None);
+    assert_eq!(
+        session
+            .guidance_window(&second_key, "tall", 0, 12)
+            .map(|w| w.len()),
+        Some(12)
+    );
 }

@@ -26,13 +26,28 @@ use crate::ingest;
 use crate::ingest::schema::quote_ident;
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, LoadError, LoadOutcome,
-    RectifyProvenance, SheetGuidance, SheetRectify, SourceLifecycleKind,
+    DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet, LoadError,
+    LoadOutcome, RectifyProvenance, SheetGuidance, SheetRectify, SourceLifecycleKind,
 };
 
 /// Raw rows surfaced per sheet in the guided-load preview -- enough to spot the
 /// header row and any separator/sub-header/footer rows to skip (ADR-0015).
+/// Doubles as the pager's window size (issue #750): the first inlined window
+/// and every fetched window are the same height.
 const GUIDANCE_PREVIEW_ROWS: usize = 12;
+
+/// The parsed sheets of a workbook parked on the guided-load dialog (issue
+/// #750): `read_non_empty_sheets` already parsed the workbook fully for the
+/// `NeedsGuidance` outcome, and holding that parse until the dialog resolves
+/// makes preview-window paging zero-reparse. Keyed by the source path the
+/// guidance was built from, so a superseding ingest's retention can never
+/// serve a stale dialog's window request (the lookup misses instead).
+/// Ephemeral -- never persisted, gone on session drop; the lifecycle is
+/// set-on-NeedsGuidance / drop-on-guided-commit / drop-on-dialog-cancel.
+pub(super) struct GuidanceRetention {
+    pub(super) source_path: String,
+    pub(super) sheets: Vec<ingest::excel::SheetRows>,
+}
 
 impl super::Session {
     /// Ingest a file. Transactional: on any failure the working set is unchanged
@@ -216,19 +231,35 @@ impl super::Session {
             Err(e) => return LoadOutcome::Error(e),
         };
 
-        // Auto-tidy each sheet; the first that can't be confidently tidied sends
-        // the whole workbook to guided loading (no partial load -- transactional).
+        // Auto-tidy EVERY sheet (issue #750): any sheet that can't be
+        // confidently tidied sends the whole workbook to guided loading (no
+        // partial load -- transactional), and each sheet's failure reason rides
+        // the guidance so the dialog can surface it under the sheet heading.
         let mut entries: Vec<(String, Vec<Vec<Data>>, RectifyProvenance)> =
             Vec::with_capacity(sheets.len());
+        let mut reasons: Vec<Option<GuidanceReason>> = Vec::with_capacity(sheets.len());
+        let mut needs_guidance = false;
         for sheet in &sheets {
             match auto_tidy(sheet) {
                 TidyOutcome::Tidied(t) => {
-                    entries.push((sheet.name.clone(), t.rows, RectifyProvenance::Auto))
+                    reasons.push(None);
+                    entries.push((sheet.name.clone(), t.rows, RectifyProvenance::Auto));
                 }
-                TidyOutcome::NeedsGuidance => {
-                    return LoadOutcome::NeedsGuidance(Self::build_guidance(path, &sheets));
+                TidyOutcome::NeedsGuidance(reason) => {
+                    needs_guidance = true;
+                    reasons.push(Some(reason));
                 }
             }
+        }
+        if needs_guidance {
+            let request = Self::build_guidance(path, &sheets, &reasons);
+            // Retain the parse for zero-reparse preview paging (issue #750);
+            // dropped on guided commit / dialog cancel (see GuidanceRetention).
+            self.guidance_retained = Some(GuidanceRetention {
+                source_path: path.to_string_lossy().to_string(),
+                sheets,
+            });
+            return LoadOutcome::NeedsGuidance(request);
         }
 
         match self.commit_excel(path, entries) {
@@ -271,9 +302,56 @@ impl super::Session {
         };
 
         match self.commit_excel(path, entries) {
-            Ok(active) => LoadOutcome::Loaded(active),
+            Ok(active) => {
+                // The dialog resolves on a successful commit: drop THIS path's
+                // retained parse (issue #750). A failed commit keeps it -- the
+                // dialog stays open for retry and its paging must keep working.
+                let path_key = path.to_string_lossy();
+                if self
+                    .guidance_retained
+                    .as_ref()
+                    .is_some_and(|r| r.source_path == path_key)
+                {
+                    self.guidance_retained = None;
+                }
+                LoadOutcome::Loaded(active)
+            }
             Err(e) => LoadOutcome::Error(e),
         }
+    }
+
+    /// Serve one preview window for a sheet parked on the guided-load dialog
+    /// (issue #750), from the retained parse -- no workbook re-read. Rows are
+    /// `[offset .. offset + limit)` clamped to the sheet's row count, rendered
+    /// exactly like the first inlined window. `limit` is clamped to the
+    /// preview window size, pinning the pager's window contract at this
+    /// boundary (IPC input is untrusted). `None` when nothing is retained
+    /// for the (path, sheet) pair -- a stale dialog whose guidance was
+    /// committed, discarded, or superseded; the command layer maps the miss to
+    /// an engine error.
+    pub fn guidance_window(
+        &self,
+        path: &str,
+        sheet_name: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Option<Vec<Vec<String>>> {
+        let retained = self.guidance_retained.as_ref()?;
+        if retained.source_path != path {
+            return None;
+        }
+        let sheet = retained.sheets.iter().find(|s| s.name == sheet_name)?;
+        Some(ingest::excel::render_preview_window(
+            sheet,
+            offset,
+            limit.min(GUIDANCE_PREVIEW_ROWS),
+        ))
+    }
+
+    /// Drop the retained guidance parse (issue #750): the dialog-cancel path.
+    /// Idempotent -- a second discard finds nothing.
+    pub fn discard_guidance_retention(&mut self) {
+        self.guidance_retained = None;
     }
 
     /// Attach every `(display name, tidied rows, rectify)` entry as a read-only
@@ -429,18 +507,30 @@ impl super::Session {
     }
 
     /// Build a [`GuidanceRequest`] from a workbook's sheets: each visible
-    /// non-blank sheet's raw top rows rendered as strings (pre-rectify preview).
-    fn build_guidance(path: &Path, sheets: &[ingest::excel::SheetRows]) -> GuidanceRequest {
+    /// non-blank sheet's raw top rows rendered as strings (pre-rectify preview)
+    /// plus the total row count + the per-sheet auto-tidy failure reason
+    /// (issue #750). `reasons` is index-aligned with `sheets`.
+    fn build_guidance(
+        path: &Path,
+        sheets: &[ingest::excel::SheetRows],
+        reasons: &[Option<GuidanceReason>],
+    ) -> GuidanceRequest {
         let workbook_name = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("workbook")
             .to_string();
+        // The zip below truncates silently on a length mismatch; both vecs
+        // are filled in the same loop, so make that alignment loud.
+        debug_assert_eq!(sheets.len(), reasons.len());
         let sheets_preview = sheets
             .iter()
-            .map(|s| GuidanceSheet {
+            .zip(reasons)
+            .map(|(s, reason)| GuidanceSheet {
                 name: s.name.clone(),
                 preview: ingest::excel::render_preview(s, GUIDANCE_PREVIEW_ROWS),
+                total_rows: s.rows.len(),
+                reason: *reason,
             })
             .collect();
         GuidanceRequest {

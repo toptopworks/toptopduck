@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import type { IntlShape } from "react-intl";
-import { ingestFile, ingestFileGuided } from "../api";
+import { discardGuidedRetention, guidanceWindow, ingestFile, ingestFileGuided } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { log } from "../lib/log";
@@ -101,6 +101,12 @@ export interface UseIngestFlow {
   handleIngestMany: (paths: string[]) => Promise<boolean>;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => Promise<void>;
   handleGuidedCancel: () => void;
+  /** Fetch one preview window for the PARKED workbook's sheet (issue #750):
+   *  rows [offset, offset + limit) rendered as strings, served from the
+   *  backend retention -- zero re-parse per page. Bound to the parked
+   *  guidance path; rejects when no dialog is parked (defensive -- the
+   *  dialog only calls it while open). */
+  fetchGuidanceWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
 }
 
 // Which route a single file's LoadOutcome took (issue #351): the batch
@@ -416,7 +422,9 @@ export function useIngestFlow(
 
   // Cancel the guidance dialog. With a parked batch this is the cancel-halt
   // (#748): the queued remainder is dropped, its count surfaced, and the #500
-  // gate settled false.
+  // gate settled false. Also frees the backend's retained parse (issue #750)
+  // best-effort: a reject leaks nothing (the retention is session-ephemeral),
+  // so it is logged, never surfaced.
   const handleGuidedCancel = useCallback(() => {
     setGuidance(null);
     setGuidanceError(null);
@@ -425,7 +433,26 @@ export function useIngestFlow(
       parkedBatchRef.current = null;
       haltBatch(parked.remaining, "cancelled", parked.resolve);
     }
-  }, [haltBatch]);
+    discardGuidedRetention(sessionId).catch((e) => {
+      log.warn("useIngestFlow", "guided-retention discard failed (session-ephemeral; leaking nothing)", {
+        error: String(e),
+      });
+    });
+  }, [sessionId, haltBatch]);
+
+  // Page the parked workbook's preview (issue #750): bound to the parked
+  // guidance path; the dialog calls it per sheet pager. No parked guidance is
+  // a programming error (the dialog only exists while guidance is set), so it
+  // rejects instead of faking an empty window.
+  const fetchGuidanceWindow = useCallback(
+    (sheetName: string, offset: number, limit: number): Promise<string[][]> => {
+      if (guidance === null) {
+        return Promise.reject(new Error("fetchGuidanceWindow without parked guidance"));
+      }
+      return guidanceWindow(sessionId, guidance.path, sheetName, offset, limit);
+    },
+    [sessionId, guidance],
+  );
 
   return {
     guidance,
@@ -435,5 +462,6 @@ export function useIngestFlow(
     handleIngestMany,
     handleGuidedSubmit,
     handleGuidedCancel,
+    fetchGuidanceWindow,
   };
 }

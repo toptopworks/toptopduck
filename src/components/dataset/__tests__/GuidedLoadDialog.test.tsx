@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { GuidedLoadDialog } from "../GuidedLoadDialog";
 import type { GuidanceRequest, SheetGuidance } from "../../../types/dataset";
 import type { AppError } from "../../../types/error";
-import { renderI18n } from "../../common/__tests__/helpers";
+import { renderI18n, withIntl } from "../../common/__tests__/helpers";
 
 // Radix Select's portal + animation model does not cooperate with jsdom's
 // synchronous fireEvent inside a Dialog (the dropdown portal never mounts
@@ -54,6 +54,8 @@ describe("GuidedLoadDialog", () => {
           ["id", "name"],
           ["1", "Alice"],
         ],
+        total_rows: 3,
+        reason: "MultipleHeaderRows",
       },
     ],
   };
@@ -64,10 +66,12 @@ describe("GuidedLoadDialog", () => {
     error: AppError | null;
     onSubmit: (guidance: SheetGuidance[]) => void;
     onCancel: () => void;
+    onFetchWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
   };
 
   function renderGuided(props: Partial<DialogProps> = {}) {
     const onSubmit = props.onSubmit ?? vi.fn();
+    const onFetchWindow = props.onFetchWindow ?? vi.fn().mockResolvedValue([]);
     renderI18n(
       <GuidedLoadDialog
         request={request}
@@ -75,10 +79,11 @@ describe("GuidedLoadDialog", () => {
         error={null}
         onSubmit={onSubmit}
         onCancel={() => {}}
+        onFetchWindow={onFetchWindow}
         {...props}
       />,
     );
-    return { onSubmit };
+    return { onSubmit, onFetchWindow };
   }
 
   const previewRows = () => document.querySelectorAll("table.preview tr");
@@ -292,8 +297,8 @@ describe("GuidedLoadDialog", () => {
         source_path: "/x/two.xlsx",
         workbook_name: "two",
         sheets: [
-          { name: "people", preview: [["meta"], ["id"], ["1"]] },
-          { name: "orders", preview: [["junk"], ["qty"], ["7"]] },
+          { name: "people", preview: [["meta"], ["id"], ["1"]], total_rows: 3, reason: null },
+          { name: "orders", preview: [["junk"], ["qty"], ["7"]], total_rows: 3, reason: null },
         ],
       };
       renderGuided({ request: twoSheets, onSubmit });
@@ -371,6 +376,226 @@ describe("GuidedLoadDialog", () => {
     it("renders no alert when error is null", () => {
       renderGuided();
       expect(document.querySelector("[role=\"alert\"]")).toBeNull();
+    });
+  });
+
+  describe("preview-window paging (issue #750)", () => {
+    // A 30-row sheet: the first 12-row window rides the inlined preview, the
+    // rest arrive through onFetchWindow. The fetch mock fabricates the rows
+    // for whatever [offset, limit) the pager asks, so every window renders
+    // with absolute numbering.
+    function bigRequest(): GuidanceRequest {
+      return {
+        source_path: "/x/big.xlsx",
+        workbook_name: "big",
+        sheets: [
+          {
+            name: "big",
+            preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
+            total_rows: 30,
+            reason: null,
+          },
+        ],
+      };
+    }
+
+    const windowRows = (_sheet: string, offset: number, limit: number) =>
+      Promise.resolve(
+        Array.from({ length: Math.min(limit, 30 - offset) }, (_, i) => [`r${offset + i + 1}`]),
+      );
+
+    it("shows the pager with an accurate position when the sheet outgrows one window", () => {
+      renderGuided({ request: bigRequest() });
+      expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
+    });
+
+    it("hides the pager entirely for a sheet that fits one window", () => {
+      // The default fixture's 3 rows fit one window -- the experience stays
+      // exactly what it was before paging landed (no pager, no indicator).
+      renderGuided();
+      expect(screen.queryByRole("button", { name: "上一页" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "下一页" })).toBeNull();
+    });
+
+    it("next fetches the next window and re-numbers rows absolutely", async () => {
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onFetchWindow });
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await waitFor(() => expect(onFetchWindow).toHaveBeenCalledWith("big", 12, 12));
+      await screen.findByText("r13");
+      // The position indicator moves with the window (polite live region).
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 13–24 行 / 共 30 行");
+      // Row numbers stay ABSOLUTE -- the window's first row reads 13, not 1.
+      expect(
+        screen.getByRole("checkbox", { name: "跳过 big 第 13 行" }),
+      ).toBeInTheDocument();
+    });
+
+    it("disables next on the last window and prev on the first", async () => {
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onFetchWindow });
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      // The final window is short: rows 25–30, and next-page disables.
+      await screen.findByText("r25");
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 25–30 行 / 共 30 行");
+      expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "上一页" })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+      await screen.findByText("r13");
+      fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+      await screen.findByText("r1");
+      expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+    });
+
+    it("a failed window fetch keeps the current window", async () => {
+      // A retention miss (committed / discarded / superseded) or IPC failure
+      // must not blank the preview: the dialog keeps the window it has, the
+      // pager re-arms, and the user can still submit what they see.
+      const onFetchWindow = vi.fn(() => Promise.reject(new Error("retention gone")));
+      const onSubmit = vi.fn();
+      renderGuided({ request: bigRequest(), onSubmit, onFetchWindow });
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await waitFor(() => expect(onFetchWindow).toHaveBeenCalledWith("big", 12, 12));
+      // The fetch flag clears -> the pager re-arms on the original window.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled(),
+      );
+      expect(screen.getByText("r1")).toBeInTheDocument();
+      expect(screen.queryByText("r13")).toBeNull();
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
+      // "Submit what they see" pinned: the default pick on the kept window
+      // goes through.
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "big", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("the header dropdown offers only the current window's rows", async () => {
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onFetchWindow });
+      const select = screen.getByTestId("header-row-select");
+      const optionValues = () =>
+        Array.from(select.querySelectorAll("option")).map((o) => o.getAttribute("value"));
+      expect(optionValues()).toEqual(Array.from({ length: 12 }, (_, i) => String(i + 1)));
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      // After paging, rows 1–12 are invisible -> unselectable.
+      expect(optionValues()).toEqual(Array.from({ length: 12 }, (_, i) => String(i + 13)));
+    });
+
+    it("selections made across windows coexist and submit as absolute rows", async () => {
+      const onSubmit = vi.fn();
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onSubmit, onFetchWindow });
+      // Window 1: header row 3 + skip row 5.
+      fireEvent.change(screen.getByTestId("header-row-select"), { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("checkbox", { name: "跳过 big 第 5 行" }));
+      // Window 2: skip row 15 -- row 5's tick must survive the page swap.
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      fireEvent.click(screen.getByRole("checkbox", { name: "跳过 big 第 15 行" }));
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "big", rectify: { header_row: 3, skip_rows: [5, 15] } },
+      ]);
+    });
+
+    it("a header picked beyond the first window survives paging back and submits by absolute row", async () => {
+      // AC3 end to end: a workbook whose header sits at row 13 is located via
+      // paging, selected there, and submits with header_row 13 -- no suite
+      // ever selected or submitted a header beyond the first window before
+      // (review finding 1). jsdom note: the trigger's placeholder fallback
+      // for an out-of-window value is a real-Radix rendering detail (the
+      // behavior suite mocks SelectValue), so the pin is the data path --
+      // the pick survives the page swap and submits as the absolute row.
+      const onSubmit = vi.fn();
+      const onFetchWindow = vi.fn(windowRows);
+      renderGuided({ request: bigRequest(), onSubmit, onFetchWindow });
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      fireEvent.change(screen.getByTestId("header-row-select"), { target: { value: "13" } });
+      // Page back to window 1: row 13 is invisible again, but the pick rides
+      // in absolute row numbers and must not be clobbered by the swap.
+      fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+      await screen.findByText("r1");
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "big", rectify: { header_row: 13, skip_rows: [] } },
+      ]);
+    });
+
+    it("a same-path re-route resets the window to the new first window", async () => {
+      // The remount key is the path (#748), so a workbook fixed on disk and
+      // re-dropped at the SAME path re-parks the dialog without remounting
+      // it -- the inlined preview is replaced in place and the pager must
+      // follow the new parse, or the table keeps rendering the old one
+      // (review finding 2: stale rows past the new total, pager gone).
+      const onFetchWindow = vi.fn(windowRows);
+      const props = {
+        loading: false,
+        error: null as AppError | null,
+        onSubmit: vi.fn(),
+        onCancel: () => {},
+        onFetchWindow,
+      };
+      const view = renderI18n(<GuidedLoadDialog request={bigRequest()} {...props} />);
+      // Park on window 2 of the original 30-row parse.
+      fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+      await screen.findByText("r13");
+      // Same path, fresh parse: the fixed sheet now fits one window.
+      view.rerender(
+        withIntl(
+          <GuidedLoadDialog
+            request={{
+              source_path: "/x/big.xlsx",
+              workbook_name: "big",
+              sheets: [
+                {
+                  name: "big",
+                  preview: Array.from({ length: 8 }, (_, i) => [`n${i + 1}`]),
+                  total_rows: 8,
+                  reason: null,
+                },
+              ],
+            }}
+            {...props}
+          />,
+        ),
+      );
+      await screen.findByText("n1");
+      // The old parse's rows are gone, and a sheet that fits one window
+      // shows no pager at all (the position indicator rides the pager).
+      expect(screen.queryByText("r13")).toBeNull();
+      expect(screen.queryByRole("button", { name: "上一页" })).toBeNull();
+    });
+  });
+
+  describe("auto-tidy failure reasons (issue #750)", () => {
+    it("renders the sheet's failure reason under its heading", () => {
+      // The default fixture sheet carries MultipleHeaderRows.
+      renderGuided();
+      expect(screen.getByRole("dialog")).toHaveTextContent("检测到多个疑似表头行");
+    });
+
+    it("renders no reason line for a sheet that tidied confidently", () => {
+      renderGuided({
+        request: {
+          source_path: "/x/two.xlsx",
+          workbook_name: "two",
+          sheets: [
+            { name: "clean", preview: [["id"], ["1"]], total_rows: 2, reason: null },
+            { name: "rough", preview: [["x"], ["2"]], total_rows: 2, reason: "NoHeaderRow" },
+          ],
+        },
+      });
+      const dialog = screen.getByRole("dialog");
+      expect(dialog).toHaveTextContent("数据从第一行开始");
+      expect(dialog).not.toHaveTextContent("检测到多个疑似表头行");
     });
   });
 });

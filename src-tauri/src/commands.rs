@@ -496,6 +496,49 @@ pub async fn ingest_file_guided(
     Ok(outcome)
 }
 
+/// Fetch one preview window for a sheet parked on the guided-load dialog
+/// (issue #750): rows `[offset .. offset + limit)` rendered as strings, served
+/// from the parse the `NeedsGuidance` outcome retained on the session -- zero
+/// workbook re-parse per page. The (path, sheet) pair must match the retained
+/// guidance; a miss (committed, discarded, or superseded) rejects so a stale
+/// dialog can never render window rows from a different workbook. Read-only:
+/// takes the session lock like any command, but holds it only for the
+/// retention read (not a SessionHandle lock-light read).
+#[tauri::command]
+pub fn guidance_window(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    path: String,
+    sheet_name: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let s = handle.session_lock()?;
+    s.guidance_window(&path, &sheet_name, offset, limit)
+        .ok_or_else(|| {
+            SessionError::Engine(format!(
+                "no retained guidance for sheet \"{sheet_name}\" of {path} (already committed, discarded, or superseded)"
+            ))
+        })
+}
+
+/// Drop the session's retained guided-load parse (issue #750): the dialog's
+/// cancel path frees the retained sheets (commit already drops them
+/// server-side). Idempotent; the frontend fires it best-effort on cancel.
+#[tauri::command]
+pub fn discard_guided_retention(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let mut s = handle.session_lock()?;
+    s.discard_guidance_retention();
+    Ok(())
+}
+
 #[tauri::command]
 pub fn list_working_set(
     store: State<'_, Arc<SessionStore>>,

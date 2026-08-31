@@ -106,10 +106,21 @@ pub fn write_sheet_csv(
 /// locates the header row and marks skips from this preview before re-ingesting
 /// via the guided path.
 pub fn render_preview(sheet: &SheetRows, n: usize) -> Vec<Vec<String>> {
+    render_preview_window(sheet, 0, n)
+}
+
+/// Render one window of raw rows as strings for the guided-load pager
+/// (issue #750): rows `[offset .. offset + limit)`, clamped to the sheet's
+/// row count by `skip` / `take` -- an offset past the last row yields an
+/// empty window rather than panicking. Same raw-grid semantics as
+/// [`render_preview`] (merged cells appear as calamine yields them); the
+/// first inlined window IS `render_preview_window(sheet, 0, n)`.
+pub fn render_preview_window(sheet: &SheetRows, offset: usize, limit: usize) -> Vec<Vec<String>> {
     sheet
         .rows
         .iter()
-        .take(n)
+        .skip(offset)
+        .take(limit)
         .map(|r| r.iter().map(cell_to_string).collect())
         .collect()
 }

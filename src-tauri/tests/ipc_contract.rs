@@ -9,8 +9,8 @@
 //! side changes, the other must follow, and these tests make that coupling loud.
 
 use toptopduck_lib::{
-    DatasetDescriptor, DatasetPrivacy, GuidanceRequest, LoadError, LoadOutcome, RectifyProvenance,
-    SheetRectify,
+    DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet, LoadError,
+    LoadOutcome, RectifyProvenance, SheetRectify,
 };
 
 /// Serialize `value`, assert the JSON equals `expected` (the pinned wire
@@ -172,6 +172,33 @@ fn load_outcome_needs_guidance_carries_request_in_data() {
     assert_wire(
         &LoadOutcome::NeedsGuidance(request),
         r#"{"kind":"NeedsGuidance","data":{"source_path":"/x/m.xlsx","workbook_name":"m","sheets":[]}}"#,
+    );
+}
+
+#[test]
+fn guidance_sheet_carries_total_rows_and_reason_wire_shape() {
+    // Issue #750: the pager drives off total_rows, and the per-sheet failure
+    // reason crosses as a plain string (unit variants) or null for a sheet
+    // that tidied confidently (mirrored in src/types/dataset.ts).
+    let failing = GuidanceSheet {
+        name: "report".into(),
+        preview: vec![vec!["a".into()]],
+        total_rows: 1024,
+        reason: Some(GuidanceReason::MultipleHeaderRows),
+    };
+    assert_wire(
+        &failing,
+        r#"{"name":"report","preview":[["a"]],"total_rows":1024,"reason":"MultipleHeaderRows"}"#,
+    );
+    let tidied = GuidanceSheet {
+        name: "clean".into(),
+        preview: vec![],
+        total_rows: 3,
+        reason: None,
+    };
+    assert_wire(
+        &tidied,
+        r#"{"name":"clean","preview":[],"total_rows":3,"reason":null}"#,
     );
 }
 

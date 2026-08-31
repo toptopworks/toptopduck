@@ -50,13 +50,13 @@ pub use approval::{
 pub use cancel::CancelToken;
 pub use commands::StoreCommandError;
 pub use model::{
-    ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet,
-    LoadError, LoadOutcome, ProfileId, ProfileKeyStatus, ProfileTestOutcome, Protocol,
-    ProviderConfig, ProviderConfigView, ProviderProfile, RectifyProvenance, RemoveSourceError,
-    RenameError, RowPage, RowReadError, SheetGuidance, SheetRectify, SkillProvenance,
-    SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, TextKind, ThinkingTrace,
-    ThreadEntry, TraceEntryView, TraceRound, TurnFailure, TurnOutcome, TurnPhase, TurnProgress,
-    TurnProvenance, TurnRecord, TurnRuntime, VizSpec, DEFAULT_PROFILE_ID,
+    ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest,
+    GuidanceSheet, LoadError, LoadOutcome, ProfileId, ProfileKeyStatus, ProfileTestOutcome,
+    Protocol, ProviderConfig, ProviderConfigView, ProviderProfile, RectifyProvenance,
+    RemoveSourceError, RenameError, RowPage, RowReadError, SheetGuidance, SheetRectify,
+    SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, TextKind,
+    ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound, TurnFailure, TurnOutcome, TurnPhase,
+    TurnProgress, TurnProvenance, TurnRecord, TurnRuntime, VizSpec, DEFAULT_PROFILE_ID,
     DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
@@ -380,6 +380,8 @@ pub fn run() {
             commands::close_session_and_wait_release,
             commands::ingest_file,
             commands::ingest_file_guided,
+            commands::guidance_window,
+            commands::discard_guided_retention,
             commands::list_working_set,
             commands::active_dataset,
             commands::get_dataset,

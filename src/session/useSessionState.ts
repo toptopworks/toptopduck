@@ -116,6 +116,10 @@ export interface UseSessionState {
   handleIngestMany: (paths: string[]) => Promise<boolean>;
   handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => void;
   handleGuidedCancel: () => void;
+  /** Preview-window pager feed for the GuidedLoadDialog (issue #750): rows
+   *  [offset, offset + limit) of the parked workbook's sheet, served from
+   *  the backend retention (zero re-parse per page). */
+  fetchGuidanceWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
   handleRename: (referenceName: string, newDisplay: string) => void;
   handleReplace: (referenceName: string, path: string) => void;
   handleDelete: (referenceName: string) => void;
@@ -321,6 +325,7 @@ export function useSessionState(
     handleIngestMany,
     handleGuidedSubmit,
     handleGuidedCancel,
+    fetchGuidanceWindow,
   } = useIngestFlow(
     sessionId,
     {
@@ -484,6 +489,7 @@ export function useSessionState(
     handleIngestMany,
     handleGuidedSubmit,
     handleGuidedCancel,
+    fetchGuidanceWindow,
     handleReplace,
     handleDelete,
     handleConfirmActiveDelete,

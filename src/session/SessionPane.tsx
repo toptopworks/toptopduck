@@ -533,6 +533,7 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
           error={s.guidanceError}
           onSubmit={s.handleGuidedSubmit}
           onCancel={s.handleGuidedCancel}
+          onFetchWindow={s.fetchGuidanceWindow}
         />
       )}
       {pendingActiveDelete && (
