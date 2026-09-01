@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail } from "../lib/error-presentation";
@@ -122,6 +122,11 @@ interface SessionPaneProps {
 // stable prop for useSessionState / useTurnFlow (no every-render fresh []).
 const NO_APPROVALS: ApprovalEntry[] = [];
 
+// The workspace tab order (ADR-0045): result first, working set second.
+// Module-level so the APG keyboard handler can index/wrap it (issue #760).
+const WORKSPACE_TABS = ["result", "workingSet"] as const;
+type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+
 export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
@@ -243,7 +248,40 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
-  const [tab, setTab] = useState<"result" | "workingSet">("result");
+  const [tab, setTab] = useState<WorkspaceTab>("result");
+
+  // Issue #760: the WAI-ARIA APG tabs contract for the workspace tab row.
+  // useId-scoped stable ids wire each tab's aria-controls to the ONE shared
+  // workspace-body panel and the panel's aria-labelledby back to whichever
+  // tab is active -- the panel hosts whichever branch the active tab
+  // selects, so a shared id (unlike the settings RuntimeSection's
+  // always-mounted per-tab panels) is the honest shape for the conditional
+  // render.
+  const tabBaseId = useId();
+  const resultTabId = `${tabBaseId}-result-tab`;
+  const workingSetTabId = `${tabBaseId}-working-set-tab`;
+  const workspacePanelId = `${tabBaseId}-panel`;
+
+  // APG keyboard activation (the same contract the settings RuntimeSection
+  // tablist implements): ArrowLeft/Right wrap around and activate on move
+  // (selection follows focus); Home/End jump to the first/last tab. Roving
+  // tabindex -- only the active tab holds tabIndex 0 -- is set in the JSX.
+  function handleTabKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    const idx = WORKSPACE_TABS.indexOf(tab);
+    let next: WorkspaceTab | null = null;
+    if (e.key === "ArrowRight") next = WORKSPACE_TABS[(idx + 1) % WORKSPACE_TABS.length];
+    else if (e.key === "ArrowLeft") next = WORKSPACE_TABS[(idx - 1 + WORKSPACE_TABS.length) % WORKSPACE_TABS.length];
+    else if (e.key === "Home") next = WORKSPACE_TABS[0];
+    else if (e.key === "End") next = WORKSPACE_TABS[WORKSPACE_TABS.length - 1];
+
+    if (next) {
+      e.preventDefault();
+      setTab(next);
+      // Focus rides the DOM id: the handler lives on the tablist, so the
+      // next tab is not guaranteed to be the event target.
+      document.getElementById(next === "result" ? resultTabId : workingSetTabId)?.focus();
+    }
+  }
 
   // ADR-0058 L2 partition retry: each region's onReset RESETS its slice of the
   // session query cache so the boundary's error-clear remount renders fresh
@@ -444,11 +482,15 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
           <div
             className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
             role="tablist"
+            onKeyDown={handleTabKeyDown}
           >
             <button
               type="button"
               role="tab"
+              id={resultTabId}
               aria-selected={tab === "result"}
+              aria-controls={workspacePanelId}
+              tabIndex={tab === "result" ? 0 : -1}
               className={cn(
                 "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
                 tab === "result" && "active text-primary border-b-primary font-semibold",
@@ -460,7 +502,10 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
             <button
               type="button"
               role="tab"
+              id={workingSetTabId}
               aria-selected={tab === "workingSet"}
+              aria-controls={workspacePanelId}
+              tabIndex={tab === "workingSet" ? 0 : -1}
               className={cn(
                 "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
                 tab === "workingSet" && "active text-primary border-b-primary font-semibold",
@@ -497,7 +542,12 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
           {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
             retired from styles.css; the flex-1 + overflow-y-auto layout could
             move too, but the hook stays for selector / test stability. */}
-          <div className="workspace-body flex-1 overflow-y-auto p-4">
+          <div
+            className="workspace-body flex-1 overflow-y-auto p-4"
+            id={workspacePanelId}
+            role="tabpanel"
+            aria-labelledby={tab === "result" ? resultTabId : workingSetTabId}
+          >
             {s.error && <ErrorBanner error={s.error} />}
             {s.haltedRemaining !== null && (
               // Issue #748: a terminally halted batch (user cancelled the
