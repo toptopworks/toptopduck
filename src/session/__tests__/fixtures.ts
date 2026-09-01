@@ -1,9 +1,10 @@
 import type { DatasetDescriptor } from "../../types/dataset";
 import type { ThreadEntry } from "../../types/thread";
 
-// Shared thread fixtures for src/session/__tests__/* tests. Each helper mints
-// a minimal-but-real ThreadEntry / DatasetDescriptor (all required fields, no
-// hand-rolled subset) so type errors surface at compile time, not runtime.
+// Shared thread fixtures for session tests plus cross-directory consumers
+// (e.g. src/__tests__/App.test.tsx). Each helper mints a minimal-but-real
+// ThreadEntry / DatasetDescriptor (all required fields, no hand-rolled
+// subset) so type errors surface at compile time, not runtime.
 
 export function src(name: string): DatasetDescriptor {
   return {
