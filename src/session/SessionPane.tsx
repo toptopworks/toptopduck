@@ -262,6 +262,12 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // batch re-renders top-down: useQuery's getSnapshot reads the reset query
   // synchronously (status pending -> thread/[]/datasets empty), so the fresh
   // boundary instance (key) mounts the children on the clean snapshot.
+  // Both region keys deliberately ride the one shared epoch: any retry
+  // remounts both regions (their local state resets with it, per ADR-0058's
+  // region-local posture); a per-region epoch is the narrowing lever if that
+  // cross-region loss ever matters. Do not remove the keys on green tests
+  // alone -- act() flattens the microtask ordering they defend against, so
+  // jsdom cannot distinguish keyed from unkeyed (ADR-0058 calibration).
   const [regionRetryEpoch, setRegionRetryEpoch] = useState(0);
   const resetSessionCache = () => {
     void queryClient.resetQueries({ queryKey: sessionKeys.all(sessionId) });

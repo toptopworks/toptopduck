@@ -1226,6 +1226,17 @@ describe("App single in-flight + cancel (issue #82 / ADR-0021/0028)", () => {
   });
 });
 
+// A malformed turn (unknown outcome kind) for the ADR-0058 boundary tests:
+// hardened with trace/provenance so the render crash reaches the exhaustive
+// outcome switch, not the earlier provenance-badge / trace reads that would
+// otherwise throw first.
+function bogusTurn(question = "x"): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: { question, outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
+  } as unknown as ThreadEntry;
+}
+
 describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1249,10 +1260,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     // test environment; the granular thread boundary is the architecturally
     // correct inner catcher and catches first-render throws.
     state.thread = [
-      {
-        entry: "Turn",
-        data: { question: "x", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
-      } as unknown as ThreadEntry,
+      bogusTurn(),
     ];
     render(<App />);
     await openSession();
@@ -1275,10 +1283,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     // onReset invalidates + error-clear remounts, the refetch returns a clean
     // thread and the pane renders the turn instead of the degrade card.
     let threadData: ThreadEntry[] = [
-      {
-        entry: "Turn",
-        data: { question: "x", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
-      } as unknown as ThreadEntry,
+      bogusTurn(),
     ];
     vi.mocked(conversation).mockImplementation(async () => threadData);
     render(<App />);
@@ -1306,10 +1311,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     // either way), so this spy is the distinguishing guard.
     const removeSpy = vi.spyOn(QueryClient.prototype, "resetQueries");
     let threadData: ThreadEntry[] = [
-      {
-        entry: "Turn",
-        data: { question: "x", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
-      } as unknown as ThreadEntry,
+      bogusTurn(),
     ];
     vi.mocked(conversation).mockImplementation(async () => threadData);
     render(<App />);
@@ -1344,10 +1346,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     vi.mocked(conversation).mockImplementation(async (sid) => {
       if (sid === "sess-1") {
         return [
-          {
-            entry: "Turn",
-            data: { question: "bad", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
-          } as unknown as ThreadEntry,
+          bogusTurn("bad"),
         ];
       }
       return [];

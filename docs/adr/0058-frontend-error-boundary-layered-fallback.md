@@ -66,4 +66,4 @@ ADR-0045（shell）/ 0051（状态分层）/ 0033（Vega 退化）/ 0015（load 
 - **CONTEXT.md 不动**：降级分层是实现/可靠性决策，不引入新领域术语。
 - **出口保留**：若某区域持续致异成常态，该区域可加"上报/反馈"出口（v2）；L3 顶层兜底的"重载"是否带"恢复未保存会话"留 v2。
 - **被 ADR-0062 精确化（QuestionBar 骨架归类）**：本 ADR"shell 骨架（header / 会话 tabs / QuestionBar）恒保"中 QuestionBar 归"会话级骨架"（跨 rail + workspace），非整窗骨架；会话栏独立通底。另：本 ADR"会话 tabs"措辞待顺为 0060 左会话栏（0060 未提 0058）。见 ADR-0062 R1。
-- **校准（region 重试机制）**：ADR-0114 退役工作区末轮文本态后，region 边界重试首次成为黑盒测试可达路径，暴露 removeQueries 实现下 region 降级卡的恢复死锁（Decision 2 校准所述），据此改定 resetQueries + 区域重试 epoch。
+- **校准（region 重试机制）**：ADR-0114 退役工作区末轮文本态后，region 边界重试首次成为黑盒测试可达路径，暴露 removeQueries 实现下 region 降级卡的恢复死锁（Decision 2 校准所述），据此改定 resetQueries + 区域重试 epoch。已知缺口：epoch key 的同批重挂在 jsdom/act 下不可区分于无 key 实现（act 将 notifyManager 微任务时序拍平，删除 key 后重试测试全绿）——重试测试钉住 resetQueries 调用，不钉 key；删除 key 须凭 Decision 2 校准的时序论证，不能凭绿测试。

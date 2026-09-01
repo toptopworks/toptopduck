@@ -985,7 +985,7 @@ describe("useTurnFlow", () => {
       expect(viewed.suppressInit).toHaveBeenCalledTimes(1);
     });
 
-    it("calls markProduced on a Materialized outcome (auto-select + pin reset)", async () => {
+    it("calls markProduced on a Materialized outcome (auto-select)", async () => {
       const { viewed, deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_7"));

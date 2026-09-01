@@ -56,8 +56,8 @@ export interface UseIngestFlowDeps {
   refreshServerState: (kind: SessionFlowKind) => Promise<void>;
   pollPersistError: () => Promise<void>;
   /** The one viewed method an ingest touches (issue #229): clearForNewSource on
-   *  a Loaded outcome (setViewedResult(null) + pin=false). The hook never
-   *  touches raw viewed state. */
+   *  a Loaded outcome (viewedResult -> null; the next view is the hero,
+   *  ADR-0114). The hook never touches raw viewed state. */
   viewed: Pick<UseViewedResult, "clearForNewSource">;
 }
 

@@ -315,9 +315,10 @@ export interface UseTurnFlowDeps {
   setError: (error: AppError | null) => void;
   pollPersistError: () => Promise<void>;
   /** The two viewed methods a turn touches (issue #229). markProduced on a
-   *  Materialized outcome (auto-select + pin reset); suppressInit after the
-   *  optimistic append (any outcome, R5 moot). The hook never touches raw
-   *  viewed state -- only these two semantic methods. */
+   *  Materialized outcome (auto-select: the view follows the produced
+   *  result); suppressInit after the optimistic append (any outcome, R5
+   *  moot). The hook never touches raw viewed state -- only these two
+   *  semantic methods. */
   viewed: Pick<UseViewedResult, "markProduced" | "suppressInit">;
   /** This session's approval entries (the app-level useApprovalEvents slice,
    *  ADR-0083). Merged into the live trace rows so a gated external call
@@ -695,9 +696,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       suppressInit(); // the user has acted; the R5 init is moot.
       if (outcome.kind === "Materialized") {
         // ADR-0084: the just-produced primary is the promotion chain's tail --
-        // the result the answer references. Auto-selects + pin resets (ADR-0062
-        // R2 "new-turn produce -> pinned=false"); the pin rule is encapsulated
-        // in useViewedResult (issue #229).
+        // the result the answer references. Auto-selects it (ADR-0062 R2
+        // "new-turn produce -> selected", calibrated by ADR-0114); the view
+        // rule is encapsulated in useViewedResult (issue #229).
         const { promotions } = outcome.data;
         const referenceName = promotions[promotions.length - 1]?.dataset.reference_name;
         if (referenceName !== undefined) {

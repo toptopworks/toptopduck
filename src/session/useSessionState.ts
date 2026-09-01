@@ -39,7 +39,8 @@ import type { ThreadEntry } from "../types/thread";
 // Per-session state + actions (ADR-0051). The shell (<App>) creates the
 // session id and renders <SessionPane key={sid} sessionId={sid} />; this hook
 // owns everything inside: server state (workingSet / active / thread via
-// TanStack Query) and client UI state (viewedResult / loading / dialogs). The hook IS the ADR-0051 "per-tab component autonomy" --
+// TanStack Query) and client UI state (viewedResult / loading / dialogs).
+// The hook IS the ADR-0051 "per-tab component autonomy" --
 // a future multi-session shell renders one SessionPane per open id and the
 // keyed caches stay isolated by the `['session', sid, ...]` prefix.
 
@@ -446,7 +447,7 @@ export function useSessionState(
   const handleCancelActiveDelete = useCallback(() => setPendingActiveDelete(null), []);
 
   // Rail result selection (preview card / result link, ADR-0083 issue #298):
-  // moves viewedResult (the pin rule lives in useViewedResult) AND opens the
+  // moves viewedResult (the move rule lives in useViewedResult) AND opens the
   // workspace when folded -- the rail and the panel are dual views of the same
   // dataset, so a rail selection must surface its panel half.
   // INVARIANT: callers must pass a referenceName that exists in the thread --
