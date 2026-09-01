@@ -369,8 +369,17 @@ describe("App guided-load flow", () => {
   });
 });
 
+// Drive the in-app rename dialog (#759): open via the row trigger, set the
+// draft, submit the form (jsdom does not dispatch submit on a Save click).
+function submitRename(triggerName: RegExp, value: string) {
+  fireEvent.click(screen.getByRole("button", { name: triggerName }));
+  const dialog = screen.getByRole("dialog");
+  fireEvent.change(within(dialog).getByRole("textbox"), { target: { value } });
+  fireEvent.submit(dialog.querySelector("form")!);
+}
+
 describe("App rename flow", () => {
-  // prompt spies must not leak between tests (jsdom default returns null).
+  // Mocks (api rejections, prototype spies) must not leak between tests.
   afterEach(() => vi.restoreAllMocks());
 
   beforeEach(() => {
@@ -397,15 +406,15 @@ describe("App rename flow", () => {
     // privacy-cols table, so BIGINT appears twice -- assert presence, not uniqueness).
     expect(screen.getAllByText("BIGINT").length).toBeGreaterThan(0);
 
-    // Rename via prompt; on refresh the working set carries the new label.
-    vi.spyOn(window, "prompt").mockReturnValue("员工表");
+    // Rename via the in-app dialog (#759); on refresh the working set carries
+    // the new label.
     vi.mocked(renameDataset).mockImplementation(async (_sid, ref, display) => {
       state.workingSet = state.workingSet.map((d) =>
         d.reference_name === ref ? { ...d, display_name: display } : d,
       );
       return { ...guidedDataset, display_name: display };
     });
-    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    submitRename(/重命名/, "员工表");
 
     // The rename carries the stable reference name + the new display label.
     await waitFor(() =>
@@ -435,12 +444,12 @@ describe("App rename flow", () => {
       ).toBeInTheDocument(),
     );
 
-    vi.spyOn(window, "prompt").mockReturnValue("员工表");
     vi.mocked(renameDataset).mockRejectedValueOnce({
       kind: "RenameDataset",
       data: { kind: "DisplayTaken", data: "员工表" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    // Open the rename dialog (#759) and submit the new label.
+    submitRename(/重命名/, "员工表");
 
     await waitFor(() =>
       expect(
@@ -518,12 +527,12 @@ describe("App error-prefix locale consistency (issue #139)", () => {
       ).toBeInTheDocument(),
     );
 
-    vi.spyOn(window, "prompt").mockReturnValue("员工表");
     vi.mocked(renameDataset).mockRejectedValueOnce({
       kind: "RenameDataset",
       data: { kind: "DisplayTaken", data: "员工表" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /^Rename/ }));
+    // Open the rename dialog (#759) and submit the new label.
+    submitRename(/^Rename/, "员工表");
 
     // Both the prefix and the underlying refusal (en-US catalog
     // error.dataset.displayTaken) render in English -- locale consistent.
@@ -554,12 +563,12 @@ describe("App error-prefix locale consistency (issue #139)", () => {
       ).toBeInTheDocument(),
     );
 
-    vi.spyOn(window, "prompt").mockReturnValue("renamed");
     vi.mocked(renameDataset).mockResolvedValue({
       ...guidedDataset,
       display_name: "renamed",
     } as never);
-    fireEvent.click(screen.getByRole("button", { name: /^Rename/ }));
+    // Open the rename dialog (#759) and submit the new label.
+    submitRename(/^Rename/, "renamed");
 
     // Rename persisted; only the cache refresh failed. The en-US
     // savedRefreshFailed template renders (Rename verb + refresh-error msg).
@@ -896,9 +905,9 @@ describe("App delete-source flow (issue #38)", () => {
   });
 
   it("removes a source via removeSource then refreshes the working set", async () => {
-    // AC: the per-row delete (after a confirm) calls removeSource with the
-    // stable reference name, then refreshes so the list no longer shows it.
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    // AC: the per-row delete (after the in-app confirm gate, #759) calls
+    // removeSource with the stable reference name, then refreshes so the list
+    // no longer shows it.
     vi.mocked(removeSource).mockImplementation(async (_sid, ref) => {
       state.workingSet = state.workingSet.filter(
         (d) => d.reference_name !== ref,
@@ -912,6 +921,9 @@ describe("App delete-source flow (issue #38)", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    // Confirm at the in-app AlertDialog (#759): its Action's accessible name is
+    // the bare 删除 (the row trigger carries "删除 people").
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
 
     await waitFor(() =>
       expect(removeSource).toHaveBeenCalledWith("sess-1", "people"),
@@ -927,7 +939,6 @@ describe("App delete-source flow (issue #38)", () => {
   it("labels a delete failure distinctly from load/rename/replace/ask failures", async () => {
     // A typed RemoveSource refusal (issue #121) surfaces under the "删源失败："
     // prefix -- never mislabelled as another operation's failure.
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(removeSource).mockRejectedValueOnce({
       kind: "RemoveSource",
       data: { kind: "NotFound", data: "people" },
@@ -940,6 +951,9 @@ describe("App delete-source flow (issue #38)", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    // Confirm at the in-app AlertDialog (#759) so the removal reaches the
+    // backend and its typed refusal can be labelled.
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     await waitFor(() =>
       expect(
         screen.getByText(/删源失败：找不到引用名为「people」的数据集/),
@@ -972,9 +986,13 @@ describe("App delete-active-source flow (issue #39)", () => {
     state.workingSet = [guidedDataset, ordersSource];
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(activeDataset).mockResolvedValue(ordersSource); // active = orders
-    // Pass the per-row "确定删除" confirm so the click reaches the backend.
-    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
+
+  // The per-row ✕ opens the in-app confirm AlertDialog (#759); the bare-删除
+  // Action inside it is the gate the click must pass to reach the backend.
+  function confirmWorkingSetDelete() {
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  }
 
   it("opens a continuation dialog when deleting the active source with others remaining", async () => {
     // AC1 (issue #39): deleting the active source while others remain does NOT
@@ -994,6 +1012,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
+    confirmWorkingSetDelete();
 
     // Dialog open; no IPC crossed yet (the dialog is the gate, not the backend).
     await waitFor(() =>
@@ -1031,6 +1050,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
+    confirmWorkingSetDelete();
     await waitFor(() =>
       expect(screen.getByText(/删除焦点源/)).toBeInTheDocument(),
     );
@@ -1064,6 +1084,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    confirmWorkingSetDelete();
 
     // No continuation dialog (only one source); straight to removeSource.
     await waitFor(() =>
@@ -1094,6 +1115,7 @@ describe("App delete-active-source flow (issue #39)", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /删除 orders/ }));
+    confirmWorkingSetDelete();
     await waitFor(() =>
       expect(screen.getByText(/删除焦点源/)).toBeInTheDocument(),
     );

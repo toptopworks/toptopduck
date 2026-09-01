@@ -563,6 +563,7 @@
   "workingSet.activeSuffix": " · current table",
   "workingSet.delete.ariaLabel": "Delete {name}",
   "workingSet.delete.confirm": "Remove {name} from the working set?",
+  "workingSet.delete.description": "The source file is removed and its reference name is dropped from the shared namespace — any SQL reading from it will fail. This cannot be undone; the file must be re-uploaded to restore the source.",
   "workingSet.delete.title": "Remove this dataset from the working set",
   "workingSet.detail.columnsHeading": "Columns & inferred types",
   "workingSet.detail.meta": "Rows: {rows} · fingerprint: {fingerprint}…",
