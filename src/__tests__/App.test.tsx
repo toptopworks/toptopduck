@@ -12,7 +12,7 @@ import { IntlProvider } from "react-intl";
 import { StrictMode } from "react";
 import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
-import type { TurnOutcome } from "../types/thread";
+import type { ThreadEntry, TurnOutcome } from "../types/thread";
 import type { ComposerSessionFields } from "../session/useComposerState";
 
 // The composer "+" context panel (the retired FileDropzone's successor, issue
@@ -119,6 +119,7 @@ import { catalogFor, type CatalogKey, type EffectiveLocale } from "../i18n";
 import {
   activeDataset,
   askQuestion,
+  conversation,
   ingestFile,
   ingestFileGuided,
   listWorkingSet,
@@ -655,6 +656,134 @@ describe("App ask flow", () => {
       ).toBeInTheDocument(),
     );
     expect(screen.queryByText(/尚无对话/)).not.toBeInTheDocument();
+  });
+});
+
+describe("App workspace history indicator (issue #757)", () => {
+  // The zh-CN catalog strings for the indicator + its exit (renderPane's
+  // default locale), resolved from the catalog so the assertions track the
+  // wording instead of duplicating literals (issue #139 convention).
+  const HISTORY_MESSAGE = catalogFor("zh-CN")["session.historyResult.message"];
+  const BACK_TO_LATEST = catalogFor("zh-CN")["session.historyResult.backToLatest"];
+  const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
+
+  // A resumed session's thread: two Materialized turns. R5 lands the view on
+  // the latest primary (result_2); the workspace starts folded (ADR-0083), so
+  // each flow opens it via the header toggle or a rail selection.
+  function resumedTurn(referenceName: string): ThreadEntry {
+    return {
+      entry: "Turn",
+      data: {
+        question: `q:${referenceName}`,
+        outcome: {
+          kind: "Materialized",
+          data: {
+            promotions: [
+              { dataset: { ...guidedDataset, reference_name: referenceName }, sql: "SELECT 1" },
+            ],
+            viz: null,
+            assumption: null,
+          },
+        },
+        trace: [],
+        provenance: { skills: [] },
+      },
+    };
+  }
+
+  // findBy*: the thread query resolves async after the pane mounts, so the
+  // rail's result links appear a beat later than renderPane() returns.
+  async function clickRailResultLink(name: string): Promise<void> {
+    const rail = document.querySelector<HTMLElement>(".session-rail")!;
+    fireEvent.click(await within(rail).findByRole("button", { name: `结果：${name}` }));
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [guidedDataset]; // a source is loaded
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => guidedDataset);
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(conversation).mockResolvedValue([
+      resumedTurn("result_1"),
+      resumedTurn("result_2"),
+    ]);
+  });
+
+  it("shows no indicator when the viewed result is the latest one", async () => {
+    renderPane();
+    // Open the folded workspace (ADR-0083 cold-start posture) to reveal the R5
+    // resume landing on the latest result.
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
+  });
+
+  it("shows no indicator on the hero when there is no result", async () => {
+    // AC "(no result)": the hero owns the workspace and the indicator has no
+    // surface there (it rides the result branch of the derivation only).
+    vi.mocked(conversation).mockResolvedValue([]);
+    renderPane();
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    await waitFor(() =>
+      expect(
+        screen.getByText(catalogFor("zh-CN")["session.hero.hasData"]),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
+  });
+
+  it("flags a history selection and the exit returns to the latest primary", async () => {
+    renderPane();
+    // Rail result-link click: moves the view onto the older result and opens
+    // the workspace (dual-view linkage, ADR-0083).
+    await clickRailResultLink("result_1");
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByText(HISTORY_MESSAGE)).toBeInTheDocument();
+
+    // "Back to latest" returns the view to the newest Materialized primary.
+    fireEvent.click(screen.getByRole("button", { name: BACK_TO_LATEST }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
+  });
+
+  it("the indicator yields when a new turn produces a result (produce = selected)", async () => {
+    renderPane();
+    await clickRailResultLink("result_1");
+    await waitFor(() =>
+      expect(screen.getByText(HISTORY_MESSAGE)).toBeInTheDocument(),
+    );
+
+    vi.mocked(askQuestion).mockResolvedValueOnce({
+      kind: "Materialized",
+      data: {
+        promotions: [
+          {
+            dataset: { ...guidedDataset, reference_name: "result_3", row_count: 1 },
+            sql: "SELECT 1",
+          },
+        ],
+        viz: null,
+        assumption: null,
+      },
+    });
+    await submitQuestion("新一问");
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /结果：result_3/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
   });
 });
 

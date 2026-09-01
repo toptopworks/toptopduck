@@ -205,6 +205,8 @@
   "session.headerMenu.rename": "重命名",
   "session.hero.empty": "把数据文件拖到窗口即可开始分析，或使用「+」按钮添加。",
   "session.hero.hasData": "数据已加载。在下方提问开始分析，或在「工作集」管理数据。",
+  "session.historyResult.backToLatest": "回到最新",
+  "session.historyResult.message": "正在查看历史结果，不是最新结果。",
   "session.rail.ariaLabel": "对话时间线",
   "session.rail.empty": "尚无对话。在下方提问或加载数据开始。",
   "session.rename.cancel": "取消",

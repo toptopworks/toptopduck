@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ViewedResult } from "./workspace";
+import { findLatestMaterializedPrimary, type ViewedResult } from "./workspace";
 import type { ThreadEntry } from "../types/thread";
 
 // The viewedResult domain (state + ADR-0062 R5 resume init), extracted from
-// useSessionState (issue #229). The parent drives it through the four
+// useSessionState (issue #229). The parent drives it through the five
 // semantic methods below and never touches the raw setters or viewedInitRef,
 // so the rules read from one module, not three call sites. Boundary is STATE
 // OWNERSHIP (viewedResult alone -- ADR-0114 retired the last-turn pin flag
@@ -27,6 +27,10 @@ export interface UseViewedResult {
   clearForNewSource: () => void;
   /** A turn was appended (any outcome): the R5 resume init is moot (ADR-0062 R5). */
   suppressInit: () => void;
+  /** The "back to latest" exit (issue #757): moves viewedResult to the latest
+   *  Materialized turn's primary; falls back to hero (null) when the thread
+   *  materialized no primary. Shares the find with the R5 resume landing. */
+  jumpToLatest: () => void;
 }
 
 export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
@@ -40,18 +44,13 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
   useEffect(() => {
     if (viewedInitRef.current || thread.length === 0) return;
     viewedInitRef.current = true;
-    for (let i = thread.length - 1; i >= 0; i--) {
-      const entry = thread[i];
-      if (entry.entry === "Turn" && entry.data.outcome.kind === "Materialized") {
-        // ADR-0084: view the turn's primary result (the promotion chain's tail
-        // -- the answer the question produced).
-        const { promotions } = entry.data.outcome.data;
-        const primary = promotions[promotions.length - 1];
-        if (!primary) continue;
-        setViewedResult({ referenceName: primary.dataset.reference_name });
-        return;
-      }
-    }
+    // ADR-0084: view the turn's primary result (the promotion chain's tail --
+    // the answer the question produced).
+    const latest = findLatestMaterializedPrimary(thread);
+    // External system -> state: the injected thread (resume query data) seeds
+    // the initial view once; a legitimate one-shot init, not derived churn.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (latest) setViewedResult({ referenceName: latest });
   }, [thread]);
 
   // ADR-0047 + ADR-0114 (rail click): moves ONLY viewedResult (never the
@@ -82,11 +81,22 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     viewedInitRef.current = true;
   }, []);
 
+  // The "back to latest" exit (issue #757): the history indicator's action.
+  // Same move semantics as selectResult (viewedResult only, never the backend
+  // active) with the target derived from the thread. The no-primary fallback
+  // is unreachable through the UI (the exit only renders while a result is
+  // showing) but keeps the move total.
+  const jumpToLatest = useCallback(() => {
+    const latest = findLatestMaterializedPrimary(thread);
+    setViewedResult(latest ? { referenceName: latest } : null);
+  }, [thread]);
+
   return {
     viewedResult,
     selectResult,
     markProduced,
     clearForNewSource,
     suppressInit,
+    jumpToLatest,
   };
 }

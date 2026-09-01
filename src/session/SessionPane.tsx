@@ -20,6 +20,7 @@ import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold"
 import { Thread } from "../components/thread/Thread";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
 import { WorkingSetList } from "../components/dataset/WorkingSetList";
 import { cn } from "@/lib/utils";
 import type { DatasetDescriptor, DatasetPrivacy } from "../types/dataset";
@@ -521,6 +522,7 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
                 sessionId={sessionId}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
+                onJumpToLatest={s.handleJumpToLatest}
               />
             ) : (
               <WorkspaceWorkingSet
@@ -577,6 +579,7 @@ function WorkspaceResult({
   sessionId,
   hasData,
   onResetRegion,
+  onJumpToLatest,
 }: {
   content: WorkspaceContent;
   sessionId: string;
@@ -585,6 +588,9 @@ function WorkspaceResult({
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
    *  the stale page that crashed it. */
   onResetRegion: () => void;
+  /** Issue #757: the history indicator's "back to latest" exit (moves
+   *  viewedResult to the latest Materialized turn's primary). */
+  onJumpToLatest: () => void;
 }) {
   switch (content.kind) {
     case "hero":
@@ -619,15 +625,43 @@ function WorkspaceResult({
       // own try/catch stays internal per ADR-0033/0058 L0; this catches the
       // rest) degrades only this block, not the Thread rail or QuestionBar.
       return (
-        <ErrorBoundary name="result" onReset={onResetRegion}>
-          <ResultView
-            sessionId={sessionId}
-            referenceName={content.referenceName}
-            assumption={content.assumption}
-            viz={content.viz}
-            staleAnchor={content.staleAnchor}
-          />
-        </ErrorBoundary>
+        <>
+          {content.viewingHistory && (
+            // Issue #757: the workspace is showing a past result, not the
+            // latest Materialized primary -- a derived fact (ADR-0114), so the
+            // indicator rides the derivation and adds no state. Informational,
+            // not cautionary (the stale disclosure owns the warning surface),
+            // so the default info Alert + role="note" pairing (alert.tsx). The
+            // exit button shares the alert row; ResultView below is untouched.
+            <Alert role="note" className="mb-2">
+              <AlertDescription>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="m-0">
+                    <FormattedMessage
+                      id="session.historyResult.message"
+                      defaultMessage="Viewing a past result, not the latest one."
+                    />
+                  </p>
+                  <Button variant="outline" size="sm" onClick={onJumpToLatest}>
+                    <FormattedMessage
+                      id="session.historyResult.backToLatest"
+                      defaultMessage="Back to latest"
+                    />
+                  </Button>
+                </div>
+              </AlertDescription>
+            </Alert>
+          )}
+          <ErrorBoundary name="result" onReset={onResetRegion}>
+            <ResultView
+              sessionId={sessionId}
+              referenceName={content.referenceName}
+              assumption={content.assumption}
+              viz={content.viz}
+              staleAnchor={content.staleAnchor}
+            />
+          </ErrorBoundary>
+        </>
       );
     default: {
       const unhandled: never = content;

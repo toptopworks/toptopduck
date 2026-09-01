@@ -130,6 +130,12 @@ export interface UseSessionState {
     privacy: DatasetPrivacy,
   ) => void;
   handleSelectResult: (referenceName: string) => void;
+  /** Issue #757: the history indicator's "back to latest" exit -- moves
+   *  viewedResult to the latest Materialized turn's primary (hero fallback
+   *  when the thread materialized none). The exit only renders while a result
+   *  is showing, so the workspace is already expanded: a plain passthrough,
+   *  no fold composition. */
+  handleJumpToLatest: () => void;
   /** The session header's workspace fold toggle (ADR-0083, issue #298). */
   handleToggleWorkspace: () => void;
   clearError: () => void;
@@ -187,6 +193,7 @@ export function useSessionState(
     markProduced,
     clearForNewSource,
     suppressInit,
+    jumpToLatest,
   } = useViewedResult(thread);
   // Workspace fold (ADR-0083, issue #298): cold-start collapsed, the first
   // promotion auto-expands once, then purely manual. Session-ephemeral plain
@@ -496,6 +503,7 @@ export function useSessionState(
     handleRename,
     handlePrivacyChange,
     handleSelectResult,
+    handleJumpToLatest: jumpToLatest,
     handleToggleWorkspace: toggleWorkspace,
     clearError,
   };

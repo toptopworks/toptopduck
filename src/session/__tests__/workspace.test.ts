@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { deriveWorkspaceContent, findMaterializedPayload } from "../workspace";
+import {
+  deriveWorkspaceContent,
+  findLatestMaterializedPrimary,
+  findMaterializedPayload,
+} from "../workspace";
 import { materialized, src, textual } from "./fixtures";
 import type { ThreadEntry } from "../../types/thread";
 
@@ -35,6 +39,41 @@ describe("findMaterializedPayload", () => {
   it("returns null when no turn materialized that reference name", () => {
     expect(findMaterializedPayload([materialized("result_1")], "result_99")).toBeNull();
     expect(findMaterializedPayload([textual("which?")], "result_1")).toBeNull();
+  });
+});
+
+describe("findLatestMaterializedPrimary (issue #757)", () => {
+  it("returns the last Materialized turn's primary (promotion chain tail)", () => {
+    expect(
+      findLatestMaterializedPrimary([materialized("result_1"), materialized("result_2")]),
+    ).toBe("result_2");
+  });
+
+  it("skips trailing non-materialized turns", () => {
+    // "Latest" means the latest MATERIALIZED turn: B/C/D turns appended after
+    // it never reach the workspace (ADR-0114), so they never age the view.
+    expect(
+      findLatestMaterializedPrimary([materialized("result_1"), textual("which?")]),
+    ).toBe("result_1");
+  });
+
+  it("skips a Materialized turn without a primary and keeps scanning", () => {
+    const noPrimary: ThreadEntry = {
+      entry: "Turn",
+      data: {
+        question: "q",
+        outcome: { kind: "Materialized", data: { promotions: [], viz: null, assumption: null } },
+        trace: [], provenance: { skills: [] },
+      },
+    };
+    expect(findLatestMaterializedPrimary([materialized("result_1"), noPrimary])).toBe(
+      "result_1",
+    );
+  });
+
+  it("returns null when the thread materialized no primary", () => {
+    expect(findLatestMaterializedPrimary([])).toBeNull();
+    expect(findLatestMaterializedPrimary([textual("which?")])).toBeNull();
   });
 });
 
@@ -94,5 +133,69 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
   it("falls back to hero when viewedResult points at a turn not in the thread", () => {
     // viewedResult set but the producing turn was GC'd / not yet appended.
     expect(deriveWorkspaceContent([], { referenceName: "result_1" }, new Map()).kind).toBe("hero");
+  });
+
+  describe("viewingHistory (issue #757 derived fact)", () => {
+    it("is false when the viewed result is the latest Materialized primary", () => {
+      const content = deriveWorkspaceContent(
+        [materialized("result_1"), materialized("result_2")],
+        { referenceName: "result_2" },
+        new Map(),
+      );
+      expect(content.kind).toBe("result");
+      if (content.kind === "result") expect(content.viewingHistory).toBe(false);
+    });
+
+    it("is true when the viewed result is an older result", () => {
+      const content = deriveWorkspaceContent(
+        [materialized("result_1"), materialized("result_2")],
+        { referenceName: "result_1" },
+        new Map(),
+      );
+      expect(content.kind).toBe("result");
+      if (content.kind === "result") expect(content.viewingHistory).toBe(true);
+    });
+
+    it("stays false when a non-materialized turn trails the viewed latest primary", () => {
+      // The comparison target is the latest MATERIALIZED turn -- a trailing
+      // B/C/D turn leaves the view on the latest result (ADR-0114).
+      const content = deriveWorkspaceContent(
+        [materialized("result_1"), textual("which name?")],
+        { referenceName: "result_1" },
+        new Map(),
+      );
+      expect(content.kind).toBe("result");
+      if (content.kind === "result") expect(content.viewingHistory).toBe(false);
+    });
+
+    it("is true when viewing a non-tail promotion of the latest turn", () => {
+      // ADR-0084: the viewed result matches ANY promotion of a turn, but the
+      // "latest" target is strictly the chain TAIL (the primary). A mid-chain
+      // antecedent counts as history.
+      const multiPromotion: ThreadEntry = {
+        entry: "Turn",
+        data: {
+          question: "q",
+          outcome: {
+            kind: "Materialized",
+            data: {
+              promotions: [
+                { dataset: src("scratch_1"), sql: "SELECT 1" },
+                { dataset: src("result_1"), sql: "SELECT 2" },
+              ],
+              viz: null,
+              assumption: null,
+            },
+          },
+          trace: [], provenance: { skills: [] },
+        },
+      };
+      const antecedent = deriveWorkspaceContent([multiPromotion], { referenceName: "scratch_1" }, new Map());
+      expect(antecedent.kind).toBe("result");
+      if (antecedent.kind === "result") expect(antecedent.viewingHistory).toBe(true);
+      const tail = deriveWorkspaceContent([multiPromotion], { referenceName: "result_1" }, new Map());
+      expect(tail.kind).toBe("result");
+      if (tail.kind === "result") expect(tail.viewingHistory).toBe(false);
+    });
   });
 });

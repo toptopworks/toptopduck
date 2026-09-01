@@ -6,7 +6,7 @@
 // Truth-source split (ADR-0051 "two sources, no overlap"):
 //  - THREAD is the single source of truth for turn PAYLOADS (question / outcome
 //    / viz / assumption / SQL). deriveWorkspaceContent + findMaterializedPayload
-//    read only the thread.
+//    + findLatestMaterializedPrimary read only the thread.
 //  - WORKING SET is the single source of truth for DATASET RUNTIME STATE
 //    (stale / columns / rows / privacy). The stale anchor on a viewed result
 //    is read from the descriptor by the caller, never from the thread snapshot.
@@ -55,6 +55,28 @@ export function findMaterializedPayload(
   return null;
 }
 
+/** The primary result of the latest Materialized turn (issue #757 "latest"):
+ * scan tail-first for the last turn whose outcome is Materialized AND carries
+ * a primary (the promotion chain's tail, ADR-0084). Trailing non-materialized
+ * turns are skipped -- the workspace is inert to them (ADR-0114), so they
+ * never age the viewed result -- as are promotion-less Materialized turns.
+ * null when the thread materialized no primary. Shared by the R5 resume
+ * landing (useViewedResult) and the "viewing a past result" fact below so the
+ * two stay one scan, never two drifting implementations. */
+export function findLatestMaterializedPrimary(thread: ThreadEntry[]): string | null {
+  for (let i = thread.length - 1; i >= 0; i--) {
+    const entry = thread[i];
+    if (entry.entry !== "Turn") continue;
+    const { outcome } = entry.data;
+    if (outcome.kind !== "Materialized") continue;
+    const { promotions } = outcome.data;
+    const primary = promotions[promotions.length - 1];
+    if (!primary) continue;
+    return primary.dataset.reference_name;
+  }
+  return null;
+}
+
 /** What the workspace "result" area shows (ADR-0062 R2 two-state, calibrated
  * by ADR-0114):
  *  - `result`: the user selected a Materialized result (now or in the past)
@@ -69,6 +91,11 @@ export type WorkspaceContent =
     assumption: string | null;
     viz: VizSpec | null;
     staleAnchor: StaleAnchor | null;
+    /** Issue #757: the viewed result is not the latest Materialized turn's
+     *  primary -- the user is looking at a past result. A derived fact, not a
+     *  state (ADR-0114): a trailing B/C/D turn does not flag the view as
+     *  historical, and a non-tail promotion of the latest turn does. */
+    viewingHistory: boolean;
   }
   | { kind: "hero" };
 
@@ -90,6 +117,10 @@ export function deriveWorkspaceContent(
         assumption: payload.assumption,
         viz: payload.viz,
         staleAnchor: staleByReference.get(viewedResult.referenceName) ?? null,
+        // The result branch implies the thread materialized SOMETHING, so the
+        // latest primary resolves; the comparison still holds when it
+        // wouldn't (any non-null name !== null).
+        viewingHistory: viewedResult.referenceName !== findLatestMaterializedPrimary(thread),
       };
     }
     // viewedResult points at a turn not currently in the thread (optimistic

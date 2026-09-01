@@ -205,6 +205,8 @@
   "session.headerMenu.rename": "Rename",
   "session.hero.empty": "Drop a data file onto the window to start analyzing, or add one with the + button.",
   "session.hero.hasData": "Data loaded. Ask a question below to start analyzing, or manage it in the Working set tab.",
+  "session.historyResult.backToLatest": "Back to latest",
+  "session.historyResult.message": "Viewing a past result, not the latest one.",
   "session.rail.ariaLabel": "Conversation timeline",
   "session.rail.empty": "No conversations yet. Ask a question below or load data to begin.",
   "session.rename.cancel": "Cancel",

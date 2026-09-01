@@ -79,6 +79,33 @@ describe("useViewedResult", () => {
     });
   });
 
+  describe("jumpToLatest (issue #757 back-to-latest exit)", () => {
+    it("moves viewedResult to the latest Materialized primary", () => {
+      const thread = [materialized("result_1"), materialized("result_2")];
+      const { result } = renderHook(() => useViewedResult(thread));
+      act(() => result.current.selectResult("result_1"));
+      act(() => result.current.jumpToLatest());
+      expect(result.current.viewedResult?.referenceName).toBe("result_2");
+    });
+
+    it("skips trailing non-materialized turns", () => {
+      const thread = [materialized("result_1"), materialized("result_2"), textual("which?")];
+      const { result } = renderHook(() => useViewedResult(thread));
+      act(() => result.current.selectResult("result_1"));
+      act(() => result.current.jumpToLatest());
+      expect(result.current.viewedResult?.referenceName).toBe("result_2");
+    });
+
+    it("falls back to hero when the thread materialized no primary", () => {
+      // Defensive landing: the exit button is only reachable while a result is
+      // showing (so some Materialized turn exists), but the move itself must
+      // degrade to hero rather than crash on a primary-less thread.
+      const { result } = renderHook(() => useViewedResult([textual("which?")]));
+      act(() => result.current.jumpToLatest());
+      expect(result.current.viewedResult).toBeNull();
+    });
+  });
+
   describe("suppressInit", () => {
     it("prevents the R5 resume init from firing on later thread content", () => {
       const { result, rerender } = renderHook(({ thread }) => useViewedResult(thread), {
