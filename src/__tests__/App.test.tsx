@@ -971,6 +971,24 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     expect(workingSetTab).toHaveFocus();
   });
 
+  it("ArrowRight wraps from the last tab back to the first", async () => {
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    resultTab.focus();
+    // Two consecutive ArrowRights: the first activates the working-set tab,
+    // the second wraps from the last tab back to the first (a bare focus()
+    // on the inactive tab would not -- the handler reads the tab state, so
+    // the first press would just move to the working-set tab).
+    fireEvent.keyDown(resultTab, { key: "ArrowRight" });
+    fireEvent.keyDown(workingSetTab, { key: "ArrowRight" });
+
+    expect(resultTab).toHaveAttribute("aria-selected", "true");
+    expect(resultTab).toHaveFocus();
+    // Pins the aria-selected toggle's inactive half on the keyboard path;
+    // the mouse test carried it alone before.
+    expect(workingSetTab).toHaveAttribute("aria-selected", "false");
+  });
+
   it("Home and End jump to the first and last tab", async () => {
     renderPane();
     const { resultTab, workingSetTab } = await openWorkspaceTabs();
