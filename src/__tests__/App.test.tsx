@@ -897,6 +897,118 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
   });
 });
 
+describe("App workspace tab keyboard contract (issue #760)", () => {
+  // The zh-CN catalog accessible names (issue #139 convention: resolve from
+  // the catalog, never duplicate literals).
+  const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
+  const RESULT_TAB = catalogFor("zh-CN")["session.tab.result"];
+  const WORKING_SET_TAB = catalogFor("zh-CN")["session.tab.workingSet"];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [guidedDataset]; // a source is loaded
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => guidedDataset);
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(conversation).mockResolvedValue([]);
+  });
+
+  /** Expand the folded workspace (ADR-0083 cold-start posture), await the tab row. */
+  async function openWorkspaceTabs(): Promise<{
+    resultTab: HTMLElement;
+    workingSetTab: HTMLElement;
+  }> {
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    const resultTab = await screen.findByRole("tab", { name: RESULT_TAB });
+    const workingSetTab = screen.getByRole("tab", { name: WORKING_SET_TAB });
+    return { resultTab, workingSetTab };
+  }
+
+  /** The workspace-body panel the tabs' aria-controls points at. */
+  function panelOf(tab: HTMLElement): HTMLElement {
+    return document.getElementById(tab.getAttribute("aria-controls")!)!;
+  }
+
+  it("keeps only the selected tab in the tab sequence (roving tabindex)", async () => {
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    // The active tab stays in the Tab sequence; the inactive one is skipped.
+    expect(resultTab).toHaveAttribute("tabindex", "0");
+    expect(workingSetTab).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("ArrowRight activates the working-set tab, moves focus, and the content follows", async () => {
+    renderPane();
+    const { resultTab } = await openWorkspaceTabs();
+    resultTab.focus();
+    fireEvent.keyDown(resultTab, { key: "ArrowRight" });
+
+    const workingSetTab = screen.getByRole("tab", { name: WORKING_SET_TAB });
+    expect(workingSetTab).toHaveAttribute("aria-selected", "true");
+    expect(workingSetTab).toHaveFocus();
+    expect(resultTab).toHaveAttribute("tabindex", "-1");
+    expect(workingSetTab).toHaveAttribute("tabindex", "0");
+    // Content follows the activation: the loaded source surfaces in the panel.
+    expect(
+      within(panelOf(workingSetTab)).getByRole("button", { name: /^people/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("ArrowLeft wraps from the first tab back to the last", async () => {
+    renderPane();
+    const { resultTab } = await openWorkspaceTabs();
+    resultTab.focus();
+    fireEvent.keyDown(resultTab, { key: "ArrowLeft" });
+
+    const workingSetTab = screen.getByRole("tab", { name: WORKING_SET_TAB });
+    expect(workingSetTab).toHaveAttribute("aria-selected", "true");
+    expect(workingSetTab).toHaveFocus();
+  });
+
+  it("Home and End jump to the first and last tab", async () => {
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    workingSetTab.focus();
+    fireEvent.keyDown(workingSetTab, { key: "Home" });
+    expect(resultTab).toHaveAttribute("aria-selected", "true");
+    expect(resultTab).toHaveFocus();
+
+    fireEvent.keyDown(resultTab, { key: "End" });
+    expect(screen.getByRole("tab", { name: WORKING_SET_TAB })).toHaveFocus();
+  });
+
+  it("the tab-panel association tracks the active tab", async () => {
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    // Both tabs point at the one shared workspace-body panel; the panel's
+    // label tracks whichever tab is active.
+    const resultPanel = panelOf(resultTab);
+    expect(resultPanel).toBe(panelOf(workingSetTab));
+    expect(resultPanel).toHaveAttribute("role", "tabpanel");
+    expect(resultPanel.getAttribute("aria-labelledby")).toBe(resultTab.id);
+
+    fireEvent.click(workingSetTab);
+    expect(resultPanel.getAttribute("aria-labelledby")).toBe(workingSetTab.id);
+  });
+
+  it("mouse clicks still switch tabs", async () => {
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    fireEvent.click(workingSetTab);
+    expect(workingSetTab).toHaveAttribute("aria-selected", "true");
+    expect(resultTab).toHaveAttribute("aria-selected", "false");
+    expect(
+      within(panelOf(workingSetTab)).getByRole("button", { name: /^people/ }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("App delete-source flow (issue #38)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
