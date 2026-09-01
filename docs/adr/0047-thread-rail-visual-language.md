@@ -76,3 +76,4 @@ ADR-0045 定了 thread rail 为 shell 左栏、承载「轮次卡片 + 源事件
 - **被 ADR-0054 闭合 open item**：原「未决」中的「截断策略（头部 vs 尾部留字符）」定为**尾部 ellipsis**（rail 固定宽 → 卡宽确定 → 保头部截尾部，呼应提问为身份句柄 ADR-0039），已从「未决」移除。见 ADR-0054。
 - **空态 placeholder 精确化**：「物种 = 恒可见数据条目类型」，placeholder 有数据后消失、不恒可见，**非 rail 第三物种**。
 - **被 ADR-0062 精确化（点 Materialized 的 pinned 旗）**：本 ADR「点 rail Materialized 卡 → setViewedResult」补「+ 若非末轮则 `pinnedToHistory=true`」，与 workspace 内容派生规则（0062 R2）配套。见 ADR-0062 R2。
+- **校准（源操作路由分拆）**：「加/换/删源 → 不动 viewedResult、不切 tab」分拆为二——加源 / 换源（重传接管引用名，ADR-0025）完成时清空 viewedResult → hero：新 / 换源无当下结果，落「源已加载未提问」空态（0062 R2 分支）；删源条款保留——其结果转 stale 由披露横幅兜底诚实（0033）。两路均不切 tab。
