@@ -129,7 +129,7 @@ import {
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
-import { materialized } from "../session/__tests__/fixtures";
+import { cancelled, failed, materialized } from "../session/__tests__/fixtures";
 
 // ADR-0093 (#512): the session-header management callback props are no-ops in
 // every SessionPane render in this file (these tests exercise session-INTERNAL
@@ -216,6 +216,15 @@ async function submitQuestion(question: string): Promise<void> {
   await act(async () => {
     await capturedComposerFields!.handleAsk(question);
   });
+}
+
+// Rail result-link click (findBy*: the thread query resolves async after the
+// pane mounts, so the links appear a beat later than renderPane() returns).
+// Shared by the #757 indicator flow and the #758 rerun provenance flow --
+// both move the view onto an older result from the rail.
+async function clickRailResultLink(name: string): Promise<void> {
+  const rail = document.querySelector<HTMLElement>(".session-rail")!;
+  fireEvent.click(await within(rail).findByRole("button", { name: `结果：${name}` }));
 }
 
 // The catalog key for an operation verb (issue #139). The negative prefix
@@ -670,13 +679,6 @@ describe("App workspace history indicator (issue #757)", () => {
   const BACK_TO_LATEST = catalogFor("zh-CN")["session.historyResult.backToLatest"];
   const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
 
-  // findBy*: the thread query resolves async after the pane mounts, so the
-  // rail's result links appear a beat later than renderPane() returns.
-  async function clickRailResultLink(name: string): Promise<void> {
-    const rail = document.querySelector<HTMLElement>(".session-rail")!;
-    fireEvent.click(await within(rail).findByRole("button", { name: `结果：${name}` }));
-  }
-
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [guidedDataset]; // a source is loaded
@@ -755,6 +757,134 @@ describe("App workspace history indicator (issue #757)", () => {
       expect(screen.getByRole("heading", { name: /结果：result_3/ })).toBeInTheDocument(),
     );
     expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
+  });
+});
+
+describe("App workspace rerun/retry actions (issue #758)", () => {
+  // The zh-CN catalog accessible names for the three action buttons (issue
+  // #139 convention: resolve from the catalog, never duplicate literals).
+  const RERUN_LABEL = catalogFor("zh-CN")["disclosure.result.staleRerunLabel"];
+  const RETRY_LABEL = catalogFor("zh-CN")["thread.outcome.retryLabel"];
+  const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
+
+  // A working-set result descriptor marked stale by a source deletion (the
+  // stale cascade). The workspace's stale anchor derives from this runtime
+  // truth (ADR-0051), never from the thread snapshot.
+  function staleResult(referenceName: string): DatasetDescriptor {
+    return {
+      ...guidedDataset,
+      reference_name: referenceName,
+      stale: { reference_name: "people", display_name: "people", reason: "Deleted" },
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+    // The shared wiring, centralized like the #757 and delete-source
+    // describes above: a loaded source, the working-set mocks reading
+    // state.workingSet lazily (the stale tests override the assignment), and
+    // a never-settling ask baseline so every fired turn stays in flight for
+    // the busy assertions; the recovery test overrides the FIRST call with
+    // a deferred settle (once-implementations consume ahead of this).
+    state.workingSet = [guidedDataset];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => guidedDataset);
+    vi.mocked(askQuestion).mockImplementation(
+      () => new Promise<TurnOutcome>(() => {}),
+    );
+  });
+
+  it("the stale banner's rerun fires the producing question and recovers the busy gate", async () => {
+    // The viewed result is stale, so the banner's "ask again" advice is an
+    // action: one click fires the question that produced the result as a
+    // fresh turn -- direct, never through the composer draft. A deferred
+    // settle makes BOTH halves of the busy gate observable (disabled while
+    // the turn runs, re-enabled after it lands) plus the handler-level
+    // guard, in one cycle.
+    vi.mocked(conversation).mockResolvedValue([materialized("result_1")]);
+    state.workingSet = [guidedDataset, staleResult("result_1")];
+    let settleAsk!: (outcome: TurnOutcome) => void;
+    vi.mocked(askQuestion).mockImplementationOnce(
+      () => new Promise<TurnOutcome>((resolve) => { settleAsk = resolve; }),
+    );
+    renderPane();
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    const rerun = await screen.findByRole("button", { name: RERUN_LABEL });
+    fireEvent.click(rerun);
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1"));
+    // Busy gate: the fired turn is in flight, so the rerun disables until it
+    // settles (the composer gate's mirror).
+    expect(screen.getByRole("button", { name: RERUN_LABEL })).toBeDisabled();
+    // Handler-level guard (belt-and-suspenders): no synthetic click pierces
+    // a disabled button under React 19 (fireEvent and a native dispatchEvent
+    // were both probed -- the framework drops both), so the guard is
+    // verified at its own layer: a second direct handleAsk (the composer
+    // path's fire, the same function ask-again funnels into) while the turn
+    // is live is a no-op, not a double fire.
+    await act(async () => {
+      void capturedComposerFields!.handleAsk("q:result_1");
+    });
+    expect(askQuestion).toHaveBeenCalledTimes(1);
+    // Settle as Textual (no working-set change, so the stale banner and its
+    // rerun survive the landing) -- the gate reopens...
+    await act(async () => {
+      settleAsk({
+        kind: "Textual",
+        data: { text_kind: "Clarify", body: "done", assumption: null },
+      });
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: RERUN_LABEL })).toBeEnabled(),
+    );
+    // ...and the full cycle repeats: a second rerun fires again (the gate
+    // recovers, not latches).
+    fireEvent.click(screen.getByRole("button", { name: RERUN_LABEL }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(2));
+  });
+
+  it("the history-viewed stale banner's rerun fires the VIEWED result's question", async () => {
+    // #757 x #758: the two features interleave at WorkspaceResult -- viewing
+    // an older (stale) result must rerun THAT result's producing question,
+    // never the latest turn's. The single-thread test above cannot tell the
+    // two apart; this pins the provenance.
+    vi.mocked(conversation).mockResolvedValue([
+      materialized("result_1"),
+      materialized("result_2"),
+    ]);
+    state.workingSet = [guidedDataset, staleResult("result_1")];
+    renderPane();
+    await clickRailResultLink("result_1");
+    const rerun = await screen.findByRole("button", { name: RERUN_LABEL });
+    fireEvent.click(rerun);
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1"));
+    expect(askQuestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Failed card's retry fires that turn's question", async () => {
+    vi.mocked(conversation).mockResolvedValue([failed("坏查询")]);
+    renderPane();
+    const retry = await screen.findByRole("button", { name: RETRY_LABEL });
+    fireEvent.click(retry);
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "坏查询"));
+    // Busy gate mirrors the rerun's: disabled while the fired turn runs.
+    expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeDisabled();
+  });
+
+  it("the Cancelled card's retry fires that turn's question", async () => {
+    vi.mocked(conversation).mockResolvedValue([cancelled("中途取消")]);
+    renderPane();
+    const retry = await screen.findByRole("button", { name: RETRY_LABEL });
+    fireEvent.click(retry);
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "中途取消"));
+    // Busy gate mirrors the rerun/Failed siblings: disabled while in flight.
+    expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeDisabled();
   });
 });
 

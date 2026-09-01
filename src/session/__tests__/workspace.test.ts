@@ -45,6 +45,15 @@ describe("findMaterializedPayload", () => {
     const payload = findMaterializedPayload([entry], "result_1");
     expect(payload?.assumption).toBe("grouped by product");
     expect(payload?.viz?.kind).toBe("bar");
+    expect(payload?.question).toBe("q");
+  });
+
+  it("carries the producing turn's question for the stale rerun (issue #758)", () => {
+    // The stale banner's rerun fires the question that produced the viewed
+    // result: the payload reads it straight off the matched turn (thread is
+    // the single source of truth, ADR-0051), never from a separate snapshot.
+    const payload = findMaterializedPayload([materialized("result_1")], "result_1");
+    expect(payload?.question).toBe("q:result_1");
   });
 
   it("returns null when no turn materialized that reference name", () => {
@@ -118,6 +127,18 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
       expect(content.assumption).toBeNull();
       expect(content.viz).toBeNull();
     }
+  });
+
+  it("carries the producing turn's question on the result branch (issue #758)", () => {
+    // The rerun button's question rides the derivation so the result pane
+    // never re-scans the thread itself (one scan, ADR-0051).
+    const content = deriveWorkspaceContent(
+      [materialized("result_1")],
+      { referenceName: "result_1" },
+      new Map(),
+    );
+    expect(content.kind).toBe("result");
+    if (content.kind === "result") expect(content.question).toBe("q:result_1");
   });
 
   it("carries the stale anchor from the working-set map (runtime truth)", () => {

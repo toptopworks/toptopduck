@@ -50,3 +50,25 @@ export function textual(body: string): ThreadEntry {
     },
   };
 }
+
+export function failed(question: string): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: {
+      question,
+      outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } },
+      trace: [], provenance: { skills: [] },
+    },
+  };
+}
+
+export function cancelled(question: string): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: {
+      question,
+      outcome: { kind: "Cancelled" },
+      trace: [], provenance: { skills: [] },
+    },
+  };
+}

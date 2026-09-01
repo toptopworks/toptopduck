@@ -29,12 +29,16 @@ export interface ViewedResult {
 export interface ResultPayload {
   assumption: string | null;
   viz: VizSpec | null;
+  /** Issue #758: the question the matched turn asked -- the stale banner's
+   *  rerun fires it as a fresh turn. Rides the payload so the result pane
+   *  never re-scans the thread itself. */
+  question: string;
 }
 
 /** Look up the Materialized turn that produced `referenceName` and return its
- * payload (assumption + viz). Thread is the single source of truth for turn
- * payloads (ADR-0051), so a re-selected past result re-renders its chart and
- * assumption side-note without a separate snapshot. */
+ * payload (assumption + viz + the producing question). Thread is the single
+ * source of truth for turn payloads (ADR-0051), so a re-selected past result
+ * re-renders its chart and assumption side-note without a separate snapshot. */
 export function findMaterializedPayload(
   thread: ThreadEntry[],
   referenceName: string,
@@ -49,7 +53,11 @@ export function findMaterializedPayload(
       outcome.kind === "Materialized" &&
       outcome.data.promotions.some((p) => p.dataset.reference_name === referenceName)
     ) {
-      return { assumption: outcome.data.assumption, viz: outcome.data.viz };
+      return {
+        assumption: outcome.data.assumption,
+        viz: outcome.data.viz,
+        question: entry.data.question,
+      };
     }
   }
   return null;
@@ -90,6 +98,10 @@ export type WorkspaceContent =
     referenceName: string;
     assumption: string | null;
     viz: VizSpec | null;
+    /** Issue #758: the question that produced this result -- the stale
+     *  banner's rerun fires it. Always present on the result branch: the
+     *  branch implies the payload resolved, and the payload carries it. */
+    question: string;
     staleAnchor: StaleAnchor | null;
     /** Issue #757: the viewed result is not the latest Materialized turn's
      *  primary -- the user is looking at a past result. A derived fact, not a
@@ -116,6 +128,7 @@ export function deriveWorkspaceContent(
         referenceName: viewedResult.referenceName,
         assumption: payload.assumption,
         viz: payload.viz,
+        question: payload.question,
         staleAnchor: staleByReference.get(viewedResult.referenceName) ?? null,
         // The result branch implies the thread materialized SOMETHING, so the
         // latest primary resolves; the comparison still holds when it

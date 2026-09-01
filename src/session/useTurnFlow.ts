@@ -602,6 +602,14 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // + active (a new result_N registered server-side).
   const handleAsk = useCallback(
     async (question: string) => {
+      // Belt-and-suspenders (issue #758): the one-turn rule enforced at the
+      // handler too, QuestionBar's submit guard being the visual twin. A
+      // synthetic dispatch (fireEvent / automation) clicks through a disabled
+      // button, so every fire path (composer, pendingQuestion, ask-again)
+      // shares this early return instead of double-firing into the strictly
+      // single-turn state. liveRef reads without a re-render, so the guard
+      // costs handleAsk nothing in identity stability.
+      if (liveRef.current !== null) return;
       setLoading(true);
       setError(null);
       // ADR-0103 (issue #608): the ask timestamp, read at submit so the
@@ -658,82 +666,92 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       }
       // The ask-time choice lands here (the turn's own duration dwarfs the
       // IPC round-trip, so the read is long resolved).
-      const runtimeChoice = await runtimeRead;
-      // Optimistic thread append (ADR-0051): the outcome object is the same
-      // shape the backend recorded; the trace is the event stream's settled
-      // rows (completed calls only); the runtime attribution is the ask-time
-      // choice stamp (issue #725). Only the content_hashes and the backend's
-      // own timestamps differ from the recorded row. The thread is
-      // staleTime-Infinity and the turn flow itself never invalidates it
-      // (ADR-0051 -- its own invalidation would wipe this append), so this
-      // optimistic form is final until the backend's row lands: a reopened
-      // mount reads it, or another domain's invalidation (ingest, skill
-      // changes) replaces the append with the recorded row -- expected
-      // convergence, never a wipe.
-      const newEntry: ThreadEntry = {
-        entry: "Turn",
-        // Issue #381: the optimistic entry's provenance carries no
-        // content_hashes -- the frontend cannot know the assembly-time
-        // hashes (the backend records them in record_turn). Issue #725: the
-        // runtime half IS stamped, from the ask-time choice read above; an
-        // unknown choice omits it (the unrecorded-turn degradation -- no
-        // badge, rendered after reopen).
-        data: {
-          question,
-          outcome,
-          trace: settledTrace,
-          provenance: {
-            skills: [],
-            ...(runtimeChoice && { runtime: choiceToTurnRuntime(runtimeChoice) }),
+      // The success tail, finally-wrapped: ANY unexpected throw between the
+      // ask and the tail (choiceToTurnRuntime on an unmapped runtime stamp,
+      // a settled callback) still reopens the busy gate -- the fire paths'
+      // defensive catches log it (ADR-0029), but without this clear the
+      // session would sit permanently disabled with the log line as the only
+      // trace. The designed failure paths (askQuestion rejection, refresh
+      // failure) settle internally above and reach this clear the same way.
+      try {
+        const runtimeChoice = await runtimeRead;
+        // Optimistic thread append (ADR-0051): the outcome object is the same
+        // shape the backend recorded; the trace is the event stream's settled
+        // rows (completed calls only); the runtime attribution is the ask-time
+        // choice stamp (issue #725). Only the content_hashes and the backend's
+        // own timestamps differ from the recorded row. The thread is
+        // staleTime-Infinity and the turn flow itself never invalidates it
+        // (ADR-0051 -- its own invalidation would wipe this append), so this
+        // optimistic form is final until the backend's row lands: a reopened
+        // mount reads it, or another domain's invalidation (ingest, skill
+        // changes) replaces the append with the recorded row -- expected
+        // convergence, never a wipe.
+        const newEntry: ThreadEntry = {
+          entry: "Turn",
+          // Issue #381: the optimistic entry's provenance carries no
+          // content_hashes -- the frontend cannot know the assembly-time
+          // hashes (the backend records them in record_turn). Issue #725: the
+          // runtime half IS stamped, from the ask-time choice read above; an
+          // unknown choice omits it (the unrecorded-turn degradation -- no
+          // badge, rendered after reopen).
+          data: {
+            question,
+            outcome,
+            trace: settledTrace,
+            provenance: {
+              skills: [],
+              ...(runtimeChoice && { runtime: choiceToTurnRuntime(runtimeChoice) }),
+            },
+            asked_at: askedAt,
+            settled_at: Date.now(),
           },
-          asked_at: askedAt,
-          settled_at: Date.now(),
-        },
-      };
-      queryClient.setQueryData<ThreadEntry[]>(sessionKeys.thread(sessionId), (old) =>
-        old ? [...old, newEntry] : [newEntry],
-      );
-      suppressInit(); // the user has acted; the R5 init is moot.
-      if (outcome.kind === "Materialized") {
-        // ADR-0084: the just-produced primary is the promotion chain's tail --
-        // the result the answer references. Auto-selects it (ADR-0062 R2
-        // "new-turn produce -> selected", calibrated by ADR-0114); the view
-        // rule is encapsulated in useViewedResult (issue #229).
-        const { promotions } = outcome.data;
-        const referenceName = promotions[promotions.length - 1]?.dataset.reference_name;
-        if (referenceName !== undefined) {
-          markProduced(referenceName);
+        };
+        queryClient.setQueryData<ThreadEntry[]>(sessionKeys.thread(sessionId), (old) =>
+          old ? [...old, newEntry] : [newEntry],
+        );
+        suppressInit(); // the user has acted; the R5 init is moot.
+        if (outcome.kind === "Materialized") {
+          // ADR-0084: the just-produced primary is the promotion chain's tail --
+          // the result the answer references. Auto-selects it (ADR-0062 R2
+          // "new-turn produce -> selected", calibrated by ADR-0114); the view
+          // rule is encapsulated in useViewedResult (issue #229).
+          const { promotions } = outcome.data;
+          const referenceName = promotions[promotions.length - 1]?.dataset.reference_name;
+          if (referenceName !== undefined) {
+            markProduced(referenceName);
+          }
+          // Only workingSet + active change here (a new result_N registered
+          // server-side + active may have moved); thread stays un-invalidated
+          // (ADR-0051) -- see the hook header for the why. The try/catch guard
+          // surfaces a refresh failure as a tagged error instead of skipping
+          // the busy-gate clear below (would lock QuestionBar forever); mirrors
+          // refreshServerState's "saved but refresh failed" contract.
+          try {
+            await Promise.all([
+              queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
+              queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
+            ]);
+          } catch (invalidateErr) {
+            // invalidateErr because this try wraps invalidateQueries (workingSet +
+            // active); the refreshFailed option stays -- it selects toAppError's
+            // user-facing "saved but refreshing..." prefix (ADR-0069), not the impl.
+            setError(toAppError(invalidateErr, intl, "ask", { refreshFailed: true }));
+          }
         }
-        // Only workingSet + active change here (a new result_N registered
-        // server-side + active may have moved); thread stays un-invalidated
-        // (ADR-0051) -- see the hook header for the why. The try/catch guard
-        // surfaces a refresh failure as a tagged error instead of skipping
-        // setLoading(false) below (would lock QuestionBar forever); mirrors
-        // refreshServerState's "saved but refresh failed" contract.
-        try {
-          await Promise.all([
-            queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
-            queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
-          ]);
-        } catch (invalidateErr) {
-          // invalidateErr because this try wraps invalidateQueries (workingSet +
-          // active); the refreshFailed option stays -- it selects toAppError's
-          // user-facing "saved but refreshing..." prefix (ADR-0069), not the impl.
-          setError(toAppError(invalidateErr, intl, "ask", { refreshFailed: true }));
-        }
+        // Textual / Failed / Cancelled: no working-set change; the optimistic
+        // append is the thread state, nothing to invalidate.
+        // ADR-0095: refresh the model config on EVERY outcome kind -- an
+        // external-runtime turn's LoopOutcome.discovered_runtime lands on the
+        // handle cache regardless of how the turn terminated, and the selector
+        // must re-read it (dedupe is inherent: the backend cache is
+        // single-slot). Fire-and-forget like pollPersistError.
+        void queryClient.invalidateQueries({
+          queryKey: sessionKeys.modelConfig(sessionId),
+        });
+      } finally {
+        setLoading(false);
+        void pollPersistError();
       }
-      // Textual / Failed / Cancelled: no working-set change; the optimistic
-      // append is the thread state, nothing to invalidate.
-      // ADR-0095: refresh the model config on EVERY outcome kind -- an
-      // external-runtime turn's LoopOutcome.discovered_runtime lands on the
-      // handle cache regardless of how the turn terminated, and the selector
-      // must re-read it (dedupe is inherent: the backend cache is
-      // single-slot). Fire-and-forget like pollPersistError.
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.modelConfig(sessionId),
-      });
-      setLoading(false);
-      void pollPersistError();
     },
     [
       sessionId,

@@ -4,6 +4,7 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
+import { cancelled, failed } from "../../../session/__tests__/fixtures";
 import { Thread } from "../Thread";
 import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
@@ -44,6 +45,12 @@ function renderThread(ui: ReactElement) {
 }
 
 describe("Thread", () => {
+  // The zh-CN accessible name of the retry button, resolved from the catalog
+  // so the assertions track the wording instead of duplicating a literal
+  // (issue #139 convention). Shared by the weaken test and the retry
+  // describe -- one resolution per key per file.
+  const RETRY_LABEL = catalogFor("zh-CN")["thread.outcome.retryLabel"];
+
   // A materialized record built from the shared mock descriptor (reference_name
   // overridden) -- the only outcome that needs a full dataset payload.
   function materializedRecord(referenceName: string, assumption: string | null): TurnRecord {
@@ -440,6 +447,60 @@ describe("Thread", () => {
     // the style layer, not duplicated here).
     expect(container.querySelector(`.turn-entry[data-outcome="failed"]`)).not.toBeNull();
     expect(container.querySelector(`.turn-entry[data-outcome="cancelled"]`)).not.toBeNull();
+    // No retry surfaces without a wired handler (honest degrade -- the
+    // unwired call sites below rely on this).
+    expect(screen.queryByRole("button", { name: RETRY_LABEL })).not.toBeInTheDocument();
+  });
+
+  describe("turn retry (issue #758)", () => {
+    // The records come from the session fixtures (cross-directory import is
+    // established); the aria-label behind RETRY_LABEL carries the fuller
+    // name.
+
+    it("the Failed outcome card's retry fires the turn's question", () => {
+      // ADR-0028 Why 2: a failed turn stays visible AND continuable -- the
+      // retry fires the verbatim question as a fresh turn.
+      const onRetryTurn = vi.fn();
+      renderThread(
+        <Thread
+          entries={[failed("坏查询")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          onRetryTurn={onRetryTurn}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: RETRY_LABEL }));
+      expect(onRetryTurn).toHaveBeenCalledWith("坏查询");
+    });
+
+    it("the Cancelled outcome card's retry fires the turn's question", () => {
+      const onRetryTurn = vi.fn();
+      renderThread(
+        <Thread
+          entries={[cancelled("中途取消")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          onRetryTurn={onRetryTurn}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: RETRY_LABEL }));
+      expect(onRetryTurn).toHaveBeenCalledWith("中途取消");
+    });
+
+    it("disables the retry buttons while a turn is in flight (busy gate)", () => {
+      renderThread(
+        <Thread
+          entries={[failed("坏查询"), cancelled("中途取消")]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          onRetryTurn={() => {}}
+          busy
+        />,
+      );
+      const buttons = screen.getAllByRole("button", { name: RETRY_LABEL });
+      expect(buttons).toHaveLength(2);
+      for (const b of buttons) expect(b).toBeDisabled();
+    });
   });
 
   it("renders source markers as a distinct species with add/replace/delete glyphs + stale counts (issue #80)", async () => {
