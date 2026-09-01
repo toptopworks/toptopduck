@@ -1,8 +1,25 @@
-import type { DatasetDescriptor, DatasetPrivacy } from "../../../types/dataset";
+import type {
+  DatasetDescriptor,
+  DatasetPrivacy,
+  GuidanceReason,
+  GuidanceSheet,
+} from "../../../types/dataset";
 
 // Shared dataset-domain test fixtures (ADR-0011 defaults). The zh-CN
 // IntlProvider wrapper used by the dataset component tests lives in the common
 // test helpers (../../common/__tests__/helpers) and is imported per test file.
+
+// Compact two-state constructors for readable guidance fixtures (#751): the
+// NeedsGuidance / AutoTidied union literals inline verbosely, and a
+// hand-written literal that drifts from the wire shape is exactly the
+// mismatch the constructors rule out at compile time.
+export function needsGuidance(reason: GuidanceReason): GuidanceSheet["state"] {
+  return { kind: "NeedsGuidance", data: { reason } };
+}
+
+export function autoTidied(headerRow: number): GuidanceSheet["state"] {
+  return { kind: "AutoTidied", data: { header_row: headerRow } };
+}
 
 export const mockDataset: DatasetDescriptor = {
   reference_name: "people",

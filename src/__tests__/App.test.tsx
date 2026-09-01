@@ -297,9 +297,7 @@ describe("App guided-load flow", () => {
           },
         ],
       },
-      // A NeedsGuidance outcome is the only shape this flow exercises; the cast
-      // keeps the mock terse without weakening the rest of the LoadOutcome union.
-    } as never);
+    });
     vi.mocked(ingestFileGuided).mockImplementation(async () => {
       state.workingSet = [guidedDataset];
       return { kind: "Loaded", data: guidedDataset } as never;
@@ -925,6 +923,29 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     privacy: { send_samples: true, type_only_columns: [] },
   };
 
+  // The two park tests below start identically: first file loads, second needs
+  // guidance, so the batch PARKS on the dialog (#748). One place builds the
+  // mock chain so the payload can't drift between them.
+  function mockBatchParksOnGuidance() {
+    vi.mocked(ingestFile)
+      .mockResolvedValueOnce({ kind: "Loaded", data: loadedDataset })
+      .mockResolvedValueOnce({
+        kind: "NeedsGuidance",
+        data: {
+          source_path: "/x/m.xlsx",
+          workbook_name: "m.xlsx",
+          sheets: [
+            {
+              name: "Sheet1",
+              preview: [["a"]],
+              total_rows: 1,
+              state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
+            },
+          ],
+        },
+      });
+  }
+
   interface PendingPayload {
     pendingIngestPaths?: string[];
     pendingQuestion?: string | null;
@@ -1079,23 +1100,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     // auto-ask neither fires NOR seeds the draft underneath the dialog.
     // Cancelling the dialog cancel-halts the batch -- the question is then
     // seeded back into the session's draft so it is never silently lost.
-    vi.mocked(ingestFile)
-      .mockResolvedValueOnce({ kind: "Loaded", data: loadedDataset })
-      .mockResolvedValueOnce({
-        kind: "NeedsGuidance",
-        data: {
-          source_path: "/x/m.xlsx",
-          workbook_name: "m.xlsx",
-          sheets: [
-            {
-              name: "Sheet1",
-              preview: [["a"]],
-              total_rows: 1,
-              state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
-            },
-          ],
-        },
-      });
+    mockBatchParksOnGuidance();
     const { onSeedDraft } = renderPaneWithPending({
       pendingIngestPaths: ["/x/a.csv", "/x/m.xlsx"],
       pendingQuestion: "how many rows?",
@@ -1119,23 +1124,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
   it("fires the pending question after a guided load drains the parked batch (#500, #748)", async () => {
     // Same park, but the user resolves the guidance: the guided file loads,
     // the queued remainder drains, and the #500 gate releases the auto-ask.
-    vi.mocked(ingestFile)
-      .mockResolvedValueOnce({ kind: "Loaded", data: loadedDataset })
-      .mockResolvedValueOnce({
-        kind: "NeedsGuidance",
-        data: {
-          source_path: "/x/m.xlsx",
-          workbook_name: "m.xlsx",
-          sheets: [
-            {
-              name: "Sheet1",
-              preview: [["a"]],
-              total_rows: 1,
-              state: { kind: "NeedsGuidance", data: { reason: "MultipleHeaderRows" } },
-            },
-          ],
-        },
-      });
+    mockBatchParksOnGuidance();
     vi.mocked(ingestFileGuided).mockResolvedValueOnce({
       kind: "Loaded",
       data: loadedDataset,
