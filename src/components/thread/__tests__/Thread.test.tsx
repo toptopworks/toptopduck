@@ -4,6 +4,7 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
+import { cancelled, failed } from "../../../session/__tests__/fixtures";
 import { Thread } from "../Thread";
 import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
@@ -44,6 +45,12 @@ function renderThread(ui: ReactElement) {
 }
 
 describe("Thread", () => {
+  // The zh-CN accessible name of the retry button, resolved from the catalog
+  // so the assertions track the wording instead of duplicating a literal
+  // (issue #139 convention). Shared by the weaken test and the retry
+  // describe -- one resolution per key per file.
+  const RETRY_LABEL = catalogFor("zh-CN")["thread.outcome.retryLabel"];
+
   // A materialized record built from the shared mock descriptor (reference_name
   // overridden) -- the only outcome that needs a full dataset payload.
   function materializedRecord(referenceName: string, assumption: string | null): TurnRecord {
@@ -442,27 +449,13 @@ describe("Thread", () => {
     expect(container.querySelector(`.turn-entry[data-outcome="cancelled"]`)).not.toBeNull();
     // No retry surfaces without a wired handler (honest degrade -- the
     // unwired call sites below rely on this).
-    expect(
-      screen.queryByRole("button", { name: catalogFor("zh-CN")["thread.outcome.retryLabel"] }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: RETRY_LABEL })).not.toBeInTheDocument();
   });
 
   describe("turn retry (issue #758)", () => {
-    // The zh-CN accessible name of the retry button, resolved from the catalog
-    // so the assertions track the wording instead of duplicating a literal
-    // (issue #139 convention). The aria-label carries the fuller name.
-    const RETRY_LABEL = catalogFor("zh-CN")["thread.outcome.retryLabel"];
-
-    const failedRecord: TurnRecord = {
-      question: "坏查询",
-      outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } },
-      trace: [], provenance: { skills: [] },
-    };
-    const cancelledRecord: TurnRecord = {
-      question: "中途取消",
-      outcome: { kind: "Cancelled" },
-      trace: [], provenance: { skills: [] },
-    };
+    // The records come from the session fixtures (cross-directory import is
+    // established); the aria-label behind RETRY_LABEL carries the fuller
+    // name.
 
     it("the Failed outcome card's retry fires the turn's question", () => {
       // ADR-0028 Why 2: a failed turn stays visible AND continuable -- the
@@ -470,7 +463,7 @@ describe("Thread", () => {
       const onRetryTurn = vi.fn();
       renderThread(
         <Thread
-          entries={[turnEntry(failedRecord)]}
+          entries={[failed("坏查询")]}
           selectedResult={null}
           onSelectResult={() => {}}
           onRetryTurn={onRetryTurn}
@@ -484,7 +477,7 @@ describe("Thread", () => {
       const onRetryTurn = vi.fn();
       renderThread(
         <Thread
-          entries={[turnEntry(cancelledRecord)]}
+          entries={[cancelled("中途取消")]}
           selectedResult={null}
           onSelectResult={() => {}}
           onRetryTurn={onRetryTurn}
@@ -497,7 +490,7 @@ describe("Thread", () => {
     it("disables the retry buttons while a turn is in flight (busy gate)", () => {
       renderThread(
         <Thread
-          entries={[turnEntry(failedRecord), turnEntry(cancelledRecord)]}
+          entries={[failed("坏查询"), cancelled("中途取消")]}
           selectedResult={null}
           onSelectResult={() => {}}
           onRetryTurn={() => {}}

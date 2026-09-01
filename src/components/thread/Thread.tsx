@@ -83,8 +83,8 @@ interface ThreadProps {
    * Optional so call sites / tests that do not exercise retry can omit it
    * (no retry buttons render). */
   onRetryTurn?: (question: string) => void;
-  /** Issue #758: a turn is in flight -- the retry buttons render disabled
-   * until it settles (the composer busy gate's mirror). */
+  /** Issue #758: the session busy gate (the composer's mirror) -- a turn or
+   * mutation in flight; the retry buttons render disabled until it clears. */
   busy?: boolean;
 }
 

@@ -72,8 +72,8 @@ interface TurnCardProps {
    *  AND continuable). undefined when the caller does not wire a retry: the
    *  outcome cards keep their read-only shape (honest degrade). */
   onRetryTurn: ((question: string) => void) | undefined;
-  /** Issue #758: a turn is in flight -- the retry button renders disabled
-   *  until it settles (the composer busy gate's mirror). */
+  /** Issue #758: the session busy gate (the composer's mirror) -- a turn or
+   *  mutation in flight; the retry button renders disabled until it clears. */
   busy: boolean;
 }
 
@@ -340,24 +340,29 @@ function TurnBody({
 }: TurnBodyProps) {
   const intl = useIntl();
   // Issue #758: the Failed/Cancelled continuation action, shared by the two
-  // outcome cards (isomorphic, like their shell). Fires the turn's verbatim
-  // question as a fresh turn; disabled while one runs. Absent when the caller
-  // wires no handler -- the cards keep their read-only shape.
-  const retryButton = onRetryTurn && (
-    <Button
-      variant="outline"
-      size="sm"
-      className="mt-1.5"
-      disabled={busy}
-      onClick={() => onRetryTurn(record.question)}
-      aria-label={intl.formatMessage({
-        id: "thread.outcome.retryLabel",
-        defaultMessage: "Retry this question",
-      })}
-    >
-      <FormattedMessage id="thread.outcome.retry" defaultMessage="Retry" />
-    </Button>
-  );
+  // outcome cards (isomorphic, like their shell). A function, not a hoisted
+  // element, per the file's derive-here convention (the meta-row glyph's
+  // twin): Materialized/Textual renders never evaluate the retry JSX --
+  // including its formatMessage -- for branches that cannot use it. Fires
+  // the turn's verbatim question as a fresh turn; disabled while one runs.
+  // Absent when the caller wires no handler -- the cards keep their
+  // read-only shape.
+  const renderRetry = () =>
+    onRetryTurn && (
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-1.5"
+        disabled={busy}
+        onClick={() => onRetryTurn(record.question)}
+        aria-label={intl.formatMessage({
+          id: "thread.outcome.retryLabel",
+          defaultMessage: "Retry this question",
+        })}
+      >
+        <FormattedMessage id="thread.outcome.retry" defaultMessage="Retry" />
+      </Button>
+    );
   switch (record.outcome.kind) {
     case "Materialized": {
       const { promotions, assumption } = record.outcome.data;
@@ -493,7 +498,7 @@ function TurnBody({
             </span>
           </div>
           <TechnicalDetailsFold detail={detail} />
-          {retryButton}
+          {renderRetry()}
         </div>
       );
     }
@@ -512,7 +517,7 @@ function TurnBody({
             <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
             <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
           </div>
-          {retryButton}
+          {renderRetry()}
         </div>
       );
     default: {

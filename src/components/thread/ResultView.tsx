@@ -135,8 +135,8 @@ interface ResultViewProps {
    * the caller did not wire a rerun -- the banner keeps its text advice and
    * renders no button (honest degrade). */
   onRerun?: (() => void) | null;
-  /** Issue #758: a turn is in flight -- the rerun button renders disabled
-   * until it settles (the composer busy gate's mirror). */
+  /** Issue #758: the session busy gate (the composer's mirror) -- a turn or
+   * mutation in flight; the rerun button renders disabled until it clears. */
   rerunBusy?: boolean;
   pageSize?: number;
 }

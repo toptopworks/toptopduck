@@ -287,6 +287,10 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   const { handleAsk } = s;
   const handleAskAgain = useCallback(
     (question: string) => {
+      // The composer's empty-input twin: ask-again consumes a raw persisted
+      // string (the only ask generator that does), so a blank question -- a
+      // legacy or hand-edited session file -- must not fire a hollow turn.
+      if (!question.trim()) return;
       void handleAsk(question).catch((e) =>
         log.error("SessionPane", "ask-again handleAsk threw unexpectedly", e),
       );
@@ -619,7 +623,8 @@ function WorkspaceResult({
   /** Issue #758: fires a question as a fresh turn -- the stale banner's
    *  rerun binds the viewed result's producing question onto it. */
   onRerun: (question: string) => void;
-  /** Issue #758: a turn is in flight -- the rerun button renders disabled. */
+  /** Issue #758: the session busy gate (the composer's mirror) -- a turn or
+   *  mutation in flight; the rerun button renders disabled until it clears. */
   busy: boolean;
 }) {
   switch (content.kind) {
