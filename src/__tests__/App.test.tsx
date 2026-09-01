@@ -12,7 +12,7 @@ import { IntlProvider } from "react-intl";
 import { StrictMode } from "react";
 import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
-import type { ThreadEntry, TurnOutcome } from "../types/thread";
+import type { TurnOutcome } from "../types/thread";
 import type { ComposerSessionFields } from "../session/useComposerState";
 
 // The composer "+" context panel (the retired FileDropzone's successor, issue
@@ -129,6 +129,7 @@ import {
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
+import { materialized } from "../session/__tests__/fixtures";
 
 // ADR-0093 (#512): the session-header management callback props are no-ops in
 // every SessionPane render in this file (these tests exercise session-INTERNAL
@@ -273,6 +274,24 @@ const guidedDataset: DatasetDescriptor = {
   rectify: { kind: "User", data: { header_row: 2, skip_rows: [] } },
   privacy: { send_samples: true, type_only_columns: [] },
 };
+
+// A single-promotion Materialized ask outcome derived from the guided source;
+// the ask-flow tests differ only in the result name.
+function materializedOutcome(referenceName: string): TurnOutcome {
+  return {
+    kind: "Materialized",
+    data: {
+      promotions: [
+        {
+          dataset: { ...guidedDataset, reference_name: referenceName, row_count: 1 },
+          sql: "SELECT 1",
+        },
+      ],
+      viz: null,
+      assumption: null,
+    },
+  };
+}
 
 describe("App guided-load flow", () => {
   beforeEach(() => {
@@ -559,23 +578,7 @@ describe("App ask flow", () => {
   });
 
   it("submits a question and shows the materialized result (issue #22)", async () => {
-    vi.mocked(askQuestion).mockResolvedValue({
-      kind: "Materialized",
-      data: {
-        promotions: [
-          {
-            dataset: {
-              ...guidedDataset,
-              reference_name: "result_1",
-              row_count: 1,
-            },
-            sql: "SELECT 1",
-          },
-        ],
-        viz: null,
-        assumption: null,
-      },
-    });
+    vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
     renderPane();
     await submitQuestion("总共几行");
     await waitFor(() =>
@@ -667,30 +670,6 @@ describe("App workspace history indicator (issue #757)", () => {
   const BACK_TO_LATEST = catalogFor("zh-CN")["session.historyResult.backToLatest"];
   const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
 
-  // A resumed session's thread: two Materialized turns. R5 lands the view on
-  // the latest primary (result_2); the workspace starts folded (ADR-0083), so
-  // each flow opens it via the header toggle or a rail selection.
-  function resumedTurn(referenceName: string): ThreadEntry {
-    return {
-      entry: "Turn",
-      data: {
-        question: `q:${referenceName}`,
-        outcome: {
-          kind: "Materialized",
-          data: {
-            promotions: [
-              { dataset: { ...guidedDataset, reference_name: referenceName }, sql: "SELECT 1" },
-            ],
-            viz: null,
-            assumption: null,
-          },
-        },
-        trace: [],
-        provenance: { skills: [] },
-      },
-    };
-  }
-
   // findBy*: the thread query resolves async after the pane mounts, so the
   // rail's result links appear a beat later than renderPane() returns.
   async function clickRailResultLink(name: string): Promise<void> {
@@ -710,9 +689,13 @@ describe("App workspace history indicator (issue #757)", () => {
       offset: 0,
       limit: 100,
     });
+    // A resumed session's thread: two Materialized turns (the session
+    // fixtures mint them). R5 lands the view on the latest primary
+    // (result_2); the workspace starts folded (ADR-0083), so each flow
+    // opens it via the header toggle or a rail selection.
     vi.mocked(conversation).mockResolvedValue([
-      resumedTurn("result_1"),
-      resumedTurn("result_2"),
+      materialized("result_1"),
+      materialized("result_2"),
     ]);
   });
 
@@ -766,19 +749,7 @@ describe("App workspace history indicator (issue #757)", () => {
       expect(screen.getByText(HISTORY_MESSAGE)).toBeInTheDocument(),
     );
 
-    vi.mocked(askQuestion).mockResolvedValueOnce({
-      kind: "Materialized",
-      data: {
-        promotions: [
-          {
-            dataset: { ...guidedDataset, reference_name: "result_3", row_count: 1 },
-            sql: "SELECT 1",
-          },
-        ],
-        viz: null,
-        assumption: null,
-      },
-    });
+    vi.mocked(askQuestion).mockResolvedValueOnce(materializedOutcome("result_3"));
     await submitQuestion("新一问");
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /结果：result_3/ })).toBeInTheDocument(),

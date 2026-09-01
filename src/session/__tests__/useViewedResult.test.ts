@@ -99,8 +99,11 @@ describe("useViewedResult", () => {
     it("falls back to hero when the thread materialized no primary", () => {
       // Defensive landing: the exit button is only reachable while a result is
       // showing (so some Materialized turn exists), but the move itself must
-      // degrade to hero rather than crash on a primary-less thread.
+      // degrade to hero rather than crash on a primary-less thread. Selecting
+      // a ghost first makes the null landing observable -- a no-op fallback
+      // would strand viewedResult on the stale selection.
       const { result } = renderHook(() => useViewedResult([textual("which?")]));
+      act(() => result.current.selectResult("ghost"));
       act(() => result.current.jumpToLatest());
       expect(result.current.viewedResult).toBeNull();
     });

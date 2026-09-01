@@ -50,7 +50,7 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     // External system -> state: the injected thread (resume query data) seeds
     // the initial view once; a legitimate one-shot init, not derived churn.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (latest) setViewedResult({ referenceName: latest });
+    if (latest !== null) setViewedResult({ referenceName: latest });
   }, [thread]);
 
   // ADR-0047 + ADR-0114 (rail click): moves ONLY viewedResult (never the
@@ -88,7 +88,7 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
   // showing) but keeps the move total.
   const jumpToLatest = useCallback(() => {
     const latest = findLatestMaterializedPrimary(thread);
-    setViewedResult(latest ? { referenceName: latest } : null);
+    setViewedResult(latest !== null ? { referenceName: latest } : null);
   }, [thread]);
 
   return {

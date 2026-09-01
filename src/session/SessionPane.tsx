@@ -634,21 +634,19 @@ function WorkspaceResult({
             // so the default info Alert + role="note" pairing (alert.tsx). The
             // exit button shares the alert row; ResultView below is untouched.
             <Alert role="note" className="mb-2">
-              <AlertDescription>
-                <div className="flex items-center justify-between gap-3">
-                  <p className="m-0">
-                    <FormattedMessage
-                      id="session.historyResult.message"
-                      defaultMessage="Viewing a past result, not the latest one."
-                    />
-                  </p>
-                  <Button variant="outline" size="sm" onClick={onJumpToLatest}>
-                    <FormattedMessage
-                      id="session.historyResult.backToLatest"
-                      defaultMessage="Back to latest"
-                    />
-                  </Button>
-                </div>
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <p className="m-0">
+                  <FormattedMessage
+                    id="session.historyResult.message"
+                    defaultMessage="Viewing a past result, not the latest one."
+                  />
+                </p>
+                <Button variant="outline" size="sm" onClick={onJumpToLatest}>
+                  <FormattedMessage
+                    id="session.historyResult.backToLatest"
+                    defaultMessage="Back to latest"
+                  />
+                </Button>
               </AlertDescription>
             </Alert>
           )}

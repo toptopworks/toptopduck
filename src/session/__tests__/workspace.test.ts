@@ -14,6 +14,17 @@ import type { ThreadEntry } from "../../types/thread";
 // two-state rule + the truth-source split (thread = turn payload truth)
 // precisely.
 
+// A Materialized turn with no promotions: it carries no primary, so the
+// latest-primary scan skips it and keeps scanning tail-first.
+const noPrimaryTurn: ThreadEntry = {
+  entry: "Turn",
+  data: {
+    question: "q",
+    outcome: { kind: "Materialized", data: { promotions: [], viz: null, assumption: null } },
+    trace: [], provenance: { skills: [] },
+  },
+};
+
 describe("findMaterializedPayload", () => {
   it("returns the assumption + viz for a result_N in the thread", () => {
     const entry: ThreadEntry = {
@@ -58,17 +69,9 @@ describe("findLatestMaterializedPrimary (issue #757)", () => {
   });
 
   it("skips a Materialized turn without a primary and keeps scanning", () => {
-    const noPrimary: ThreadEntry = {
-      entry: "Turn",
-      data: {
-        question: "q",
-        outcome: { kind: "Materialized", data: { promotions: [], viz: null, assumption: null } },
-        trace: [], provenance: { skills: [] },
-      },
-    };
-    expect(findLatestMaterializedPrimary([materialized("result_1"), noPrimary])).toBe(
-      "result_1",
-    );
+    expect(
+      findLatestMaterializedPrimary([materialized("result_1"), noPrimaryTurn]),
+    ).toBe("result_1");
   });
 
   it("returns null when the thread materialized no primary", () => {
@@ -161,6 +164,19 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
       // B/C/D turn leaves the view on the latest result (ADR-0114).
       const content = deriveWorkspaceContent(
         [materialized("result_1"), textual("which name?")],
+        { referenceName: "result_1" },
+        new Map(),
+      );
+      expect(content.kind).toBe("result");
+      if (content.kind === "result") expect(content.viewingHistory).toBe(false);
+    });
+
+    it("stays false when the latest Materialized turn carries no primary", () => {
+      // The promotion-less tail must not flag the still-latest view: the scan
+      // skips it and resolves the older turn's primary as the comparison
+      // target (pinned here at the derivation level, not just the helper).
+      const content = deriveWorkspaceContent(
+        [materialized("result_1"), noPrimaryTurn],
         { referenceName: "result_1" },
         new Map(),
       );
