@@ -40,6 +40,14 @@ const PAGE_BTN =
 // <td> (ADR-0067 (2): Tailwind scale utility, no new token).
 const NUMERIC_CELL = "num text-right tabular-nums";
 
+// Issue #768 banner-stack rhythm: warning-class notices (the stale
+// disclosure, the viz degradation, the read-error banner) take the sm step
+// (my-3, 12px) while the info banner keeps xs (my-2, 8px), so a multi-banner
+// stack no longer reads as one uniform rhythm. Shared by all three warning
+// surfaces (cf. PAGE_BTN) -- the rhythm is a cross-banner contract, not a
+// per-banner choice, so the call sites must not drift apart.
+const WARNING_NOTICE_MARGIN = "my-3";
+
 // Disclosure thresholds (ADR-0057: precise values are visual iteration, not
 // architecture). A result above either threshold renders an honest banner
 // rather than silently looking lightweight. Exported so tests can pin them.
@@ -268,7 +276,7 @@ export function ResultView({
         // against the new source to recompute. A warning Alert (ADR-0050);
         // role="status" is polite -- important, not an interrupting emergency.
         // The verb splits honestly via an ICU select on the anchor reason.
-        <Alert variant="warning" role="status" className="my-2">
+        <Alert variant="warning" role="status" className={WARNING_NOTICE_MARGIN}>
           <AlertDescription
             className={cn(onRerun && "flex items-center justify-between gap-3")}
           >
@@ -312,30 +320,36 @@ export function ResultView({
         </p>
       )}
 
-      {showRowDisclosure && (
-        // ADR-0057 large-result disclosure: an honest banner (not silent
-        // pagination) when a result crosses the row threshold. Info Alert
-        // (ADR-0050); role="note" is static reference, not announced.
+      {(showRowDisclosure || showColumnDisclosure) && (
+        // ADR-0057 disclosures, merged into one banner (issue #768): the two
+        // info-class hints share a trigger scenario (result scale) and a
+        // semantic ("big result; the UI answers with pagination / horizontal
+        // scroll; ask to focus"), so both landing at once is one notice with
+        // two segments, not two stacked banners. Each segment renders only
+        // when its threshold is crossed; thresholds and copy are unchanged.
+        // Info Alert (ADR-0050); role="note" is static reference, not
+        // announced. The segments sit an xxs (4px) apart via space-y -- the
+        // intra-banner rhythm is tighter than the banner-to-banner rhythm.
         <Alert role="note" className="my-2">
-          <AlertDescription>
-            <FormattedMessage
-              id="disclosure.result.largeRows"
-              defaultMessage="This result is large ({count} rows) and is paginated; ask a follow-up to focus on part of it."
-              values={{ count: total }}
-            />
-          </AlertDescription>
-        </Alert>
-      )}
-      {showColumnDisclosure && (
-        // ADR-0057 many-columns disclosure: columns render in full with
-        // horizontal scroll (no cap); this banner tells the user to scroll.
-        <Alert role="note" className="my-2">
-          <AlertDescription>
-            <FormattedMessage
-              id="disclosure.result.manyColumns"
-              defaultMessage="This result has {count} columns; scroll horizontally to see them all."
-              values={{ count: columns.length }}
-            />
+          <AlertDescription className="space-y-1">
+            {showRowDisclosure && (
+              <p>
+                <FormattedMessage
+                  id="disclosure.result.largeRows"
+                  defaultMessage="This result is large ({count} rows) and is paginated; ask a follow-up to focus on part of it."
+                  values={{ count: total }}
+                />
+              </p>
+            )}
+            {showColumnDisclosure && (
+              <p>
+                <FormattedMessage
+                  id="disclosure.result.manyColumns"
+                  defaultMessage="This result has {count} columns; scroll horizontally to see them all."
+                  values={{ count: columns.length }}
+                />
+              </p>
+            )}
           </AlertDescription>
         </Alert>
       )}
@@ -367,7 +381,7 @@ export function ResultView({
         // reads as a caution, not a fatal error. {reason} is the typed
         // decode/render failure rendered through formatVizFailure so it always
         // lands in the active locale (ADR-0052, issue #138).
-        <Alert variant="warning" role="status" className="my-2">
+        <Alert variant="warning" role="status" className={WARNING_NOTICE_MARGIN}>
           <AlertDescription>
             <FormattedMessage
               id="disclosure.result.vizDegraded"
@@ -378,7 +392,10 @@ export function ResultView({
         </Alert>
       )}
 
-      {error && <ErrorBanner error={error} />}
+      {/* The read-error banner rides the warning rhythm (issue #768) via its
+          className passthrough -- the only ErrorBanner caller that stacks
+          against the other notices. */}
+      {error && <ErrorBanner error={error} className={WARNING_NOTICE_MARGIN} />}
 
       {/*
         Table (ADR-0057): always present below the chart. Columns render in full
