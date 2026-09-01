@@ -3,8 +3,10 @@ import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { readRows } from "../../api";
 import { toAppError } from "../../lib/error-presentation";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
+import { cn } from "@/lib/utils";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Alert, AlertDescription } from "../ui/alert";
+import { Button } from "../ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import type { AppError } from "../../types/error";
 import type { ColumnSchema, StaleAnchor } from "../../types/dataset";
@@ -127,6 +129,15 @@ interface ResultViewProps {
    * rows PLUS this honest disclosure. null = the result is live. Derived by
    * the caller from the working-set descriptor (runtime truth), NOT the thread. */
   staleAnchor?: StaleAnchor | null;
+  /** Issue #758: fires the question that produced this result as a fresh turn
+   * (the stale banner's "ask again" advice, made an action). The question
+   * rides the caller's derivation, so the handler arrives pre-bound. null =
+   * the caller did not wire a rerun -- the banner keeps its text advice and
+   * renders no button (honest degrade). */
+  onRerun?: (() => void) | null;
+  /** Issue #758: a turn is in flight -- the rerun button renders disabled
+   * until it settles (the composer busy gate's mirror). */
+  rerunBusy?: boolean;
   pageSize?: number;
 }
 
@@ -148,6 +159,8 @@ export function ResultView({
   assumption,
   viz,
   staleAnchor = null,
+  onRerun = null,
+  rerunBusy = false,
   pageSize = DEFAULT_PAGE_SIZE,
 }: ResultViewProps) {
   const [columns, setColumns] = useState<ColumnSchema[]>([]);
@@ -256,12 +269,35 @@ export function ResultView({
         // role="status" is polite -- important, not an interrupting emergency.
         // The verb splits honestly via an ICU select on the anchor reason.
         <Alert variant="warning" role="status" className="my-2">
-          <AlertDescription>
-            <FormattedMessage
-              id="disclosure.result.stale"
-              defaultMessage="This result is stale (source {name} was {reason, select, Replaced {updated} other {deleted}}) — ask again to recompute against the new source."
-              values={{ name: staleAnchor.display_name, reason: staleAnchor.reason }}
-            />
+          <AlertDescription
+            className={cn(onRerun && "flex items-center justify-between gap-3")}
+          >
+            <p className="m-0">
+              <FormattedMessage
+                id="disclosure.result.stale"
+                defaultMessage="This result is stale (source {name} was {reason, select, Replaced {updated} other {deleted}}) — ask again to recompute against the new source."
+                values={{ name: staleAnchor.display_name, reason: staleAnchor.reason }}
+              />
+            </p>
+            {onRerun && (
+              // Issue #758: the disclosure's "ask again" advice, made an
+              // action -- fires the producing question as a fresh turn. The
+              // aria-label carries the fuller accessible name (it contains the
+              // visible label, WCAG 2.5.3).
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                disabled={rerunBusy}
+                onClick={onRerun}
+                aria-label={intl.formatMessage({
+                  id: "disclosure.result.staleRerunLabel",
+                  defaultMessage: "Rerun the original question",
+                })}
+              >
+                <FormattedMessage id="disclosure.result.staleRerun" defaultMessage="Rerun" />
+              </Button>
+            )}
           </AlertDescription>
         </Alert>
       )}

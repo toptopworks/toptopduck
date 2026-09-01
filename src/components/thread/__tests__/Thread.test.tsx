@@ -440,6 +440,74 @@ describe("Thread", () => {
     // the style layer, not duplicated here).
     expect(container.querySelector(`.turn-entry[data-outcome="failed"]`)).not.toBeNull();
     expect(container.querySelector(`.turn-entry[data-outcome="cancelled"]`)).not.toBeNull();
+    // No retry surfaces without a wired handler (honest degrade -- the
+    // unwired call sites below rely on this).
+    expect(
+      screen.queryByRole("button", { name: catalogFor("zh-CN")["thread.outcome.retryLabel"] }),
+    ).not.toBeInTheDocument();
+  });
+
+  describe("turn retry (issue #758)", () => {
+    // The zh-CN accessible name of the retry button, resolved from the catalog
+    // so the assertions track the wording instead of duplicating a literal
+    // (issue #139 convention). The aria-label carries the fuller name.
+    const RETRY_LABEL = catalogFor("zh-CN")["thread.outcome.retryLabel"];
+
+    const failedRecord: TurnRecord = {
+      question: "坏查询",
+      outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } },
+      trace: [], provenance: { skills: [] },
+    };
+    const cancelledRecord: TurnRecord = {
+      question: "中途取消",
+      outcome: { kind: "Cancelled" },
+      trace: [], provenance: { skills: [] },
+    };
+
+    it("the Failed outcome card's retry fires the turn's question", () => {
+      // ADR-0028 Why 2: a failed turn stays visible AND continuable -- the
+      // retry fires the verbatim question as a fresh turn.
+      const onRetryTurn = vi.fn();
+      renderThread(
+        <Thread
+          entries={[turnEntry(failedRecord)]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          onRetryTurn={onRetryTurn}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: RETRY_LABEL }));
+      expect(onRetryTurn).toHaveBeenCalledWith("坏查询");
+    });
+
+    it("the Cancelled outcome card's retry fires the turn's question", () => {
+      const onRetryTurn = vi.fn();
+      renderThread(
+        <Thread
+          entries={[turnEntry(cancelledRecord)]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          onRetryTurn={onRetryTurn}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: RETRY_LABEL }));
+      expect(onRetryTurn).toHaveBeenCalledWith("中途取消");
+    });
+
+    it("disables the retry buttons while a turn is in flight (busy gate)", () => {
+      renderThread(
+        <Thread
+          entries={[turnEntry(failedRecord), turnEntry(cancelledRecord)]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          onRetryTurn={() => {}}
+          busy
+        />,
+      );
+      const buttons = screen.getAllByRole("button", { name: RETRY_LABEL });
+      expect(buttons).toHaveLength(2);
+      for (const b of buttons) expect(b).toBeDisabled();
+    });
   });
 
   it("renders source markers as a distinct species with add/replace/delete glyphs + stale counts (issue #80)", async () => {

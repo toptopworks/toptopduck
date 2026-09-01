@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../ResultView";
+import { catalogFor } from "../../../i18n";
 import { readRows } from "../../../api";
 import embed from "vega-embed";
 
@@ -320,6 +321,85 @@ describe("ResultView", () => {
     const alert = screen.getByRole("status");
     expect(alert).toHaveTextContent(/已删除/);
     expect(alert).not.toHaveTextContent(/已更新/);
+  });
+
+  describe("stale banner rerun (issue #758)", () => {
+    // The zh-CN accessible name of the rerun button, resolved from the catalog
+    // so the assertion tracks the wording instead of duplicating a literal
+    // (issue #139 convention). The aria-label carries the fuller name.
+    const RERUN_LABEL = catalogFor("zh-CN")["disclosure.result.staleRerunLabel"];
+    const page = {
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    };
+    const staleAnchor = {
+      reference_name: "people",
+      display_name: "员工表",
+      reason: "Replaced" as const,
+    };
+
+    it("renders a rerun button that fires the bound handler", async () => {
+      // The stale disclosure's advice ("ask again to recompute") becomes an
+      // action: the button fires the caller-bound rerun (the producing
+      // question rides the derivation, never the button itself).
+      vi.mocked(readRows).mockResolvedValue(page);
+      const onRerun = vi.fn();
+      renderI18n(
+        <ResultView
+          sessionId="sess-1"
+          referenceName="result_1"
+          assumption={null}
+          viz={null}
+          staleAnchor={staleAnchor}
+          onRerun={onRerun}
+        />,
+      );
+      await waitFor(() => expect(readRows).toHaveBeenCalled());
+      const alert = screen.getByRole("status");
+      fireEvent.click(within(alert).getByRole("button", { name: RERUN_LABEL }));
+      expect(onRerun).toHaveBeenCalledTimes(1);
+    });
+
+    it("disables the rerun button while a turn is in flight (busy gate)", async () => {
+      // rerunBusy mirrors the composer's loading gate: no second turn fires
+      // underneath a running one.
+      vi.mocked(readRows).mockResolvedValue(page);
+      renderI18n(
+        <ResultView
+          sessionId="sess-1"
+          referenceName="result_1"
+          assumption={null}
+          viz={null}
+          staleAnchor={staleAnchor}
+          onRerun={() => {}}
+          rerunBusy
+        />,
+      );
+      await waitFor(() => expect(readRows).toHaveBeenCalled());
+      const alert = screen.getByRole("status");
+      expect(within(alert).getByRole("button", { name: RERUN_LABEL })).toBeDisabled();
+    });
+
+    it("renders no rerun button when the caller wires none", async () => {
+      // Honest degrade: a stale banner without a wired rerun keeps its text
+      // advice and never promises an action it cannot perform.
+      vi.mocked(readRows).mockResolvedValue(page);
+      renderI18n(
+        <ResultView
+          sessionId="sess-1"
+          referenceName="result_1"
+          assumption={null}
+          viz={null}
+          staleAnchor={staleAnchor}
+        />,
+      );
+      await waitFor(() => expect(readRows).toHaveBeenCalled());
+      const alert = screen.getByRole("status");
+      expect(within(alert).queryByRole("button", { name: RERUN_LABEL })).not.toBeInTheDocument();
+    });
   });
 });
 

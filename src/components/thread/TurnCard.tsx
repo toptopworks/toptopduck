@@ -13,6 +13,7 @@ import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { PencilLine } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "../ui/button";
 import { TraceRowList } from "./TraceView";
 import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
@@ -66,6 +67,14 @@ interface TurnCardProps {
    *  user bubble, before the execution they enabled. undefined when the turn
    *  owns none. */
   agentHead?: ReactNode;
+  /** Issue #758: fires this turn's question again as a fresh turn -- the
+   *  Failed/Cancelled continuation (ADR-0028 Why 2: these turns stay visible
+   *  AND continuable). undefined when the caller does not wire a retry: the
+   *  outcome cards keep their read-only shape (honest degrade). */
+  onRetryTurn: ((question: string) => void) | undefined;
+  /** Issue #758: a turn is in flight -- the retry button renders disabled
+   *  until it settles (the composer busy gate's mirror). */
+  busy: boolean;
 }
 
 // One turn rendered as a chat exchange (ADR-0103): the user bubble (verbatim
@@ -95,6 +104,8 @@ export function TurnCard({
   thinkingInitiallyExpanded,
   skillIndex,
   agentHead,
+  onRetryTurn,
+  busy,
 }: TurnCardProps) {
   const intl = useIntl();
   const isStale = !!staleAnchor;
@@ -163,6 +174,8 @@ export function TurnCard({
           staleAnchor={staleAnchor}
           hasJumpTarget={hasJumpTarget}
           onStaleChipJump={onStaleChipJump}
+          onRetryTurn={onRetryTurn}
+          busy={busy}
         />
         {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
             state, always visible -- for Materialized/Textual (issue #720 moves
@@ -304,6 +317,8 @@ interface TurnBodyProps {
   staleAnchor: StaleAnchor | undefined;
   hasJumpTarget: boolean;
   onStaleChipJump: (() => void) | undefined;
+  onRetryTurn: ((question: string) => void) | undefined;
+  busy: boolean;
 }
 
 // The shared shell of the Failed/Cancelled outcome cards (issue #720): one
@@ -320,8 +335,29 @@ function TurnBody({
   staleAnchor,
   hasJumpTarget,
   onStaleChipJump,
+  onRetryTurn,
+  busy,
 }: TurnBodyProps) {
   const intl = useIntl();
+  // Issue #758: the Failed/Cancelled continuation action, shared by the two
+  // outcome cards (isomorphic, like their shell). Fires the turn's verbatim
+  // question as a fresh turn; disabled while one runs. Absent when the caller
+  // wires no handler -- the cards keep their read-only shape.
+  const retryButton = onRetryTurn && (
+    <Button
+      variant="outline"
+      size="sm"
+      className="mt-1.5"
+      disabled={busy}
+      onClick={() => onRetryTurn(record.question)}
+      aria-label={intl.formatMessage({
+        id: "thread.outcome.retryLabel",
+        defaultMessage: "Retry this question",
+      })}
+    >
+      <FormattedMessage id="thread.outcome.retry" defaultMessage="Retry" />
+    </Button>
+  );
   switch (record.outcome.kind) {
     case "Materialized": {
       const { promotions, assumption } = record.outcome.data;
@@ -457,6 +493,7 @@ function TurnBody({
             </span>
           </div>
           <TechnicalDetailsFold detail={detail} />
+          {retryButton}
         </div>
       );
     }
@@ -475,6 +512,7 @@ function TurnBody({
             <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
             <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
           </div>
+          {retryButton}
         </div>
       );
     default: {

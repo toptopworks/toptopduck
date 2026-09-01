@@ -129,7 +129,7 @@ import {
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
-import { materialized } from "../session/__tests__/fixtures";
+import { cancelled, failed, materialized } from "../session/__tests__/fixtures";
 
 // ADR-0093 (#512): the session-header management callback props are no-ops in
 // every SessionPane render in this file (these tests exercise session-INTERNAL
@@ -755,6 +755,89 @@ describe("App workspace history indicator (issue #757)", () => {
       expect(screen.getByRole("heading", { name: /结果：result_3/ })).toBeInTheDocument(),
     );
     expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
+  });
+});
+
+describe("App workspace rerun/retry actions (issue #758)", () => {
+  // The zh-CN catalog accessible names for the three action buttons (issue
+  // #139 convention: resolve from the catalog, never duplicate literals).
+  const RERUN_LABEL = catalogFor("zh-CN")["disclosure.result.staleRerunLabel"];
+  const RETRY_LABEL = catalogFor("zh-CN")["thread.outcome.retryLabel"];
+  const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
+
+  // A working-set result descriptor marked stale by a source deletion (the
+  // stale cascade). The workspace's stale anchor derives from this runtime
+  // truth (ADR-0051), never from the thread snapshot.
+  function staleResult(referenceName: string): DatasetDescriptor {
+    return {
+      ...guidedDataset,
+      reference_name: referenceName,
+      stale: { reference_name: "people", display_name: "people", reason: "Deleted" },
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+  });
+
+  it("the stale banner's rerun fires the producing question", async () => {
+    // The viewed result is stale, so the banner's "ask again" advice is an
+    // action: one click fires the question that produced the result as a
+    // fresh turn -- direct, never through the composer draft.
+    vi.mocked(conversation).mockResolvedValue([materialized("result_1")]);
+    state.workingSet = [guidedDataset, staleResult("result_1")];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => guidedDataset);
+    vi.mocked(askQuestion).mockImplementationOnce(
+      () => new Promise<TurnOutcome>(() => {}), // keeps the rerun in flight
+    );
+    renderPane();
+    fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
+    const rerun = await screen.findByRole("button", { name: RERUN_LABEL });
+    fireEvent.click(rerun);
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1"));
+    // Busy gate: the fired turn is in flight, so the rerun disables until it
+    // settles (the composer gate's mirror).
+    expect(screen.getByRole("button", { name: RERUN_LABEL })).toBeDisabled();
+  });
+
+  it("the Failed card's retry fires that turn's question", async () => {
+    vi.mocked(conversation).mockResolvedValue([failed("坏查询")]);
+    state.workingSet = [guidedDataset];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => guidedDataset);
+    vi.mocked(askQuestion).mockImplementationOnce(
+      () => new Promise<TurnOutcome>(() => {}), // keeps the retry in flight
+    );
+    renderPane();
+    const retry = await screen.findByRole("button", { name: RETRY_LABEL });
+    fireEvent.click(retry);
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "坏查询"));
+    // Busy gate mirrors the rerun's: disabled while the fired turn runs.
+    expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeDisabled();
+  });
+
+  it("the Cancelled card's retry fires that turn's question", async () => {
+    vi.mocked(conversation).mockResolvedValue([cancelled("中途取消")]);
+    state.workingSet = [guidedDataset];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => guidedDataset);
+    vi.mocked(askQuestion).mockImplementationOnce(
+      () => new Promise<TurnOutcome>(() => {}),
+    );
+    renderPane();
+    const retry = await screen.findByRole("button", { name: RETRY_LABEL });
+    fireEvent.click(retry);
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "中途取消"));
+    // Busy gate mirrors the rerun/Failed siblings: disabled while in flight.
+    expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeDisabled();
   });
 });
 

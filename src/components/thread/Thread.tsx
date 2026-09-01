@@ -77,6 +77,15 @@ interface ThreadProps {
    * ADR-0083). Wired to the app-level approval hook; defaults to a no-op so
    * tests that render a pending card without the hook do not crash. */
   onRespondApproval?: (requestId: string, response: ApprovalResponse) => void;
+  /** Issue #758: fires a Failed/Cancelled turn's question again as a fresh
+   * turn (ADR-0028 Why 2: those turns stay visible AND continuable). Each
+   * outcome card carries the question itself; this is the shared sink.
+   * Optional so call sites / tests that do not exercise retry can omit it
+   * (no retry buttons render). */
+  onRetryTurn?: (question: string) => void;
+  /** Issue #758: a turn is in flight -- the retry buttons render disabled
+   * until it settles (the composer busy gate's mirror). */
+  busy?: boolean;
 }
 
 // The always-visible conversation thread (ADR-0028/0039/0040/0047). The rail
@@ -115,6 +124,8 @@ export function Thread({
   skillIndex,
   liveTurn = null,
   onRespondApproval = NOOP_RESPOND,
+  onRetryTurn,
+  busy = false,
 }: ThreadProps) {
   const intl = useIntl();
   // The source-event index currently highlighted by a stale-chip jump-select
@@ -418,6 +429,8 @@ export function Thread({
                     jumpTargetIdx === null ? undefined : () => jumpToSource(jumpTargetIdx)
                   }
                   mentionedDataset={findMentionedDataset(entry.data.question, datasetLabels)}
+                  onRetryTurn={onRetryTurn}
+                  busy={busy}
                   // The settle seed rides only the appended entry's MOUNTING
                   // frame (the swap, one commit after the live turn's
                   // folds); the uncontrolled folds take the initial once, so

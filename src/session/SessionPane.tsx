@@ -275,6 +275,25 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
     setRegionRetryEpoch((e) => e + 1);
   };
 
+  // Issue #758: the ask-again sink -- the stale banner's rerun and the rail's
+  // Failed/Cancelled retry buttons all funnel here, firing the held question
+  // as a fresh turn. Direct fire, never through the composer draft; handleAsk
+  // catches its own failures internally (session error state), the `.catch`
+  // is the same defensive log the pendingQuestion path uses. handleAsk is
+  // destructured out first: it is useCallback-stable inside useSessionState
+  // while the `s` return object is rebuilt every render, so depending on the
+  // method (not the object) keeps handleAskAgain identity-stable (the same
+  // pattern the approval callbacks above use).
+  const { handleAsk } = s;
+  const handleAskAgain = useCallback(
+    (question: string) => {
+      void handleAsk(question).catch((e) =>
+        log.error("SessionPane", "ask-again handleAsk threw unexpectedly", e),
+      );
+    },
+    [handleAsk],
+  );
+
   const viewedReference = s.viewedResult?.referenceName ?? null;
   const viewedDescriptor = viewedReference
     ? s.datasets.find((d) => d.reference_name === viewedReference) ?? null
@@ -385,6 +404,8 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
                 // recorded thread while a turn runs.
                 liveTurn={s.liveTurn}
                 onRespondApproval={handleRespondApproval}
+                onRetryTurn={handleAskAgain}
+                busy={s.loading}
               />
             </ErrorBoundary>
             {s.thread.length === 0 && s.liveTurn === null && (
@@ -523,6 +544,8 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
                 onJumpToLatest={s.handleJumpToLatest}
+                onRerun={handleAskAgain}
+                busy={s.loading}
               />
             ) : (
               <WorkspaceWorkingSet
@@ -580,6 +603,8 @@ function WorkspaceResult({
   hasData,
   onResetRegion,
   onJumpToLatest,
+  onRerun,
+  busy,
 }: {
   content: WorkspaceContent;
   sessionId: string;
@@ -591,6 +616,11 @@ function WorkspaceResult({
   /** Issue #757: the history indicator's "back to latest" exit (moves
    *  viewedResult to the latest Materialized turn's primary). */
   onJumpToLatest: () => void;
+  /** Issue #758: fires a question as a fresh turn -- the stale banner's
+   *  rerun binds the viewed result's producing question onto it. */
+  onRerun: (question: string) => void;
+  /** Issue #758: a turn is in flight -- the rerun button renders disabled. */
+  busy: boolean;
 }) {
   switch (content.kind) {
     case "hero":
@@ -657,6 +687,8 @@ function WorkspaceResult({
               assumption={content.assumption}
               viz={content.viz}
               staleAnchor={content.staleAnchor}
+              onRerun={() => onRerun(content.question)}
+              rerunBusy={busy}
             />
           </ErrorBoundary>
         </>
