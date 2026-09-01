@@ -49,7 +49,3 @@ export function textual(body: string): ThreadEntry {
     },
   };
 }
-
-export function source(kind: "Added" | "Deleted" | "Replaced", name: string): ThreadEntry {
-  return { entry: "Source", data: { kind, reference_name: name, display_name: name } };
-}

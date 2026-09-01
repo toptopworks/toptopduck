@@ -1,7 +1,7 @@
-// Pure workspace-derivation helpers (ADR-0051 / ADR-0062 R2). Kept out of the
-// component so the derivation rule (viewedResult + thread last turn +
-// pinnedToHistory -> what the workspace shows) is unit-testable without React,
-// and so the SessionPane component stays a thin caller of these functions.
+// Pure workspace-derivation helpers (ADR-0051 / ADR-0062 R2, calibrated by
+// ADR-0114). Kept out of the component so the derivation rule (viewedResult
+// -> what the workspace shows) is unit-testable without React, and so the
+// SessionPane component stays a thin caller of these functions.
 //
 // Truth-source split (ADR-0051 "two sources, no overlap"):
 //  - THREAD is the single source of truth for turn PAYLOADS (question / outcome
@@ -12,12 +12,7 @@
 //    is read from the descriptor by the caller, never from the thread snapshot.
 
 import type { StaleAnchor } from "../types/dataset";
-import type {
-  ThreadEntry,
-  TurnOutcome,
-  TurnRecord,
-  VizSpec,
-} from "../types/thread";
+import type { ThreadEntry, VizSpec } from "../types/thread";
 
 /** The user's workspace view selection (ADR-0051): a thin reference to the
  * Materialized result pane the user is looking at. NEVER the active dataset
@@ -25,36 +20,6 @@ import type {
  * touching the backend active pointer. */
 export interface ViewedResult {
   referenceName: string;
-}
-
-/** Find the last Turn entry in the thread (source lifecycle events are skipped
- * -- they occupy a timeline slot but are not turns, ADR-0040). null when the
- * thread has no turns yet. */
-export function lastTurnEntry(thread: ThreadEntry[]): TurnRecord | null {
-  for (let i = thread.length - 1; i >= 0; i--) {
-    const entry = thread[i];
-    if (entry.entry === "Turn") return entry.data;
-  }
-  return null;
-}
-
-/** The non-materialized outcome family (ADR-0028 B/C/D -- Textual / Failed /
- * Cancelled): everything except Materialized. Narrowing TurnRecord onto this
- * makes the "a Materialized never reaches the textual card" invariant a
- * type-level guarantee, so the card's switch can end in `default: never`
- * instead of a defensive `return null`. The Omit-base keeps every other
- * TurnRecord field (question + trace, issue #297) riding the narrowed type. */
-export type NonMaterializedOutcome = Exclude<TurnOutcome, { kind: "Materialized" }>;
-export type NonMaterializedTurn = Omit<TurnRecord, "outcome"> & {
-  outcome: NonMaterializedOutcome;
-};
-
-/** Is this turn's outcome a non-materialized kind (ADR-0028 B/C/D -- Textual /
- * Failed / Cancelled)? These occupy a thread slot but produce no result_N. A
- * type predicate so deriveWorkspaceContent carries the narrowed turn type into
- * WorkspaceContent.lastTurnText, not the full TurnRecord. */
-export function isNonMaterialized(turn: TurnRecord): turn is NonMaterializedTurn {
-  return turn.outcome.kind !== "Materialized";
 }
 
 /** The payload a viewed Materialized result renders with (ADR-0051: derived
@@ -90,17 +55,14 @@ export function findMaterializedPayload(
   return null;
 }
 
-/** What the workspace "result" area shows (ADR-0062 R2). The three-state
- * derivation:
- *  - `lastTurnText`: the last turn is non-materialized (B/C/D) AND the user has
- *    not pinned to a history result -- show the textual card so the user can
- *    read/respond (ADR-0048).
- *  - `result`: otherwise, if the user selected a Materialized result (now or
- *    in the past) -- show its chart + table.
- *  - `hero`: otherwise (no viewed result, and no non-materialized last turn) --
- *    the empty-state drop zone. */
+/** What the workspace "result" area shows (ADR-0062 R2 two-state, calibrated
+ * by ADR-0114):
+ *  - `result`: the user selected a Materialized result (now or in the past)
+ *    and its payload resolves from the thread -- show its chart + table.
+ *  - `hero`: otherwise -- the empty-state drop zone.
+ * Non-materialized turns (B/C/D) never reach the workspace; their read
+ * surface is the rail (ADR-0103), so the workspace is inert to them. */
 export type WorkspaceContent =
-  | { kind: "lastTurnText"; turn: NonMaterializedTurn }
   | {
     kind: "result";
     referenceName: string;
@@ -110,22 +72,15 @@ export type WorkspaceContent =
   }
   | { kind: "hero" };
 
-/** Derive what the workspace shows right now (ADR-0062 R2). Pure in
- * (thread, viewedResult, pinnedToHistory, staleByReference) -- the caller
- * supplies the stale map derived from the working-set query (runtime truth,
- * ADR-0051), so this function reads no queries itself. */
+/** Derive what the workspace shows right now (ADR-0062 R2, ADR-0114). Pure in
+ * (thread, viewedResult, staleByReference) -- the caller supplies the stale map
+ * derived from the working-set query (runtime truth, ADR-0051), so this
+ * function reads no queries itself. */
 export function deriveWorkspaceContent(
   thread: ThreadEntry[],
   viewedResult: ViewedResult | null,
-  pinnedToHistory: boolean,
   staleByReference: ReadonlyMap<string, StaleAnchor>,
 ): WorkspaceContent {
-  const last = lastTurnEntry(thread);
-  // R2: last turn B/C/D + unpinned -> textual card (transient; ADR-0051
-  // "naturally renders" made explicit).
-  if (last && isNonMaterialized(last) && !pinnedToHistory) {
-    return { kind: "lastTurnText", turn: last };
-  }
   if (viewedResult) {
     const payload = findMaterializedPayload(thread, viewedResult.referenceName);
     if (payload) {

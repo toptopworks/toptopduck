@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { fmtError, errorDetail, formatTurnFailure, turnFailureDetail } from "../lib/error-presentation";
+import { fmtError, errorDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
@@ -25,12 +25,12 @@ import { cn } from "@/lib/utils";
 import type { DatasetDescriptor, DatasetPrivacy } from "../types/dataset";
 import type { SkillEntry } from "../types/skills";
 import type { ThreadEntry } from "../types/thread";
-import type { NonMaterializedTurn, WorkspaceContent } from "./workspace";
+import type { WorkspaceContent } from "./workspace";
 import { sessionKeys, skillKeys } from "./queryKeys";
 
 // The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
-// and client UI state (viewedResult / pinnedToHistory / loading / dialogs).
+// and client UI state (viewedResult / loading / dialogs).
 // The shell (<App>) places this as the right grid block (rail + workspace);
 // the session sidebar is a separate, full-height column (R1).
 //
@@ -244,16 +244,34 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
   const [tab, setTab] = useState<"result" | "workingSet">("result");
 
-  // ADR-0058 L2 partition retry: each region's onReset REMOVES its slice of the
-  // session query cache so the key-bump remount re-fetches fresh data -- NOT the
-  // stale page that crashed it. invalidateQueries would leave the cache in place
-  // and let useQuery hand the remounted children the same throwing data via its
-  // stale-then-refetch render; removeQueries drops it so the remount mounts into
-  // a loading state and refetches clean. The session-body boundary and the
-  // granular Thread/ResultView boundaries all drop the whole session prefix:
-  // cheap (a few IPC) and avoids the re-throw.
+  // ADR-0058 L2 partition retry: each region's onReset RESETS its slice of the
+  // session query cache so the boundary's error-clear remount renders fresh
+  // data -- NOT the stale page that crashed it. invalidateQueries would leave
+  // the cache in place and let useQuery hand the remounted children the same
+  // throwing data via its stale-then-refetch render; removeQueries drops the
+  // cache but does not refetch the still-mounted observers (the region
+  // boundary never unmounts useSessionState, so nothing drives a re-read).
+  // resetQueries both drops the data and actively refetches.
+  // The epoch bump is the second half of the contract: the query observers
+  // live OUTSIDE the region boundary, so their change notifications (batched
+  // onto a microtask by TanStack's notifyManager) land AFTER the boundary's
+  // synchronous error-clear re-render -- which would mount the children back
+  // onto the parent's LAST JSX snapshot (still the stale array) and re-throw
+  // straight into the fallback, deadlocking the card. The bump pulls this
+  // component into the same React batch as the boundary's setState, and the
+  // batch re-renders top-down: useQuery's getSnapshot reads the reset query
+  // synchronously (status pending -> thread/[]/datasets empty), so the fresh
+  // boundary instance (key) mounts the children on the clean snapshot.
+  // Both region keys deliberately ride the one shared epoch: any retry
+  // remounts both regions (their local state resets with it, per ADR-0058's
+  // region-local posture); a per-region epoch is the narrowing lever if that
+  // cross-region loss ever matters. Do not remove the keys on green tests
+  // alone -- act() flattens the microtask ordering they defend against, so
+  // jsdom cannot distinguish keyed from unkeyed (ADR-0058 calibration).
+  const [regionRetryEpoch, setRegionRetryEpoch] = useState(0);
   const resetSessionCache = () => {
-    queryClient.removeQueries({ queryKey: sessionKeys.all(sessionId) });
+    void queryClient.resetQueries({ queryKey: sessionKeys.all(sessionId) });
+    setRegionRetryEpoch((e) => e + 1);
   };
 
   const viewedReference = s.viewedResult?.referenceName ?? null;
@@ -353,7 +371,7 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
             className="session-rail"
             aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
           >
-            <ErrorBoundary name="thread" onReset={resetSessionCache}>
+            <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
               <Thread
                 entries={s.thread}
                 selectedResult={viewedReference}
@@ -498,6 +516,7 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
 
             {tab === "result" ? (
               <WorkspaceResult
+                key={`result-${regionRetryEpoch}`}
                 content={s.workspaceContent}
                 sessionId={sessionId}
                 hasData={s.datasets.length > 0}
@@ -550,8 +569,9 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   );
 }
 
-// The "结果" tab content: derived from (viewedResult, thread last turn,
-// pinnedToHistory) via workspaceContent. Three states per ADR-0062 R2.
+// The "结果" tab content: derived from (viewedResult, thread) via
+// workspaceContent. Two states per ADR-0062 R2 (calibrated by ADR-0114):
+// a resolving viewed result, or the hero.
 function WorkspaceResult({
   content,
   sessionId,
@@ -593,11 +613,6 @@ function WorkspaceResult({
           </p>
         </div>
       );
-    case "lastTurnText":
-      // ADR-0062 R2: the last turn is a non-materialized B/C/D and the user has
-      // not pinned to a history result -- show the textual card so the user can
-      // read / respond (ADR-0048 clarification flows through the next turn).
-      return <TextualOutcomeCard turn={content.turn} />;
     case "result":
       // The chart + table for the viewed Materialized result (ADR-0062 R4).
       // ADR-0058 L2 result partition: a render crash inside ResultView (Vega's
@@ -621,106 +636,13 @@ function WorkspaceResult({
   }
 }
 
-// The textual outcome rendered full-width in the workspace (ADR-0062 R2
-// lastTurnText). Mirrors the rail's outcome encoding (ADR-0047) but at workspace
-// scale so a clarify/refuse/failed/cancelled is readable and actionable. The
-// turn is already narrowed to NonMaterializedTurn (workspace.ts), so Materialized
-// is excluded at the type level and the switch ends in `default: never` -- no
-// defensive `return null` for an unreachable case.
-//
-// ADR-0067 (issue #173): the .textual-card visual rule (padding/bg/border/
-// radius) + the per-outcome border-left retired from styles.css onto this
-// component as utility + ADR-0050 token. The semantic class hooks
-// (.textual-card / .textual-card.{clarify,refuse,failed,cancelled}) are kept on
-// the <article> for selector / test stability (Shell.test.tsx queries
-// .textual-card.failed); the hook doubles as the variant-utility lookup key.
-// Issue #222: shadow-sm lifts the in-content card so it shares one elevation
-// language with the floating dialog (shadow-lg) / popover (shadow-md) layer --
-// a Tailwind scale utility, not a new --shadow-* token (ADR-0067 (2)).
-const TEXTUAL_CARD_BASE =
-  "textual-card p-4 bg-card border border-border rounded-lg shadow-sm";
-// The variant key set is a closed domain -- Lowercase<TextKind> ("clarify" |
-// "refuse") for the Textual arm + "failed" + "cancelled" for the other two
-// outcome kinds. A literal-union Record catches key typos at compile time and
-// stays exhaustive if TextKind grows, matching the `default: never` pattern
-// used by the outcome switch below.
-const TEXTUAL_CARD_VARIANT: Record<"clarify" | "refuse" | "failed" | "cancelled", string> = {
-  clarify: "border-l-[3px] border-l-primary",
-  refuse: "border-l-[3px] border-l-muted-foreground",
-  failed: "border-l-[3px] border-l-destructive",
-  cancelled: "opacity-60",
-};
-function TextualOutcomeCard({ turn }: { turn: NonMaterializedTurn }) {
-  const intl = useIntl();
-  switch (turn.outcome.kind) {
-    case "Textual": {
-      const { text_kind, body, assumption } = turn.outcome.data;
-      const isClarify = text_kind === "Clarify";
-      // "clarify" | "refuse" -- the lowercase text_kind is both the kept class
-      // hook and the variant-utility lookup key. Cast to the literal union so
-      // the TEXTUAL_CARD_VARIANT lookup is exhaustive-checked (TextKind is
-      // "Clarify" | "Refuse", so the cast is sound).
-      const variantHook = text_kind.toLowerCase() as "clarify" | "refuse";
-      return (
-        <article className={cn(TEXTUAL_CARD_BASE, variantHook, TEXTUAL_CARD_VARIANT[variantHook])}>
-          <h3 className="m-0 mb-2">
-            {isClarify ? (
-              <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
-            ) : (
-              <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
-            )}
-          </h3>
-          <p className="textual-body my-1 leading-normal">{body}</p>
-          {assumption && (
-            <p className="assumption">
-              <FormattedMessage
-                id="thread.assumption"
-                defaultMessage="Assumption: {text}"
-                values={{ text: assumption }}
-              />
-            </p>
-          )}
-        </article>
-      );
-    }
-    case "Failed": {
-      // Outcome C (issue #125): render by TurnFailure kind via the locale
-      // catalog (no backend Display string crosses IPC); Execute / Resource
-      // carry a technical detail under the collapsed fold.
-      const failure = turn.outcome.data;
-      const detail = turnFailureDetail(failure);
-      return (
-        <article className={cn(TEXTUAL_CARD_BASE, "failed", TEXTUAL_CARD_VARIANT.failed)}>
-          <h3 className="m-0 mb-2">
-            <FormattedMessage id="thread.outcome.failed" defaultMessage="Failed" />
-          </h3>
-          <p className="textual-body my-1 leading-normal">{formatTurnFailure(failure, intl)}</p>
-          <TechnicalDetailsFold detail={detail} />
-        </article>
-      );
-    }
-    case "Cancelled":
-      return (
-        <article className={cn(TEXTUAL_CARD_BASE, "cancelled", TEXTUAL_CARD_VARIANT.cancelled)}>
-          <h3 className="m-0 mb-2">
-            <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
-          </h3>
-        </article>
-      );
-    default: {
-      const unhandled: never = turn.outcome;
-      throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
-    }
-  }
-}
-
 // The "工作集" tab (ADR-0045): source management -- rename / replace / delete /
 // privacy. The list + detail pair moved here from the old single-column layout.
 //
 // Panel card chrome for the master/detail sections (issue #184 + #222): bg-card
 // + border + rounded-lg + p-4 carry the surface (ADR-0067 (1) .panel layout hook
-// + visual utility); shadow-sm shares the elevation language of the workspace
-// textual-card / dialog / popover (Tailwind scale, no new token, ADR-0067 (2)).
+// + visual utility); shadow-sm shares the elevation language of the floating
+// dialog / popover layer (Tailwind scale, no new token, ADR-0067 (2)).
 // Shared by the list and detail sections so the pair reads as one surface.
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
 function WorkspaceWorkingSet({

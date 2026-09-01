@@ -6,7 +6,7 @@
  * soft-cap) moved to shadcn Alert variants in issue #108; QuestionBar's
  * input/buttons, FileDropzone's button, ErrorBanner, and the session-pane
  * persist-warning moved to shadcn Input/Button/Alert variants in issue #172
- * (ADR-0067); the Workspace tabs/body/hero, the textual-card outcomes, and the
+ * (ADR-0067); the Workspace tabs/body/hero, and the
  * ResultView container + sticky pagination moved to Tailwind utility +
  * ADR-0050 token in issue #173 (ADR-0067); the ErrorBoundary DegradeCard moved
  * to shadcn Card + Button + TechnicalDetailsFold in issue #181 (ADR-0067); the
@@ -615,9 +615,9 @@
  * rule-by-rule retirement lives on each component's ADR-0067 inline comment
  * (not re-listed here -- a hand-kept copy drifts on the next slice, per the
  * retire-scope convention above). The semantic class hooks (.workspace-tabs /
- * .workspace-body / .workspace-hero / .textual-card /
- * .textual-card.{clarify,refuse,failed,cancelled}) stay on the components for
- * selector / test stability; the bare "active" class on the tab button is kept
+ * .workspace-body / .workspace-hero) stay on the components for
+ * selector / test stability; the textual-card hooks retired with the card
+ * itself (ADR-0114). The bare "active" class on the tab button is kept
  * as a state marker. The .active-chip rule below is layout-only (pushing the
  * chip to the row's right edge) and stays here. */
 /* active-chip is now a Badge variant="default" (teal --primary, ADR-0050); this
