@@ -90,3 +90,4 @@ ADR-0060 把前端 shell 从两栏（0045）扩为三栏（+ 左会话栏），A
 - **顺措辞被引 ADR**（反向指针 + 精确化，已追加）：0045（R1 跨度 + R4 布局）、0051（R2 派生 + R5 resume init）、0047（R2 pinned）、0058（R1 骨架归类）、0061（R3 拖放 + R5 resume）、0033（R4 退化落点）、0057（R4 分页落点）。
 - **CONTEXT.md 不动**：R1-R5 全是 UI 布局 / 状态机 / 交互实现，不引入领域术语。
 - **未决（留实现期 / 视觉打磨）**：R4 图自然高度过大时的处理、assumption 旁注展开 / 折叠态、R2 `pinnedToHistory` 的精确命名。
+- **被 ADR-0114 校准**：R2 三态派生收敛为两态——退役「末轮 B/C/D 且未钉住 → 显末轮文本卡」与 `pinnedToHistory` 仲裁旗（ADR-0103 chat 化后 rail 为轮次内容全量读面，工作区文本卡信息零增量且默认折叠姿态不可见）；派生余 viewedResult 可解析 → 图 + 表，否则 hero。R5 resume 初始化的 `pinnedToHistory=false` 条款随之失效；工作区对非物化轮次无反应。
