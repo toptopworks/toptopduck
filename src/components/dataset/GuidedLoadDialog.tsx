@@ -92,6 +92,43 @@ function GuidanceReasonMessage({ reason }: { reason: GuidanceReason }) {
   }
 }
 
+// Decode a sheet's two-state (#751) into the rendering pair the dialog needs:
+// whether auto-tidy resolved it, the header-row pre-fill (the guess for a
+// resolved sheet, the blind row-1 default for a deferred one), and the failure
+// reason (deferred only). The switch is exhaustive with a never-asserted
+// default (mirrors GuidanceReasonMessage above): a GuidanceSheetState variant
+// added on the Rust side without a TS case must fail the build, not silently
+// pre-fill row 1 and render a blank reason line.
+function decodeSheetState(state: GuidanceSheet["state"]): {
+  isAutoTidied: boolean;
+  headerRow: number;
+  reason: GuidanceReason | null;
+} {
+  switch (state.kind) {
+    case "AutoTidied":
+      return { isAutoTidied: true, headerRow: state.data.header_row, reason: null };
+    case "NeedsGuidance":
+      return { isAutoTidied: false, headerRow: 1, reason: state.data.reason };
+    default: {
+      const unhandled: never = state;
+      throw new Error(`unhandled GuidanceSheetState: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Seed the per-sheet choices from a request's sheets (#751): a sheet the
+// auto-tidy resolved pre-fills its header pick with the detected row (the
+// guess); a deferred sheet keeps the blind row-1 default. Both start with no
+// skips -- the auto path never produces skip rows, and the deferred path
+// gathers them interactively.
+function prefillChoices(sheets: GuidanceSheet[]): Record<string, SheetChoice> {
+  const init: Record<string, SheetChoice> = {};
+  for (const s of sheets) {
+    init[s.name] = { headerRow: decodeSheetState(s.state).headerRow, skipRows: [] };
+  }
+  return init;
+}
+
 // Guided-load dialog (ADR-0015): shown when auto-tidy can't confidently rectify
 // a workbook. For each sheet the user points at the header row and ticks any
 // rows to skip; the submitted choices re-enter ingest as rectify params
@@ -115,7 +152,14 @@ function GuidanceReasonMessage({ reason }: { reason: GuidanceReason }) {
 // dialog stays open on failure (in-place retry keeps the sheet choices), the
 // parent clears the error on re-submit / cancel / a freshly routed guidance,
 // and remounts this component keyed on the source path so a resumed batch's
-// next file starts from clean choices (the `choices` init runs at mount only).
+// next file starts from clean choices (a same-path re-route re-derives them
+// in place -- the `choicesAtMount` identity check below).
+//
+// Issue #751: sheets the auto-tidy resolved ride the request with their
+// detected header row as a guess. They pre-fill the header pick, collapse to
+// a one-line summary ("Header row N (auto-detected)" + Adjust), and submit
+// the guess as an explicit rectify alongside the deferred sheets' user picks
+// (ADR-0042: visible at load time = confirmed by the user).
 export function GuidedLoadDialog({
   request,
   loading,
@@ -139,13 +183,22 @@ export function GuidedLoadDialog({
   onFetchWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
 }) {
   const intl = useIntl();
-  const [choices, setChoices] = useState<Record<string, SheetChoice>>(() => {
-    const init: Record<string, SheetChoice> = {};
-    for (const s of request.sheets) {
-      init[s.name] = { headerRow: 1, skipRows: [] };
-    }
-    return init;
-  });
+  const [choicesAtMount, setChoicesAtMount] = useState(request);
+  const [choices, setChoices] = useState<Record<string, SheetChoice>>(() =>
+    prefillChoices(request.sheets),
+  );
+  // A same-path re-route re-parks the dialog WITHOUT remounting it (the
+  // remount key is the path, #748 -- a file drop on the window while the
+  // dialog is open bypasses the modal, per useIngestFlow): the request object
+  // is replaced in place, so re-derive the choices the moment its identity
+  // changes, or a re-dropped workbook rides the stale parse -- a moved guess
+  // renders and submits mislabeled as auto-detected, and a newly added sheet
+  // name has no choice at all (issue #751 review). Mirrors the sheetAtMount
+  // reset in GuidedSheetSection below.
+  if (choicesAtMount !== request) {
+    setChoicesAtMount(request);
+    setChoices(prefillChoices(request.sheets));
+  }
 
   // The parent mounts this component only while the dialog is open and unmounts
   // it on close (SessionPane's `s.guidance` guard), so `open` is always true
@@ -236,7 +289,7 @@ export function GuidedLoadDialog({
           <DialogDescription>
             <FormattedMessage
               id="guidedLoad.description"
-              defaultMessage="Auto-tidy could not pin down the header row. For each sheet, point at the header row and tick any non-data rows to skip. Rows above the header row are excluded automatically."
+              defaultMessage="Auto-tidy could not read every sheet in this workbook. Sheets it resolved are collapsed with their detected header row — pick Adjust to review or change one. For the remaining sheets, point at the header row and tick any non-data rows to skip. Rows above the header row are excluded automatically."
             />
           </DialogDescription>
         </DialogHeader>
@@ -286,8 +339,9 @@ export function GuidedLoadDialog({
 // One sheet's guidance block (#749): a headline-sm heading, the auto-tidy
 // failure reason (issue #750), the Select-driven header row, the preview
 // window pager (issue #750), and the preview table with dual-channel row
-// states. useId gives every sheet its own heading / select ids -- hooks cannot
-// run inside the parent's map callback, hence the component split.
+// states. Issue #751 adds the resolved sheets' collapsed summary + Adjust
+// expansion. useId gives every sheet its own heading / select ids -- hooks
+// cannot run inside the parent's map callback, hence the component split.
 //
 // Paging model (issue #750): the FIRST window rides the inlined
 // `sheet.preview`; the pager (visible only when the sheet outgrows one
@@ -315,6 +369,14 @@ function GuidedSheetSection({
   const intl = useIntl();
   const headingId = useId();
   const selectId = useId();
+  // Per-sheet two-state rendering (#751): a deferred sheet always shows its
+  // full form (reason line + controls, unchanged); a resolved sheet starts
+  // collapsed on its one-line summary and expands through Adjust into the
+  // same full form. The flag only ever turns ON -- the expanded form IS the
+  // adjustment surface, so no collapse toggle is needed (YAGNI); the only
+  // path back to collapsed is the same-path re-route reset below.
+  const { isAutoTidied, reason } = decodeSheetState(sheet.state);
+  const [expanded, setExpanded] = useState(!isAutoTidied);
   // The first window is the inlined preview; its height IS the page size.
   // The max-1 clamp keeps pageCount finite for a zero-preview sheet (an
   // EmptySheet guidance) -- the backend drops rowless sheets, so the clamp
@@ -327,16 +389,53 @@ function GuidedSheetSection({
     rows: sheet.preview,
   });
   const [isFetchingWindow, setIsFetchingWindow] = useState(false);
-  const [previewAtMount, setPreviewAtMount] = useState(sheet.preview);
+  const [sheetAtMount, setSheetAtMount] = useState(sheet);
   // A same-path re-route re-parks the dialog WITHOUT remounting it (the
-  // remount key is the path, #748), replacing the inlined preview in place:
-  // reset the window to the new first window the moment the preview's
-  // identity changes, or the table keeps rendering the old parse (issue
-  // #750 review: stale-window dead end on a fixed-and-re-dropped workbook).
-  if (previewAtMount !== sheet.preview) {
-    setPreviewAtMount(sheet.preview);
+  // remount key is the path, #748), replacing the sheet object in place:
+  // reset the per-sheet UI state the moment the sheet's identity changes.
+  // The window resets to the new first window or the table keeps rendering
+  // the old parse (issue #750 review), and the expansion re-tracks the new
+  // two-state or a flipped sheet renders the wrong branch of it (issue #755
+  // review: a newly deferred sheet collapsed on a stale auto summary).
+  if (sheetAtMount !== sheet) {
+    setSheetAtMount(sheet);
     setWindowState({ offset: 0, rows: sheet.preview });
+    setExpanded(!isAutoTidied);
   }
+
+  if (!expanded) {
+    // The resolved sheet's one-line summary (#751): sheet name + detected
+    // header row + Adjust. The choice survives the collapse in the parent's
+    // absolute-row state, so submitting straight from the summary sends the
+    // guess as an explicit rectify (ADR-0042 visible = confirmed).
+    return (
+      <section className="py-4" aria-labelledby={headingId}>
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <h3 id={headingId} className="text-base font-semibold">
+              {sheet.name}
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              <FormattedMessage
+                id="guidedLoad.autoSummary"
+                defaultMessage="Header row {n} (auto-detected)"
+                values={{ n: choice.headerRow }}
+              />
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            className="shrink-0"
+            onClick={() => setExpanded(true)}
+            disabled={loading}
+          >
+            <FormattedMessage id="guidedLoad.adjust" defaultMessage="Adjust" />
+          </Button>
+        </div>
+      </section>
+    );
+  }
+
   const currentPage = Math.floor(windowState.offset / pageSize);
 
   async function gotoPage(page: number) {
@@ -370,9 +469,9 @@ function GuidedSheetSection({
       <h3 id={headingId} className="text-base font-semibold">
         {sheet.name}
       </h3>
-      {sheet.reason && (
+      {reason && (
         <p className="mt-1 text-xs text-muted-foreground">
-          <GuidanceReasonMessage reason={sheet.reason} />
+          <GuidanceReasonMessage reason={reason} />
         </p>
       )}
       <div className="mt-3 flex items-center gap-2">

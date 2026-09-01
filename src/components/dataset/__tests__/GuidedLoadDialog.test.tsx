@@ -5,6 +5,7 @@ import { GuidedLoadDialog } from "../GuidedLoadDialog";
 import type { GuidanceRequest, SheetGuidance } from "../../../types/dataset";
 import type { AppError } from "../../../types/error";
 import { renderI18n, withIntl } from "../../common/__tests__/helpers";
+import { autoTidied, needsGuidance } from "./helpers";
 
 // Radix Select's portal + animation model does not cooperate with jsdom's
 // synchronous fireEvent inside a Dialog (the dropdown portal never mounts
@@ -55,7 +56,7 @@ describe("GuidedLoadDialog", () => {
           ["1", "Alice"],
         ],
         total_rows: 3,
-        reason: "MultipleHeaderRows",
+        state: needsGuidance("MultipleHeaderRows"),
       },
     ],
   };
@@ -297,8 +298,18 @@ describe("GuidedLoadDialog", () => {
         source_path: "/x/two.xlsx",
         workbook_name: "two",
         sheets: [
-          { name: "people", preview: [["meta"], ["id"], ["1"]], total_rows: 3, reason: null },
-          { name: "orders", preview: [["junk"], ["qty"], ["7"]], total_rows: 3, reason: null },
+          {
+            name: "people",
+            preview: [["meta"], ["id"], ["1"]],
+            total_rows: 3,
+            state: needsGuidance("AmbiguousHeaderZone"),
+          },
+          {
+            name: "orders",
+            preview: [["junk"], ["qty"], ["7"]],
+            total_rows: 3,
+            state: needsGuidance("NoHeaderRow"),
+          },
         ],
       };
       renderGuided({ request: twoSheets, onSubmit });
@@ -393,7 +404,7 @@ describe("GuidedLoadDialog", () => {
             name: "big",
             preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
             total_rows: 30,
-            reason: null,
+            state: needsGuidance("MultipleHeaderRows"),
           },
         ],
       };
@@ -559,7 +570,7 @@ describe("GuidedLoadDialog", () => {
                   name: "big",
                   preview: Array.from({ length: 8 }, (_, i) => [`n${i + 1}`]),
                   total_rows: 8,
-                  reason: null,
+                  state: needsGuidance("MultipleHeaderRows"),
                 },
               ],
             }}
@@ -588,14 +599,271 @@ describe("GuidedLoadDialog", () => {
           source_path: "/x/two.xlsx",
           workbook_name: "two",
           sheets: [
-            { name: "clean", preview: [["id"], ["1"]], total_rows: 2, reason: null },
-            { name: "rough", preview: [["x"], ["2"]], total_rows: 2, reason: "NoHeaderRow" },
+            { name: "clean", preview: [["id"], ["1"]], total_rows: 2, state: autoTidied(1) },
+            {
+              name: "rough",
+              preview: [["x"], ["2"]],
+              total_rows: 2,
+              state: needsGuidance("NoHeaderRow"),
+            },
           ],
         },
       });
       const dialog = screen.getByRole("dialog");
       expect(dialog).toHaveTextContent("数据从第一行开始");
       expect(dialog).not.toHaveTextContent("检测到多个疑似表头行");
+      // The resolved sheet collapses to its auto-detected summary instead of
+      // a reason line (#751).
+      expect(dialog).toHaveTextContent("表头第 1 行（自动检测）");
+    });
+  });
+
+  describe("auto-tidied sheets: prefill + sectioned presentation (issue #751)", () => {
+    // A mixed workbook in workbook order: "clean" resolved (header detected on
+    // row 2, below a banner title), "rough" deferred.
+    function mixedRequest(): GuidanceRequest {
+      return {
+        source_path: "/x/mixed.xlsx",
+        workbook_name: "mixed",
+        sheets: [
+          {
+            name: "clean",
+            preview: [["Report"], ["id", "name"], ["1", "Alice"]],
+            total_rows: 3,
+            state: autoTidied(2),
+          },
+          {
+            name: "rough",
+            preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
+            total_rows: 3,
+            state: needsGuidance("MultipleHeaderRows"),
+          },
+        ],
+      };
+    }
+
+    it("collapses auto sheets into a summary row; deferred sheets stay expanded", () => {
+      renderGuided({ request: mixedRequest() });
+      const dialog = screen.getByRole("dialog");
+      // Summary = sheet name + detected header row + the Adjust button.
+      expect(dialog).toHaveTextContent("clean");
+      expect(dialog).toHaveTextContent("表头第 2 行（自动检测）");
+      expect(screen.getByRole("button", { name: "调整" })).toBeInTheDocument();
+      // Collapsed: no preview table rows -> no skip checkboxes for "clean".
+      expect(screen.queryByRole("checkbox", { name: "跳过 clean 第 1 行" })).toBeNull();
+      // The deferred sheet keeps its expanded form + reason line (unchanged).
+      expect(dialog).toHaveTextContent("检测到多个疑似表头行");
+      expect(screen.getByRole("checkbox", { name: "跳过 rough 第 3 行" })).toBeInTheDocument();
+      // Workbook order rides the section stack: clean's heading precedes rough's.
+      const headings = Array.from(dialog.querySelectorAll("h3")).map((h) => h.textContent);
+      expect(headings).toEqual(["clean", "rough"]);
+    });
+
+    it("Adjust expands the auto sheet into the full form with the header pre-filled", () => {
+      renderGuided({ request: mixedRequest() });
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      // The full form renders the preview table with the guess in the select.
+      expect(screen.getByRole("checkbox", { name: "跳过 clean 第 1 行" })).toBeInTheDocument();
+      const cleanSelect = screen.getAllByTestId("header-row-select")[0]!;
+      expect(cleanSelect).toHaveValue("2"); // the guess, not the blind row 1
+      // The guessed row carries the accent mark in the preview.
+      const secondRow = document.querySelectorAll("table.preview tr")[1]!;
+      expect(secondRow.className.split(/\s+/)).toContain("bg-accent");
+    });
+
+    it("an expanded auto sheet that outgrows one window shows the pager", () => {
+      renderGuided({
+        request: {
+          source_path: "/x/tallauto.xlsx",
+          workbook_name: "tallauto",
+          sheets: [
+            {
+              name: "tall",
+              preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
+              total_rows: 30,
+              state: autoTidied(1),
+            },
+            { name: "rough", preview: [["x"], ["1"]], total_rows: 2, state: needsGuidance("NoHeaderRow") },
+          ],
+        },
+      });
+      // No pager while collapsed.
+      expect(screen.queryByRole("button", { name: "下一页" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
+      expect(screen.getByRole("dialog")).toHaveTextContent("第 1–12 行 / 共 30 行");
+    });
+
+    it("submitting from the summary covers every sheet, the auto one with its guess", () => {
+      const onSubmit = vi.fn();
+      renderGuided({ request: mixedRequest(), onSubmit });
+      // No expansion, no adjustment: the guess rides as an explicit rectify.
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 2, skip_rows: [] } },
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("an adjusted auto sheet submits the user's value, not the guess", () => {
+      const onSubmit = vi.fn();
+      renderGuided({ request: mixedRequest(), onSubmit });
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      const cleanSelect = screen.getAllByTestId("header-row-select")[0]!;
+      fireEvent.change(cleanSelect, { target: { value: "1" } });
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 1, skip_rows: [] } },
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("disables Adjust while loading, like every other control", () => {
+      renderGuided({ request: mixedRequest(), loading: true });
+      expect(screen.getByRole("button", { name: "调整" })).toBeDisabled();
+    });
+
+    it("Adjust is one-way: no collapse back, and the summary is gone", () => {
+      // The expanded form IS the adjustment surface (the ticket defines
+      // expand only; YAGNI on a collapse toggle): once expanded there is no
+      // button that folds the section back, and the summary line itself is
+      // gone -- a future regression that re-derives choices on collapse has
+      // no seam to ride through unnoticed.
+      renderGuided({ request: mixedRequest() });
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      expect(screen.queryByText("表头第 2 行（自动检测）")).toBeNull();
+      expect(screen.queryByRole("button", { name: "调整" })).toBeNull();
+    });
+
+    it("a guess beyond the first window survives Adjust and submits as the absolute row", () => {
+      // A banner plus note rows can park the detected header below window 1
+      // (tidy's header_like[0] route): Adjust expands into window 1 where the
+      // select offers no matching option, and the pick must still ride as the
+      // absolute row number. jsdom cannot assert the Radix trigger's
+      // placeholder fallback (the Select portal never opens in this suite) --
+      // the data path is the part that can regress silently.
+      const onSubmit = vi.fn();
+      renderGuided({
+        request: {
+          source_path: "/x/farguess.xlsx",
+          workbook_name: "farguess",
+          sheets: [
+            {
+              name: "far",
+              preview: Array.from({ length: 12 }, (_, i) => [`r${i + 1}`]),
+              total_rows: 30,
+              state: autoTidied(15),
+            },
+            { name: "rough", preview: [["x"], ["1"]], total_rows: 2, state: needsGuidance("NoHeaderRow") },
+          ],
+        },
+        onSubmit,
+      });
+      // The summary names the far guess before any expansion.
+      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 15 行（自动检测）");
+      fireEvent.click(screen.getByRole("button", { name: "调整" }));
+      // Row 15 is not rendered in window 1, so it carries no checkbox.
+      expect(screen.queryByRole("checkbox", { name: "跳过 far 第 15 行" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "far", rectify: { header_row: 15, skip_rows: [] } },
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("a same-path re-route re-tracks the pre-fill to the moved guess", () => {
+      // The remount key is the path (#748), so a workbook fixed on disk and
+      // re-dropped at the SAME path re-parks the dialog without remounting:
+      // the choices must re-derive from the new request, or the old guess
+      // renders mislabeled as auto-detected and submits as the user's pick
+      // (issue #751 review) -- and a newly added sheet name must get a
+      // choice instead of crashing on the read.
+      const onSubmit = vi.fn();
+      const props = {
+        loading: false,
+        error: null as AppError | null,
+        onSubmit,
+        onCancel: () => {},
+        onFetchWindow: vi.fn().mockResolvedValue([]),
+      };
+      const view = renderI18n(<GuidedLoadDialog request={mixedRequest()} {...props} />);
+      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 2 行（自动检测）");
+      view.rerender(
+        withIntl(
+          <GuidedLoadDialog
+            request={{
+              source_path: "/x/mixed.xlsx",
+              workbook_name: "mixed",
+              sheets: [
+                { name: "clean", preview: [["Report"], ["note"], ["id", "name"], ["1", "Alice"]], total_rows: 4, state: autoTidied(3) },
+                {
+                  name: "rough",
+                  preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
+                  total_rows: 3,
+                  state: needsGuidance("MultipleHeaderRows"),
+                },
+                { name: "added", preview: [["id"], ["1"]], total_rows: 2, state: autoTidied(1) },
+              ],
+            }}
+            {...props}
+          />,
+        ),
+      );
+      // The summary follows the moved guess; the added sheet renders its own
+      // summary instead of throwing on a missing choice.
+      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 3 行（自动检测）");
+      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 1 行（自动检测）");
+      fireEvent.click(screen.getByRole("button", { name: "加载" }));
+      expect(onSubmit).toHaveBeenCalledWith([
+        { name: "clean", rectify: { header_row: 3, skip_rows: [] } },
+        { name: "rough", rectify: { header_row: 1, skip_rows: [] } },
+        { name: "added", rectify: { header_row: 1, skip_rows: [] } },
+      ]);
+    });
+
+    it("a same-path re-route that defers a resolved sheet swaps to the full form", () => {
+      // The flip side of the re-route reset: if the fixed workbook now makes
+      // auto-tidy defer a previously resolved sheet, the section must follow
+      // the new two-state -- the reason line and full form render, and the
+      // stale auto summary is gone (issue #751 review: hidden reason line).
+      const props = {
+        loading: false,
+        error: null as AppError | null,
+        onSubmit: vi.fn(),
+        onCancel: () => {},
+        onFetchWindow: vi.fn().mockResolvedValue([]),
+      };
+      const view = renderI18n(<GuidedLoadDialog request={mixedRequest()} {...props} />);
+      expect(screen.getByRole("dialog")).toHaveTextContent("表头第 2 行（自动检测）");
+      view.rerender(
+        withIntl(
+          <GuidedLoadDialog
+            request={{
+              source_path: "/x/mixed.xlsx",
+              workbook_name: "mixed",
+              sheets: [
+                {
+                  name: "clean",
+                  preview: [["meta", "info"], ["id", "name"], ["1", "Alice"]],
+                  total_rows: 3,
+                  state: needsGuidance("MultipleHeaderRows"),
+                },
+                {
+                  name: "rough",
+                  preview: [["meta", "info"], ["id", "name"], ["2", "Bob"]],
+                  total_rows: 3,
+                  state: needsGuidance("MultipleHeaderRows"),
+                },
+              ],
+            }}
+            {...props}
+          />,
+        ),
+      );
+      // "clean" swapped from its collapsed summary to the deferred branch:
+      // reason line + full form (its checkbox renders; the summary is gone).
+      expect(screen.getByRole("dialog")).not.toHaveTextContent("表头第 2 行（自动检测）");
+      expect(screen.getByRole("checkbox", { name: "跳过 clean 第 3 行" })).toBeInTheDocument();
     });
   });
 });

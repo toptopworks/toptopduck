@@ -29,6 +29,13 @@ use crate::model::GuidanceReason;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TidiedSheet {
     pub rows: Vec<Vec<Data>>,
+    /// 1-based absolute row number of the detected header in the RAW sheet
+    /// (issue #751). Forward-fill never changes the row count, so the index
+    /// `auto_tidy` computes on the raw grid is the header's position in the
+    /// sheet the user sees -- the same row-number semantics the guided rectify
+    /// uses (ADR-0015). Lets the guided dialog pre-fill the header pick for a
+    /// sheet the auto algorithm resolved instead of restarting from row 1.
+    pub header_row: u32,
 }
 
 /// Outcome of auto-tidying one sheet.
@@ -112,7 +119,13 @@ pub fn auto_tidy(sheet: &SheetRows) -> TidyOutcome {
     let mut tidy = Vec::with_capacity(rows.len().saturating_sub(header_idx));
     tidy.push(rows[header_idx].clone());
     tidy.extend(rows[header_idx + 1..].iter().cloned());
-    TidyOutcome::Tidied(TidiedSheet { rows: tidy })
+    // The header's 1-based raw row (issue #751). An .xlsx grid can't outgrow
+    // u32 (1,048,576 rows max), so the conversion never truncates.
+    let header_row = u32::try_from(header_idx + 1).expect("xlsx row count fits u32");
+    TidyOutcome::Tidied(TidiedSheet {
+        rows: tidy,
+        header_row,
+    })
 }
 
 /// Forward-fill every merged range with its top-left cell's value. Only
@@ -220,9 +233,9 @@ mod tests {
             merges,
         }
     }
-    fn tidied_rows(o: TidyOutcome) -> Vec<Vec<Data>> {
+    fn tidied_sheet(o: TidyOutcome) -> TidiedSheet {
         match o {
-            TidyOutcome::Tidied(t) => t.rows,
+            TidyOutcome::Tidied(t) => t,
             TidyOutcome::NeedsGuidance(r) => panic!("expected Tidied, got NeedsGuidance({r:?})"),
         }
     }
@@ -258,10 +271,12 @@ mod tests {
             ],
             vec![],
         );
-        let out = tidied_rows(auto_tidy(&g));
+        let t = tidied_sheet(auto_tidy(&g));
         // Header preserved, all data rows retained -- nothing to skip.
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0], row(&[s("id"), s("name"), s("score")]));
+        assert_eq!(t.rows.len(), 3);
+        assert_eq!(t.rows[0], row(&[s("id"), s("name"), s("score")]));
+        // The header sits on the very first raw row (issue #751).
+        assert_eq!(t.header_row, 1);
     }
 
     #[test]
@@ -275,9 +290,11 @@ mod tests {
             ],
             vec![],
         );
-        let out = tidied_rows(auto_tidy(&g));
-        assert_eq!(out[0], row(&[s("id"), s("name")])); // title dropped
-        assert_eq!(out.len(), 2); // header + 1 data row
+        let t = tidied_sheet(auto_tidy(&g));
+        assert_eq!(t.rows[0], row(&[s("id"), s("name")])); // title dropped
+        assert_eq!(t.rows.len(), 2); // header + 1 data row
+                                     // The header sits on raw row 2, below the banner title (issue #751).
+        assert_eq!(t.header_row, 2);
     }
 
     #[test]
@@ -291,9 +308,12 @@ mod tests {
             ],
             vec![merge(1, 1, 2, 1)],
         );
-        let out = tidied_rows(auto_tidy(&g));
-        assert_eq!(out[2][1], s("East")); // merged cell unmerged (forward-filled)
-        assert_eq!(out[0], row(&[s("id"), s("region"), s("amt")]));
+        let t = tidied_sheet(auto_tidy(&g));
+        assert_eq!(t.rows[2][1], s("East")); // merged cell unmerged (forward-filled)
+        assert_eq!(t.rows[0], row(&[s("id"), s("region"), s("amt")]));
+        // Forward-fill never changes the row count, so the header keeps its
+        // raw position (issue #751).
+        assert_eq!(t.header_row, 1);
     }
 
     #[test]
@@ -356,9 +376,10 @@ mod tests {
             ],
             vec![],
         );
-        let out = tidied_rows(auto_tidy(&g));
-        assert_eq!(out[0], row(&[s("name"), s("city")]));
-        assert_eq!(out.len(), 3);
+        let t = tidied_sheet(auto_tidy(&g));
+        assert_eq!(t.rows[0], row(&[s("name"), s("city")]));
+        assert_eq!(t.rows.len(), 3);
+        assert_eq!(t.header_row, 1);
     }
 
     #[test]
@@ -371,9 +392,10 @@ mod tests {
             ],
             vec![],
         );
-        let out = tidied_rows(auto_tidy(&g));
-        assert_eq!(out[0], row(&[s("name"), s("city")]));
-        assert_eq!(out.len(), 2);
+        let t = tidied_sheet(auto_tidy(&g));
+        assert_eq!(t.rows[0], row(&[s("name"), s("city")]));
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.header_row, 2); // the banner title's row is not the header
     }
 
     #[test]
@@ -405,9 +427,10 @@ mod tests {
         // A narrow one-column table (header + data) tidies via the
         // single-column fallback, not NeedsGuidance.
         let g = sheet(vec![row(&[s("id")]), row(&[i(1)]), row(&[i(2)])], vec![]);
-        let out = tidied_rows(auto_tidy(&g));
-        assert_eq!(out[0], row(&[s("id")]));
-        assert_eq!(out.len(), 3);
+        let t = tidied_sheet(auto_tidy(&g));
+        assert_eq!(t.rows[0], row(&[s("id")]));
+        assert_eq!(t.rows.len(), 3);
+        assert_eq!(t.header_row, 1); // narrow table: the single column's header
     }
 
     #[test]
@@ -422,8 +445,10 @@ mod tests {
             ],
             vec![merge(0, 0, 0, 2)],
         );
-        let out = tidied_rows(auto_tidy(&g));
-        assert_eq!(out[0], row(&[s("id"), s("name"), s("score")]));
-        assert_eq!(out.len(), 2);
+        let t = tidied_sheet(auto_tidy(&g));
+        assert_eq!(t.rows[0], row(&[s("id"), s("name"), s("score")]));
+        assert_eq!(t.rows.len(), 2);
+        // The merged banner occupies row 1; the real header sits on row 2.
+        assert_eq!(t.header_row, 2);
     }
 }

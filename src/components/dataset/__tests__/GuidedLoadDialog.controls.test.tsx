@@ -3,6 +3,7 @@ import { fireEvent, screen } from "@testing-library/react";
 import { GuidedLoadDialog } from "../GuidedLoadDialog";
 import type { GuidanceRequest } from "../../../types/dataset";
 import { renderI18n } from "../../common/__tests__/helpers";
+import { needsGuidance } from "./helpers";
 
 // Control-systematization audit (issue #749): the dialog swept its native
 // <select> / <input type=checkbox> / bare <h3> onto the design-system
@@ -23,7 +24,9 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
           ["1", "Alice"],
         ],
         total_rows: 3,
-        reason: null,
+        // Deferred state -> the full form renders (a resolved sheet would
+        // start collapsed on its summary, #751).
+        state: needsGuidance("MultipleHeaderRows"),
       },
     ],
   };
@@ -120,7 +123,7 @@ describe("GuidedLoadDialog control systematization (issue #749)", () => {
             name: "big",
             preview: [["r1"], ["r2"], ["r3"]],
             total_rows: 8,
-            reason: null,
+            state: needsGuidance("MultipleHeaderRows"),
           },
         ],
       },
