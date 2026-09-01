@@ -563,6 +563,7 @@
   "workingSet.activeSuffix": " · 当前表",
   "workingSet.delete.ariaLabel": "删除 {name}",
   "workingSet.delete.confirm": "确定从工作集删除「{name}」？",
+  "workingSet.delete.description": "源文件将被移除，其引用名从共享命名空间释放——引用它的 SQL 将全部失效。此操作不可撤销；须重新上传文件才能恢复该源。",
   "workingSet.delete.title": "从工作集删除此数据集",
   "workingSet.detail.columnsHeading": "列与推断类型",
   "workingSet.detail.meta": "行数：{rows} · 指纹：{fingerprint}…",

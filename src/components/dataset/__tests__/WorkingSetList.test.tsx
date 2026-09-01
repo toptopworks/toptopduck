@@ -13,7 +13,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 import { open } from "@tauri-apps/plugin-dialog";
 
 describe("WorkingSetList", () => {
-  // window.prompt spies must not leak between tests (jsdom default returns null).
+  // Spies must not leak between tests.
   afterEach(() => vi.restoreAllMocks());
 
   it("lists datasets and marks the active one", () => {
@@ -73,9 +73,28 @@ describe("WorkingSetList", () => {
     expect(screen.getByText(/工作集为空/)).toBeInTheDocument();
   });
 
-  it("renames a dataset's display label via prompt (ADR-0037, issue #8)", () => {
+  // --- Rename dialog (issue #759): the native window.prompt retired onto an
+  // in-app Dialog + Input (ADR-0037 semantics unchanged -- display label only,
+  // the reference name survives).
+
+  it("opens the rename dialog with the current display name prefilled (issue #759)", () => {
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(/重命名显示名/);
+    // The input starts from the current display label so an edit builds on it.
+    expect(screen.getByRole("textbox")).toHaveValue(mockDataset.display_name);
+  });
+
+  it("submits a valid rename through the dialog and closes it (ADR-0037, issue #759)", () => {
     const onRename = vi.fn();
-    vi.spyOn(window, "prompt").mockReturnValue("员工表");
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -85,37 +104,39 @@ describe("WorkingSetList", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "员工表" } });
+    // jsdom does not dispatch form submit on a submit-button click; drive the
+    // form's submit event directly (the SessionSidebar rename-test pattern).
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
     // Carries the stable reference name + the new display label; the reference
     // name is what the parent keys selection off, so it survives the rename.
     expect(onRename).toHaveBeenCalledWith("people", "员工表");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("ignores an empty, cancelled, or no-change rename prompt", () => {
+  it("keys the rename off the reference name after the display label diverges (ADR-0037, issue #759)", () => {
+    // After any rename the two names diverge; every fixture in the flows above
+    // keeps them equal, so a swap of the two at the call site passes those
+    // identically. A diverged fixture pins the backend identity: the callback
+    // must carry the stable reference name, never the (old or new) label.
     const onRename = vi.fn();
-    const promptSpy = vi.spyOn(window, "prompt");
+    const diverged: DatasetDescriptor = { ...mockDataset, display_name: "员工表" };
     renderI18n(
       <WorkingSetList
-        datasets={[mockDataset]}
+        datasets={[diverged]}
         activeName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
     );
-    const renameBtn = screen.getByRole("button", { name: /重命名/ });
-    // Cancel (null), empty string, and a no-change answer all count as "no
-    // rename" -- onRename must never fire. One render, repeated clicks, so the
-    // queries don't accumulate across renders.
-    for (const answer of [null, "", mockDataset.display_name]) {
-      onRename.mockClear();
-      promptSpy.mockReturnValue(answer);
-      fireEvent.click(renameBtn);
-      expect(onRename).not.toHaveBeenCalled();
-    }
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "人事表" } });
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
+    expect(onRename).toHaveBeenCalledWith("people", "人事表");
   });
 
-  it("trims surrounding whitespace before renaming", () => {
+  it("keeps Save disabled for a blank or whitespace-only draft (issue #759)", () => {
     const onRename = vi.fn();
-    vi.spyOn(window, "prompt").mockReturnValue("  员工表  ");
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -125,13 +146,59 @@ describe("WorkingSetList", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    const save = screen.getByRole("button", { name: "保存" });
+    for (const draft of ["", "   "]) {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: draft } });
+      expect(save).toBeDisabled();
+    }
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  it("keeps Save disabled while the draft trims to the current display name (issue #759)", () => {
+    // The dialog opens prefilled with the current name -> no change yet -> Save
+    // disabled. A real edit re-enables it; walking the edit back to the
+    // current name disables it again. This is the old prompt's no-change ignore
+    // expressed as an un-submittable form.
+    const onRename = vi.fn();
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    const save = screen.getByRole("button", { name: "保存" });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "员工表" } });
+    expect(save).toBeEnabled();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "  people  " } });
+    expect(save).toBeDisabled();
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  it("trims surrounding whitespace before renaming (issue #759)", () => {
+    const onRename = vi.fn();
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "  员工表  " } });
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
     // trimmed before reaching the parent -> backend gets a clean label
     expect(onRename).toHaveBeenCalledWith("people", "员工表");
   });
 
-  it("ignores a whitespace-only rename prompt", () => {
+  it("cancels the rename dialog without firing onRename (issue #759)", () => {
     const onRename = vi.fn();
-    vi.spyOn(window, "prompt").mockReturnValue("   ");
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -141,7 +208,72 @@ describe("WorkingSetList", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(onRename).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("Escape closes the rename dialog without renaming and restores trigger focus (issue #759)", async () => {
+    // Radix Dialog routes ESC through onOpenChange(false) -> cancel. The list
+    // captures the opening trigger and re-focuses it on close (Radix's own
+    // restore only targets a DialogTrigger ref), so the keyboard flow lands
+    // back on the row's rename button.
+    const onRename = vi.fn();
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: /重命名/ });
+    // fireEvent.click does not move focus in jsdom; focus first so Radix has a
+    // previously-focused trigger to restore to (a real click would focus it).
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onRename).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("falls back to focusing the list when Save's loading gate disables the trigger (issue #759)", async () => {
+    // The submit fires onRename before closing, and the parent's mutation runs
+    // setLoading(true) synchronously -- batched with the close into one commit,
+    // so the deferred restore finds the row trigger disabled and focus() on a
+    // disabled button is ignored. The restore must fall back to the list
+    // container instead of dropping keyboard focus to <body>.
+    const onRename = vi.fn();
+    const utils = renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    // Mirror the parent: the loading flip rides the same commit as the close.
+    onRename.mockImplementation(() => {
+      utils.rerender(
+        withIntl(
+          <WorkingSetList
+            datasets={[mockDataset]}
+            activeName={null}
+            onSelect={() => {}}
+            onRename={onRename}
+            loading={true}
+          />,
+        ),
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "员工表" } });
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
+    expect(onRename).toHaveBeenCalledWith("people", "员工表");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("list")).toHaveFocus();
   });
 
   it("disables the rename button while loading (prevents concurrent IPC)", () => {
@@ -210,11 +342,31 @@ describe("WorkingSetList", () => {
     expect(screen.getByRole("button", { name: /换源/ })).toBeDisabled();
   });
 
-  it("deletes a dataset after a confirm, forwarding the stable reference name (issue #38)", () => {
-    // The per-row delete button confirms, then forwards the reference name --
-    // the identity the backend removes (not the display label).
+  // --- Delete dialog (issue #759): the native window.confirm retired onto an
+  // in-app AlertDialog. AlertDialog semantics (issue #105 precedent): ESC +
+  // overlay click are deliberately inert -- an irreversible removal needs an
+  // explicit 取消 / 删除.
+
+  it("opens a delete AlertDialog naming the dataset (issue #38, #759)", () => {
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    const dialog = screen.getByRole("alertdialog");
+    // The title carries the display name (workingSet.delete.confirm semantics).
+    expect(dialog).toHaveTextContent(/确定从工作集删除「people」/);
+    // The irreversibility description renders (workingSet.delete.description).
+    expect(dialog).toHaveTextContent(/不可撤销/);
+  });
+
+  it("confirms the delete and forwards the stable reference name (issue #38, #759)", () => {
     const onDelete = vi.fn();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -225,14 +377,125 @@ describe("WorkingSetList", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("people"));
+    // The Action's accessible name is the bare 删除 (common.delete); the
+    // trigger carries "删除 people", so the exact match picks the dialog's
+    // Action only -- the identity the backend removes is the reference name.
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDelete).toHaveBeenCalledWith("people");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("keys the delete off the reference name after the display label diverges (issue #38, #759)", () => {
+    // The dialog's title names the display label, but the backend identity is
+    // the reference name -- with the two diverged, the callback must carry the
+    // reference name (a swap regression would remove the wrong source).
+    const onDelete = vi.fn();
+    const diverged: DatasetDescriptor = { ...mockDataset, display_name: "员工表" };
+    renderI18n(
+      <WorkingSetList
+        datasets={[diverged]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(/员工表/);
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
     expect(onDelete).toHaveBeenCalledWith("people");
   });
 
-  it("ignores a cancelled delete confirm (issue #38)", () => {
-    // A no at the confirm gate never reaches the backend -- no IPC, no removal.
+  it("reopens the delete dialog for the next row after a confirmed delete (issue #759)", () => {
+    // The confirm path must clear the delete target: the AlertDialog is
+    // uncontrolled (defaultOpen), so a stale target would leave it mounted
+    // with the open consumed -- the next row's delete click would open
+    // nothing. Two deletes in a row is the core working-set teardown flow.
     const onDelete = vi.fn();
-    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const orders: DatasetDescriptor = { ...mockDataset, reference_name: "orders", display_name: "orders" };
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset, orders]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "删除 people" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDelete).toHaveBeenCalledWith("people");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    // Row B's delete click must open the dialog again, naming B.
+    fireEvent.click(screen.getByRole("button", { name: "删除 orders" }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(/确定从工作集删除「orders」/);
+  });
+
+  it("cancels the delete dialog without firing onDelete and restores trigger focus (issue #38, #759)", async () => {
+    // A cancel at the confirm gate never reaches the backend -- no IPC, no
+    // removal; the keyboard flow lands back on the row's delete trigger.
+    const onDelete = vi.fn();
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: /删除/ });
+    // fireEvent.click does not move focus in jsdom; focus first so the restore
+    // has an opener to land on (a real click would focus the trigger).
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(trigger).toHaveFocus();
+  });
+
+  it("falls back to focusing the list when the confirm's loading gate disables the trigger (issue #759)", async () => {
+    // Same shape as the Save path: onDelete fires before the close and the
+    // parent flips loading in the same commit, so the deferred restore meets a
+    // disabled trigger -- the fallback keeps focus in the working-set region.
+    const onDelete = vi.fn();
+    const utils = renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    onDelete.mockImplementation(() => {
+      utils.rerender(
+        withIntl(
+          <WorkingSetList
+            datasets={[mockDataset]}
+            activeName={null}
+            onSelect={() => {}}
+            onRename={() => {}}
+            onDelete={onDelete}
+            loading={true}
+          />,
+        ),
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDelete).toHaveBeenCalledWith("people");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("list")).toHaveFocus();
+  });
+
+  it("Escape does not close the delete dialog (AlertDialog semantics, issue #759)", () => {
+    // Mirrors the ActiveSourceDeleteDialog ESC pin: the destructive confirm
+    // intentionally blocks ESC dismiss -- ESC on the content is inert, so
+    // onDelete never fires (no accidental dismiss of an irreversible removal).
+    const onDelete = vi.fn();
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -243,6 +506,34 @@ describe("WorkingSetList", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("overlay-click does not close the delete dialog (AlertDialog semantics, issue #759)", async () => {
+    // Radix AlertDialog prevents onInteractOutside, so a pointer-down on the
+    // overlay (outside the content) leaves the dialog open and fires onDelete
+    // never -- the user must take an explicit 取消 / 删除.
+    const onDelete = vi.fn();
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    // Radix attaches its pointerdown listener on a setTimeout(0) after mount;
+    // flush it before the pointer events so the outside-click is observed.
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.pointerDown(document.body, { button: 0 });
+    fireEvent.pointerUp(document.body, { button: 0 });
+    fireEvent.click(document.body);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
     expect(onDelete).not.toHaveBeenCalled();
   });
 
