@@ -201,23 +201,39 @@ export function WorkingSetList({
   // targets the DialogTrigger context ref, but the openers here are the list's
   // per-row buttons (not DialogTrigger), so the restore is wired by hand:
   // captured on open, re-focused on close (issue #759 focus-management AC).
-  const openTriggerRef = useRef<HTMLElement | null>(null);
+  const openTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // Fallback restore target for the action-close paths (see closeDialog): the
+  // list container is focusable programmatically only (tabIndex -1), so a
+  // disabled opener does not strand keyboard focus on <body>.
+  const listRef = useRef<HTMLUListElement | null>(null);
   const closeDialog = (clear: () => void) => {
     clear();
     // Deferred past the focus trap: while the scope is still mounted the trap
     // re-focuses the dialog content on any focus-out, and Radix's own
     // unmount-time restore (also a setTimeout(0)) targets a DialogTrigger ref
     // the list's per-row buttons never fill. Restoring on the same tick order
-    // lands the close back on the opener.
-    setTimeout(() => openTriggerRef.current?.focus(), 0);
+    // lands the close back on the opener. On Save / Delete-confirm the
+    // mutation's loading gate has already disabled the opener (onRename /
+    // onDelete fire before the close and runSimpleMutation sets loading
+    // synchronously, batched into this same commit), and focus() on a
+    // disabled button is ignored -- fall back to the list so keyboard users
+    // keep a place in the working-set region.
+    setTimeout(() => {
+      const trigger = openTriggerRef.current;
+      if (trigger && trigger.isConnected && !trigger.disabled) {
+        trigger.focus();
+      } else {
+        listRef.current?.focus();
+      }
+    }, 0);
   };
   const closeRename = () => closeDialog(() => setRenameTarget(null));
   const closeDelete = () => closeDialog(() => setDeleteTarget(null));
-  const openRename = (d: DatasetDescriptor, trigger: HTMLElement) => {
+  const openRename = (d: DatasetDescriptor, trigger: HTMLButtonElement) => {
     openTriggerRef.current = trigger;
     setRenameTarget(d);
   };
-  const openDelete = (d: DatasetDescriptor, trigger: HTMLElement) => {
+  const openDelete = (d: DatasetDescriptor, trigger: HTMLButtonElement) => {
     openTriggerRef.current = trigger;
     setDeleteTarget(d);
   };
@@ -261,7 +277,7 @@ export function WorkingSetList({
     // .replace / .delete / .active / .stale) stay on the elements as anchor
     // points for selector queries and future migration slices.
     <>
-      <ul className="working-set list-none m-0 p-0">
+      <ul ref={listRef} tabIndex={-1} className="working-set list-none m-0 p-0 outline-none">
         {datasets.map((d) => (
           <li
             key={d.reference_name}

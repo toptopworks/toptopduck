@@ -114,6 +114,27 @@ describe("WorkingSetList", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("keys the rename off the reference name after the display label diverges (ADR-0037, issue #759)", () => {
+    // After any rename the two names diverge; every fixture in the flows above
+    // keeps them equal, so a swap of the two at the call site passes those
+    // identically. A diverged fixture pins the backend identity: the callback
+    // must carry the stable reference name, never the (old or new) label.
+    const onRename = vi.fn();
+    const diverged: DatasetDescriptor = { ...mockDataset, display_name: "员工表" };
+    renderI18n(
+      <WorkingSetList
+        datasets={[diverged]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "人事表" } });
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
+    expect(onRename).toHaveBeenCalledWith("people", "人事表");
+  });
+
   it("keeps Save disabled for a blank or whitespace-only draft (issue #759)", () => {
     const onRename = vi.fn();
     renderI18n(
@@ -216,6 +237,43 @@ describe("WorkingSetList", () => {
     expect(onRename).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it("falls back to focusing the list when Save's loading gate disables the trigger (issue #759)", async () => {
+    // The submit fires onRename before closing, and the parent's mutation runs
+    // setLoading(true) synchronously -- batched with the close into one commit,
+    // so the deferred restore finds the row trigger disabled and focus() on a
+    // disabled button is ignored. The restore must fall back to the list
+    // container instead of dropping keyboard focus to <body>.
+    const onRename = vi.fn();
+    const utils = renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={onRename}
+      />,
+    );
+    // Mirror the parent: the loading flip rides the same commit as the close.
+    onRename.mockImplementation(() => {
+      utils.rerender(
+        withIntl(
+          <WorkingSetList
+            datasets={[mockDataset]}
+            activeName={null}
+            onSelect={() => {}}
+            onRename={onRename}
+            loading={true}
+          />,
+        ),
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "员工表" } });
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
+    expect(onRename).toHaveBeenCalledWith("people", "员工表");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("list")).toHaveFocus();
   });
 
   it("disables the rename button while loading (prevents concurrent IPC)", () => {
@@ -327,6 +385,52 @@ describe("WorkingSetList", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
+  it("keys the delete off the reference name after the display label diverges (issue #38, #759)", () => {
+    // The dialog's title names the display label, but the backend identity is
+    // the reference name -- with the two diverged, the callback must carry the
+    // reference name (a swap regression would remove the wrong source).
+    const onDelete = vi.fn();
+    const diverged: DatasetDescriptor = { ...mockDataset, display_name: "员工表" };
+    renderI18n(
+      <WorkingSetList
+        datasets={[diverged]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(/员工表/);
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDelete).toHaveBeenCalledWith("people");
+  });
+
+  it("reopens the delete dialog for the next row after a confirmed delete (issue #759)", () => {
+    // The confirm path must clear the delete target: the AlertDialog is
+    // uncontrolled (defaultOpen), so a stale target would leave it mounted
+    // with the open consumed -- the next row's delete click would open
+    // nothing. Two deletes in a row is the core working-set teardown flow.
+    const onDelete = vi.fn();
+    const orders: DatasetDescriptor = { ...mockDataset, reference_name: "orders", display_name: "orders" };
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset, orders]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "删除 people" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDelete).toHaveBeenCalledWith("people");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    // Row B's delete click must open the dialog again, naming B.
+    fireEvent.click(screen.getByRole("button", { name: "删除 orders" }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(/确定从工作集删除「orders」/);
+  });
+
   it("cancels the delete dialog without firing onDelete and restores trigger focus (issue #38, #759)", async () => {
     // A cancel at the confirm gate never reaches the backend -- no IPC, no
     // removal; the keyboard flow lands back on the row's delete trigger.
@@ -350,6 +454,41 @@ describe("WorkingSetList", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     await new Promise((r) => setTimeout(r, 0));
     expect(trigger).toHaveFocus();
+  });
+
+  it("falls back to focusing the list when the confirm's loading gate disables the trigger (issue #759)", async () => {
+    // Same shape as the Save path: onDelete fires before the close and the
+    // parent flips loading in the same commit, so the deferred restore meets a
+    // disabled trigger -- the fallback keeps focus in the working-set region.
+    const onDelete = vi.fn();
+    const utils = renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={onDelete}
+      />,
+    );
+    onDelete.mockImplementation(() => {
+      utils.rerender(
+        withIntl(
+          <WorkingSetList
+            datasets={[mockDataset]}
+            activeName={null}
+            onSelect={() => {}}
+            onRename={() => {}}
+            onDelete={onDelete}
+            loading={true}
+          />,
+        ),
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDelete).toHaveBeenCalledWith("people");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("list")).toHaveFocus();
   });
 
   it("Escape does not close the delete dialog (AlertDialog semantics, issue #759)", () => {
