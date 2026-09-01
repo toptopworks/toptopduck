@@ -385,16 +385,21 @@ describe("App three-column shell (issue #79 ACs)", () => {
     expect(conversation).toHaveBeenCalledTimes(1);
   });
 
-  it("pins to a history result so it overrides the last textual turn (ADR-0062 R2)", async () => {
-    // End-to-end pin chain: the last turn is a Clarify (workspace would show the
-    // textual card), but clicking an earlier Materialized result in the rail sets
-    // pinnedToHistory so the viewed result overrides the last-turn text. This is
-    // the full handleSelectResult -> deriveWorkspaceContent path the pure-function
+  it("keeps the workspace inert to a textual last turn; a rail click moves viewedResult (ADR-0114)", async () => {
+    // End-to-end chain: R5 resume lands viewedResult on the LAST Materialized
+    // (result_2). The last turn is a Clarify -- the rail is its read surface,
+    // and the workspace reacts not at all (still showing result_2, the exact
+    // "keep showing what was being viewed" AC). Clicking an EARLIER
+    // Materialized result in the rail moves ONLY viewedResult (no pin flag)
+    // -> the workspace shows result_1's table. This is the full
+    // handleSelectResult -> deriveWorkspaceContent path the pure-function
     // unit test alone cannot cover.
     const r1 = src("result_1");
-    state.workingSet = [r1];
+    const r2 = src("result_2");
+    state.workingSet = [r1, r2];
     state.thread = [
       materializedTurn("result_1"),
+      materializedTurn("result_2"),
       {
         entry: "Turn",
         data: {
@@ -409,22 +414,23 @@ describe("App three-column shell (issue #79 ACs)", () => {
     ];
     render(<App />);
     await openSession();
-    // Last turn is Clarify -> workspace shows the textual card.
-    await waitFor(() => expect(document.querySelector(".textual-card")).toBeInTheDocument());
-    // Click result_1 in the rail -> pin -> workspace shows result_1's table.
+    // The rail renders the Clarify turn; the workspace still shows result_2
+    // (resume landing) -- the textual last turn changed nothing.
+    await waitFor(() => expect(document.querySelector(".turn-outcome.textual")).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument();
+    // Click result_1 in the rail -> only viewedResult moves -> workspace shows result_1's table.
     fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
     );
-    // The workspace textual card is gone (the rail still renders the turn text,
-    // but under a different class -- .turn-outcome, not .textual-card).
-    expect(document.querySelector(".textual-card")).not.toBeInTheDocument();
   });
 
   it("renders a failed turn's typed failure via the locale catalog (issue #125)", async () => {
-    // The workspace's TextualOutcomeCard renders a Failed turn by TurnFailure
-    // kind through the locale catalog (no backend Display string crosses IPC);
-    // the engine detail rides the collapsed TechnicalDetailsFold.
+    // The rail's Failed card renders the failure by TurnFailure kind through
+    // the locale catalog (no backend Display string crosses IPC); the engine
+    // detail rides the collapsed TechnicalDetailsFold. ADR-0114: the
+    // workspace is inert to turn outcomes -- the rail is the read surface,
+    // so the workspace stays on the hero.
     state.workingSet = [src("result_1")];
     state.thread = [
       {
@@ -441,48 +447,32 @@ describe("App three-column shell (issue #79 ACs)", () => {
     ];
     render(<App />);
     await openSession();
-    // The workspace shows the Failed textual card (distinct from the Thread
-    // rail's .turn-outcome.failed). Scope the message assertions to the card:
-    // the rail renders the same Execute locale message under a different class.
+    // The rail renders the Failed outcome card. Scope the message assertions
+    // to the card.
     await waitFor(() =>
-      expect(document.querySelector(".textual-card.failed")).toBeInTheDocument(),
+      expect(document.querySelector(".turn-outcome.failed")).toBeInTheDocument(),
     );
-    const card = document.querySelector(".textual-card.failed") as HTMLElement;
+    const card = document.querySelector(".turn-outcome.failed") as HTMLElement;
     expect(within(card).getByText("执行查询失败")).toBeInTheDocument(); // error.turn.execute
     expect(within(card).getByText("no_such_col")).toBeInTheDocument(); // fold detail
+    // The workspace shows no outcome card for the failed turn.
+    expect(document.querySelector(".workspace-hero")).toBeInTheDocument();
   });
 
-  it("elevates in-content cards (textual-card + working-set panels) with shadow-sm (issue #222)", async () => {
+  it("elevates working-set panels with shadow-sm (issue #222)", async () => {
     // ADR-0067 (2) + issue #222: in-content cards share one elevation language
     // with the floating dialog (shadow-lg) / popover (shadow-md) layer above
-    // them. The workspace textual-card (full-width outcome) and the working-set
-    // master/detail panels carry the Tailwind shadow-sm utility -- no new
-    // --shadow-* token (ADR-0067 (2) rules one out). The rail turn-card
-    // (ADR-0047) stays flat (rail density should not lift) and the degrade-card
-    // stays shadow-none (its left border is the emphasis), so neither is pinned
-    // here. jsdom cannot paint a box-shadow, but it CAN assert the className,
-    // so a regression that drops shadow-sm while leaving the bg-card/border
-    // chrome stays caught (same pin shape as the SessionSidebar
-    // session-menu shadow-md tests).
+    // them. The working-set master/detail panels carry the Tailwind shadow-sm
+    // utility -- no new --shadow-* token (ADR-0067 (2) rules one out). The
+    // rail turn-card (ADR-0047) stays flat (rail density should not lift) and
+    // the degrade-card stays shadow-none (its left border is the emphasis),
+    // so neither is pinned here. jsdom cannot paint a box-shadow, but it CAN
+    // assert the className, so a regression that drops shadow-sm while
+    // leaving the bg-card/border chrome stays caught (same pin shape as the
+    // SessionSidebar session-menu shadow-md tests).
     state.workingSet = [src("result_1")];
-    state.thread = [
-      {
-        entry: "Turn",
-        data: {
-          question: "哪个名字",
-          outcome: {
-            kind: "Textual",
-            data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
-          },
-          trace: [], provenance: { skills: [] },
-        },
-      },
-    ];
     render(<App />);
     await openSession();
-    // Result tab: the workspace textual-card carries shadow-sm.
-    await waitFor(() => expect(document.querySelector(".textual-card")).toBeInTheDocument());
-    expect(document.querySelector(".textual-card")?.className.split(/\s+/)).toContain("shadow-sm");
     // Working set tab: both master/detail .panel sections carry shadow-sm.
     fireEvent.click(screen.getByRole("tab", { name: /工作集/ }));
     await waitFor(() => expect(document.querySelectorAll(".panel")).toHaveLength(2));
@@ -1261,7 +1251,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     state.thread = [
       {
         entry: "Turn",
-        data: { question: "x", outcome: { kind: "Bogus" } },
+        data: { question: "x", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
       } as unknown as ThreadEntry,
     ];
     render(<App />);
@@ -1287,7 +1277,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     let threadData: ThreadEntry[] = [
       {
         entry: "Turn",
-        data: { question: "x", outcome: { kind: "Bogus" } },
+        data: { question: "x", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
       } as unknown as ThreadEntry,
     ];
     vi.mocked(conversation).mockImplementation(async () => threadData);
@@ -1301,23 +1291,24 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
       { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } } },
     ];
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    // The remounted pane reads the refetched (clean) data -- the question
-    // renders and the degrade card is gone.
     await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
     expect(document.querySelector(".degrade-card")).not.toBeInTheDocument();
   });
 
-  it("retry removes the session cache slice (ADR-0058 removeQueries contract)", async () => {
-    // Locks the ADR-0058 decision that retry REMOVES (not invalidates) the
+  it("retry resets the session cache slice (ADR-0058 resetQueries contract)", async () => {
+    // Locks the ADR-0058 decision that retry RESETS (not invalidates) the
     // session query cache: invalidate would leave stale data for the remounted
-    // children to re-render and re-throw against. A regression to invalidate
-    // (or a no-op) would still pass the existing retry test above (the mock
-    // returns fresh data either way), so this spy is the distinguishing guard.
-    const removeSpy = vi.spyOn(QueryClient.prototype, "removeQueries");
+    // children to re-render and re-throw against, and a bare remove would not
+    // refetch the still-mounted observers (the region boundary never unmounts
+    // useSessionState, so the remount would re-render the parent's stale JSX
+    // snapshot and re-throw). A regression to invalidate (or a no-op) would
+    // still pass the existing retry test above (the mock returns fresh data
+    // either way), so this spy is the distinguishing guard.
+    const removeSpy = vi.spyOn(QueryClient.prototype, "resetQueries");
     let threadData: ThreadEntry[] = [
       {
         entry: "Turn",
-        data: { question: "x", outcome: { kind: "Bogus" } },
+        data: { question: "x", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
       } as unknown as ThreadEntry,
     ];
     vi.mocked(conversation).mockImplementation(async () => threadData);
@@ -1335,8 +1326,8 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     // The remounted pane reads the refetched (clean) data.
     await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
-    // ADR-0058: retry called removeQueries (the cache was dropped, not left
-    // stale), and the drop drove a fresh conversation() refetch.
+    // ADR-0058: retry called resetQueries (the cache data was dropped AND the
+    // active observers refetched), which drove the fresh conversation() call.
     expect(removeSpy).toHaveBeenCalled();
     expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
       conversationCallsBefore,
@@ -1355,7 +1346,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
         return [
           {
             entry: "Turn",
-            data: { question: "bad", outcome: { kind: "Bogus" } },
+            data: { question: "bad", outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
           } as unknown as ThreadEntry,
         ];
       }

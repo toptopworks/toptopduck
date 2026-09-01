@@ -720,9 +720,9 @@ describe("App delete-source flow (issue #38)", () => {
     expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
     expect(screen.queryByText(failedPrefix("replace"))).not.toBeInTheDocument();
     // A RemoveSource reject is a command reject, not a turn outcome, so the
-    // ask-turn Failed card (.textual-card.failed, issue #125) must not render.
+    // rail's Failed card (.turn-outcome.failed, issue #125) must not render.
     expect(
-      document.querySelector(".textual-card.failed"),
+      document.querySelector(".turn-outcome.failed"),
     ).not.toBeInTheDocument();
   });
 });

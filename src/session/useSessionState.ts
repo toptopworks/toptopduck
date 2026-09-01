@@ -39,8 +39,7 @@ import type { ThreadEntry } from "../types/thread";
 // Per-session state + actions (ADR-0051). The shell (<App>) creates the
 // session id and renders <SessionPane key={sid} sessionId={sid} />; this hook
 // owns everything inside: server state (workingSet / active / thread via
-// TanStack Query) and client UI state (viewedResult / pinnedToHistory /
-// loading / dialogs). The hook IS the ADR-0051 "per-tab component autonomy" --
+// TanStack Query) and client UI state (viewedResult / loading / dialogs). The hook IS the ADR-0051 "per-tab component autonomy" --
 // a future multi-session shell renders one SessionPane per open id and the
 // keyed caches stay isolated by the `['session', sid, ...]` prefix.
 
@@ -183,7 +182,6 @@ export function useSessionState(
   // for the boundary. workspaceContent derivation stays here (fusion below).
   const {
     viewedResult,
-    pinnedToHistory,
     selectResult,
     markProduced,
     clearForNewSource,
@@ -212,8 +210,8 @@ export function useSessionState(
   }, [datasets]);
 
   const workspaceContent = useMemo(
-    () => deriveWorkspaceContent(thread, viewedResult, pinnedToHistory, staleByReference),
-    [thread, viewedResult, pinnedToHistory, staleByReference],
+    () => deriveWorkspaceContent(thread, viewedResult, staleByReference),
+    [thread, viewedResult, staleByReference],
   );
 
   // --- Helpers -------------------------------------------------------------

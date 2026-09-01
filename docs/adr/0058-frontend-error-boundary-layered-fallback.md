@@ -20,7 +20,7 @@
 
 **（2）降级语义**
 - 降级卡 = 友好文案 + "重试"按钮 + 可展开"技术详情"（dev 模式/折叠，守 ADR-0017 诚实——不藏着但不吓人）。
-- **重试 = `key` bump remount + `removeQueries` 该区域服务端态**（0051 的 thread/rows/workingSet query；用 remove 而非 invalidate——remount 时 useQuery 对 invalidate 仍会 stale-then-refetch，先用致异的旧数据渲染会再次 throw，remove 才真正"重拉最新而非拿旧数据再炸"）。
+- **重试 = 区域重试 epoch（state bump）+ `resetQueries` 该区域服务端态**（0051 的 thread/rows/workingSet query；用 reset 而非 invalidate——invalidate 会 stale-then-refetch，remount 先用致异旧数据渲染会再次 throw。校准：remove 同样不够——region 边界不卸载 query observer（observer 在边界外的 useSessionState），remove 后没有重拉驱动；且 cache 通知经 notifyManager 微任务批处理、晚于边界的同步 error-clear 重渲染，remount 撞上父组件旧 JSX 快照（仍携致异数据）立即再 throw，降级卡死锁。reset 同时清数据并主动重拉仍挂载的 observer；epoch bump 把父组件拉进同一 React 批，批内自上而下重渲染使 useQuery 同步读到 reset 后的 pending 态，边界以干净快照重挂）。
 - 区域内客户端 UI 态（如分页 offset）随 remount 丢弃；会话级 UI 态（viewedResult）保留。
 - shell 骨架（header / 会话 tabs / QuestionBar）恒保——降级卡只替换崩掉的那一块。
 - 重试后仍致异：降级卡保持、不再无限重试；持续致异由 L3 兜底接（"重开会话/重载"出口）。
@@ -57,12 +57,13 @@ ADR-0045（shell）/ 0051（状态分层）/ 0033（Vega 退化）/ 0015（load 
 ## Consequences
 
 - **前端实现**：新增 ErrorBoundary 组件（class component，`getDerivedStateFromError` + `componentDidCatch`）；分区包裹 ResultView / Thread / SessionPane；顶层包裹 App 根。降级卡组件（友好文案 + 重试按钮 + 可展开技术详情）。
-- **重试实现**：`key` bump（如 `key={retryCount}`）强制 remount + `queryClient.removeQueries({ queryKey: ['session', sid, <region>] })`（依赖 0051 落地）；用 remove 而非 invalidate，确保 remount 不会先用 stale 旧数据渲染而再次 throw。
+- **重试实现**：onReset 内 `queryClient.resetQueries({ queryKey: ['session', sid, <region>] })` + 区域重试 epoch state bump（依赖 0051 落地）；用 reset 而非 invalidate / remove，确保 remount 不先用 stale 旧数据渲染而再次 throw（理由见 Decision 2 校准）。
 - **与 0033 关系**：Vega `useEffect` try/catch（`ResultView.tsx:109`）**保留不动**；ErrorBoundary 只接 ResultView 内 Vega 之外的 render throw。
-- **与 0051 关系**：SessionPane 级边界契合 per-tab 隔离；`removeQueries` 重试依赖 0051 queryKey 分片；viewedResult 保留契合 active/Viewed 分离。
+- **与 0051 关系**：SessionPane 级边界契合 per-tab 隔离；`resetQueries` 重试依赖 0051 queryKey 分片；viewedResult 保留契合 active/Viewed 分离。
 - **嵌套边界的 React 19 限制（已知缺口）**：session 边界是 thread/result 边界的 React 树祖先。React 19 + TanStack Query（useSyncExternalStore）真实 App 树中，Query 驱动的 re-render 阶段 throw 会被外层 session 边界先 catch（降级整个 session）而非内层 region 边界；首渲染 throw 不受影响（region 边界正常 catch）。根因未定位（隔离测试不可复现）。由此 granular partition（一块崩只降级该块）在首渲染 throw 可靠、Query-driven re-render throw 不保证；黑盒测试据此断言「降级卡可见 + 会话隔离 + 重试」而非「region 精确 catch」。恢复 Query-driven 场景 granular 的前提是在隔离测试复现并定位根因，或重构边界为 siblings 拓扑。
 - **与 0055 关系**：关 tab in-flight 场景的"前端 promise 孤儿"（`setQueryData` 打空 cache）仍归 0051/0055 处理，不上抬到 ErrorBoundary。
 - **重试上限留实现期**：精确重试次数、降级卡技术详情的 dev/prod 策略非架构。
 - **CONTEXT.md 不动**：降级分层是实现/可靠性决策，不引入新领域术语。
 - **出口保留**：若某区域持续致异成常态，该区域可加"上报/反馈"出口（v2）；L3 顶层兜底的"重载"是否带"恢复未保存会话"留 v2。
 - **被 ADR-0062 精确化（QuestionBar 骨架归类）**：本 ADR"shell 骨架（header / 会话 tabs / QuestionBar）恒保"中 QuestionBar 归"会话级骨架"（跨 rail + workspace），非整窗骨架；会话栏独立通底。另：本 ADR"会话 tabs"措辞待顺为 0060 左会话栏（0060 未提 0058）。见 ADR-0062 R1。
+- **校准（region 重试机制）**：ADR-0114 退役工作区末轮文本态后，region 边界重试首次成为黑盒测试可达路径，暴露 removeQueries 实现下 region 降级卡的恢复死锁（Decision 2 校准所述），据此改定 resetQueries + 区域重试 epoch。

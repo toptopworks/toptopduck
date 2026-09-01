@@ -73,9 +73,14 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     // ADR-0058 Decision 2: drop the region's stale server state, then clear
     // the error so the children remount fresh. onReset runs BEFORE the clear
     // so a synchronous cache drop queues the refetch the remounted children
-    // read. No key bump is needed: the render throw already unmounted the
-    // children (the fallback took their place), so clearing the error mounts
-    // them fresh and any local UI state is naturally reset.
+    // read. The boundary itself needs no key bump to remount children: the
+    // render throw already unmounted them (the fallback took their place),
+    // so clearing the error mounts them fresh and any local UI state is
+    // naturally reset. (A caller MAY still key this boundary -- see
+    // ADR-0058 Decision 2 calibration: for region boundaries the query
+    // observers live outside, and the caller's retry-epoch bump pulls the
+    // parent into the same React batch so the children remount on a fresh
+    // props snapshot.)
     this.props.onReset?.();
     this.setState({ error: null });
   };
@@ -129,8 +134,7 @@ interface DegradeCardProps {
 // TechnicalDetailsFold; the .degrade-card class hook stays on the <Card> for
 // selector / test stability (ErrorBoundary.test.tsx queries .degrade-card).
 // The destructive left-edge accent (ADR-0058 recoverable-but-flagged tone)
-// rides a literal border-l-[3px] border-l-destructive, mirroring the
-// textual-card failed variant from issue #173.
+// rides a literal border-l-[3px] border-l-destructive.
 //
 // gap-0 opts out of Card's flex gap so each section's own margin drives the
 // rhythm -- TechnicalDetailsFold carries mt-2 internally, and flex gap would

@@ -182,8 +182,7 @@ describe("ErrorBoundary (ADR-0058)", () => {
         </ErrorBoundary>,
       ),
     );
-    // Left-edge destructive accent -- the ADR-0058 recoverable-but-flagged
-    // tone, mirrored from the textual-card failed variant (issue #173).
+    // Left-edge destructive accent -- the ADR-0058 recoverable-but-flagged tone.
     const card = document.querySelector(".degrade-card") as HTMLElement;
     expect(card.className.split(/\s+/)).toContain("border-l-destructive");
     expect(card.className.split(/\s+/)).toContain("border-l-[3px]");
