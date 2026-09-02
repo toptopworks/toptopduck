@@ -178,6 +178,13 @@ pub enum SessionError {
     /// `SkillMount.data.kind` and renders the skill-domain locale message.
     #[error("{0}")]
     SkillMount(crate::session::skills::SkillMountError),
+    /// A full-result CSV export failed (issue #769): `export_rows_csv` wraps
+    /// the typed [`ExportRowsError`](crate::model::ExportRowsError) here
+    /// instead of flattening the destination half to [`Self::Engine`]
+    /// (string), so the frontend recurses `Export.data.kind` and renders the
+    /// export-domain locale message.
+    #[error("{0}")]
+    Export(crate::model::ExportRowsError),
     /// An engine / internal failure (mutex poison, join error, etc.) -- the
     /// catch-all for failures that are not one of the addressing / guard
     /// states above. Carries the underlying detail string.

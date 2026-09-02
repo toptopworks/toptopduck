@@ -292,9 +292,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-# CSV round-trip assertions for the full-result export tests (issue #769) --
-# the same crate the core-side writer uses.
-csv = "1"
 # Generates .xlsx fixtures (incl. formula cells with cached values) for the
 # black-box ingest seam -- no binary fixtures committed (mirrors the parquet
 # fixture helper).

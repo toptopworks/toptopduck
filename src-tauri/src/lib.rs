@@ -50,9 +50,9 @@ pub use approval::{
 pub use cancel::CancelToken;
 pub use commands::StoreCommandError;
 pub use model::{
-    ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportRowsError, GuidanceReason,
-    GuidanceRequest, GuidanceSheet, GuidanceSheetState, LoadError, LoadOutcome, ProfileId,
-    ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
+    ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportIoStep, ExportRowsError,
+    GuidanceReason, GuidanceRequest, GuidanceSheet, GuidanceSheetState, LoadError, LoadOutcome,
+    ProfileId, ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
     ProviderProfile, RectifyProvenance, RemoveSourceError, RenameError, RowPage, RowReadError,
     SheetGuidance, SheetRectify, SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind,
     StaleAnchor, StaleReason, TextKind, ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound,

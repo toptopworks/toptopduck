@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { renderI18n } from "../../common/__tests__/helpers";
+import { renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { TooltipProvider } from "../../ui/tooltip";
 import { ResultActions } from "../ResultActions";
 import { exportRowsCsv, readRowsTsv } from "../../../api";
@@ -86,12 +86,18 @@ describe("ResultActions", () => {
   });
 
   it("routes an export failure to the error lane, never silently", async () => {
+    // The wire shape is the typed SessionError::Export reject (ExportRowsError
+    // adjacently-tagged); the lane receives it verbatim for toAppError.
+    const reject = {
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Write", path: "C:/out/x.csv", detail: "denied" } },
+    };
     vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
-    vi.mocked(exportRowsCsv).mockRejectedValue(new Error("create C:/out/x.csv: denied"));
+    vi.mocked(exportRowsCsv).mockRejectedValue(reject);
     const { onError } = renderActions();
     fireEvent.click(exportButton());
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
-    expect(onError.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(onError.mock.calls[0][0]).toEqual(reject);
   });
 
   it("writes the full TSV to the clipboard and acknowledges in place", async () => {
@@ -101,6 +107,7 @@ describe("ResultActions", () => {
     vi.mocked(readRowsTsv).mockResolvedValue("甲\t乙\na b\tx y\n");
     const { onError } = renderActions();
     fireEvent.click(copyButton());
+    await waitFor(() => expect(readRowsTsv).toHaveBeenCalledWith("sess-1", "result_1"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("甲\t乙\na b\tx y\n"));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "已复制" })).toBeInTheDocument(),
@@ -145,5 +152,65 @@ describe("ResultActions", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "已复制" })).toBeEnabled(),
     );
+  });
+
+  it("disables both actions while an export is in flight", async () => {
+    // AC: the shared busy flag is direction-agnostic -- an export in flight
+    // disables the pair exactly like a copy (no re-trigger either).
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    let resolveExport: (v: void) => void = () => {};
+    vi.mocked(exportRowsCsv).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveExport = resolve;
+        }),
+    );
+    renderActions();
+    fireEvent.click(exportButton());
+    await waitFor(() => expect(exportRowsCsv).toHaveBeenCalledTimes(1));
+    expect(exportButton()).toBeDisabled();
+    expect(copyButton()).toBeDisabled();
+    fireEvent.click(exportButton()); // lands on a disabled control
+    expect(exportRowsCsv).toHaveBeenCalledTimes(1);
+    resolveExport(undefined);
+    await waitFor(() => expect(exportButton()).toBeEnabled());
+  });
+
+  it("drops a late copy failure and ack when the result switched under it", async () => {
+    // The header instance is reused across result switches; settle-time
+    // effects (the error lane, the ack) land only on the result that started
+    // the pull -- a late resolution under a new reference is dropped, while
+    // the busy flag still clears.
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    let rejectTsv: (e: Error) => void = () => {};
+    vi.mocked(readRowsTsv).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectTsv = reject;
+        }),
+    );
+    const onError = vi.fn();
+    const { rerender } = renderI18n(
+      <TooltipProvider>
+        <ResultActions sessionId="sess-1" referenceName="result_1" onError={onError} />
+      </TooltipProvider>,
+    );
+    fireEvent.click(copyButton());
+    await waitFor(() => expect(readRowsTsv).toHaveBeenCalledTimes(1));
+    // The user switches to another result under the same header instance.
+    rerender(
+      withIntl(
+        <TooltipProvider>
+          <ResultActions sessionId="sess-1" referenceName="result_2" onError={onError} />
+        </TooltipProvider>,
+      ),
+    );
+    rejectTsv(new Error("late"));
+    // Busy clears (the pair re-enables) but the late failure never lands on
+    // the new result's lane, and no ack flips.
+    await waitFor(() => expect(copyButton()).toBeEnabled());
+    expect(onError).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
   });
 });

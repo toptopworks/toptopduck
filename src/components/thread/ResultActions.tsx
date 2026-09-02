@@ -12,13 +12,18 @@
 // toast). ONE busy flag disables both actions while either is in flight (no
 // re-trigger, no concurrent full pulls; no progress bar by design). Failures
 // surface through the caller's error lane (toAppError read semantics ->
-// ResultView's ErrorBanner) -- never silent, never a fake ack.
+// ResultView's ErrorBanner) -- never silent, never a fake ack, and logged to
+// the plugin sink either way. A ResultActions instance is reused across result
+// switches (the header remounts on nothing), so settle-time effects (the error
+// lane, the copied ack) are dropped when the result they started from is no
+// longer on screen -- a late failure lands on the result that started the
+// pull, not whichever result the user switched to.
 //
 // i18n (ADR-0052): the shared "Copied" flip reuses thread.copy.copied's id;
 // the two idle labels are this file's own static literals for @formatjs/cli
 // extract.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, Download } from "lucide-react";
@@ -39,17 +44,29 @@ export function ResultActions({
   onError: (e: unknown) => void;
 }) {
   const intl = useIntl();
-  // Which full pull is in flight -- one flag for both actions, so neither can
-  // re-trigger (or start alongside the other) until the pull settles.
-  const [busy, setBusy] = useState<"export" | "copy" | null>(null);
+  // One busy flag covers both actions, so neither can re-trigger (or start
+  // alongside the other) until the pull settles.
+  const [busy, setBusy] = useState(false);
   // The ack flag + hold timer live in the shared copied-ack hook; the copy
   // tooltip's natural open state (hover/focus intent) stays here, with the
   // copied ack ORing in to force it open for the hold window.
   const { copied, acknowledge } = useCopiedAck();
   const [tooltipOpen, setTooltipOpen] = useState(false);
+  // Latest-props mirror: the handlers are async, so the props they closed over
+  // at trigger time can go stale while a pull is in flight (the user switches
+  // results under the reused instance); settle-time effects compare against
+  // this mirror so a late failure or ack is dropped rather than misattributed.
+  const currentRef = useRef({ sessionId, referenceName });
+  useEffect(() => {
+    currentRef.current = { sessionId, referenceName };
+  });
+  const isStale = (at: { sessionId: string; referenceName: string }) =>
+    currentRef.current.sessionId !== at.sessionId ||
+    currentRef.current.referenceName !== at.referenceName;
 
   async function exportCsv() {
-    setBusy("export");
+    const atStart = { sessionId, referenceName };
+    setBusy(true);
     try {
       // Native save dialog; a cancel (null) is a quiet no-op -- no export, no
       // error surface.
@@ -58,27 +75,31 @@ export function ResultActions({
         filters: [{ name: "CSV", extensions: ["csv"] }],
       });
       if (dest === null) return;
-      await exportRowsCsv(sessionId, referenceName, dest);
+      await exportRowsCsv(atStart.sessionId, atStart.referenceName, dest);
     } catch (e) {
-      onError(e);
+      // Honest failure: the error lane carries the reason (the lane stays
+      // diagnosable in the log sink too -- symmetric with the copy path).
+      log.warn("ResultActions", "full-result export failed", e);
+      if (!isStale(atStart)) onError(e);
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
   async function copyAll() {
-    setBusy("copy");
+    const atStart = { sessionId, referenceName };
+    setBusy(true);
     try {
-      const tsv = await readRowsTsv(sessionId, referenceName);
+      const tsv = await readRowsTsv(atStart.sessionId, atStart.referenceName);
       await navigator.clipboard.writeText(tsv);
-      acknowledge();
+      if (!isStale(atStart)) acknowledge();
     } catch (e) {
       // Honest failure: no ack flip -- the error lane carries the reason (the
       // lane stays diagnosable in the log sink too).
       log.warn("ResultActions", "full-result copy failed", e);
-      onError(e);
+      if (!isStale(atStart)) onError(e);
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
@@ -94,7 +115,7 @@ export function ResultActions({
     id: "thread.copy.copied",
     defaultMessage: "Copied",
   });
-  const disabled = busy !== null;
+  const disabled = busy;
   return (
     <div className="flex shrink-0 gap-1">
       <Tooltip>

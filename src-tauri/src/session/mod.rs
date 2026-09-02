@@ -32,8 +32,8 @@ use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
-    ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportRowsError, RenameError, RowPage,
-    RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, TextKind,
+    ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportIoStep, ExportRowsError, RenameError,
+    RowPage, RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, TextKind,
     ThreadEntry, TraceRound, TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
     TurnRuntime,
 };
@@ -1902,23 +1902,11 @@ impl Session {
         let limit = limit.min(MAX_READ_ROWS);
         let (columns, body, total) = self.full_rows_sql(reference_name)?;
         let sql = format!("{body} LIMIT {limit} OFFSET {offset}");
-        let conn = self
-            .admin_engine
-            .acquire()
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
         let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| RowReadError::Execute(e.to_string()))?
-        {
-            out.push(Self::varchar_cells(row, columns.len())?);
-        }
+        self.scan_rows(&sql, columns.len(), |cells| {
+            out.push(cells);
+            Ok(())
+        })?;
         Ok(RowPage {
             columns,
             rows: out,
@@ -1973,6 +1961,41 @@ impl Session {
         Ok(cells)
     }
 
+    /// Run a rows query and hand each row's display cells to `on_row`
+    /// (issue #769): the one data-access loop shared by the paged read and
+    /// the full-result export / copy paths -- acquire / prepare / query /
+    /// scan / cell-shaping live here exactly once, so the three paths share
+    /// one contract instead of three copies. `E` converts from
+    /// [`RowReadError`], keeping each caller's own error type.
+    fn scan_rows<E>(
+        &self,
+        sql: &str,
+        ncols: usize,
+        mut on_row: impl FnMut(Vec<String>) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<RowReadError>,
+    {
+        let conn = self
+            .admin_engine
+            .acquire()
+            .map_err(|e| RowReadError::Execute(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| RowReadError::Execute(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| RowReadError::Execute(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| RowReadError::Execute(e.to_string()))?
+        {
+            let cells = Self::varchar_cells(row, ncols)?;
+            on_row(cells)?;
+        }
+        Ok(())
+    }
+
     /// Export every row of a dataset to `path` as UTF-8 CSV (issue #769): the
     /// header row leads, then ALL rows -- the same data source and cell
     /// semantics as [`Self::read_rows`] but no `MAX_READ_ROWS` clamp and no
@@ -1984,41 +2007,46 @@ impl Session {
     /// results export too -- the rows are real and the payload carries no
     /// status markers.
     pub fn export_rows_csv(&self, reference_name: &str, path: &str) -> Result<(), ExportRowsError> {
+        let (columns, sql, _) = self.full_rows_sql(reference_name)?;
+        // Create the destination first; the streaming half writes the BOM and
+        // hands the file to the csv writer (which adds its own buffer and
+        // flushes through it at the end).
+        let file = fs::File::create(path).map_err(|e| export_io(ExportIoStep::Create, path, e))?;
+        let result = self.export_csv_stream(file, &columns, &sql, path);
+        if result.is_err() {
+            // Create truncated any pre-existing file at the path, so a failed
+            // export must not leave the half-written artifact behind -- a
+            // truncated CSV opens as a valid-looking export. Best-effort
+            // removal; the error itself still crosses IPC.
+            let _ = fs::remove_file(path);
+        }
+        result
+    }
+
+    /// The post-create half of [`Self::export_rows_csv`] (issue #769): BOM,
+    /// header, and every row streamed through the csv writer's buffer. Split
+    /// out so the caller can remove the truncated destination when this
+    /// fails.
+    fn export_csv_stream(
+        &self,
+        mut file: fs::File,
+        columns: &[ColumnSchema],
+        sql: &str,
+        path: &str,
+    ) -> Result<(), ExportRowsError> {
         use std::io::Write as _;
 
-        let (columns, sql, _) = self
-            .full_rows_sql(reference_name)
-            .map_err(ExportRowsError::RowRead)?;
-        // Create the destination and write the BOM first; the csv writer wraps
-        // the file (adding its own buffer) and flushes through it at the end.
-        let mut file = fs::File::create(path)
-            .map_err(|e| ExportRowsError::Io(format!("create {path}: {e}")))?;
         file.write_all(UTF8_BOM.as_bytes())
-            .map_err(|e| ExportRowsError::Io(format!("write {path}: {e}")))?;
+            .map_err(|e| export_io(ExportIoStep::Write, path, e))?;
         let mut wtr = csv::Writer::from_writer(file);
         wtr.write_record(columns.iter().map(|c| c.name.as_str()))
-            .map_err(|e| ExportRowsError::Io(format!("write {path}: {e}")))?;
-        let conn = self
-            .admin_engine
-            .acquire()
-            .map_err(|e| ExportRowsError::RowRead(RowReadError::Execute(e.to_string())))?;
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| ExportRowsError::RowRead(RowReadError::Execute(e.to_string())))?;
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| ExportRowsError::RowRead(RowReadError::Execute(e.to_string())))?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| ExportRowsError::RowRead(RowReadError::Execute(e.to_string())))?
-        {
-            let cells =
-                Self::varchar_cells(row, columns.len()).map_err(ExportRowsError::RowRead)?;
+            .map_err(|e| export_io(ExportIoStep::Write, path, e))?;
+        self.scan_rows(sql, columns.len(), |cells| {
             wtr.write_record(cells)
-                .map_err(|e| ExportRowsError::Io(format!("write {path}: {e}")))?;
-        }
+                .map_err(|e| export_io(ExportIoStep::Write, path, e))
+        })?;
         wtr.flush()
-            .map_err(|e| ExportRowsError::Io(format!("write {path}: {e}")))?;
+            .map_err(|e| export_io(ExportIoStep::Flush, path, e))?;
         Ok(())
     }
 
@@ -2033,23 +2061,10 @@ impl Session {
         let (columns, sql, _) = self.full_rows_sql(reference_name)?;
         let mut out = String::new();
         push_tsv_line(&mut out, columns.iter().map(|c| c.name.as_str()));
-        let conn = self
-            .admin_engine
-            .acquire()
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| RowReadError::Execute(e.to_string()))?
-        {
-            let cells = Self::varchar_cells(row, columns.len())?;
+        self.scan_rows(&sql, columns.len(), |cells| {
             push_tsv_line(&mut out, cells.iter());
-        }
+            Ok(())
+        })?;
         Ok(out)
     }
 
@@ -2096,6 +2111,17 @@ fn push_tsv_line<S: AsRef<str>>(out: &mut String, cells: impl IntoIterator<Item 
         }
     }
     out.push('\n');
+}
+
+/// Build the typed destination-file failure for a CSV export (issue #769):
+/// which step failed, at which path, with the underlying io error as the
+/// detail.
+fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> ExportRowsError {
+    ExportRowsError::Io {
+        step,
+        path: path.to_string(),
+        detail: e.to_string(),
+    }
 }
 
 /// Map the agent loop's structured outcome onto the four-way [`TurnOutcome`]

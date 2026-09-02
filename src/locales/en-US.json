@@ -104,6 +104,7 @@
   "error.save.rename": "Failed to replace the .duck file",
   "error.save.serialize": "Failed to serialize the .duck file",
   "error.session.engine": "Internal error",
+  "error.session.exportIo": "Failed to write the export file",
   "error.session.inFlight": "A query is already running on this session; cancel it or wait for it to finish",
   "error.session.invalidId": "Invalid session id",
   "error.session.notFound": "Session not found or closed",

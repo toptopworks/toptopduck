@@ -34,7 +34,7 @@ use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use crate::mcp::McpClient;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, ExportRowsError, LoadOutcome, ProfileId, ProfileKeyStatus,
+    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
     SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
@@ -956,10 +956,10 @@ pub async fn read_rows(
 /// (issue #769): the native save dialog already ran frontend-side, so a
 /// cancel never reaches here. Runs off the async/UI thread and under the
 /// session lock like `read_rows` -- a full-result scan is the same blocking
-/// class as a large-OFFSET page. Data-source failures cross IPC as the typed
-/// `SessionError::RowRead` (matching `read_rows`); a destination-file failure
-/// is not an addressing / guard state, so it rides `SessionError::Engine`
-/// with a descriptive detail.
+/// class as a large-OFFSET page. Failures cross IPC as the typed
+/// `SessionError::Export` (`ExportRowsError`): the data-source half mirrors
+/// `read_rows`, the destination half carries the step / path / detail for the
+/// export-domain locale message.
 #[tauri::command]
 pub async fn export_rows_csv(
     store: State<'_, Arc<SessionStore>>,
@@ -973,10 +973,7 @@ pub async fn export_rows_csv(
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
         s.export_rows_csv(&reference_name, &path)
-            .map_err(|e| match e {
-                ExportRowsError::RowRead(r) => SessionError::RowRead(r),
-                ExportRowsError::Io(detail) => SessionError::Engine(detail),
-            })
+            .map_err(SessionError::Export)
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))?

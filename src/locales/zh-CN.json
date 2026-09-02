@@ -104,6 +104,7 @@
   "error.save.rename": "替换 .duck 失败",
   "error.save.serialize": "序列化 .duck 失败",
   "error.session.engine": "内部错误",
+  "error.session.exportIo": "导出文件写入失败",
   "error.session.inFlight": "该会话有查询进行中，请先取消或等待完成",
   "error.session.invalidId": "会话 id 格式错误",
   "error.session.notFound": "会话不存在或已关闭",

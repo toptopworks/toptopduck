@@ -7,6 +7,7 @@
 
 import type {
   DuckLoadError,
+  ExportRowsError,
   MigrationError,
   RemoveSourceError,
   RenameError,
@@ -52,6 +53,8 @@ export function isSessionError(e: unknown): e is SessionError {
       return isRowReadError((e as { data?: unknown }).data);
     case "SkillMount":
       return isSkillMountError((e as { data?: unknown }).data);
+    case "Export":
+      return isExportRowsError((e as { data?: unknown }).data);
     case "Engine":
       return typeof (e as { data?: unknown }).data === "string";
     default:
@@ -279,6 +282,31 @@ export function isRowReadError(e: unknown): e is RowReadError {
     case "UnknownDataset":
     case "Execute":
       return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to an ExportRowsError (issue #769) -- the
+// export_rows_csv error. Reached via isSessionError's Export branch. The
+// RowRead half recurses into the shared row-read shape; Io verifies the step /
+// path / detail triple before promising it.
+export function isExportRowsError(e: unknown): e is ExportRowsError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "RowRead":
+      return isRowReadError((e as { data?: unknown }).data);
+    case "Io": {
+      const d = (e as { data?: unknown }).data;
+      if (typeof d !== "object" || d === null) return false;
+      const step = (d as { step?: unknown }).step;
+      return (
+        (step === "Create" || step === "Write" || step === "Flush") &&
+        typeof (d as { path?: unknown }).path === "string" &&
+        typeof (d as { detail?: unknown }).detail === "string"
+      );
+    }
     default:
       return false;
   }

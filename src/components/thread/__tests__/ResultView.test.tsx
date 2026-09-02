@@ -692,8 +692,9 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
 
   it("surfaces an export failure in the read-error banner", async () => {
     // AC (issue #769): failures route through the existing error channel (the
-    // read-kind ErrorBanner), not silently -- the Engine reject's descriptive
-    // detail lands in the technical fold.
+    // read-kind ErrorBanner), not silently -- the typed Export reject renders
+    // the export-domain message with the step / path / detail in the
+    // technical fold.
     vi.mocked(readRows).mockResolvedValue({
       columns: [{ name: "n", canonical_type: "BIGINT" }],
       rows: [["3"]],
@@ -703,8 +704,8 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     });
     vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
     vi.mocked(exportRowsCsv).mockRejectedValue({
-      kind: "Engine",
-      data: "create C:/out/x.csv: denied",
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
     });
     renderI18n(
       <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
@@ -712,7 +713,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/内部错误/);
+    expect(alert).toHaveTextContent(/导出文件写入失败/);
     expect(alert).toHaveTextContent(/create C:\/out\/x\.csv: denied/);
   });
 });
