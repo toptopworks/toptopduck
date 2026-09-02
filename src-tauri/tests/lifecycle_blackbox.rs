@@ -869,6 +869,36 @@ fn read_rows_returns_history_for_stale_result() {
 }
 
 #[test]
+fn export_and_copy_still_work_on_a_stale_result() {
+    // Issue #769: a stale result's rows are real and the staleness disclosure
+    // has already done its duty -- export/copy stay available and the payload
+    // is pure data (the full-path twin of
+    // `read_rows_returns_history_for_stale_result`).
+    let mut session =
+        session_with_scripts(&[("count", r#"SELECT COUNT(*) AS n FROM "orders".data"#)]);
+    load_source(&mut session, &fixture("people.csv"));
+    load_source(&mut session, &fixture("orders.csv"));
+    session.ask("count"); // result_1 (COUNT -> 1 row)
+    session
+        .remove_active_source("orders", "people")
+        .expect("cascade");
+    assert!(session.get("result_1").unwrap().stale.is_some());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("stale.csv");
+    session
+        .export_rows_csv("result_1", path.to_str().unwrap())
+        .expect("stale export");
+    let bytes = std::fs::read(&path).expect("read csv");
+    assert_eq!(&bytes[..3], b"\xEF\xBB\xBF", "UTF-8 BOM leads");
+    let text = String::from_utf8_lossy(&bytes[3..]);
+    assert_eq!(text, "n\n3\n", "header + the real COUNT row, no markers");
+
+    let tsv = session.read_rows_tsv("result_1").expect("stale tsv");
+    assert_eq!(tsv, "n\n3\n");
+}
+
+#[test]
 fn result_number_takes_max_plus_one_after_stale() {
     // AC8 (issue #40, ADR-0022/0013): after a result goes stale, the next
     // materialization takes max(existing)+1 -- stale numbers are never reused

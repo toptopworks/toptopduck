@@ -185,6 +185,8 @@
   "questionBar.phase.thinkingRetry": "思考中（第 {attempt} 次）…",
   "questionBar.placeholder": "用自然语言提问…",
   "questionBar.submit": "提问",
+  "result.action.copyAll": "复制全部",
+  "result.action.exportCsv": "导出 CSV",
   "result.assumption": "假设：{text}",
   "result.emptyRows": "（无数据行）",
   "result.pagination.next": "下一页",

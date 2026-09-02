@@ -429,6 +429,18 @@ impl std::fmt::Display for RowReadError {
 }
 impl std::error::Error for RowReadError {}
 
+/// Why a full-result CSV export failed (issue #769). The data-source half
+/// reuses [`RowReadError`] 1:1 with the paged read; writing the destination
+/// file (create / write / flush) is the separate [`Self::Io`]. The IPC layer
+/// maps `RowRead` onto [`SessionError::RowRead`] (typed, locale-rendered) and
+/// `Io` onto [`SessionError::Engine`] with a descriptive detail -- Rust-only,
+/// never serialized across IPC itself.
+#[derive(Debug)]
+pub enum ExportRowsError {
+    RowRead(RowReadError),
+    Io(String),
+}
+
 /// One page of a dataset rows (ADR-0024 windowed display). Cells are CAST to
 /// VARCHAR (NULL renders as the empty string) so the frontend renders uniform
 /// strings. `total` is the full row count -- the frontend shows it alongside

@@ -50,14 +50,14 @@ pub use approval::{
 pub use cancel::CancelToken;
 pub use commands::StoreCommandError;
 pub use model::{
-    ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest,
-    GuidanceSheet, GuidanceSheetState, LoadError, LoadOutcome, ProfileId, ProfileKeyStatus,
-    ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, ProviderProfile,
-    RectifyProvenance, RemoveSourceError, RenameError, RowPage, RowReadError, SheetGuidance,
-    SheetRectify, SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor,
-    StaleReason, TextKind, ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProgress, TurnProvenance, TurnRecord, TurnRuntime, VizSpec,
-    DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportRowsError, GuidanceReason,
+    GuidanceRequest, GuidanceSheet, GuidanceSheetState, LoadError, LoadOutcome, ProfileId,
+    ProfileKeyStatus, ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView,
+    ProviderProfile, RectifyProvenance, RemoveSourceError, RenameError, RowPage, RowReadError,
+    SheetGuidance, SheetRectify, SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind,
+    StaleAnchor, StaleReason, TextKind, ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound,
+    TurnFailure, TurnOutcome, TurnPhase, TurnProgress, TurnProvenance, TurnRecord, TurnRuntime,
+    VizSpec, DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
     DuckPath, LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
@@ -394,6 +394,8 @@ pub fn run() {
             commands::cancel,
             commands::conversation,
             commands::read_rows,
+            commands::read_rows_tsv,
+            commands::export_rows_csv,
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_provider_config,

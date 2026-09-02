@@ -185,6 +185,8 @@
   "questionBar.phase.thinkingRetry": "Thinking (attempt {attempt})…",
   "questionBar.placeholder": "Ask in natural language…",
   "questionBar.submit": "Ask",
+  "result.action.copyAll": "Copy all",
+  "result.action.exportCsv": "Export CSV",
   "result.assumption": "Assumption: {text}",
   "result.emptyRows": "(no data rows)",
   "result.pagination.next": "Next",

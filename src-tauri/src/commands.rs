@@ -34,7 +34,7 @@ use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use crate::mcp::McpClient;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus,
+    DatasetDescriptor, DatasetPrivacy, ExportRowsError, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
     SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
@@ -945,6 +945,59 @@ pub async fn read_rows(
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
         s.read_rows(&reference_name, offset, limit)
+            .map_err(SessionError::RowRead)
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))?
+}
+
+/// Export every row of a dataset from the named session as UTF-8 CSV (BOM +
+/// header row + all rows, no `MAX_READ_ROWS` clamp) to the user-chosen `path`
+/// (issue #769): the native save dialog already ran frontend-side, so a
+/// cancel never reaches here. Runs off the async/UI thread and under the
+/// session lock like `read_rows` -- a full-result scan is the same blocking
+/// class as a large-OFFSET page. Data-source failures cross IPC as the typed
+/// `SessionError::RowRead` (matching `read_rows`); a destination-file failure
+/// is not an addressing / guard state, so it rides `SessionError::Engine`
+/// with a descriptive detail.
+#[tauri::command]
+pub async fn export_rows_csv(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    reference_name: String,
+    path: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let handle = Arc::clone(&handle);
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = handle.session_lock()?;
+        s.export_rows_csv(&reference_name, &path)
+            .map_err(|e| match e {
+                ExportRowsError::RowRead(r) => SessionError::RowRead(r),
+                ExportRowsError::Io(detail) => SessionError::Engine(detail),
+            })
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))?
+}
+
+/// Read every row of a dataset from the named session as TSV text (header row
+/// leading, no `MAX_READ_ROWS` clamp) -- the full-result clipboard payload
+/// (issue #769). Same blocking / lock class and typed-error contract as
+/// `read_rows`.
+#[tauri::command]
+pub async fn read_rows_tsv(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    reference_name: String,
+) -> Result<String, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let handle = Arc::clone(&handle);
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = handle.session_lock()?;
+        s.read_rows_tsv(&reference_name)
             .map_err(SessionError::RowRead)
     })
     .await
