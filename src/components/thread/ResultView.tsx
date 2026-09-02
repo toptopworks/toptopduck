@@ -191,8 +191,9 @@ export function ResultView({
   // branch ("(no data rows)") for one frame before the fetch flipped it.
   const [loading, setLoading] = useState(true);
   // Issue #773: has the first loadPage finished (success OR error)? Gates the
-  // pagination count so the pre-settle initial state (total 0, rows []) never
-  // renders "Rows 0–0 (of 0)" -- a fake count inside the aria-live region.
+  // pagination count's content so the pre-settle initial state (total 0,
+  // rows []) never renders "Rows 0–0 (of 0)" -- a fake value flashing in the
+  // count bar.
   // Never resets: later fetches (pagination, result switches) keep the last
   // real values on screen while in flight instead of clearing.
   const [settled, setSettled] = useState(false);
@@ -537,15 +538,17 @@ export function ResultView({
         retired 0.3rem 0.8rem / 0.88rem is imperceptible.
       */}
       <div className="page-info sticky bottom-0 bg-background border-t border-border py-2 m-0 flex gap-2 items-center">
-        {settled && (
-          // Issue #773: the count mounts only after the first load settles.
-          // Before that, the initial state (total 0, rows []) would render
-          // "Rows 0–0 (of 0)" -- a fake value the aria-live region would
-          // announce to screen readers. Afterwards it never unmounts: in-flight
-          // fetches keep the last real values (the buttons disable on loading,
-          // so the stale count is never actionable), and a 0-row result
-          // renders its honest true "0–0 (of 0)".
-          <span aria-live="polite">
+        {/* Issue #773: the count's content mounts only after the first load
+          settles. Before that, the initial state (total 0, rows []) would
+          render "Rows 0–0 (of 0)" -- a fake value flashing in the count bar.
+          The region itself stays mounted from the first frame, so the first
+          real count lands as a text mutation -- the reliably announced class
+          (content present when a live region is created is commonly not
+          announced). In flight the content keeps the last real values (the
+          buttons disable on loading, so the stale count is never actionable),
+          and a 0-row result renders its honest true "0–0 (of 0)". */}
+        <span aria-live="polite">
+          {settled ? (
             <FormattedMessage
               id="result.pagination.range"
               defaultMessage="Rows {start}–{end} (of {total})"
@@ -555,8 +558,8 @@ export function ResultView({
                 total,
               }}
             />
-          </span>
-        )}
+          ) : null}
+        </span>
         <button
           type="button"
           disabled={!hasPrev || loading}
