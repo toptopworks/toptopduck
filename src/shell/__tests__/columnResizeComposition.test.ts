@@ -29,10 +29,11 @@ let shellWidth = 1024;
 let sidebarWidthLive = SIDEBAR_DEFAULT_WIDTH;
 
 // Stand-in for the measured track host: the harness mounts no real DOM, so a
-// detached element satisfies the observeTarget contract (#781). jsdom has no
-// ResizeObserver; the stub records the rail's observer callback so tests can
-// fire the observe-time initial callback after syncing the bridge (which
-// stands in for the layout having settled).
+// detached element satisfies the observeTarget contract (#781). The
+// suite-wide setup installs a no-op ResizeObserver class, so the per-suite
+// stub replaces it with one that records the rail's observer callback —
+// tests then fire the observe-time initial callback after syncing the
+// bridge (which stands in for the layout having settled).
 const trackHostTarget: React.RefObject<HTMLElement | null> = {
   current: document.createElement("div"),
 };
@@ -40,11 +41,18 @@ const trackHostTarget: React.RefObject<HTMLElement | null> = {
 let fireRailContainerChange: (() => void) | undefined;
 
 class ResizeObserverStub {
+  static constructed = 0;
+
+  observed: unknown[] = [];
+
   constructor(callback: () => void) {
     fireRailContainerChange = callback;
+    ResizeObserverStub.constructed += 1;
   }
 
-  observe(): void {}
+  observe(element: unknown): void {
+    this.observed.push(element);
+  }
 
   unobserve(): void {}
 
@@ -78,6 +86,7 @@ describe("column resize composition", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     fireRailContainerChange = undefined;
+    ResizeObserverStub.constructed = 0;
   });
 
   it("a sidebar drag compensates the rail, keeping the column sum fixed", () => {
@@ -158,6 +167,10 @@ describe("column resize composition", () => {
     expect(result.current.sidebar.width + result.current.rail.width).toBe(
       shellWidth - 320,
     );
+    // One rail hook mounted: exactly one observer. A second mount would
+    // silently overwrite the fire-callback capture, so the construction
+    // count keeps that failure mode loud.
+    expect(ResizeObserverStub.constructed).toBe(1);
   });
 
   it("the factory window layout re-clamps the rail on mount (entry 2)", () => {

@@ -51,12 +51,11 @@ export function useRailResize(options?: {
    *  static MAX_WIDTH — e.g. jsdom, where clientWidth reads as 0. */
   getMaxWidth?: () => number | undefined;
   /** Element whose settled layout drives the re-clamp (issue #781): the
-   *  track host, which must be attached by this hook's first effect run
-   *  (the App wiring's ref is set in the same commit as the hook). Observed
-   *  via ResizeObserver where available — the observer fires after the
-   *  layout actually changes and its observe-time initial callback covers
-   *  cold start. Environments without ResizeObserver keep the width
-   *  static-only. */
+   *  track host. The observer follows the ref's current element — it is
+   *  re-checked after every commit, so a replaced element (a boundary
+   *  retry remounts the host under the same ref object) or a
+   *  late-attached one is picked up automatically. Environments without
+   *  ResizeObserver keep the width static-only. */
   observeTarget?: RefObject<HTMLElement | null>;
 }): {
   /** Current rail width in pixels. */
@@ -114,16 +113,41 @@ export function useRailResize(options?: {
 
   // Observe the track host's settled layout (issue #781): window shrinks, the
   // sidebar's own re-clamp, and cold start (the observe-time initial
-  // callback) all surface here after the layout has actually settled.
+  // callback) all surface here after the layout has actually settled. The
+  // observer follows the ref's current element rather than the ref object's
+  // identity — a boundary retry (ADR-0058 L3) can replace the tracked host
+  // under the same ref object, and an identity-keyed effect would never
+  // re-observe the new node, leaving the observer attached to a detached
+  // node that never fires again. The dep-less sync re-checks after every
+  // commit; the equality check keeps the steady state a no-op.
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const observedNodeRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
-    const target = options?.observeTarget;
-    if (!target || typeof ResizeObserver === "undefined") return;
-    const element = target.current;
-    if (!element) return;
-    const observer = new ResizeObserver(clampToCeiling);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [options?.observeTarget, clampToCeiling]);
+    const element = options?.observeTarget?.current ?? null;
+    if (typeof ResizeObserver === "undefined") return;
+    if (element === observedNodeRef.current) return;
+    observerRef.current?.disconnect();
+    if (element) {
+      const observer = new ResizeObserver(clampToCeiling);
+      observer.observe(element);
+      observerRef.current = observer;
+      observedNodeRef.current = element;
+    } else {
+      observerRef.current = null;
+      observedNodeRef.current = null;
+    }
+  });
+  // Unmount cleanup resets the observation state, not just the observer:
+  // a StrictMode remount must rebuild the observer, which the sync above
+  // only does when the node record reads stale.
+  useEffect(
+    () => () => {
+      observerRef.current?.disconnect();
+      observerRef.current = null;
+      observedNodeRef.current = null;
+    },
+    [],
+  );
 
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();

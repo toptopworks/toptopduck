@@ -1,4 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RAIL_DEFAULT_WIDTH, useRailResize } from "../useRailResize";
 
@@ -19,15 +20,20 @@ describe("useRailResize", () => {
 
   class ResizeObserverStub {
     static last: ResizeObserverStub | undefined;
+    static constructed = 0;
 
     disconnected = false;
+    observed: unknown[] = [];
 
     constructor(callback: () => void) {
       fireContainerChange = callback;
       ResizeObserverStub.last = this;
+      ResizeObserverStub.constructed += 1;
     }
 
-    observe(): void {}
+    observe(element: unknown): void {
+      this.observed.push(element);
+    }
 
     unobserve(): void {}
 
@@ -45,6 +51,7 @@ describe("useRailResize", () => {
     vi.restoreAllMocks();
     fireContainerChange = undefined;
     ResizeObserverStub.last = undefined;
+    ResizeObserverStub.constructed = 0;
   });
 
   // --- Initial state ----------------------------------------------------
@@ -426,7 +433,7 @@ describe("useRailResize", () => {
     expect(result.current.width).toBe(280);
   });
 
-  it("disconnects the observer on unmount", () => {
+  it("observes exactly the target element and disconnects on unmount", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     const target: React.RefObject<HTMLElement | null> = {
       current: document.createElement("div"),
@@ -436,7 +443,69 @@ describe("useRailResize", () => {
     );
     const observer = ResizeObserverStub.last;
     expect(observer).toBeDefined();
+    // The construction wiring is anchored end-to-end: the hook observed
+    // exactly the target element once — dropping or reordering the observe
+    // call must fail here, not only in a real browser.
+    expect(observer?.observed).toEqual([target.current]);
     unmount();
     expect(observer?.disconnected).toBe(true);
+  });
+
+  it("does not construct an observer when observeTarget is omitted", () => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    renderHook(() => useRailResize());
+    expect(ResizeObserverStub.constructed).toBe(0);
+    expect(ResizeObserverStub.last).toBeUndefined();
+  });
+
+  it("does not churn the observer across re-renders", () => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    const target: React.RefObject<HTMLElement | null> = {
+      current: document.createElement("div"),
+    };
+    const { rerender } = renderHook(() =>
+      useRailResize({ observeTarget: target }),
+    );
+    expect(ResizeObserverStub.constructed).toBe(1);
+    act(() => rerender());
+    expect(ResizeObserverStub.constructed).toBe(1);
+    expect(ResizeObserverStub.last?.observed).toEqual([target.current]);
+  });
+
+  it("re-observes when the ref's element is replaced", () => {
+    // A boundary retry (ADR-0058 L3) remounts the tracked host under the
+    // same ref object: the observer must follow the new node or it stays
+    // attached to a detached one that never fires again, silently
+    // disabling the re-clamp until reload.
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    const target: React.RefObject<HTMLElement | null> = {
+      current: document.createElement("div"),
+    };
+    const { rerender } = renderHook(() =>
+      useRailResize({ observeTarget: target }),
+    );
+    const firstObserver = ResizeObserverStub.last;
+    expect(firstObserver?.observed).toEqual([target.current]);
+    target.current = document.createElement("div");
+    act(() => rerender());
+    expect(ResizeObserverStub.constructed).toBe(2);
+    expect(firstObserver?.disconnected).toBe(true);
+    expect(ResizeObserverStub.last?.observed).toEqual([target.current]);
+  });
+
+  it("rebuilds the observer after a StrictMode double-invoke cycle", () => {
+    // StrictMode mounts, cleans up, remounts: the cleanup resets the
+    // observation state so the remount re-runs the sync and rebuilds the
+    // observer instead of skipping it as a no-op on a stale node record.
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    const target: React.RefObject<HTMLElement | null> = {
+      current: document.createElement("div"),
+    };
+    renderHook(() => useRailResize({ observeTarget: target }), {
+      wrapper: StrictMode,
+    });
+    expect(ResizeObserverStub.constructed).toBe(2);
+    expect(ResizeObserverStub.last?.disconnected).toBe(false);
+    expect(ResizeObserverStub.last?.observed).toEqual([target.current]);
   });
 });
