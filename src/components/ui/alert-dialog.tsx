@@ -6,8 +6,10 @@ import { buttonVariants } from "./button-variants";
 
 // shadcn/ui v4 new-york copy-in (ADR-0049, issue #105). AlertDialog is the
 // destructive-action dialog: same portal/focus-trap/scroll-lock as Dialog BUT
-// ESC + overlay click are opt-in (the user must take an explicit action -- no
-// accidental dismiss of a destructive confirm). Used by ActiveSourceDeleteDialog.
+// the primitive blocks overlay/outside click dismiss. ESC is NOT blocked -- an
+// unguarded AlertDialog still closes on ESC, so a destructive confirm guards
+// it explicitly at the usage site (onEscapeKeyDown preventDefault, issue #766;
+// see ActiveSourceDeleteDialog and the working-set delete confirm).
 // The action/cancel triggers reuse buttonVariants (imported from the private
 // copy-in surface) so a Radix Close composes with the shadcn Button look.
 

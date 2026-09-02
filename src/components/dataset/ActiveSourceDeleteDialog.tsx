@@ -25,12 +25,15 @@ import {
 // nothing crosses IPC and the working set stays put (AC3).
 //
 // The shell is now a Radix AlertDialog (issue #105): role="alertdialog" +
-// focus-trap + scroll-lock come from the primitive. AlertDialog semantics
-// (destructive confirm) intentionally do NOT dismiss on ESC or overlay click --
-// the user must take an explicit 中止 / 继续 action, so the hand-written window
-// ESC listener is gone. The candidate list keeps native radios (the issue scope
-// is the AlertDialog shell, not a form-control sweep; native radios keep
-// toBeChecked reliable in the tests). defaultOpen keeps this uncontrolled: the
+// focus-trap + scroll-lock come from the primitive. The primitive blocks
+// overlay/outside pointer dismiss itself but NOT ESC -- an unguarded
+// AlertDialog still closes on ESC (issue #766) -- so the content carries an
+// explicit onEscapeKeyDown preventDefault (same guard as the working-set
+// delete confirm): the user must take an explicit 中止 / 继续 action, and the
+// hand-written window ESC listener stays gone. The candidate list keeps
+// native radios (the issue scope is the AlertDialog shell, not a
+// form-control sweep; native radios keep toBeChecked reliable in the tests).
+// defaultOpen keeps this uncontrolled: the
 // parent mounts/unmounts via pendingActiveDelete. AlertDialogCancel owns its
 // close (dismiss = cancel); AlertDialogAction preventDefault-defers close so
 // the parent's async remove decides unmount on success (a failure leaves it
@@ -50,7 +53,7 @@ export function ActiveSourceDeleteDialog({
 
   return (
     <AlertDialog defaultOpen>
-      <AlertDialogContent>
+      <AlertDialogContent onEscapeKeyDown={(e) => e.preventDefault()}>
         <AlertDialogHeader>
           <AlertDialogTitle>
             <FormattedMessage
