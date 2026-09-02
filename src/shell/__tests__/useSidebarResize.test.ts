@@ -267,4 +267,177 @@ describe("useSidebarResize", () => {
     });
     expect(result.current.width).toBe(300);
   });
+
+  // --- Dynamic availability ceiling (issue #770) -------------------------
+
+  it("clamps pointermove to the dynamic max when it is below the static max", () => {
+    const { result } = renderHook(() =>
+      useSidebarResize({ getMaxWidth: () => 424 }),
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+      } as unknown as React.PointerEvent);
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 900 }));
+    });
+    expect(result.current.width).toBe(424);
+  });
+
+  it("keeps the static max when the dynamic max is above it", () => {
+    const { result } = renderHook(() =>
+      useSidebarResize({ getMaxWidth: () => 4000 }),
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+      } as unknown as React.PointerEvent);
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 9999 }));
+    });
+    expect(result.current.width).toBe(518);
+  });
+
+  it("falls back to the static max when the getter returns undefined", () => {
+    const { result } = renderHook(() =>
+      useSidebarResize({ getMaxWidth: () => undefined }),
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+      } as unknown as React.PointerEvent);
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 9999 }));
+    });
+    expect(result.current.width).toBe(518);
+  });
+
+  it("restores a stored width clamped to the dynamic max", () => {
+    localStorage.setItem(STORAGE_KEY, "518");
+    const { result } = renderHook(() =>
+      useSidebarResize({ getMaxWidth: () => 424 }),
+    );
+    expect(result.current.width).toBe(424);
+  });
+
+  it("restore clamp bottoms out at the static minimum, never below it", () => {
+    localStorage.setItem(STORAGE_KEY, "400");
+    const { result } = renderHook(() =>
+      useSidebarResize({ getMaxWidth: () => 100 }),
+    );
+    // 238 = the static floor (MIN_WIDTH), pinned as a literal like the 518
+    // ceiling asserts above.
+    expect(result.current.width).toBe(238);
+  });
+
+  it("re-clamps the live width on window shrink without persisting it", () => {
+    localStorage.setItem(STORAGE_KEY, "424");
+    const { result, rerender } = renderHook(
+      ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
+        useSidebarResize({ getMaxWidth }),
+      { initialProps: { getMaxWidth: () => 424 } },
+    );
+    expect(result.current.width).toBe(424);
+
+    // Window shrinks: the availability ceiling drops to 240.
+    rerender({ getMaxWidth: () => 240 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(result.current.width).toBe(240);
+    // The stored preference keeps the pre-shrink value — a transient narrow
+    // window must not overwrite it (the restore path re-clamps per launch).
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("424");
+  });
+
+  it("window widen does not grow the live width (one-way re-clamp)", () => {
+    const { result, rerender } = renderHook(
+      ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
+        useSidebarResize({ getMaxWidth }),
+      { initialProps: { getMaxWidth: () => 240 } },
+    );
+    expect(result.current.width).toBe(SIDEBAR_DEFAULT_WIDTH);
+
+    rerender({ getMaxWidth: () => 500 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(result.current.width).toBe(SIDEBAR_DEFAULT_WIDTH);
+  });
+
+  it("window shrink never pushes the live width below the static minimum", () => {
+    localStorage.setItem(STORAGE_KEY, "424");
+    const { result, rerender } = renderHook(
+      ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
+        useSidebarResize({ getMaxWidth }),
+      { initialProps: { getMaxWidth: () => 424 } },
+    );
+
+    rerender({ getMaxWidth: () => 100 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    // 238 = the static floor (MIN_WIDTH).
+    expect(result.current.width).toBe(238);
+  });
+
+  it("does not persist a width that was only re-clamped by a mid-drag window shrink", () => {
+    const { result, rerender } = renderHook(
+      ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
+        useSidebarResize({ getMaxWidth }),
+      { initialProps: { getMaxWidth: () => 424 } },
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+      } as unknown as React.PointerEvent);
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 424 }));
+    });
+    expect(result.current.width).toBe(424);
+
+    // Window shrinks mid-drag, before the pointer is released.
+    rerender({ getMaxWidth: () => 240 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(result.current.width).toBe(240);
+
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointerup"));
+    });
+    // The shrink was environmental, not a user width choice — nothing stored.
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it("persists again once the user drags after a mid-drag shrink", () => {
+    const { result, rerender } = renderHook(
+      ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
+        useSidebarResize({ getMaxWidth }),
+      { initialProps: { getMaxWidth: () => 424 } },
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+      } as unknown as React.PointerEvent);
+    });
+    rerender({ getMaxWidth: () => 240 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    // The user moves again — the width is theirs once more (clamped to the
+    // shrunken ceiling), so the release persists it.
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointerup"));
+    });
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("240");
+  });
 });

@@ -6,9 +6,12 @@
 //
 // Persistence is frontend-only (localStorage): the width is a live UI pref,
 // not an app-config field, so no Rust/IPC change is needed. The clamp range
-// (238-518) keeps the sidebar usable without overwhelming the content area.
+// (238-518) keeps the sidebar usable without overwhelming the content area;
+// the range's upper end additionally shrinks with the available width
+// (issue #770) via the optional getMaxWidth availability getter.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { mergeCeiling } from "./layoutBounds";
 
 const STORAGE_KEY = "toptopduck.sidebar-width";
 
@@ -21,18 +24,21 @@ const MIN_WIDTH = 238;
  *  swallowing the entire workspace. */
 const MAX_WIDTH = 518;
 
-function clampWidth(px: number): number {
-  return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, px));
+/** Clamp to [MIN_WIDTH, max] — the max parameter carries the availability
+ *  ceiling (issue #770) while MIN_WIDTH stays the hard floor. */
+function clampWidth(px: number, max: number): number {
+  return Math.max(MIN_WIDTH, Math.min(max, px));
 }
 
-function loadStoredWidth(): number {
+function loadStoredWidth(maxWidth?: number): number {
+  const max = mergeCeiling(maxWidth, MAX_WIDTH);
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return clampWidth(Number(stored) || SIDEBAR_DEFAULT_WIDTH);
+    if (stored) return clampWidth(Number(stored) || SIDEBAR_DEFAULT_WIDTH, max);
   } catch {
     // localStorage unavailable (SSR / restricted context)
   }
-  return SIDEBAR_DEFAULT_WIDTH;
+  return clampWidth(SIDEBAR_DEFAULT_WIDTH, max);
 }
 
 export function useSidebarResize(options?: {
@@ -40,6 +46,11 @@ export function useSidebarResize(options?: {
    *  App.tsx to compensate the rail width (−delta) so the workspace stays
    *  visually fixed when the sidebar is dragged. */
   onDelta?: (delta: number) => void;
+  /** Dynamic width ceiling in px (issue #770: shell width minus the rail and
+   *  workspace floors), consulted on every pointermove, once at restore, and
+   *  on window-resize re-clamp. Return undefined to fall back to the static
+   *  MAX_WIDTH — e.g. jsdom, where clientWidth reads as 0. */
+  getMaxWidth?: () => number | undefined;
 }): {
   /** Current sidebar width in pixels. */
   width: number;
@@ -49,21 +60,41 @@ export function useSidebarResize(options?: {
   onResizeStart: (e: ReactPointerEvent) => void;
 } {
   // Lazy-init from localStorage so no mount effect is needed (avoids the
-  // cascading-render lint on setState-in-effect).
-  const [width, setWidth] = useState(() => loadStoredWidth());
+  // cascading-render lint on setState-in-effect). The availability ceiling
+  // rides the same lazy init — the getter's own pre-mount fallback covers
+  // the measurement (see App's getSidebarMaxWidth).
+  const [width, setWidth] = useState(() =>
+    loadStoredWidth(options?.getMaxWidth?.()),
+  );
   const [isDragging, setIsDragging] = useState(false);
   const widthRef = useRef(width);
   const draggingRef = useRef(false);
-  // Store the latest onDelta in a ref so the global pointermove listener
-  // (mounted once) always calls the current callback without re-subscribing.
+  // True when the current width was last changed by a mid-drag window-shrink
+  // re-clamp rather than by the user's pointer — the drag's pointerup skips
+  // persistence so the transient value never overwrites the stored
+  // preference (issue #770: persistence stays drag-owned).
+  const resizeShrunkRef = useRef(false);
+  // Store the latest onDelta / getMaxWidth in refs so the global pointermove
+  // listener (mounted once) always reads the current callbacks without
+  // re-subscribing.
   const onDeltaRef = useRef(options?.onDelta);
+  const getMaxWidthRef = useRef(options?.getMaxWidth);
   useEffect(() => {
     onDeltaRef.current = options?.onDelta;
+    getMaxWidthRef.current = options?.getMaxWidth;
   });
+
+  /** min(MAX_WIDTH, dynamic ceiling) — an undefined getter reads as
+   *  static-only (mergeCeiling, shared with useRailResize). */
+  const effectiveMax = useCallback(
+    (): number => mergeCeiling(getMaxWidthRef.current?.(), MAX_WIDTH),
+    [],
+  );
 
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();
     draggingRef.current = true;
+    resizeShrunkRef.current = false;
     setIsDragging(true);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
@@ -77,10 +108,13 @@ export function useSidebarResize(options?: {
       if (!draggingRef.current) return;
       // clientX maps directly to the desired sidebar width because the
       // sidebar starts at the window's left edge (x = 0).
-      const clamped = clampWidth(e.clientX);
+      const clamped = clampWidth(e.clientX, effectiveMax());
       const delta = clamped - widthRef.current;
       widthRef.current = clamped;
       setWidth(clamped);
+      // A user move re-owns the width — clears any mid-drag shrink flag so
+      // the eventual pointerup persists again.
+      resizeShrunkRef.current = false;
       // Compensate the rail so the workspace stays fixed.
       if (delta !== 0) onDeltaRef.current?.(delta);
     }
@@ -92,9 +126,28 @@ export function useSidebarResize(options?: {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       try {
-        localStorage.setItem(STORAGE_KEY, String(widthRef.current));
+        // Skip persistence when the only change since the user's last move
+        // was the window-shrink re-clamp (environmental, not a width choice).
+        if (!resizeShrunkRef.current) {
+          localStorage.setItem(STORAGE_KEY, String(widthRef.current));
+        }
       } catch {
         // Write failed (quota / private mode) -- width stays in-memory only.
+      }
+    }
+
+    // Re-clamp the live width when the container narrows (issue #770): the
+    // rail and workspace floors must stay satisfiable without crushing the
+    // rail below its compensated floor. One-way by design — a later widen
+    // does not restore the pre-shrink width (re-drag instead) — and NOT
+    // persisted: a transient narrow window must not overwrite the stored
+    // preference (the restore path re-clamps per launch).
+    function onWindowResize(): void {
+      const max = effectiveMax();
+      if (widthRef.current > max) {
+        widthRef.current = Math.max(MIN_WIDTH, max);
+        setWidth(widthRef.current);
+        if (draggingRef.current) resizeShrunkRef.current = true;
       }
     }
 
@@ -104,16 +157,18 @@ export function useSidebarResize(options?: {
     // system gesture intercepts on touch devices). Without it the drag
     // state + body cursor would stick permanently.
     window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("resize", onWindowResize);
     return () => {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("resize", onWindowResize);
       // Restore body styles if unmounted mid-drag (React Strict Mode, fast
       // navigation) — the listeners above are gone so onPointerUp cannot fire.
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
-  }, []);
+  }, [effectiveMax]);
 
   return { width, isDragging, onResizeStart };
 }

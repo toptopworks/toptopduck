@@ -99,9 +99,20 @@
    * conversation column. Default: rail open. Collapsed: workspace folded,
    * conversation centered at any container width -- the 1fr spacers shrink to
    * 0 below the 800px cap, so a narrow container still fills the width (no
-   * centering threshold needed; matches the cold-start bar's centering). */
-  --track-grid: 0fr minmax(0, var(--rail-width, 350px)) 1fr 0fr;
-  --track-grid-collapsed: 1fr minmax(0, 800px) 0fr 1fr;
+   * centering threshold needed; matches the cold-start bar's centering).
+   *
+   * Workspace floor (issue #770): the workspace track's 320px min mirrors
+   * WORKSPACE_MIN_WIDTH in src/shell/layoutBounds.ts -- the grid-level
+   * guarantee that the expanded workspace never resolves below 320px (the
+   * rail track yields first via its minmax(0, ·) min). The minmax-bearing
+   * tracks (conversation/workspace) keep a matching minmax() structure in
+   * both lists and the bare-flex spacers pair fr↔fr, so the fold animation's
+   * grid-template-columns interpolation stays smooth (a bare 0fr in the
+   * collapsed list would pair a length min against auto and snap). */
+  --workspace-min-width: 320px;
+  --track-grid:
+    0fr minmax(0, var(--rail-width, 350px)) minmax(var(--workspace-min-width), 1fr) 0fr;
+  --track-grid-collapsed: 1fr minmax(0, 800px) minmax(0, 0fr) 1fr;
   /* Codex-style collapse: animate the first column var(--sidebar-width) <-> 0
    * so the main region slides instead of snapping. grid-template-columns
    * interpolation needs the column to actually shrink, which in turn needs
@@ -444,7 +455,9 @@
  * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
  * while the panel is folded away (cold-start default, session-ephemeral) --
  * the rail owns the released space (the rail-as-primary form). The rail's
- * flex-basis (320px) is the min-width floor (issue #350). */
+ * floors live in useRailResize (350 direct-drag / 280 compensated); the
+ * 320px minimum-usable-column floor is the workspace track's
+ * (--workspace-min-width, issue #770). */
 .session-pane {
   height: 100%;
   display: flex;
@@ -454,8 +467,10 @@
  * conversation when the workspace folds. Tracks: [left-spacer] [conversation]
  * [workspace] [right-spacer]. The 1fr spacers center the 800px column at any
  * container width (they shrink to 0 below the cap, so a narrow container
- * fills the width); the workspace column shrinks 1fr -> 0fr. Every track
- * interpolates (fr->fr, minmax px->px) so no jitter. */
+ * fills the width); the workspace column shrinks minmax(min, 1fr) ->
+ * minmax(0, 0fr). Every track interpolates (minmax<->minmax px-by-px on the
+ * conversation/workspace tracks, bare fr<->fr on the spacers) so no
+ * jitter. */
 .shell .session-pane.workspace-collapsed .session-body {
   grid-template-columns: var(--track-grid-collapsed);
 }
@@ -503,7 +518,8 @@
 }
 /* Grid row: conversation + workspace. Same grid-template-columns slide
  * pattern as the shell sidebar -- the transition on grid-template-columns
- * makes the column boundary slide smoothly (rail-width 1fr <-> 800px 0fr).
+ * makes the column boundary slide smoothly (expanded rail track <-> the
+ * centered 800px fold tracks).
  * background prevents white flash during the slide.
  *
  * --rail-width (set inline on .shell by useRailResize) drives the
