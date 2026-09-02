@@ -130,10 +130,12 @@ interface ResultViewProps {
   sessionId: string;
   referenceName: string;
   /** Issue #772: the question that produced this result -- the pane title's
-   * text, rendered verbatim (user data, never the catalog). Absent/empty (a
-   * thread persisted before the question rode the payload, issue #758) falls
-   * back to the reference-name title. */
-  question?: string;
+   * text, rendered verbatim (user data, never the catalog). Required like its
+   * domain source (WorkspaceContent.result.question, itself derived from the
+   * required persisted turn field); an empty string (the only degenerate form
+   * -- an ask IPC caller bypassing the composer's trim guard) falls back to
+   * the reference-name title, never an empty heading. */
+  question: string;
   assumption: string | null;
   /** The provider's optional viz spec for this result (ADR-0016/0033): null =
    * a plain table turn; a spec the frontend renders via VegaChart, or degrades
@@ -277,14 +279,23 @@ export function ResultView({
                * text -- a human coordinate, not the machine reference name
                * (which stays rail-side). Single-line truncate with hover
                * recovery; the full text stays in the DOM, so the table's
-               * aria-labelledby name carries it whole. */
-              <TruncatingTooltip text={question} className="block truncate">
+               * aria-labelledby name carries it whole. The recovery tooltip
+               * keeps the question's line structure (the rail bubble's
+               * whitespace-pre-wrap posture, ADR-0103) so a multi-line
+               * question is recovered whole, not space-joined. */
+              <TruncatingTooltip
+                text={question}
+                className="block truncate"
+                contentClassName="whitespace-pre-wrap"
+              >
                 {question}
               </TruncatingTooltip>
             ) : (
-              /* Honest fallback for threads persisted before the question
-               * rode the payload: the reference-name title, never an empty
-               * heading. */
+              /* Degenerate-empty-string fallback (defense in depth: the
+               * derivation layer types the question required and the composer
+               * rejects blank submits, so only an ask caller bypassing the
+               * editor can land here): the reference-name title, never an
+               * empty heading. */
               <FormattedMessage
                 id="result.title"
                 defaultMessage="Result: {name}"
