@@ -13,6 +13,7 @@ import { useAppConfigState } from "./shell/useAppConfigState";
 import { useStartupRuntime } from "./shell/useStartupRuntime";
 import { useSidebarResize } from "./shell/useSidebarResize";
 import { useRailResize } from "./shell/useRailResize";
+import { railMaxWidth, sidebarMaxWidth } from "./shell/layoutBounds";
 import { useProfileKeys } from "./shell/useProfileKeys";
 import {
   useComposerState,
@@ -185,12 +186,36 @@ export default function App() {
   // delta, keeping the workspace visually fixed). The rail handle is
   // per-SessionPane but the width is global so it stays consistent across
   // keep-alive session switches.
+  //
+  // Availability ceilings (issue #770): both drags clamp to what the live
+  // grid containers can actually fit (measured from the elements, not
+  // window.innerWidth, so the semantics stay anchored to whatever hosts the
+  // tracks). Non-positive measurements (jsdom has no layout) read as "no
+  // dynamic constraint" and fall back to the hooks' static ceilings. The
+  // sidebar's ceiling is deliberately NOT fold-gated: a sidebar dragged wide
+  // while the workspace is folded must not crush the rail below its floor
+  // once the workspace is expanded again.
+  const shellRef = useRef<HTMLDivElement>(null);
+  const mainAreaRef = useRef<HTMLElement>(null);
+  const getSidebarMaxWidth = useCallback((): number | undefined => {
+    // Pre-mount (the restore path) the shell ref is null: the shell fills the
+    // viewport, so documentElement.clientWidth stands in for that one
+    // instant.
+    const shellWidth =
+      shellRef.current?.clientWidth ?? document.documentElement.clientWidth;
+    return shellWidth > 0 ? sidebarMaxWidth(shellWidth) : undefined;
+  }, []);
+  const getRailMaxWidth = useCallback((): number | undefined => {
+    const trackHostWidth = mainAreaRef.current?.clientWidth ?? 0;
+    return trackHostWidth > 0 ? railMaxWidth(trackHostWidth) : undefined;
+  }, []);
+
   const {
     width: railWidth,
     isDragging: railDragging,
     onResizeStart: onRailResizeStart,
     adjustWidth: adjustRailWidth,
-  } = useRailResize();
+  } = useRailResize({ getMaxWidth: getRailMaxWidth });
 
   const {
     width: sidebarWidth,
@@ -198,6 +223,7 @@ export default function App() {
     onResizeStart: onSidebarResizeStart,
   } = useSidebarResize({
     onDelta: (delta) => adjustRailWidth(-delta),
+    getMaxWidth: getSidebarMaxWidth,
   });
 
   // --- Session shell (issue #195) -----------------------------------------
@@ -809,6 +835,7 @@ export default function App() {
           >
             <NavigationHistoryProvider location={location} restore={restore}>
               <div
+                ref={shellRef}
                 className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidebarDragging ? " sidebar-dragging" : ""}${railDragging ? " rail-dragging" : ""}${settingsView.open ? " settings-mode" : ""}${settingsNavCollapsed ? " settings-nav-collapsed" : ""}${isColdStart ? " cold-start-mode" : ""}`}
                 style={
                   {
@@ -923,6 +950,7 @@ export default function App() {
                     between the two postures (CSS transition), so the bar glides
                     centered <-> bottom on first submit / "+" navigation. */}
                 <main
+                  ref={mainAreaRef}
                   className={`main-area${activeWsCollapsed ? " workspace-collapsed" : ""}`}
                 >
                   <div className="session-pane-host">

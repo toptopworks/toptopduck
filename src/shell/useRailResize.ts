@@ -13,6 +13,7 @@
 // an ephemeral layout adjustment that the user re-sets per session.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { COMPENSATED_MIN_WIDTH, mergeCeiling } from "./layoutBounds";
 
 /** Default rail width in pixels. Equals MIN_WIDTH so the cold-start width
  *  is always within the clamp range (no handle/column boundary offset on
@@ -22,21 +23,27 @@ export const RAIL_DEFAULT_WIDTH = 350;
 /** Minimum width when dragged directly via the rail handle -- protects the
  *  QuestionBar toolbar (submit button + auth chip + context + provider triggers). */
 const MIN_WIDTH = 350;
-/** Lower floor for sidebar-driven compensation: the sidebar drag may push
- *  the rail below its own MIN_WIDTH (down to 280) to keep the workspace
- *  usable. The toolbar compresses but stays functional (overflow scroll). */
-const COMPENSATED_MIN_WIDTH = 280;
+/** Lower floor for sidebar-driven compensation lives in layoutBounds
+ *  (COMPENSATED_MIN_WIDTH) alongside the other width algebra (issue #770). */
 /** Maximum resizable width -- lets the rail grow wide without swallowing the
  *  entire workspace column. */
 const MAX_WIDTH = 600;
 
-/** Clamp to [min, MAX_WIDTH]. The min parameter lets direct drag and sidebar
- *  compensation share one clamp path with different floors. */
-function clampWidth(px: number, min = MIN_WIDTH): number {
-  return Math.max(min, Math.min(MAX_WIDTH, px));
+/** Clamp to [min, max]. The min parameter lets direct drag and sidebar
+ *  compensation share one clamp path with different floors; the max parameter
+ *  lets the static ceiling and the availability ceiling (issue #770) share
+ *  one path too. */
+function clampWidth(px: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, px));
 }
 
-export function useRailResize(): {
+export function useRailResize(options?: {
+  /** Dynamic width ceiling in px (issue #770: track-host width minus the
+   *  workspace floor), consulted on every pointermove and every
+   *  sidebar-compensation adjustment. Return undefined to fall back to the
+   *  static MAX_WIDTH — e.g. jsdom, where clientWidth reads as 0. */
+  getMaxWidth?: () => number | undefined;
+}): {
   /** Current rail width in pixels. */
   width: number;
   /** Whether a drag is in progress (for cursor / highlight styling). */
@@ -56,6 +63,20 @@ export function useRailResize(): {
   // moment. Each move computes startWidth + (clientX - startX).
   const startXRef = useRef(0);
   const startWidthRef = useRef(width);
+  // Store the latest getMaxWidth in a ref so the global pointermove listener
+  // (mounted once) always reads the current availability without
+  // re-subscribing — same pattern as useSidebarResize's onDeltaRef.
+  const getMaxWidthRef = useRef(options?.getMaxWidth);
+  useEffect(() => {
+    getMaxWidthRef.current = options?.getMaxWidth;
+  });
+
+  /** min(MAX_WIDTH, dynamic ceiling) — an undefined getter reads as
+   *  static-only (mergeCeiling, shared with useSidebarResize). */
+  const effectiveMax = useCallback(
+    (): number => mergeCeiling(getMaxWidthRef.current?.(), MAX_WIDTH),
+    [],
+  );
 
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();
@@ -80,7 +101,11 @@ export function useRailResize(): {
       // snap the rail back up to 350. When startWidthRef is at or above
       // MIN_WIDTH the floor stays at MIN_WIDTH (normal case).
       const effectiveMin = Math.min(MIN_WIDTH, startWidthRef.current);
-      const clamped = clampWidth(startWidthRef.current + delta, effectiveMin);
+      const clamped = clampWidth(
+        startWidthRef.current + delta,
+        effectiveMin,
+        effectiveMax(),
+      );
       widthRef.current = clamped;
       setWidth(clamped);
     }
@@ -108,16 +133,20 @@ export function useRailResize(): {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
-  }, []);
+  }, [effectiveMax]);
 
   // Externally-driven width adjustment (sidebar drag coordination). Uses the
   // lower COMPENSATED_MIN_WIDTH floor so the sidebar can push the rail past
   // its own direct-drag floor while keeping the workspace usable.
   const adjustWidth = useCallback((delta: number) => {
-    const clamped = clampWidth(widthRef.current + delta, COMPENSATED_MIN_WIDTH);
+    const clamped = clampWidth(
+      widthRef.current + delta,
+      COMPENSATED_MIN_WIDTH,
+      effectiveMax(),
+    );
     widthRef.current = clamped;
     setWidth(clamped);
-  }, []);
+  }, [effectiveMax]);
 
   return { width, isDragging, onResizeStart, adjustWidth };
 }

@@ -232,4 +232,65 @@ describe("useRailResize", () => {
     });
     expect(result.current.width).toBe(280);
   });
+
+  // --- Dynamic availability ceiling (issue #770) -------------------------
+
+  it("clamps pointermove to the dynamic max when it is below the static max", () => {
+    const { result } = renderHook(() =>
+      useRailResize({ getMaxWidth: () => 466 }),
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+        clientX: 500,
+      } as unknown as React.PointerEvent);
+    });
+    // 350 + 500 = 850 → min(600, 466) = 466.
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
+    });
+    expect(result.current.width).toBe(466);
+  });
+
+  it("keeps the static max when the dynamic max is above it", () => {
+    const { result } = renderHook(() =>
+      useRailResize({ getMaxWidth: () => 4000 }),
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+        clientX: 500,
+      } as unknown as React.PointerEvent);
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
+    });
+    expect(result.current.width).toBe(600);
+  });
+
+  it("falls back to the static max when the getter returns undefined", () => {
+    const { result } = renderHook(() =>
+      useRailResize({ getMaxWidth: () => undefined }),
+    );
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+        clientX: 500,
+      } as unknown as React.PointerEvent);
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
+    });
+    expect(result.current.width).toBe(600);
+  });
+
+  it("adjustWidth respects the dynamic max on positive delta", () => {
+    const { result } = renderHook(() =>
+      useRailResize({ getMaxWidth: () => 466 }),
+    );
+    act(() => {
+      result.current.adjustWidth(500);
+    });
+    expect(result.current.width).toBe(466);
+  });
 });
