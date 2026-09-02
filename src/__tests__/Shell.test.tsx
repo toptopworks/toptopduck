@@ -1661,18 +1661,19 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
-  it("on resume, the first NEW promotion still auto-expands (one-shot survives R5 init, ADR-0083)", async () => {
+  it("on resume onto a materialized session, a new promotion never auto-expands (one-shot is session-scoped, issue #771)", async () => {
     // Resume lands viewedResult on the prior Materialized primary via the R5
-    // init effect in useViewedResult -- NOT via markProduced, so the workspace
-    // auto-expand one-shot stays intact. A subsequent first ask must still open
-    // the panel. Locks the seam against rerouting R5 through markProduced
-    // (which would silently spend the one-shot on a turn the user never asked).
+    // init effect in useViewedResult -- NOT via markProduced. Issue #771
+    // scopes the auto-expand one-shot to the session: a mount onto a thread
+    // that already materialized a result treats the guidance as consumed, so
+    // the fold remains for the user to open -- the first NEW promotion after
+    // resume must not steal it (the view itself still follows the result;
+    // markProduced is untouched by the fold).
     state.thread = [materializedTurn("result_1")];
     render(<App />);
     await openSession();
-    // Queue the test's own turn AFTER openSession so the creation turn consumes
-    // the helper's one-time rejection, not this Materialized outcome (which would
-    // otherwise auto-expand the workspace + spend the one-shot during openSession).
+    // Queue the turn AFTER openSession so the creation turn consumes the
+    // one-time rejection of the helper, not this Materialized outcome.
     vi.mocked(askQuestion).mockResolvedValueOnce({
       kind: "Materialized",
       data: {
@@ -1681,17 +1682,25 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         assumption: null,
       },
     });
-    // Resume cold-start: folded (the one-shot is intact, not spent by R5).
+    // Resume cold-start: folded, with the R5 landing visible on the rail
+    // (result_1 is the viewed result) -- the landing moved no fold.
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
-    // The first NEW promotion after resume opens the panel.
+    expect(await screen.findByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    // The first NEW promotion after resume: the view follows result_2 but
+    // the panel stays folded (this session already showed results).
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "新问" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
-    );
-    await waitFor(() =>
       expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument(),
     );
+    expect(await screen.findByRole("button", { name: /result_2 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
   it("a rail preview-card click opens the workspace on the same dataset (dual view, issue #298)", async () => {

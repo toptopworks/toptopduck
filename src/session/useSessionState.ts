@@ -75,7 +75,9 @@ export interface UseSessionState {
   viewedResult: ViewedResult | null;
   workspaceContent: WorkspaceContent;
   /** ADR-0083 (issue #298): the workspace panel's fold. Cold-start collapsed;
-   *  the first result_N promotion auto-expands once, then it is manual. */
+   *  the first result_N promotion auto-expands once, then it is manual. The
+   *  one-shot is session-scoped (issue #771): a remount onto an
+   *  already-materialized session does not re-arm it. */
   workspaceCollapsed: boolean;
   loading: boolean;
   /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
@@ -237,13 +239,15 @@ export function useSessionState(
   } = useViewedResult(thread);
   // Workspace fold (ADR-0083, issue #298): cold-start collapsed, the first
   // promotion auto-expands once, then purely manual. Session-ephemeral plain
-  // state -- never persisted, reset on every pane mount (new / resume).
+  // state -- never persisted, reset on every pane mount (new / resume); the
+  // one-shot consumption derives from the thread (issue #771), so a remount
+  // onto an already-materialized session stays spent.
   const {
     workspaceCollapsed,
     expandWorkspace,
     toggleWorkspace,
     notePromotion,
-  } = useWorkspaceCollapse();
+  } = useWorkspaceCollapse(thread);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [pendingActiveDelete, setPendingActiveDelete] =
