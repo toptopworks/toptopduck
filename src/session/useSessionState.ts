@@ -70,7 +70,7 @@ export interface UseSessionState {
    *  fallbacks keep the derivations rendering through a failure, so this
    *  aggregate is the pane's only error signal -- it drives the session-level
    *  disclosure banner. */
-  queryErrors: Error[];
+  queryErrors: ReadonlyArray<Error>;
   // Client UI state.
   viewedResult: ViewedResult | null;
   workspaceContent: WorkspaceContent;
@@ -207,7 +207,6 @@ export function useSessionState(
   const queryErrors = useMemo(() => {
     const errs: Error[] = [];
     if (workingSetError !== null) errs.push(workingSetError);
-
     if (activeError !== null) errs.push(activeError);
     if (threadError !== null) errs.push(threadError);
     return errs;

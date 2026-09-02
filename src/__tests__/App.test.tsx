@@ -1614,11 +1614,15 @@ describe("SessionPane session-query error banner (#763)", () => {
     vi.mocked(conversation).mockResolvedValue([]);
   });
 
-  it("renders no banner while all session queries are healthy", async () => {
+  it("renders no banner and logs nothing while all session queries are healthy", async () => {
+    const warnSpy = vi.spyOn(log, "warn");
     renderPane();
 
     await waitFor(() => expect(conversation).toHaveBeenCalled());
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // The warn belongs to the error-set effect, not to rendering: a healthy
+    // pane stays silent.
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it("renders one destructive banner with a retry when the thread query fails", async () => {
@@ -1630,6 +1634,18 @@ describe("SessionPane session-query error banner (#763)", () => {
     expect(banner).toHaveTextContent(BANNER_TITLE);
     expect(document.querySelectorAll("[data-slot=\"alert\"]")).toHaveLength(1);
     expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeEnabled();
+    // The disclosure's slot and severity: between the session header and the
+    // session body (the pane column's conditional banner slot), in the
+    // destructive variant.
+    const header = document.querySelector(".session-header")!;
+    const body = document.querySelector(".session-body")!;
+    expect(
+      banner.compareDocumentPosition(header) & Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy();
+    expect(
+      body.compareDocumentPosition(banner) & Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy();
+    expect(banner.className).toContain("border-destructive/40");
     // Non-blocking: the thread fell back to EMPTY_THREAD, so the rail keeps
     // its fresh-session hint -- the error state does not blank the pane.
     expect(screen.getByText(RAIL_EMPTY)).toBeInTheDocument();
@@ -1652,13 +1668,38 @@ describe("SessionPane session-query error banner (#763)", () => {
     expect(await screen.findByText(BANNER_TITLE)).toBeInTheDocument();
   });
 
-  it("renders exactly one banner when several session queries fail", async () => {
-    vi.mocked(listWorkingSet).mockRejectedValue(new Error("ws down"));
-    vi.mocked(conversation).mockRejectedValue(new Error("thread down"));
+  it("renders exactly one banner when all three session queries fail, and Retry refetches every errored slice", async () => {
+    const warnSpy = vi.spyOn(log, "warn");
+    // The retry below fails again with FRESH Error identities (mockRejected
+    // Value reuses one instance, which the error state holds across the
+    // refetch, so the memo deps would never move): that is the identity
+    // change the log's re-fire rides on.
+    vi.mocked(listWorkingSet)
+      .mockRejectedValueOnce(new Error("ws down"))
+      .mockRejectedValueOnce(new Error("ws down again"));
+    vi.mocked(activeDataset)
+      .mockRejectedValueOnce(new Error("active down"))
+      .mockRejectedValueOnce(new Error("active down again"));
+    vi.mocked(conversation)
+      .mockRejectedValueOnce(new Error("thread down"))
+      .mockRejectedValueOnce(new Error("thread down again"));
     renderPane();
 
     await screen.findByRole("alert");
     expect(document.querySelectorAll("[data-slot=\"alert\"]")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: RETRY_LABEL }));
+
+    // Every errored branch refetches -- working set, active, AND thread: the
+    // plural half of the retry contract, with no branch left unexecuted.
+    await waitFor(() => expect(listWorkingSet).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(activeDataset).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(conversation).toHaveBeenCalledTimes(2));
+    // The rejections land back in error state: the banner is not
+    // optimistically cleared, and the log re-fires for the new error-set
+    // identity.
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await waitFor(() => expect(warnSpy).toHaveBeenCalledTimes(2));
   });
 
   it("keeps rendering thread-derived content alongside the banner (cached, non-blocking)", async () => {
@@ -1699,13 +1740,18 @@ describe("SessionPane session-query error banner (#763)", () => {
     renderPane();
 
     // The visible banner carries the disclosure; log.warn carries the durable
-    // trace (the skill-registry warn above is the log-only precedent).
+    // trace (the skill-registry warn above is the log-only precedent). Each
+    // Error arrives as its own extra -- the sink takes the stack branch only
+    // for a bare Error, while an array extra stringifies to [{}].
     await waitFor(() =>
       expect(warnSpy).toHaveBeenCalledWith(
         "SessionPane",
         "session query failed",
-        [expect.any(Error)],
+        expect.any(Error),
       ),
     );
+    // Once per error-set change, not per render: the pane re-renders several
+    // times while settling, and the memo identity must absorb all of them.
+    await waitFor(() => expect(warnSpy).toHaveBeenCalledTimes(1));
   });
 });

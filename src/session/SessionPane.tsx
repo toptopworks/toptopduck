@@ -377,10 +377,13 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // (ADR-0029). That one is log-only because the rail trades UI surfacing
   // for readability; the session queries get the banner as well.
   // queryErrors is a useSessionState memo, so the effect fires once per
-  // error-set change, not per render.
+  // error-set change, not per render. The errors spread into individual
+  // extras: the sink's describe() takes the stack branch only for a bare
+  // Error, while an array extra stringifies to [{}] (message and stack are
+  // non-enumerable).
   useEffect(() => {
     if (s.queryErrors.length > 0) {
-      log.warn("SessionPane", "session query failed", s.queryErrors);
+      log.warn("SessionPane", "session query failed", ...s.queryErrors);
     }
   }, [s.queryErrors]);
   // Hoisted so the ActiveSourceDeleteDialog filter callback reads it without a
