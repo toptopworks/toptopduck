@@ -185,7 +185,18 @@ export function ResultView({
   const [rows, setRows] = useState<string[][]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
-  const [loading, setLoading] = useState(false);
+  // Issue #773: the initial value is "loading" -- the mount effect below
+  // unconditionally kicks off loadPage(0), so before the first frame settles
+  // the component IS loading. A false initial value rendered the empty-table
+  // branch ("(no data rows)") for one frame before the fetch flipped it.
+  const [loading, setLoading] = useState(true);
+  // Issue #773: has the first loadPage finished (success OR error)? Gates the
+  // pagination count's content so the pre-settle initial state (total 0,
+  // rows []) never renders "Rows 0–0 (of 0)" -- a fake value flashing in the
+  // count bar.
+  // Never resets: later fetches (pagination, result switches) keep the last
+  // real values on screen while in flight instead of clearing.
+  const [settled, setSettled] = useState(false);
   // Issue #194: readRows reject typed as AppError, kind "read" (a readRows
   // reject is the read phase of a turn; toAppError applies no verb prefix on the
   // read kind, and ErrorBanner renders only message + detail, not kind).
@@ -215,7 +226,15 @@ export function ResultView({
         if (seq !== seqRef.current) return;
         setError(toAppError(e, intl, "read"));
       } finally {
-        if (seq === seqRef.current) setLoading(false);
+        if (seq === seqRef.current) {
+          setLoading(false);
+          // Issue #773: settling is success OR failure -- an errored first
+          // load keeps today's behavior (the count renders alongside the
+          // error banner), so only the pre-settle window is suppressed. A
+          // superseded request (seq mismatch) does not settle; its successor
+          // does when it lands.
+          setSettled(true);
+        }
       }
     },
     [intl, sessionId, referenceName, pageSize],
@@ -519,16 +538,27 @@ export function ResultView({
         retired 0.3rem 0.8rem / 0.88rem is imperceptible.
       */}
       <div className="page-info sticky bottom-0 bg-background border-t border-border py-2 m-0 flex gap-2 items-center">
+        {/* Issue #773: the count's content mounts only after the first load
+          settles. Before that, the initial state (total 0, rows []) would
+          render "Rows 0–0 (of 0)" -- a fake value flashing in the count bar.
+          The region itself stays mounted from the first frame, so the first
+          real count lands as a text mutation -- the reliably announced class
+          (content present when a live region is created is commonly not
+          announced). In flight the content keeps the last real values (the
+          buttons disable on loading, so the stale count is never actionable),
+          and a 0-row result renders its honest true "0–0 (of 0)". */}
         <span aria-live="polite">
-          <FormattedMessage
-            id="result.pagination.range"
-            defaultMessage="Rows {start}–{end} (of {total})"
-            values={{
-              start: total === 0 ? 0 : offset + 1,
-              end: offset + shown,
-              total,
-            }}
-          />
+          {settled ? (
+            <FormattedMessage
+              id="result.pagination.range"
+              defaultMessage="Rows {start}–{end} (of {total})"
+              values={{
+                start: total === 0 ? 0 : offset + 1,
+                end: offset + shown,
+                total,
+              }}
+            />
+          ) : null}
         </span>
         <button
           type="button"

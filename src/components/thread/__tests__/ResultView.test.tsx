@@ -309,6 +309,138 @@ describe("ResultView", () => {
     expect(screen.queryByText("11")).not.toBeInTheDocument();
   });
 
+  describe("first-load flash (issue #773)", () => {
+    // Issue #773: two first-frame artifacts. (1) The loading state starts
+    // "not loading" while the mount effect unconditionally fetches, so the very
+    // first render hits the empty-table branch and flashes the empty-state row;
+    // the initial value is now "loading" (the fetch is unconditional, so the
+    // initial value is the fact). (2) The pagination count rendered "Rows 0–0
+    // (of 0)" from the pre-fetch initial state -- a fake value flashing in the
+    // count bar; the count's content now mounts only after the first load
+    // settles and keeps the previous page's values during pagination fetches
+    // (the buttons disable on loading anyway).
+    //
+    // jsdom limit, stated honestly: RTL's act flushes the mount effect
+    // synchronously, so the true first frame (before the effect) is not
+    // observable here -- the initial-value fix is verified by review/browser.
+    // What IS observable: the in-flight window (pending readRows) below.
+    const page = {
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"], ["2"]],
+      total: 5,
+      offset: 0,
+      limit: 2,
+    };
+
+    it("renders neither the empty-state row nor the count while the first page is in flight", async () => {
+      let resolveFirst: (p: Awaited<ReturnType<typeof readRows>>) => void = () => {};
+      vi.mocked(readRows).mockImplementation(
+        () => new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+      );
+      renderI18n(
+        <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+      );
+      // The fetch is in flight (effect ran, promise pending): no empty-state
+      // row and no count -- "Rows 0–0 (of 0)" from the initial state must
+      // never mount, so aria-live never announces the fake count.
+      expect(screen.queryByText(/（无数据行）/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/第 \d+–\d+ 行（共 \d+ 行）/)).not.toBeInTheDocument();
+      resolveFirst(page);
+      await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+      // Settled: the count mounts with the real values.
+      expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+    });
+
+    it("keeps the previous page's count while the next page is fetching", async () => {
+      vi.mocked(readRows)
+        .mockResolvedValueOnce(page)
+        .mockImplementationOnce(
+          () => new Promise(() => {}), // next page stays in flight
+        );
+      renderI18n(
+        <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+      );
+      await waitFor(() => expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+      await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
+      // In flight: the old count stays (no clear-flash); the buttons are
+      // disabled for the same window, so the stale count is not actionable.
+      expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+      const next = screen.getByRole("button", { name: /下一页/ });
+      expect(next).toBeDisabled();
+    });
+
+    it("mounts the count with honest zero values after a 0-row result settles", async () => {
+      // A 0-row result is a valid result: after settling, the empty-state row
+      // shows and the count renders the true "0–0 (of 0)" -- only the
+      // pre-settle window is suppressed, never the honest settled state.
+      vi.mocked(readRows).mockResolvedValue({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [],
+        total: 0,
+        offset: 0,
+        limit: 100,
+      });
+      renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+      await waitFor(() => expect(screen.getByText(/（无数据行）/)).toBeInTheDocument());
+      expect(screen.getByText(/第 0–0 行（共 0 行）/)).toBeInTheDocument();
+    });
+
+    it("keeps the count rendered after a read error settles (error path, zero regression)", async () => {
+      // Settling is success OR failure (issue #773): an error
+      // keeps the current behavior -- the count renders (initial state's
+      // 0–0, as today) alongside the read-error banner, gaining no new
+      // behavior and losing none.
+      vi.mocked(readRows).mockRejectedValue(new Error("read boom"));
+      renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+      await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      expect(screen.getByText(/第 0–0 行（共 0 行）/)).toBeInTheDocument();
+      // The error path also recovers loading: with rows empty and loading
+      // false, the empty-state row renders (shown === 0 && !loading).
+      expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
+    });
+
+    it("does not settle when a superseded first load lands before its successor", async () => {
+      // The settle lives inside the finally's seq guard: a superseded request
+      // (the result switched mid-flight) must not flip the latch, or the fake
+      // count would mount via the result-switch route. Its successor settles
+      // when it lands.
+      let resolveFirst: (p: Awaited<ReturnType<typeof readRows>>) => void = () => {};
+      let resolveSecond: (p: Awaited<ReturnType<typeof readRows>>) => void = () => {};
+      vi.mocked(readRows)
+        .mockImplementationOnce(
+          () => new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+        )
+        .mockImplementationOnce(
+          () => new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+        );
+      const { rerender } = renderI18n(
+        <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+      );
+      rerender(
+        withIntl(
+          <TooltipProvider>
+            <ResultView sessionId="sess-1" referenceName="result_2" question="q:result_2" assumption={null} viz={null} pageSize={2} />
+          </TooltipProvider>,
+        ),
+      );
+      await waitFor(() => expect(readRows).toHaveBeenCalledTimes(2));
+      // The superseded first load lands: no settle, the count stays absent.
+      resolveFirst(page);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(screen.queryByText(/第 \d+–\d+ 行（共 \d+ 行）/)).not.toBeInTheDocument();
+      // The successor lands: it settles, the count mounts with real values.
+      resolveSecond(page);
+      await waitFor(() => expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument());
+    });
+  });
+
   it("renders the large-result disclosure as a note Alert (ADR-0050/0057, issue #108)", async () => {
     // ADR-0057: a result crossing the row threshold discloses honestly (not
     // silent pagination). Migrated to a default info Alert (ADR-0050);
@@ -691,9 +823,13 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
 
   it("finalizes the Vega view on unmount to free the chart resource", async () => {
     // The render effect's cleanup calls finalize so an unmounted chart frees its
-    // Vega view (no canvas/view leak across result switches). ResultView is keyed
-    // by reference name in App.tsx, so every result switch remounts and runs
-    // this cleanup path -- leaving it unguarded would leak views silently.
+    // Vega view (no canvas/view leak across unmounts). The render site does NOT
+    // key ResultView by reference name -- a result switch is a prop change, not
+    // a remount, and a session switch keeps panes alive (ADR-0060 CSS-hidden
+    // keep-alive) -- so this cleanup fires on true unmounts (pane close, the
+    // workspace tab switching away from result, the region-retry epoch bump
+    // that re-keys the workspace result region); leaving it unguarded would
+    // leak views silently.
     const finalize = vi.fn();
     vi.mocked(embed).mockResolvedValue(
       { finalize } as unknown as Awaited<ReturnType<typeof embed>>,
