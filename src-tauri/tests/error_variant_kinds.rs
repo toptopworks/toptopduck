@@ -109,6 +109,11 @@ fn row_read_error() -> Vec<RowReadError> {
     vec![
         RowReadError::UnknownDataset(String::new()),
         RowReadError::Execute(String::new()),
+        RowReadError::TooLarge {
+            row_count: 0,
+            limit: 0,
+        },
+        RowReadError::Cancelled,
     ]
 }
 

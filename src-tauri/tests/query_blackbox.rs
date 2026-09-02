@@ -395,7 +395,7 @@ fn export_rows_csv_writes_every_row_beyond_the_page_cap() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("result_1.csv");
     session
-        .export_rows_csv("result_1", path.to_str().unwrap())
+        .export_rows_csv("result_1", path.to_str().unwrap(), false)
         .expect("export");
 
     let bytes = std::fs::read(&path).expect("read csv");
@@ -420,7 +420,7 @@ fn export_rows_csv_writes_every_row_beyond_the_page_cap() {
 
     // The TSV full path runs the same fixture unclamped too -- a clamp on
     // the copy path alone would fail this count.
-    let tsv = session.read_rows_tsv("result_1").expect("tsv");
+    let tsv = session.read_rows_tsv("result_1", false).expect("tsv");
     assert_eq!(
         tsv.lines().count(),
         10_002,
@@ -441,7 +441,7 @@ fn read_rows_tsv_carries_the_header_and_sanitizes_control_characters() {
     load_source(&mut session, &fixture("people.csv"));
     session.ask("复制"); // result_1: 3 rows
 
-    let tsv = session.read_rows_tsv("result_1").expect("tsv");
+    let tsv = session.read_rows_tsv("result_1", false).expect("tsv");
     let lines: Vec<&str> = tsv.lines().collect();
     assert_eq!(lines[0], "甲\t乙", "header row leads");
     assert_eq!(lines[1], "a b\tx y", "tab/LF sanitized to spaces");
@@ -455,7 +455,7 @@ fn export_and_copy_on_unknown_reference_are_rejected() {
     // (and no file is created: the data source resolves before the open).
     let session = session_with(&[]);
     assert!(matches!(
-        session.export_rows_csv("nope", "unused.csv"),
+        session.export_rows_csv("nope", "unused.csv", false),
         Err(ExportRowsError::RowRead(RowReadError::UnknownDataset(_)))
     ));
     assert!(
@@ -463,7 +463,7 @@ fn export_and_copy_on_unknown_reference_are_rejected() {
         "no file created: the data source resolves before the open"
     );
     assert!(matches!(
-        session.read_rows_tsv("nope"),
+        session.read_rows_tsv("nope", false),
         Err(RowReadError::UnknownDataset(_))
     ));
 }
@@ -480,7 +480,7 @@ fn export_rows_csv_destination_failure_is_typed_and_leaves_no_artifact() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("no_such_dir").join("result_1.csv");
     assert!(matches!(
-        session.export_rows_csv("result_1", path.to_str().unwrap()),
+        session.export_rows_csv("result_1", path.to_str().unwrap(), false),
         Err(ExportRowsError::Io {
             step: ExportIoStep::Create,
             ..
@@ -499,14 +499,176 @@ fn export_and_copy_on_an_empty_result_carry_the_header_only() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("result_1.csv");
     session
-        .export_rows_csv("result_1", path.to_str().unwrap())
+        .export_rows_csv("result_1", path.to_str().unwrap(), false)
         .expect("export");
     let bytes = std::fs::read(&path).expect("read csv");
     assert_eq!(&bytes[..3], b"\xEF\xBB\xBF", "UTF-8 BOM leads");
     assert_eq!(&bytes[3..], b"n\n", "header row only, no data rows");
 
-    let tsv = session.read_rows_tsv("result_1").expect("tsv");
+    let tsv = session.read_rows_tsv("result_1", false).expect("tsv");
     assert_eq!(tsv, "n\n", "header line only");
+}
+
+#[test]
+fn export_and_copy_refuse_above_the_confirm_gate_until_confirmed() {
+    // Issue #779 AC1: a full pull over the confirm threshold refuses with the
+    // real row count until the caller re-sends with confirmed. The threshold
+    // is injected small (the gated seam -- the `read_line_bounded` `max`
+    // precedent) so a 3-row fixture exercises the same gate the constant
+    // guards in production. The refusal lands BEFORE the destination opens,
+    // so no file is created.
+    let mut session = session_with(&[(
+        "大结果",
+        "SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3",
+    )]);
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("大结果"); // result_1: 3 rows
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("result_1.csv");
+    assert!(matches!(
+        session.export_rows_csv_gated("result_1", path.to_str().unwrap(), false, 2),
+        Err(ExportRowsError::RowRead(RowReadError::TooLarge {
+            row_count: 3,
+            limit: 2
+        }))
+    ));
+    assert!(!path.exists(), "gate refuses before the destination opens");
+    assert!(matches!(
+        session.read_rows_tsv_gated("result_1", false, 2),
+        Err(RowReadError::TooLarge {
+            row_count: 3,
+            limit: 2
+        })
+    ));
+
+    // Confirmed, the same call proceeds: the file lands and the TSV returns.
+    session
+        .export_rows_csv_gated("result_1", path.to_str().unwrap(), true, 2)
+        .expect("confirmed export");
+    assert!(path.exists());
+    let tsv = session
+        .read_rows_tsv_gated("result_1", true, 2)
+        .expect("confirmed tsv");
+    assert_eq!(tsv.lines().count(), 4, "header + 3 rows");
+}
+
+#[test]
+fn a_leftover_cancel_request_does_not_kill_a_later_full_pull() {
+    // Issue #779 review finding: the cancel flag only `begin_turn` clears,
+    // and a full pull is not a turn -- so a request left over from the last
+    // cancelled turn or stopped pull must not silently kill the next pull on
+    // its first row (a quiet no-op the user reads as a dead button). The
+    // pull's start consumes the leftover request; a request fired DURING the
+    // scan is the mid-scan test below.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .scripted_tool_turn_seq("大结果", productive("SELECT 1 AS n UNION ALL SELECT 2"));
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("大结果"); // result_1: 2 rows
+    cancel.request(); // the leftover: a stop that landed after the turn
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("result_1.csv");
+    session
+        .export_rows_csv("result_1", path.to_str().unwrap(), false)
+        .expect("export survives the leftover request");
+    assert!(path.exists());
+    let tsv = session
+        .read_rows_tsv("result_1", false)
+        .expect("copy survives the leftover request");
+    assert_eq!(tsv.lines().count(), 3, "header + 2 rows");
+}
+
+#[test]
+fn export_observe_the_cancel_token_mid_scan_from_outside_the_lock() {
+    // Issue #779 AC2: a cancel fired while the export holds the session lock
+    // still reaches it -- the token fires WITHOUT the lock (ADR-0021's
+    // outside-the-lock cancel path), so the cancel command's thread lands
+    // mid-scan and the row loop's checkpoint observes it within one row. The
+    // export runs on a worker thread; the main thread waits until the
+    // destination exists (BOM + header written, the row loop underway) and
+    // only then fires -- a genuine mid-scan observation, not a pre-set flag.
+    // A million rows keep the scan comfortably longer than the poll loop.
+    // The failed-write cleanup holds for a cancelled write too -- no
+    // half-written artifact survives.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "大结果",
+        productive("SELECT i AS n FROM range(1, 1000001) t(i)"),
+    );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("大结果"); // result_1: 1_000_000 rows
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("result_1.csv");
+    let session = Arc::new(Mutex::new(session));
+    let export_path = path.to_str().unwrap().to_string();
+    let worker = {
+        let session = Arc::clone(&session);
+        let export_path = export_path.clone();
+        thread::spawn(move || {
+            let s = session.lock().unwrap();
+            s.export_rows_csv("result_1", &export_path, false)
+        })
+    };
+    // Wait for the scan to be underway (destination created), then fire the
+    // cancel the way the cancel command does -- from this thread, without
+    // the session lock the worker holds.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !path.exists() {
+        if std::time::Instant::now() > deadline {
+            panic!("export never created the destination within 30s");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    cancel.request();
+    match worker.join().expect("export thread") {
+        Err(ExportRowsError::RowRead(RowReadError::Cancelled)) => {}
+        other => panic!("expected a cancelled export, got {other:?}"),
+    }
+    assert!(!path.exists(), "a cancelled export leaves no artifact");
+}
+
+#[test]
+fn copy_observe_the_cancel_token_mid_scan() {
+    // The TSV twin of the export test above: the copy has no destination to
+    // poll, so the cancel fires a fixed beat after the pull starts -- well
+    // inside a million-row scan on any machine that finishes the fixture's
+    // turn in test time. A pre-scan fire would have been consumed at the
+    // pull's start (the leftover-request contract), so landing mid-scan is
+    // exactly what this pins.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "大结果",
+        productive("SELECT i AS n FROM range(1, 1000001) t(i)"),
+    );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("大结果"); // result_1: 1_000_000 rows
+
+    let session = Arc::new(Mutex::new(session));
+    let worker = {
+        let session = Arc::clone(&session);
+        thread::spawn(move || {
+            let s = session.lock().unwrap();
+            s.read_rows_tsv("result_1", false)
+        })
+    };
+    thread::sleep(Duration::from_millis(250));
+    cancel.request();
+    match worker.join().expect("copy thread") {
+        Err(RowReadError::Cancelled) => {}
+        other => panic!("expected a cancelled copy, got {other:?}"),
+    }
 }
 
 #[test]

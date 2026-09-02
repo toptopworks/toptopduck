@@ -956,7 +956,11 @@ pub async fn read_rows(
 /// (issue #769): the native save dialog already ran frontend-side, so a
 /// cancel never reaches here. Runs off the async/UI thread and under the
 /// session lock like `read_rows` -- a full-result scan is the same blocking
-/// class as a large-OFFSET page. Failures cross IPC as the typed
+/// class as a large-OFFSET page. A result over the confirm threshold refuses
+/// with `RowReadError::TooLarge` until re-sent with `confirmed: true`, and a
+/// cancel observed mid-scan stops the scan with `RowReadError::Cancelled`
+/// (issue #779 -- the token fires without the session lock, so the export's
+/// lock hold does not shield it). Failures cross IPC as the typed
 /// `SessionError::Export` (`ExportRowsError`): the data-source half mirrors
 /// `read_rows`, the destination half carries the step / path / detail for the
 /// export-domain locale message.
@@ -966,13 +970,14 @@ pub async fn export_rows_csv(
     session_id: String,
     reference_name: String,
     path: String,
+    confirmed: bool,
 ) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
-        s.export_rows_csv(&reference_name, &path)
+        s.export_rows_csv(&reference_name, &path, confirmed)
             .map_err(SessionError::Export)
     })
     .await
@@ -982,19 +987,23 @@ pub async fn export_rows_csv(
 /// Read every row of a dataset from the named session as TSV text (header row
 /// leading, no `MAX_READ_ROWS` clamp) -- the full-result clipboard payload
 /// (issue #769). Same blocking / lock class and typed-error contract as
-/// `read_rows`.
+/// `read_rows`. The full-path guardrails of issue #779 apply: the confirm
+/// threshold refuses with `RowReadError::TooLarge` until re-sent with
+/// `confirmed: true`, and a cancel observed mid-scan stops with
+/// `RowReadError::Cancelled`.
 #[tauri::command]
 pub async fn read_rows_tsv(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
     reference_name: String,
+    confirmed: bool,
 ) -> Result<String, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
-        s.read_rows_tsv(&reference_name)
+        s.read_rows_tsv(&reference_name, confirmed)
             .map_err(SessionError::RowRead)
     })
     .await

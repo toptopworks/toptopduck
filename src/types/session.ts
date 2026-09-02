@@ -65,10 +65,15 @@ export type RenameSessionError = { kind: "EmptyName" };
 // adjacently-tagged, issue #121). Rides SessionError::Turn; UnknownDataset
 // carries the reference name, Execute carries the engine detail (technical,
 // never an API key per ADR-0029). Turn failures are TurnOutcome::Failed
-// (ADR-0028), NOT this type.
+// (ADR-0028), NOT this type. TooLarge / Cancelled are the full-pull
+// guardrails (issue #779): the confirm gate's refusal carries the real row
+// count + threshold, the mid-scan cancel observation is a unit variant (the
+// serde data half is null).
 export type RowReadError =
   | { kind: "UnknownDataset"; data: string }
-  | { kind: "Execute"; data: string };
+  | { kind: "Execute"; data: string }
+  | { kind: "TooLarge"; data: { row_count: number; limit: number } }
+  | { kind: "Cancelled" };
 
 // Why a full-result CSV export failed (issue #769). Mirrors the Rust
 // `ExportRowsError` (serde adjacently-tagged). Rides SessionError::Export;

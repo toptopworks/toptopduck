@@ -195,6 +195,17 @@ impl CancelToken {
             generation,
         }
     }
+
+    /// Consume a leftover cancel request without touching the turn
+    /// generation: the full-pull paths' analogue of [`Self::begin_turn`]'s
+    /// flag reset (issue #779). A pull is not a turn, so a request left over
+    /// from the last cancelled turn or stopped pull would otherwise kill the
+    /// next pull on its first row. A racing `request()` has the same
+    /// nondeterminism `begin_turn` documents above: it either lands before
+    /// (wiped) or after (honored by the pull's row loop).
+    pub fn clear_request(&self) {
+        self.state.fetch_and(!1u64, Ordering::SeqCst);
+    }
 }
 
 /// RAII guard for the in-flight flag. Created by
@@ -261,6 +272,29 @@ mod tests {
         assert!(token.is_requested());
         let _guard = token.begin_turn();
         assert!(!token.is_requested(), "stale request must be cleared");
+    }
+
+    #[test]
+    fn clear_request_consumes_a_stale_request_without_touching_generation() {
+        // Issue #779: a full pull starts by consuming a leftover request (the
+        // begin_turn analogue), and the turn generation must survive --
+        // request_if for the still-current generation still fires, so a
+        // watchdog paired with this turn is unaffected by the clear.
+        let token = Arc::new(CancelToken::new());
+        let guard = token.begin_turn();
+        let generation = guard.generation();
+        drop(guard);
+        token.request();
+        assert!(token.is_requested());
+        token.clear_request();
+        assert!(!token.is_requested(), "stale request must be consumed");
+        // The generation survived the clear: the paired request_if still
+        // recognizes it as current (fires and re-sets the flag).
+        assert!(
+            token.request_if(generation),
+            "generation untouched by the clear"
+        );
+        assert!(token.is_requested());
     }
 
     #[test]

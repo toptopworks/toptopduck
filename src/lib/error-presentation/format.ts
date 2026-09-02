@@ -411,6 +411,19 @@ function formatRowReadError(e: RowReadError, intl: IntlShape): string {
         id: "error.turn.execute",
         defaultMessage: "Failed to execute the query",
       });
+    case "TooLarge":
+      // The full-pull confirm gate (issue #779). Normally intercepted by the
+      // result actions' confirm flow before formatting; this is the fallback
+      // wording for any other lane the refusal might reach.
+      return intl.formatMessage({
+        id: "error.rowRead.tooLarge",
+        defaultMessage: "This result is too large to pull in one go without confirmation",
+      });
+    case "Cancelled":
+      return intl.formatMessage({
+        id: "error.rowRead.cancelled",
+        defaultMessage: "The full-result action was cancelled",
+      });
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled RowReadError kind: ${JSON.stringify(unhandled)}`);
@@ -614,6 +627,10 @@ function rowReadErrorDetail(e: RowReadError): string | null {
     case "Execute":
       return e.data;
     case "UnknownDataset":
+      return null;
+    case "TooLarge":
+      return `rows=${e.data.row_count} threshold=${e.data.limit}`;
+    case "Cancelled":
       return null;
     default: {
       const unhandled: never = e;

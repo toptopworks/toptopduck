@@ -273,8 +273,9 @@ export function isRenameError(e: unknown): e is RenameError {
 }
 
 // Narrow an unknown value to a RowReadError (issue #121) -- the read_rows error.
-// Reached via isSessionError's Turn branch. Both variants carry a string under
-// data (the reference name / the engine detail).
+// Reached via isSessionError's Turn branch. UnknownDataset / Execute carry a
+// string under data (the reference name / the engine detail); TooLarge carries
+// the row count + threshold pair (issue #779); Cancelled is a unit variant.
 export function isRowReadError(e: unknown): e is RowReadError {
   if (typeof e !== "object" || e === null) return false;
   const kind = (e as { kind?: unknown }).kind;
@@ -282,9 +283,50 @@ export function isRowReadError(e: unknown): e is RowReadError {
     case "UnknownDataset":
     case "Execute":
       return typeof (e as { data?: unknown }).data === "string";
+    case "TooLarge": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { row_count?: unknown }).row_count === "number" &&
+        typeof (d as { limit?: unknown }).limit === "number"
+      );
+    }
+    case "Cancelled":
+      return true;
     default:
       return false;
   }
+}
+
+// Classify a full-pull IPC reject against the guardrails (issue #779): the
+// confirm gate's refusal (with the row count the prompt quotes), the mid-scan
+// cancel observation, or null when the reject is anything else (a real
+// failure -- the caller's error lane handles those). The TSV copy rides
+// SessionError::RowRead directly, the CSV export rides SessionError::Export's
+// RowRead half one level deeper -- both unwrapped through the existing
+// narrowings, never re-matched by hand.
+export function classifyFullPullRejection(
+  e: unknown,
+): { kind: "tooLarge"; rowCount: number } | { kind: "cancelled" } | null {
+  if (typeof e !== "object" || e === null) return null;
+  const kind = (e as { kind?: unknown }).kind;
+  let inner: unknown = null;
+  if (kind === "RowRead") {
+    inner = (e as { data?: unknown }).data;
+  } else if (kind === "Export") {
+    const wrapped = (e as { data?: unknown }).data;
+    if (isExportRowsError(wrapped) && wrapped.kind === "RowRead") {
+      // isExportRowsError's RowRead branch already verified the nested
+      // RowReadError shape; the shared tail re-checks it for the direct
+      // branch anyway.
+      inner = wrapped.data;
+    }
+  }
+  if (!isRowReadError(inner)) return null;
+  if (inner.kind === "TooLarge") return { kind: "tooLarge", rowCount: inner.data.row_count };
+  if (inner.kind === "Cancelled") return { kind: "cancelled" };
+  return null;
 }
 
 // Narrow an unknown value to an ExportRowsError (issue #769) -- the

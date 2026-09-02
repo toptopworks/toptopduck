@@ -887,14 +887,14 @@ fn export_and_copy_still_work_on_a_stale_result() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("stale.csv");
     session
-        .export_rows_csv("result_1", path.to_str().unwrap())
+        .export_rows_csv("result_1", path.to_str().unwrap(), false)
         .expect("stale export");
     let bytes = std::fs::read(&path).expect("read csv");
     assert_eq!(&bytes[..3], b"\xEF\xBB\xBF", "UTF-8 BOM leads");
     let text = String::from_utf8_lossy(&bytes[3..]);
     assert_eq!(text, "n\n3\n", "header + the real COUNT row, no markers");
 
-    let tsv = session.read_rows_tsv("result_1").expect("stale tsv");
+    let tsv = session.read_rows_tsv("result_1", false).expect("stale tsv");
     assert_eq!(tsv, "n\n3\n");
 }
 
