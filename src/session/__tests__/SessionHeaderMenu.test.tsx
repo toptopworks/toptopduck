@@ -108,6 +108,19 @@ describe("SessionHeaderMenu (issue #512)", () => {
     expect(getTrigger()).toBeTruthy();
   });
 
+  it("carries the 28px hit-area pin shared with the header chrome family (issue #774)", () => {
+    renderMenu();
+    // The trigger sits in the same .session-header row as the workspace
+    // toggle, so the whole family shares one hit-area spec: h-7 w-7 button
+    // (28px) with a 14px glyph. jsdom computes no layout, so the pin asserts
+    // the utilities; the mocked trigger spreads the real className onto a
+    // plain button, keeping the utilities assertable here.
+    const trigger = getTrigger();
+    expect(trigger).toHaveClass("h-7", "w-7");
+    const glyph = trigger.querySelector("svg");
+    expect(glyph).toHaveClass("h-3.5", "w-3.5");
+  });
+
   it("shows Rename / Save a copy… / Close / Delete items", () => {
     renderMenu();
     expect(screen.getByRole("menuitem", { name: /Rename/ })).toBeTruthy();

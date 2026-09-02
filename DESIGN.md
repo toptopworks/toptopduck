@@ -508,7 +508,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`app-shell` / `app-shell-dark`** — The window background. Background `{colors.canvas}` / `{colors.canvas-dark}`, text `{colors.ink}` / `{colors.ink-dark}`. In production this maps to the Tailwind `bg-background text-foreground` utilities.
 
-**`topbar` / `topbar-dark`** — Thin 40px strip spanning the full viewport width. Same background as the shell. Houses the sidebar toggle, session name, and window controls. Height is deliberately compact — this is chrome, not content.
+**`topbar` / `topbar-dark`** — Thin 40px strip spanning the full viewport width. Same background as the shell. Houses the sidebar toggle, session name, and window controls. Height is deliberately compact — this is chrome, not content. Header-chrome icon buttons sharing the topbar ghost style (sidebar toggle, back/forward nav, workspace toggle, session-actions menu trigger) carry a 28px hit area (`h-7 w-7`) with a 14px glyph (`h-3.5 w-3.5`) — the WCAG 2.5.8 24px minimum plus margin. The window controls are a separate titlebar family (Windows-style 32px × 44px hit) and are not bound by this note.
 
 **`sidebar` / `sidebar-dark`** — Session sidebar at 220px width. Same background as the shell. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 180ms grid-template-columns animation.
 
@@ -570,7 +570,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 - Reserve `{colors.primary}` (teal) for primary CTAs, active states, and focus rings. One accent, used scarcely.
 - Use brightness-step surfaces + functional shadow tiers for depth. In-content cards carry `shadow-sm`; floating popovers carry `shadow-md`; dialogs carry `shadow-lg`.
 - Render every SQL snippet, data value, and file path in the system monospace stack via `{typography.code}`.
-- Keep button height at 36px and topbar at 40px — compact workbench density.
+- Keep button height at 36px, topbar at 40px, and header icon-button hit areas at 28px with a 14px glyph — compact workbench density.
 - Use 1px hairlines (`{colors.border}` / `{colors.border-dark}`) for all visual separation.
 - Support both light and dark modes as equals. Neither is the "default."
 - Apply `{typography.label-caps}` with CSS `text-transform: uppercase` for badges and section labels.
