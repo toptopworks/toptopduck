@@ -215,7 +215,13 @@ export default function App() {
     isDragging: railDragging,
     onResizeStart: onRailResizeStart,
     adjustWidth: adjustRailWidth,
-  } = useRailResize({ getMaxWidth: getRailMaxWidth });
+  } = useRailResize({
+    getMaxWidth: getRailMaxWidth,
+    // Issue #781: the rail's ceiling reads the track host, whose clientWidth
+    // lags the sidebar's own re-clamp inside a single window-resize event —
+    // so the re-clamp observes the host's settled layout instead of resize.
+    observeTarget: mainAreaRef,
+  });
 
   const {
     width: sidebarWidth,
