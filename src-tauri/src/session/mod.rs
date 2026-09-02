@@ -32,9 +32,10 @@ use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, RenameError, RowPage, RowReadError, SkillLifecycleEvent,
-    SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry, TraceRound, TurnFailure,
-    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
+    ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportIoStep, ExportRowsError, RenameError,
+    RowPage, RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, TextKind,
+    ThreadEntry, TraceRound, TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
+    TurnRuntime,
 };
 use crate::persistence::recipe::{
     LastRuntime, Recipe, RecipeTraceRound, RecipeTurn, RuntimeKind,
@@ -72,6 +73,11 @@ pub use resume::{is_resuming, resuming_count};
 /// requested limit is clamped so a malformed/hostile caller can't pull the whole
 /// table into memory; the physical table still holds the full result.
 const MAX_READ_ROWS: u64 = 10_000;
+
+/// The UTF-8 BOM written ahead of an exported CSV's first record (issue #769):
+/// Excel-family spreadsheets autodetect UTF-8 by its presence -- without it a
+/// CJK column name or value garbles on open.
+const UTF8_BOM: &str = "\u{FEFF}";
 
 /// The subdirectory name under the session temp dir where external MCP tools
 /// write their output files (ADR-0087 Decision 3). Created eagerly at session
@@ -1894,6 +1900,33 @@ impl Session {
         // Clamp the page size to the display cap (ADR-0005/0024) so a malformed
         // or hostile caller can't pull the whole table into memory.
         let limit = limit.min(MAX_READ_ROWS);
+        let (columns, body, total) = self.full_rows_sql(reference_name)?;
+        let sql = format!("{body} LIMIT {limit} OFFSET {offset}");
+        let mut out = Vec::new();
+        self.scan_rows(&sql, columns.len(), |cells| {
+            out.push(cells);
+            Ok(())
+        })?;
+        Ok(RowPage {
+            columns,
+            rows: out,
+            total,
+            offset,
+            limit,
+        })
+    }
+
+    /// The shared SELECT body of the paged read and the full-result export /
+    /// copy paths (issue #769): the working set's FROM fragment with every
+    /// column CAST to VARCHAR (NULL -> "") for uniform rendering, plus the
+    /// descriptor's full row count (the paged read's honest `total`). Paged
+    /// reads append LIMIT/OFFSET; the full paths run it unclamped and stream
+    /// the rows out instead of paging them. The identifiers and the FROM
+    /// fragment are tool-generated, so the interpolation is safe.
+    fn full_rows_sql(
+        &self,
+        reference_name: &str,
+    ) -> Result<(Vec<ColumnSchema>, String, u64), RowReadError> {
         let descriptor = self
             .working_set
             .get(reference_name)
@@ -1907,44 +1940,132 @@ impl Session {
             .iter()
             .map(|c| format!("CAST({} AS VARCHAR)", quote_ident(&c.name)))
             .collect();
-        let sql = format!(
-            "SELECT {} FROM {} LIMIT {} OFFSET {}",
-            selects.join(", "),
-            from,
-            limit,
-            offset
-        );
+        Ok((
+            columns,
+            format!("SELECT {} FROM {}", selects.join(", "), from),
+            descriptor.row_count,
+        ))
+    }
+
+    /// Read one queried row as display cells: VARCHAR cells verbatim, NULL ->
+    /// "" -- the cell semantics shared by the paged read and the full-result
+    /// export / copy paths (lifted from read_rows, issue #769).
+    fn varchar_cells(row: &duckdb::Row<'_>, len: usize) -> Result<Vec<String>, RowReadError> {
+        let mut cells = Vec::with_capacity(len);
+        for i in 0..len {
+            let v: Option<String> = row
+                .get(i)
+                .map_err(|e| RowReadError::Execute(e.to_string()))?;
+            cells.push(v.unwrap_or_default());
+        }
+        Ok(cells)
+    }
+
+    /// Run a rows query and hand each row's display cells to `on_row`
+    /// (issue #769): the one data-access loop shared by the paged read and
+    /// the full-result export / copy paths -- acquire / prepare / query /
+    /// scan / cell-shaping live here exactly once, so the three paths share
+    /// one contract instead of three copies. `E` converts from
+    /// [`RowReadError`], keeping each caller's own error type.
+    fn scan_rows<E>(
+        &self,
+        sql: &str,
+        ncols: usize,
+        mut on_row: impl FnMut(Vec<String>) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<RowReadError>,
+    {
         let conn = self
             .admin_engine
             .acquire()
             .map_err(|e| RowReadError::Execute(e.to_string()))?;
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare(sql)
             .map_err(|e| RowReadError::Execute(e.to_string()))?;
         let mut rows = stmt
             .query([])
             .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        let mut out = Vec::new();
         while let Some(row) = rows
             .next()
             .map_err(|e| RowReadError::Execute(e.to_string()))?
         {
-            let mut cells = Vec::with_capacity(columns.len());
-            for i in 0..columns.len() {
-                let v: Option<String> = row
-                    .get(i)
-                    .map_err(|e| RowReadError::Execute(e.to_string()))?;
-                cells.push(v.unwrap_or_default());
-            }
-            out.push(cells);
+            let cells = Self::varchar_cells(row, ncols)?;
+            on_row(cells)?;
         }
-        Ok(RowPage {
-            columns,
-            rows: out,
-            total: descriptor.row_count,
-            offset,
-            limit,
-        })
+        Ok(())
+    }
+
+    /// Export every row of a dataset to `path` as UTF-8 CSV (issue #769): the
+    /// header row leads, then ALL rows -- the same data source and cell
+    /// semantics as [`Self::read_rows`] but no `MAX_READ_ROWS` clamp and no
+    /// paging; rows stream through the csv writer's buffer instead of landing
+    /// in memory, and the frontend never stitches pages together. The file
+    /// opens with a UTF-8 BOM (see [`UTF8_BOM`]); fields are CSV-escaped by the
+    /// writer. Destination-file failures (create / write / flush) are
+    /// [`ExportRowsError::Io`]; everything else matches `read_rows` 1:1. Stale
+    /// results export too -- the rows are real and the payload carries no
+    /// status markers.
+    pub fn export_rows_csv(&self, reference_name: &str, path: &str) -> Result<(), ExportRowsError> {
+        let (columns, sql, _) = self.full_rows_sql(reference_name)?;
+        // Create the destination first; the streaming half writes the BOM and
+        // hands the file to the csv writer (which adds its own buffer and
+        // flushes through it at the end).
+        let file = fs::File::create(path).map_err(|e| export_io(ExportIoStep::Create, path, e))?;
+        let result = self.export_csv_stream(file, &columns, &sql, path);
+        if result.is_err() {
+            // Create truncated any pre-existing file at the path, so a failed
+            // export must not leave the half-written artifact behind -- a
+            // truncated CSV opens as a valid-looking export. Best-effort
+            // removal; the error itself still crosses IPC.
+            let _ = fs::remove_file(path);
+        }
+        result
+    }
+
+    /// The post-create half of [`Self::export_rows_csv`] (issue #769): BOM,
+    /// header, and every row streamed through the csv writer's buffer. Split
+    /// out so the caller can remove the truncated destination when this
+    /// fails.
+    fn export_csv_stream(
+        &self,
+        mut file: fs::File,
+        columns: &[ColumnSchema],
+        sql: &str,
+        path: &str,
+    ) -> Result<(), ExportRowsError> {
+        use std::io::Write as _;
+
+        file.write_all(UTF8_BOM.as_bytes())
+            .map_err(|e| export_io(ExportIoStep::Write, path, e))?;
+        let mut wtr = csv::Writer::from_writer(file);
+        wtr.write_record(columns.iter().map(|c| c.name.as_str()))
+            .map_err(|e| export_io(ExportIoStep::Write, path, e))?;
+        self.scan_rows(sql, columns.len(), |cells| {
+            wtr.write_record(cells)
+                .map_err(|e| export_io(ExportIoStep::Write, path, e))
+        })?;
+        wtr.flush()
+            .map_err(|e| export_io(ExportIoStep::Flush, path, e))?;
+        Ok(())
+    }
+
+    /// Every row of a dataset as TSV text with the header row leading (issue
+    /// #769): the full-result clipboard payload. Same data source and cell
+    /// semantics as [`Self::read_rows`], no clamp and no paging. TSV carries no
+    /// quoting convention that spreadsheet paste honors, so an embedded tab,
+    /// CR, or LF would silently split one cell across columns -- those control
+    /// characters are sanitized to a space (see [`push_tsv_line`]). Stale
+    /// results copy too; the payload carries no status markers.
+    pub fn read_rows_tsv(&self, reference_name: &str) -> Result<String, RowReadError> {
+        let (columns, sql, _) = self.full_rows_sql(reference_name)?;
+        let mut out = String::new();
+        push_tsv_line(&mut out, columns.iter().map(|c| c.name.as_str()));
+        self.scan_rows(&sql, columns.len(), |cells| {
+            push_tsv_line(&mut out, cells.iter());
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// Run arbitrary SQL on the session connection, materializing the engine
@@ -1967,6 +2088,39 @@ impl Session {
             [],
             |r| r.get(0),
         )?)
+    }
+}
+
+/// Append one TSV line (cells joined on tabs, trailing newline) with each
+/// cell's embedded tab / CR / LF sanitized to a single space (issue #769) --
+/// TSV has no quoting convention that spreadsheet paste honors, so keeping
+/// those control characters would silently break the paste's column structure.
+fn push_tsv_line<S: AsRef<str>>(out: &mut String, cells: impl IntoIterator<Item = S>) {
+    let mut first = true;
+    for cell in cells {
+        if !first {
+            out.push('\t');
+        }
+        first = false;
+        for ch in cell.as_ref().chars() {
+            out.push(if matches!(ch, '\t' | '\r' | '\n') {
+                ' '
+            } else {
+                ch
+            });
+        }
+    }
+    out.push('\n');
+}
+
+/// Build the typed destination-file failure for a CSV export (issue #769):
+/// which step failed, at which path, with the underlying io error as the
+/// detail.
+fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> ExportRowsError {
+    ExportRowsError::Io {
+        step,
+        path: path.to_string(),
+        detail: e.to_string(),
     }
 }
 

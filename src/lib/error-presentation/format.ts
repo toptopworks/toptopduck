@@ -10,6 +10,7 @@
 import type { IntlShape } from "react-intl";
 import type {
   DuckLoadError,
+  ExportRowsError,
   MigrationError,
   RemoveSourceError,
   RenameError,
@@ -417,6 +418,28 @@ function formatRowReadError(e: RowReadError, intl: IntlShape): string {
   }
 }
 
+// Format an ExportRowsError (full-result CSV export failure) through the
+// locale catalog (issue #769). The data-source half recurses into the shared
+// row-read wording; the destination half (create / write / flush of the
+// user-chosen file) is a user-actionable environment failure with its own
+// export-domain message, and the step / path / detail ride the fold via
+// exportRowsErrorDetail.
+function formatExportRowsError(e: ExportRowsError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "RowRead":
+      return formatRowReadError(e.data, intl);
+    case "Io":
+      return intl.formatMessage({
+        id: "error.session.exportIo",
+        defaultMessage: "Failed to write the export file",
+      });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled ExportRowsError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 // Format an unknown error (a Tauri IPC reject, a JS Error, or a structured
 // object) into a readable string. A structured typed error -- SessionError
 // (issue #119), ResumeError / SaveError (issue #120) -- is narrowed to its
@@ -470,6 +493,8 @@ export function fmtError(e: unknown, intl: IntlShape): string {
         return formatRowReadError(e.data, intl);
       case "SkillMount":
         return formatSkillMountError(e.data, intl);
+      case "Export":
+        return formatExportRowsError(e.data, intl);
       default: {
         // Exhaustiveness guard (issue #121): a future SessionError variant must
         // trip the compiler here, not silently fall through to the opaque JSON
@@ -519,6 +544,7 @@ export function errorDetail(e: unknown): string | null {
     if (e.kind === "Engine") return e.data;
     if (e.kind === "Resume") return resumeErrorDetail(e.data);
     if (e.kind === "Turn") return rowReadErrorDetail(e.data);
+    if (e.kind === "Export") return exportRowsErrorDetail(e.data);
     return null;
   }
   if (isSaveError(e)) {
@@ -592,6 +618,22 @@ function rowReadErrorDetail(e: RowReadError): string | null {
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled RowReadError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Detail for a nested ExportRowsError (issue #769), reached via
+// SessionError::Export. Io carries the step / path / detail for the fold;
+// the RowRead half delegates to the shared row-read detail.
+function exportRowsErrorDetail(e: ExportRowsError): string | null {
+  switch (e.kind) {
+    case "RowRead":
+      return rowReadErrorDetail(e.data);
+    case "Io":
+      return `${e.data.step.toLowerCase()} ${e.data.path}: ${e.data.detail}`;
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled ExportRowsError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }

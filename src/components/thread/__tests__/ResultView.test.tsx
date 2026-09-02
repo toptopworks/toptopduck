@@ -1,21 +1,37 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { renderI18n, withIntl } from "../../common/__tests__/helpers";
+import { renderI18n as renderI18nBase, withIntl } from "../../common/__tests__/helpers";
+import { TooltipProvider } from "../../ui/tooltip";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../ResultView";
 import { catalogFor } from "../../../i18n";
-import { readRows } from "../../../api";
+import { readRows, exportRowsCsv } from "../../../api";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import embed from "vega-embed";
 
+// ResultView's header now rides ResultActions' Radix tooltips, which need the
+// app-wide TooltipProvider ancestor (mounted in App.tsx); tests provide it the
+// RoundProse way. This renderI18n shadows the shared helper with a
+// provider-wrapping render so every call site keeps its shape.
+function renderI18n(ui: React.ReactElement) {
+  return renderI18nBase(<TooltipProvider>{ui}</TooltipProvider>);
+}
+
 // ResultView paginates via readRows; stub it so the tests script the page
-// payloads without the Tauri bridge. Only readRows is mocked (ResultView's sole
-// api surface) -- the rest of the module passes through unchanged.
+// payloads without the Tauri bridge. The ResultActions pair (issue #769) rides
+// the same module, so its two full-pull surfaces are stubbed too -- the rest of
+// the module passes through unchanged.
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
   return {
     ...actual,
     readRows: vi.fn(),
+    readRowsTsv: vi.fn(),
+    exportRowsCsv: vi.fn(),
   };
 });
+// The export action opens the native save dialog before the IPC call; stubbed
+// so the tests script the chosen-path and cancel branches.
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn() }));
 // Vega-Embed needs a real canvas; jsdom has none, so the render itself is
 // mocked. ResultView still drives the real decodeViz + the embed call/catch
 // branches -- the mock lets each test script a successful embed or a rejected
@@ -216,7 +232,11 @@ describe("ResultView", () => {
     );
     // result_1's page-0 is still pending; switch to result_2 (resolves fast).
     rerender(
-      withIntl(<ResultView sessionId="sess-1" referenceName="result_2" assumption={null} viz={null} />),
+      withIntl(
+        <TooltipProvider>
+          <ResultView sessionId="sess-1" referenceName="result_2" assumption={null} viz={null} />
+        </TooltipProvider>,
+      ),
     );
     await waitFor(() => expect(screen.getByText("99")).toBeInTheDocument());
     // Now result_1's stale page-0 lands -- it must be discarded, not rendered.
@@ -643,5 +663,57 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     const alert = screen.getByRole("status");
     expect(alert.getAttribute("data-slot")).toBe("alert");
     expect(alert).toHaveTextContent(/图表无法渲染，已显示表格/);
+  });
+
+  it("keeps the header's export/copy actions available on a stale result", async () => {
+    // AC (issue #769): a stale result's rows are real and the disclosure has
+    // done its duty -- both take-it-away actions stay reachable (no gating on
+    // the stale anchor).
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["3"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "orders", display_name: "Orders", reason: "Deleted" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: "导出 CSV" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制全部" })).toBeInTheDocument();
+  });
+
+  it("surfaces an export failure in the read-error banner", async () => {
+    // AC (issue #769): failures route through the existing error channel (the
+    // read-kind ErrorBanner), not silently -- the typed Export reject renders
+    // the export-domain message with the step / path / detail in the
+    // technical fold.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["3"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    vi.mocked(exportRowsCsv).mockRejectedValue({
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/导出文件写入失败/);
+    expect(alert).toHaveTextContent(/create C:\/out\/x\.csv: denied/);
   });
 });

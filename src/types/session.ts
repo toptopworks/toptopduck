@@ -32,6 +32,7 @@ export type SessionError =
   | { kind: "RenameSession"; data: RenameSessionError }
   | { kind: "Turn"; data: RowReadError }
   | { kind: "SkillMount"; data: SkillMountError }
+  | { kind: "Export"; data: ExportRowsError }
   | { kind: "Engine"; data: string };
 
 // Why a source removal was rejected (issues #38/#39/#40, ADR-0040). Mirrors the
@@ -68,6 +69,18 @@ export type RenameSessionError = { kind: "EmptyName" };
 export type RowReadError =
   | { kind: "UnknownDataset"; data: string }
   | { kind: "Execute"; data: string };
+
+// Why a full-result CSV export failed (issue #769). Mirrors the Rust
+// `ExportRowsError` (serde adjacently-tagged). Rides SessionError::Export;
+// the data-source half reuses RowReadError 1:1, the destination half carries
+// which step failed (create / write / flush), at which path, with the
+// underlying io detail (technical, never an API key per ADR-0029).
+export type ExportRowsError =
+  | { kind: "RowRead"; data: RowReadError }
+  | {
+    kind: "Io";
+    data: { step: "Create" | "Write" | "Flush"; path: string; detail: string };
+  };
 
 // Why a forward migration step failed (issue #120). Rides DuckLoadError::
 // Migration inside ResumeError::Load. Mirrors the Rust `MigrationError` (serde

@@ -22,10 +22,10 @@ use toptopduck_lib::provider::tool_calling::{
 use toptopduck_lib::session::PosturePair;
 use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
-    CancelToken, DatasetPrivacy, FakeProvider, KeychainStore, LoadOutcome, OperationKind,
-    ProviderError, ResumeEvent, ResumeProgress, Session, SessionId, SourceResolution, TextKind,
-    ThreadEntry, TraceEntryView, TurnFailure, TurnInputs, TurnOutcome, TurnPhase, TurnProgress,
-    TurnRecord,
+    CancelToken, DatasetPrivacy, ExportIoStep, ExportRowsError, FakeProvider, KeychainStore,
+    LoadOutcome, OperationKind, ProviderError, ResumeEvent, ResumeProgress, RowReadError, Session,
+    SessionId, SourceResolution, TextKind, ThreadEntry, TraceEntryView, TurnFailure, TurnInputs,
+    TurnOutcome, TurnPhase, TurnProgress, TurnRecord,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -370,6 +370,143 @@ fn a_multi_promotion_turn_persists_every_result_into_the_recipe_chain() {
 fn read_rows_on_unknown_reference_is_rejected() {
     let session = session_with(&[]);
     assert!(session.read_rows("nope", 0, 10).is_err());
+}
+
+#[test]
+fn export_rows_csv_writes_every_row_beyond_the_page_cap() {
+    // Issue #769: the export path reuses read_rows' data source but runs it
+    // unclamped -- a result past MAX_READ_ROWS (10_000) lands in the file in
+    // full, header row leading, behind a UTF-8 BOM (Excel-family UTF-8
+    // autodetection), with fields CSV-escaped and NULL rendered as an empty
+    // cell.
+    let mut session = session_with(&[(
+        "导出",
+        r#"SELECT
+              i AS 序号,
+              CASE WHEN i = 1 THEN 'a,b "c"'
+                   WHEN i = 2 THEN 'l' || chr(13) || 'm' || chr(10) || 'n'
+                   ELSE '值' || i END AS 备注,
+              CAST(NULL AS VARCHAR) AS 空值
+            FROM range(1, 10002) t(i)"#,
+    )]);
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("导出"); // result_1: 10_001 rows
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("result_1.csv");
+    session
+        .export_rows_csv("result_1", path.to_str().unwrap())
+        .expect("export");
+
+    let bytes = std::fs::read(&path).expect("read csv");
+    assert_eq!(&bytes[..3], b"\xEF\xBB\xBF", "UTF-8 BOM leads");
+    let mut reader = csv::Reader::from_reader(&bytes[3..]);
+    let headers = reader.headers().expect("headers").clone();
+    assert_eq!(headers, vec!["序号", "备注", "空值"]);
+    let records: Vec<_> = reader.records().map(|r| r.expect("record")).collect();
+    assert_eq!(records.len(), 10_001, "no MAX_READ_ROWS clamp");
+    assert_eq!(
+        records[0].get(1),
+        Some(r#"a,b "c""#),
+        "quoted field round-trips"
+    );
+    assert_eq!(
+        records[1].get(1),
+        Some("l\rm\nn"),
+        "embedded CR/LF round-trips inside the quoted field"
+    );
+    assert_eq!(records[2].get(1), Some("值3"), "CJK value round-trips");
+    assert_eq!(records[0].get(2), Some(""), "NULL -> empty cell");
+
+    // The TSV full path runs the same fixture unclamped too -- a clamp on
+    // the copy path alone would fail this count.
+    let tsv = session.read_rows_tsv("result_1").expect("tsv");
+    assert_eq!(
+        tsv.lines().count(),
+        10_002,
+        "tsv unclamped: header + all rows"
+    );
+}
+
+#[test]
+fn read_rows_tsv_carries_the_header_and_sanitizes_control_characters() {
+    // Issue #769: the full-copy payload is the header plus every row joined on
+    // tabs; TSV has no quoting convention spreadsheet paste honors, so cells
+    // with embedded tab/LF are sanitized to spaces to keep the paste's column
+    // structure honest.
+    let mut session = session_with(&[(
+        "复制",
+        r#"SELECT 'a' || chr(9) || 'b' AS 甲, 'x' || chr(10) || 'y' AS 乙 FROM range(1, 4) t(i)"#,
+    )]);
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("复制"); // result_1: 3 rows
+
+    let tsv = session.read_rows_tsv("result_1").expect("tsv");
+    let lines: Vec<&str> = tsv.lines().collect();
+    assert_eq!(lines[0], "甲\t乙", "header row leads");
+    assert_eq!(lines[1], "a b\tx y", "tab/LF sanitized to spaces");
+    assert_eq!(lines.len(), 4, "header + all 3 rows, no paging");
+}
+
+#[test]
+fn export_and_copy_on_unknown_reference_are_rejected() {
+    // Issue #769: the full paths share read_rows' refusal -- an unknown
+    // reference is the typed UnknownDataset, not a silent empty file/payload
+    // (and no file is created: the data source resolves before the open).
+    let session = session_with(&[]);
+    assert!(matches!(
+        session.export_rows_csv("nope", "unused.csv"),
+        Err(ExportRowsError::RowRead(RowReadError::UnknownDataset(_)))
+    ));
+    assert!(
+        !Path::new("unused.csv").exists(),
+        "no file created: the data source resolves before the open"
+    );
+    assert!(matches!(
+        session.read_rows_tsv("nope"),
+        Err(RowReadError::UnknownDataset(_))
+    ));
+}
+
+#[test]
+fn export_rows_csv_destination_failure_is_typed_and_leaves_no_artifact() {
+    // Review of #778: a destination that cannot be opened is the typed
+    // Io { step: Create, .. } refusal -- the export-domain locale message
+    // frontend-side, not the generic internal-error wording.
+    let mut session = session_with(&[("q", "SELECT 1 AS n")]);
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("q"); // result_1
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("no_such_dir").join("result_1.csv");
+    assert!(matches!(
+        session.export_rows_csv("result_1", path.to_str().unwrap()),
+        Err(ExportRowsError::Io {
+            step: ExportIoStep::Create,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn export_and_copy_on_an_empty_result_carry_the_header_only() {
+    // Issue #769: a zero-row result still produces a well-formed payload --
+    // BOM + header row for the file, the header line alone for the TSV.
+    let mut session = session_with(&[("empty", "SELECT 1 AS n WHERE 1 = 0")]);
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("empty"); // result_1: 0 rows
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("result_1.csv");
+    session
+        .export_rows_csv("result_1", path.to_str().unwrap())
+        .expect("export");
+    let bytes = std::fs::read(&path).expect("read csv");
+    assert_eq!(&bytes[..3], b"\xEF\xBB\xBF", "UTF-8 BOM leads");
+    assert_eq!(&bytes[3..], b"n\n", "header row only, no data rows");
+
+    let tsv = session.read_rows_tsv("result_1").expect("tsv");
+    assert_eq!(tsv, "n\n", "header line only");
 }
 
 #[test]

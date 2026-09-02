@@ -429,6 +429,57 @@ impl std::fmt::Display for RowReadError {
 }
 impl std::error::Error for RowReadError {}
 
+/// Which destination-file operation failed during a full-result CSV export
+/// (issue #769): opening the path, a buffered write, or the closing flush.
+/// Crosses IPC as a bare string inside [`ExportRowsError::Io`]'s payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExportIoStep {
+    Create,
+    Write,
+    Flush,
+}
+
+/// Why a full-result CSV export failed (issue #769). The data-source half
+/// reuses [`RowReadError`] 1:1 with the paged read; a destination-file failure
+/// (create / write / flush) carries the step, the path, and the underlying
+/// detail. The whole type crosses IPC wrapped in
+/// [`SessionError::Export`](crate::session_store::SessionError) -- the
+/// frontend recurses `Export.data.kind` and renders the export-domain locale
+/// message (the destination half previously rode `SessionError::Engine` and
+/// rendered the generic internal-error wording). The hand-written `Display`
+/// below is Rust-log-only -- NOT the IPC contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum ExportRowsError {
+    RowRead(RowReadError),
+    Io {
+        step: ExportIoStep,
+        path: String,
+        detail: String,
+    },
+}
+
+impl From<RowReadError> for ExportRowsError {
+    fn from(e: RowReadError) -> Self {
+        Self::RowRead(e)
+    }
+}
+
+impl std::fmt::Display for ExportRowsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Rust-log-only (the RowReadError precedent): the IPC contract is the
+        // serde struct above and the authoritative user wording lives in the
+        // frontend locale catalog.
+        match self {
+            Self::RowRead(r) => write!(f, "{r}"),
+            Self::Io { step, path, detail } => {
+                write!(f, "export {step:?} on {path} failed: {detail}")
+            }
+        }
+    }
+}
+impl std::error::Error for ExportRowsError {}
+
 /// One page of a dataset rows (ADR-0024 windowed display). Cells are CAST to
 /// VARCHAR (NULL renders as the empty string) so the frontend renders uniform
 /// strings. `total` is the full row count -- the frontend shows it alongside

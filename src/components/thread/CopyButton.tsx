@@ -12,44 +12,28 @@
 // site keeps its static-literal formatMessage for @formatjs/cli extract);
 // the shared "Copied" flip label is this file's own static literal.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useIntl } from "react-intl";
 import { Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useCopiedAck } from "./useCopiedAck";
 import { log } from "../../lib/log";
-
-// How long the copied acknowledgment holds before the glyph reverts (ms).
-const COPIED_HOLD_MS = 1500;
 
 export function CopyButton({ text, label }: { text: string; label: string }) {
   const intl = useIntl();
-  const [copied, setCopied] = useState(false);
+  // The ack flag + hold timer live in the shared copied-ack hook (the state
+  // machine is identical across the copy affordances, issue #769).
+  const { copied, acknowledge } = useCopiedAck();
   // The tooltip's natural open state (hover/focus intent, tracked through
   // onOpenChange); the copied ack ORs in to force the tooltip open for the
   // hold window so the acknowledgment pops up on its own.
   const [tooltipOpen, setTooltipOpen] = useState(false);
-  // The revert timer id, nulled when it fires or on a re-copy (a fresh click
-  // always re-arms it). The unmount cleanup clears the timer; an in-flight
-  // clipboard write's continuation may still call the setter after unmount --
-  // a harmless no-op on React 18+.
-  const timer = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (timer.current !== null) window.clearTimeout(timer.current);
-    },
-    [],
-  );
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      if (timer.current !== null) window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => {
-        timer.current = null;
-        setCopied(false);
-      }, COPIED_HOLD_MS);
+      acknowledge();
     } catch (e) {
       // Clipboard unavailable (permissions / non-secure context): no ack
       // flip -- an honest no-op, but the lane stays diagnosable in the log

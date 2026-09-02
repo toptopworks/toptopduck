@@ -951,6 +951,56 @@ pub async fn read_rows(
     .map_err(|e| SessionError::Engine(e.to_string()))?
 }
 
+/// Export every row of a dataset from the named session as UTF-8 CSV (BOM +
+/// header row + all rows, no `MAX_READ_ROWS` clamp) to the user-chosen `path`
+/// (issue #769): the native save dialog already ran frontend-side, so a
+/// cancel never reaches here. Runs off the async/UI thread and under the
+/// session lock like `read_rows` -- a full-result scan is the same blocking
+/// class as a large-OFFSET page. Failures cross IPC as the typed
+/// `SessionError::Export` (`ExportRowsError`): the data-source half mirrors
+/// `read_rows`, the destination half carries the step / path / detail for the
+/// export-domain locale message.
+#[tauri::command]
+pub async fn export_rows_csv(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    reference_name: String,
+    path: String,
+) -> Result<(), SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let handle = Arc::clone(&handle);
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = handle.session_lock()?;
+        s.export_rows_csv(&reference_name, &path)
+            .map_err(SessionError::Export)
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))?
+}
+
+/// Read every row of a dataset from the named session as TSV text (header row
+/// leading, no `MAX_READ_ROWS` clamp) -- the full-result clipboard payload
+/// (issue #769). Same blocking / lock class and typed-error contract as
+/// `read_rows`.
+#[tauri::command]
+pub async fn read_rows_tsv(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    reference_name: String,
+) -> Result<String, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let handle = Arc::clone(&handle);
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = handle.session_lock()?;
+        s.read_rows_tsv(&reference_name)
+            .map_err(SessionError::RowRead)
+    })
+    .await
+    .map_err(|e| SessionError::Engine(e.to_string()))?
+}
+
 // --- LLM provider key + endpoint config (issue #29/#53, ADR-0007/0019/0029/0038) ---
 //
 // Session-AGNOSTIC commands (ADR-0056 Decision 4): the API key, the provider

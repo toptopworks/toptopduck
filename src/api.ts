@@ -222,6 +222,27 @@ export async function readRows(
   return invoke<RowPage>("read_rows", { sessionId, referenceName, offset, limit });
 }
 
+// Read every row of a dataset from the named session as TSV text (header row
+// leading, tab/CR/LF sanitized) -- the full-result clipboard payload, not
+// clamped by the display page cap and never stitched from pages (issue #769).
+export async function readRowsTsv(
+  sessionId: string,
+  referenceName: string,
+): Promise<string> {
+  return invoke<string>("read_rows_tsv", { sessionId, referenceName });
+}
+
+// Export every row of a dataset as UTF-8 CSV (BOM + header row) to a
+// user-chosen path. The native save dialog runs before this call, so a cancel
+// never reaches the backend (issue #769).
+export async function exportRowsCsv(
+  sessionId: string,
+  referenceName: string,
+  path: string,
+): Promise<void> {
+  return invoke<void>("export_rows_csv", { sessionId, referenceName, path });
+}
+
 // --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
 //
 // Session-AGNOSTIC (ADR-0056): no sessionId. The API key crosses IPC exactly

@@ -5,6 +5,7 @@ import { toAppError } from "../../lib/error-presentation";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { cn } from "@/lib/utils";
 import { ErrorBanner } from "../common/ErrorBanner";
+import { ResultActions } from "./ResultActions";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
@@ -252,22 +253,38 @@ export function ResultView({
 
   return (
     <section className="result-view">
-      {/* ADR-0067 (issue #173): the .result-view h2 margin rule retired from
-          styles.css onto utility. */}
-      <h2 id={headingId} className="mb-1">
-        <FormattedMessage
-          id="result.title"
-          defaultMessage="Result: {name}"
-          values={{ name: referenceName }}
+      {/* Issue #769: the header's take-it-away actions (export CSV / copy all)
+          sit right of the title + row-count meta. They live inside this view,
+          so the hero empty state (no result) never renders them. Failures land
+          in the same read-error banner as page-load rejects (issue #194 lane:
+          toAppError kind "read"). */}
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          {/* ADR-0067 (issue #173): the .result-view h2 margin rule retired
+              from styles.css onto utility. */}
+          <h2 id={headingId} className="mb-1">
+            <FormattedMessage
+              id="result.title"
+              defaultMessage="Result: {name}"
+              values={{ name: referenceName }}
+            />
+          </h2>
+          <p className="meta">
+            <FormattedMessage
+              id="result.rowCount"
+              defaultMessage="Rows: {count}"
+              values={{ count: total }}
+            />
+          </p>
+        </div>
+        <ResultActions
+          sessionId={sessionId}
+          referenceName={referenceName}
+          onError={(e) => {
+            setError(toAppError(e, intl, "read"));
+          }}
         />
-      </h2>
-      <p className="meta">
-        <FormattedMessage
-          id="result.rowCount"
-          defaultMessage="Rows: {count}"
-          values={{ count: total }}
-        />
-      </p>
+      </div>
 
       {staleAnchor && (
         // ADR-0047 stage-stale / ADR-0041 honest wording: the rows below are
