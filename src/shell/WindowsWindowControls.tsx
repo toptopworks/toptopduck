@@ -62,7 +62,7 @@ export function WindowsWindowControls(): ReactElement {
 
   // -mr-4 offsets the topbar's px-4 padding so the close button's right edge
   // sits flush with the viewport (Windows-style titlebar hit target). The
-  // focus-visible ring matches SidebarToggle / RailToggle so the three
+  // focus-visible ring matches SidebarToggle so the three
   // buttons stay keyboard-reachable now that decorations:false removed the
   // system chrome (ADR-0052 layer-1 a11y invariant).
   return (

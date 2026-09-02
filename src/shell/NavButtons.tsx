@@ -4,15 +4,16 @@ import { useNavigationHistory } from "./useNavigationHistory";
 
 // Topbar back/forward buttons (issue #288). Browser-style in-app history bound to
 // NavigationHistoryProvider: back/forward move the stack cursor and the provider
-// calls restore() to re-apply the target view. Each button is a Codex-style ghost
-// icon button matching SidebarToggle (h-6 w-6 + h-3 w-3 glyph); disabled at the
-// stack head/tail so the affordance mirrors canBack/canForward. Labels use STATIC
+// calls restore() to re-apply the target view. Each button is a Codex-style
+// ghost icon button matching SidebarToggle (h-7 w-7 + h-3.5 w-3.5 glyph;
+// issue #774: 28px hit area); disabled at the stack head/tail so the
+// affordance mirrors canBack/canForward. Labels use STATIC
 // formatMessage literals (id + defaultMessage at the call site) so @formatjs/cli
 // resolves both ids; a non-literal id would break the i18n:check CI gate
 // (ADR-0052). NAV_BUTTON_CLASS is the single source of truth for the ghost-button
 // styling so the two buttons cannot drift.
 const NAV_BUTTON_CLASS =
-  "nav-button inline-flex h-6 w-6 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50";
+  "nav-button inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50";
 
 export function NavButtons() {
   const intl = useIntl();
@@ -35,7 +36,7 @@ export function NavButtons() {
         disabled={!canBack}
         onClick={back}
       >
-        <ArrowLeft className="h-3 w-3" aria-hidden />
+        <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
       </button>
       <button
         type="button"
@@ -45,7 +46,7 @@ export function NavButtons() {
         disabled={!canForward}
         onClick={forward}
       >
-        <ArrowRight className="h-3 w-3" aria-hidden />
+        <ArrowRight className="h-3.5 w-3.5" aria-hidden />
       </button>
     </div>
   );

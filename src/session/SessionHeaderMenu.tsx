@@ -15,8 +15,9 @@ import { resolveDisplayName } from "./displayName";
 // that previously lived in the sidebar row's context menu (Rename / Save a
 // copy / Close / Delete) now live here as session-scoped chrome alongside the
 // workspace toggle. The `⋯` trigger mirrors the WorkspaceToggle's ghost-icon
-// button rule (ADR-0067 #171: h-6 w-6 button + text-foreground/70; the dots
-// glyph uses h-3.5 w-3.5 to match WorkspaceToggle's icon visual weight).
+// button rule (ADR-0067 #171: h-7 w-7 button + text-foreground/70; the dots
+// glyph uses h-3.5 w-3.5 to match WorkspaceToggle's icon visual weight --
+// issue #774: one 28px hit-area spec across the header chrome family).
 //
 // Rename + Delete open local dialog state (the existing RenameSessionDialog /
 // DeleteSessionDialog exported from SessionSidebar); Export + Close fire the
@@ -65,7 +66,7 @@ export function SessionHeaderMenu({
         <DropdownMenuTrigger
           // Mirrors WorkspaceToggle's ghost-icon rule (ADR-0067 #171).
           disabled={disabled}
-          className="session-header-menu inline-flex h-6 w-6 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="session-header-menu inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/70 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           aria-label={intl.formatMessage({
             id: "session.headerMenu.ariaLabel",
             defaultMessage: "Session actions",
