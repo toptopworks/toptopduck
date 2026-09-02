@@ -299,6 +299,27 @@ describe("ResultView", () => {
     // The segments stay distinct <p> lines inside the banner (not run-on
     // text) -- one paragraph per crossed threshold.
     expect(alert.querySelectorAll("p")).toHaveLength(2);
+    // The intra-banner rhythm rides on the vertical-spacing utility (xxs,
+    // 4px) -- pinned so the segments cannot collapse into flush paragraphs.
+    const description = alert.querySelector("[data-slot=\"alert-description\"]");
+    expect(description?.className.split(/\s+/)).toContain("space-y-1");
+  });
+
+  it("renders no disclosure exactly at the thresholds (ADR-0057)", async () => {
+    // ADR-0057 thresholds are strict: a result AT either count is not large
+    // yet -- the disclosures start one past the threshold. The boundary
+    // fixture pins both comparisons against an inclusive flip (10,000 rows
+    // and 100 columns exactly stay silent).
+    vi.mocked(readRows).mockResolvedValue({
+      columns: MANY_COLUMNS.slice(0, COLUMN_DISCLOSURE_THRESHOLD),
+      rows: [["x"]],
+      total: ROW_DISCLOSURE_THRESHOLD,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
   it("gives warning banners more separation than the info banner (issue #768)", async () => {
