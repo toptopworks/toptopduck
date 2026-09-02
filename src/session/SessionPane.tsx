@@ -789,6 +789,7 @@ function WorkspaceResult({
             <ResultView
               sessionId={sessionId}
               referenceName={content.referenceName}
+              question={content.question}
               assumption={content.assumption}
               viz={content.viz}
               staleAnchor={content.staleAnchor}

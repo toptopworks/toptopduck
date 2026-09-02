@@ -603,12 +603,13 @@ describe("App ask flow", () => {
     await waitFor(() =>
       expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行"),
     );
-    // the materialized result pane appears (ResultView heading). The thread
-    // rail also shows a result link with the same text, so target the heading
-    // role to assert the workspace ResultView specifically.
+    // the materialized result pane appears (ResultView heading, titled with
+    // the producing question, issue #772). The rail's turn card also shows the
+    // question text, so target the heading role to assert the workspace
+    // ResultView specifically.
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /结果：result_1/ }),
+        screen.getByRole("heading", { name: /总共几行/ }),
       ).toBeInTheDocument(),
     );
   });
@@ -717,7 +718,7 @@ describe("App workspace history indicator (issue #757)", () => {
     // resume landing on the latest result.
     fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
     );
     expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
   });
@@ -742,14 +743,14 @@ describe("App workspace history indicator (issue #757)", () => {
     // the workspace (dual-view linkage, ADR-0083).
     await clickRailResultLink("result_1");
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
     );
     expect(screen.getByText(HISTORY_MESSAGE)).toBeInTheDocument();
 
     // "Back to latest" returns the view to the newest Materialized primary.
     fireEvent.click(screen.getByRole("button", { name: BACK_TO_LATEST }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
     );
     expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
   });
@@ -764,7 +765,7 @@ describe("App workspace history indicator (issue #757)", () => {
     vi.mocked(askQuestion).mockResolvedValueOnce(materializedOutcome("result_3"));
     await submitQuestion("新一问");
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_3/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /新一问/ })).toBeInTheDocument(),
     );
     expect(screen.queryByText(HISTORY_MESSAGE)).not.toBeInTheDocument();
   });

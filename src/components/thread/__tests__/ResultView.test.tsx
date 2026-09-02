@@ -60,7 +60,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption="把 id 当作主键" viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption="把 id 当作主键" viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
     expect(screen.getByText(/行数：1/)).toBeInTheDocument();
     expect(screen.getByText("n")).toBeInTheDocument(); // column header
@@ -68,6 +68,62 @@ describe("ResultView", () => {
     expect(screen.getByText(/假设：把 id 当作主键/)).toBeInTheDocument();
     // Issue #768 "neither" combo: no threshold crossed -> no info banner.
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("titles the result with the producing question verbatim (issue #772)", async () => {
+    // The question replaces the machine reference name as the pane's title;
+    // the "Result: " prefix retires (the tab already names the pane). The full
+    // text stays in the DOM inside the heading, so the table's accessible name
+    // (aria-labelledby -> this heading) carries the whole question even while
+    // the truncate utility clips it visually.
+    const QUESTION = "按部门统计平均薪资，并列出前五";
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question={QUESTION} assumption={null} viz={null} />,
+    );
+    const heading = screen.getByRole("heading", { name: QUESTION });
+    const table = screen.getByRole("table");
+    expect(table.getAttribute("aria-labelledby")).toBe(heading.id);
+    // prefix retired on the normal path
+    expect(screen.queryByText(/结果：/)).not.toBeInTheDocument();
+    // Truncation posture (jsdom cannot compute layout, so pin the classes per
+    // this file's utility-pin convention): the span is block + truncate.
+    const titleText = within(heading).getByText(QUESTION);
+    expect(titleText).toHaveClass("block", "truncate");
+    // Hover recovery (ADR-0050): the truncated trigger opens the tooltip with
+    // the full question (jsdom reports 0 width, so the overflow gate passes).
+    fireEvent.pointerMove(titleText);
+    await waitFor(() => {
+      const tooltip = screen.getByRole("tooltip");
+      expect(tooltip.textContent).toContain(QUESTION);
+      // The recovery keeps the question's line structure (the rail bubble's
+      // whitespace-pre-wrap posture, ADR-0103), not space-joined lines.
+      expect(tooltip).toHaveClass("whitespace-pre-wrap");
+    });
+  });
+
+  it("falls back to the reference-name title when the question is empty (issue #772)", async () => {
+    // The question is required at the derivation layer and the composer
+    // rejects blank submits, so an empty string is the only degenerate form
+    // (an ask caller bypassing the editor's trim guard); the title degrades
+    // to the reference name via the existing catalog key -- never an empty
+    // heading.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(screen.getByRole("heading", { name: "结果：result_1" })).toBeInTheDocument();
   });
 
   it("paginates forward and discloses a total larger than the page", async () => {
@@ -80,7 +136,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 2,
     });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
     expect(screen.getByText(/共 5 行/)).toBeInTheDocument(); // total disclosed
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
@@ -97,7 +153,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
     expect(screen.getByText(/行数：0/)).toBeInTheDocument();
     expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
@@ -119,7 +175,7 @@ describe("ResultView", () => {
       limit: 100,
     });
     const { container } = renderI18n(
-      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
     );
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     // The empty-string cell carries the cell-null hook (kept for selector
@@ -156,7 +212,7 @@ describe("ResultView", () => {
       limit: 100,
     });
     const { container } = renderI18n(
-      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
     );
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     // The BIGINT column carries .num + text-right + tabular-nums on both its
@@ -198,7 +254,7 @@ describe("ResultView", () => {
         offset: 0,
         limit: 2,
       });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} pageSize={2} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />);
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
     fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
     await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
@@ -228,13 +284,13 @@ describe("ResultView", () => {
       });
     });
     const { rerender } = renderI18n(
-      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
     );
     // result_1's page-0 is still pending; switch to result_2 (resolves fast).
     rerender(
       withIntl(
         <TooltipProvider>
-          <ResultView sessionId="sess-1" referenceName="result_2" assumption={null} viz={null} />
+          <ResultView sessionId="sess-1" referenceName="result_2" question="q:result_2" assumption={null} viz={null} />
         </TooltipProvider>,
       ),
     );
@@ -266,7 +322,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     const alert = screen.getByRole("note");
     expect(alert.getAttribute("data-slot")).toBe("alert");
@@ -288,7 +344,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     const alert = screen.getByRole("note");
     expect(alert.getAttribute("data-slot")).toBe("alert");
@@ -310,7 +366,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     expect(screen.getAllByRole("note")).toHaveLength(1);
     const alert = screen.getByRole("note");
@@ -337,7 +393,7 @@ describe("ResultView", () => {
       offset: 0,
       limit: 100,
     });
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
@@ -361,6 +417,7 @@ describe("ResultView", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={{ kind: "bar", spec: "not-valid-json" }}
         staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Replaced" as const }}
@@ -381,7 +438,7 @@ describe("ResultView", () => {
     // and takes the warning margin only at this call site, via its className
     // passthrough -- the other ErrorBanner callers are untouched.
     vi.mocked(readRows).mockRejectedValue(new Error("read boom"));
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
     const errorBanner = await waitFor(() => screen.getByRole("alert"));
     expect(errorBanner.className.split(/\s+/)).toContain("my-3");
   });
@@ -402,6 +459,7 @@ describe("ResultView", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={null}
         staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Replaced" as const }}
@@ -431,6 +489,7 @@ describe("ResultView", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={null}
         staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Deleted" as const }}
@@ -470,6 +529,7 @@ describe("ResultView", () => {
         <ResultView
           sessionId="sess-1"
           referenceName="result_1"
+          question="q:result_1"
           assumption={null}
           viz={null}
           staleAnchor={staleAnchor}
@@ -490,6 +550,7 @@ describe("ResultView", () => {
         <ResultView
           sessionId="sess-1"
           referenceName="result_1"
+          question="q:result_1"
           assumption={null}
           viz={null}
           staleAnchor={staleAnchor}
@@ -510,6 +571,7 @@ describe("ResultView", () => {
         <ResultView
           sessionId="sess-1"
           referenceName="result_1"
+          question="q:result_1"
           assumption={null}
           viz={null}
           staleAnchor={staleAnchor}
@@ -547,6 +609,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
       />,
@@ -566,6 +629,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={{ kind: "bar", spec: "not-valid-json" }}
       />,
@@ -584,6 +648,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "rect" }) }}
       />,
@@ -602,6 +667,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
       />,
@@ -616,7 +682,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
   it("renders a plain table with no disclosure when viz is null", async () => {
     // ADR-0033: a null viz is the default table turn -- NOT a degradation, so no
     // disclosure shows and Vega-Embed is never called.
-    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />);
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     expect(embed).not.toHaveBeenCalled();
     expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
@@ -636,6 +702,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
       />,
@@ -655,6 +722,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={{ kind: "bar", spec: "not-valid-json" }}
       />,
@@ -680,6 +748,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
+        question="q:result_1"
         assumption={null}
         viz={null}
         staleAnchor={{ reference_name: "orders", display_name: "Orders", reason: "Deleted" as const }}
@@ -708,7 +777,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
     });
     renderI18n(
-      <ResultView sessionId="sess-1" referenceName="result_1" assumption={null} viz={null} />,
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
     );
     await waitFor(() => expect(readRows).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));

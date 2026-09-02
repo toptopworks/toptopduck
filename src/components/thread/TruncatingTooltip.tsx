@@ -1,12 +1,12 @@
 // Tail-ellipsis truncation (ADR-0054) hover-recovery layer (ADR-0050 maps
 // Tooltip to card-truncation full-text recovery, issue #106). The truncated span
 // is the Tooltip trigger; the full text rides TooltipContent so a hover recovers
-// what the fixed rail width clipped. asChild keeps the trigger span a direct
-// flex child (no wrapper node) so the `truncate` utility on the same span owns
-// the ellipsis end-to-end. Replaces the v0 native title attribute (which carried
-// the same full text but only as the browser's slow, unstyled tooltip). max-w-xs
-// caps the popover so a long question wraps instead of stretching the rail-wide
-// tooltip.
+// what the span's constrained container clipped. asChild keeps the trigger span
+// a direct flex child (no wrapper node) so the `truncate` utility on the same
+// span owns the ellipsis end-to-end. Replaces the v0 native title attribute
+// (which carried the same full text but only as the browser's slow, unstyled
+// tooltip). max-w-xs caps the popover so a long question wraps instead of
+// stretching the container-wide tooltip.
 //
 // The tooltip opens only when the trigger text actually overflows — no tooltip
 // when the text fits (see isTruncated below).
@@ -18,12 +18,13 @@
 // non-pointer access.
 //
 // Extracted from Thread.tsx (issue #427) as a shared utility consumed by
-// SourceMarker, SkillMarker, TurnCard, and the composer popover sections. Lives
-// in its own file to avoid a circular dependency between Thread.tsx and
-// TurnCard.tsx.
+// SourceMarker, SkillMarker, TurnCard, the composer popover sections, and the
+// workspace result title (issue #772). Lives in its own file to avoid a
+// circular dependency between Thread.tsx and TurnCard.tsx.
 
 import { useRef, useState, type ReactNode } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 // Whether the trigger span's content overflows its visible box (i.e. the
 // `truncate` utility is actively ellipsizing). jsdom reports 0 for both
@@ -38,10 +39,16 @@ function isTruncated(el: HTMLElement): boolean {
 export function TruncatingTooltip({
   text,
   className,
+  contentClassName,
   children,
 }: {
   text: ReactNode;
   className?: string;
+  /** Issue #772: extra classes for the TooltipContent -- the result title
+   * passes whitespace-pre-wrap so a multi-line question recovers its line
+   * structure instead of joining lines with spaces (the rail bubble's
+   * posture, ADR-0103). */
+  contentClassName?: string;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLSpanElement>(null);
@@ -61,7 +68,7 @@ export function TruncatingTooltip({
           {children}
         </span>
       </TooltipTrigger>
-      <TooltipContent className="max-w-xs">{text}</TooltipContent>
+      <TooltipContent className={cn("max-w-xs", contentClassName)}>{text}</TooltipContent>
     </Tooltip>
   );
 }
