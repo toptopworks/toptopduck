@@ -27,8 +27,10 @@ export interface UseWorkspaceCollapse {
   /** The session header toggle (the manual fold-AND-unfold path). */
   toggleWorkspace: () => void;
   /** A result_N promotion just settled (the useTurnFlow markProduced seam).
-   *  The FIRST call within the session auto-expands; every later call is a
-   *  no-op (the one-shot is spent whether or not it moved the fold). */
+   *  The FIRST call auto-expands, unless the mount scan already spent the
+   *  one-shot on a session that materialized before this mount (issue
+   *  #771); every later call is a no-op (the one-shot is spent whether or
+   *  not it moved the fold). */
   notePromotion: () => void;
 }
 
@@ -47,9 +49,11 @@ export function useWorkspaceCollapse(thread: ThreadEntry[]): UseWorkspaceCollaps
   // per mount, and later thread updates (a live promotion settling into the
   // cache) never re-run it, so a fresh session still auto-expands. Accepted
   // race (the same window the R5 suppressInit seam guards in useViewedResult,
-  // judged not worth a compensation seam here): an ask landing before the
-  // resume query resolves fires the guide once for an already-materialized
-  // session.
+  // judged not worth a compensation seam here), in both directions: an ask
+  // landing before the resume query resolves fires the guide once for an
+  // already-materialized session, and an L2 remount during a session's first
+  // ask can see the orphaned settle's Materialized turn as first content --
+  // that result gets no guide, and no later promotion re-arms it.
   const initScanRef = useRef(false);
   useEffect(() => {
     if (initScanRef.current || thread.length === 0) return;

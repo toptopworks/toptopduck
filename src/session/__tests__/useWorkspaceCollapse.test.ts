@@ -126,12 +126,17 @@ describe("useWorkspaceCollapse", () => {
     });
 
     it("scans at most once -- a Materialized turn landing after the first content does not retro-consume", () => {
-      // The fresh-session shape: mount sees [], the optimistic append lands
-      // a non-materialized turn (first content; the scan runs, finds
-      // nothing), then the promotion settles the turn Materialized in the
-      // cache. The scan must not re-run over the settled history -- the
-      // auto-expand of the live promotion depends on the one-shot staying
-      // armed.
+      // The scan runs at most once per mount: only the FIRST non-empty
+      // thread triggers it, later updates never re-run it. Modeled with
+      // the two-ask shape -- the first ask settles non-materialized
+      // (first content; the scan runs, finds nothing), then a later
+      // update carries a Materialized turn. No retro-consume: the
+      // auto-expand of the live promotion depends on the one-shot
+      // staying armed. The single-ask fresh session is an ordering
+      // guarantee instead -- the settle block appends the final entry
+      // synchronously with notePromotion, so the promotion always
+      // precedes the scan -- and is locked by the Shell auto-expand
+      // integration test, not here.
       const { result, rerender } = renderHook(({ thread }) => useWorkspaceCollapse(thread), {
         initialProps: { thread: [] as ThreadEntry[] },
       });
