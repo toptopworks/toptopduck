@@ -70,6 +70,52 @@ describe("ResultView", () => {
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
+  it("titles the result with the producing question verbatim (issue #772)", async () => {
+    // The question replaces the machine reference name as the pane's title;
+    // the "Result: " prefix retires (the tab already names the pane). The full
+    // text stays in the DOM inside the heading, so the table's accessible name
+    // (aria-labelledby -> this heading) carries the whole question even while
+    // the truncate utility clips it visually.
+    const QUESTION = "按部门统计平均薪资，并列出前五";
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question={QUESTION} assumption={null} viz={null} />,
+    );
+    const heading = screen.getByRole("heading", { name: QUESTION });
+    const table = screen.getByRole("table");
+    expect(table.getAttribute("aria-labelledby")).toBe(heading.id);
+    // prefix retired on the normal path
+    expect(screen.queryByText(/结果：/)).not.toBeInTheDocument();
+    // Hover recovery (ADR-0050): the truncated trigger opens the tooltip with
+    // the full question (jsdom reports 0 width, so the overflow gate passes).
+    fireEvent.pointerMove(within(heading).getByText(QUESTION));
+    await waitFor(() => {
+      expect(screen.getByRole("tooltip").textContent).toContain(QUESTION);
+    });
+  });
+
+  it("falls back to the reference-name title when the question is missing (issue #772)", async () => {
+    // Threads persisted before the question rode the payload render no
+    // question; the title degrades honestly to the reference name via the
+    // existing catalog key -- never an empty heading.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(screen.getByRole("heading", { name: "结果：result_1" })).toBeInTheDocument();
+  });
+
   it("paginates forward and discloses a total larger than the page", async () => {
     // ADR-0024/0030: a bounded page is shown with the honest total, so a
     // truncated view never looks complete; the next-page button fetches onward.

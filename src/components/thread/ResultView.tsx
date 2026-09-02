@@ -6,6 +6,7 @@ import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { cn } from "@/lib/utils";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { ResultActions } from "./ResultActions";
+import { TruncatingTooltip } from "./TruncatingTooltip";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
@@ -128,6 +129,11 @@ interface ResultViewProps {
   /** ADR-0056: the session this result belongs to -- readRows addresses it. */
   sessionId: string;
   referenceName: string;
+  /** Issue #772: the question that produced this result -- the pane title's
+   * text, rendered verbatim (user data, never the catalog). Absent/empty (a
+   * thread persisted before the question rode the payload, issue #758) falls
+   * back to the reference-name title. */
+  question?: string;
   assumption: string | null;
   /** The provider's optional viz spec for this result (ADR-0016/0033): null =
    * a plain table turn; a spec the frontend renders via VegaChart, or degrades
@@ -165,6 +171,7 @@ interface ResultViewProps {
 export function ResultView({
   sessionId,
   referenceName,
+  question,
   assumption,
   viz,
   staleAnchor = null,
@@ -259,15 +266,31 @@ export function ResultView({
           in the same read-error banner as page-load rejects (issue #194 lane:
           toAppError kind "read"). */}
       <div className="flex items-start justify-between gap-2">
-        <div>
+        {/* min-w-0 lets this flex child shrink so the truncating title clips
+            instead of stretching the header row past the actions. */}
+        <div className="min-w-0">
           {/* ADR-0067 (issue #173): the .result-view h2 margin rule retired
               from styles.css onto utility. */}
           <h2 id={headingId} className="mb-1">
-            <FormattedMessage
-              id="result.title"
-              defaultMessage="Result: {name}"
-              values={{ name: referenceName }}
-            />
+            {question ? (
+              /* Issue #772: the title is the producing question's verbatim
+               * text -- a human coordinate, not the machine reference name
+               * (which stays rail-side). Single-line truncate with hover
+               * recovery; the full text stays in the DOM, so the table's
+               * aria-labelledby name carries it whole. */
+              <TruncatingTooltip text={question} className="block truncate">
+                {question}
+              </TruncatingTooltip>
+            ) : (
+              /* Honest fallback for threads persisted before the question
+               * rode the payload: the reference-name title, never an empty
+               * heading. */
+              <FormattedMessage
+                id="result.title"
+                defaultMessage="Result: {name}"
+                values={{ name: referenceName }}
+              />
+            )}
           </h2>
           <p className="meta">
             <FormattedMessage

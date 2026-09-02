@@ -320,7 +320,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     // The workspace ResultView heading appears (chart+table pane).
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /总共几行/ })).toBeInTheDocument(),
     );
   });
 
@@ -336,7 +336,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
     await openSession();
     // R5 init: viewedResult <- last Materialized (result_2).
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
     );
     // Baseline: openSession's creation turn already fired one (rejected) ask.
     const asksBeforeClick = vi.mocked(askQuestion).mock.calls.length;
@@ -344,7 +344,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
     fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
     // viewedResult moved to result_1; the workspace now shows result_1.
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
     );
     // No NEW ask / mutation IPC fired by the click -- active is untouched.
     expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBeforeClick);
@@ -417,11 +417,11 @@ describe("App three-column shell (issue #79 ACs)", () => {
     // The rail renders the Clarify turn; the workspace still shows result_2
     // (resume landing) -- the textual last turn changed nothing.
     await waitFor(() => expect(document.querySelector(".turn-outcome.textual")).toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument();
     // Click result_1 in the rail -> only viewedResult moves -> workspace shows result_1's table.
     fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
     );
   });
 
@@ -1422,7 +1422,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     fireEvent.click(screen.getByText("季报"));
     // R5: viewedResult lands on the LAST Materialized (result_2), not result_1.
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
     );
     // ADR-0047 stage-stale: the workspace shows the old table + disclosure.
     expect(screen.getByText(/此结果已失效/)).toBeInTheDocument();
@@ -1716,7 +1716,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // selection landed -- the card reads back as active).
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
       "aria-current",
@@ -1735,7 +1735,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // Open the workspace onto result_1.
     fireEvent.click(await screen.findByRole("button", { name: /result_1 的预览/ }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_1/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
       "aria-current",
@@ -1744,7 +1744,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // Click result_2's card: the workspace swaps + the active marker moves.
     fireEvent.click(screen.getByRole("button", { name: /result_2 的预览/ }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /结果：result_2/ })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /result_2 的预览/ })).toHaveAttribute(
       "aria-current",
