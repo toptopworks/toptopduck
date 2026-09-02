@@ -31,8 +31,7 @@ function clampWidth(px: number, max: number): number {
 }
 
 function loadStoredWidth(maxWidth?: number): number {
-  const max =
-    maxWidth === undefined ? MAX_WIDTH : Math.min(MAX_WIDTH, maxWidth);
+  const max = mergeCeiling(maxWidth, MAX_WIDTH);
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) return clampWidth(Number(stored) || SIDEBAR_DEFAULT_WIDTH, max);
