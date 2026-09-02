@@ -113,6 +113,13 @@
   --track-grid:
     0fr minmax(0, var(--rail-width, 350px)) minmax(var(--workspace-min-width), 1fr) 0fr;
   --track-grid-collapsed: 1fr minmax(0, 800px) minmax(0, 0fr) 1fr;
+  /* Session header height (issue #782): single 40px source shared by
+   * .session-header (height/min-height) and .rail-resize-handle (top) so the
+   * drag line stops exactly at the header's bottom edge — ADR-0092 lifted
+   * the handle to .main-area with top:0, which let it span the header strip
+   * (drag line bleeding over the header + col-resize hit area stealing
+   * pointer events there). */
+  --session-header-height: 40px;
   /* Codex-style collapse: animate the first column var(--sidebar-width) <-> 0
    * so the main region slides instead of snapping. grid-template-columns
    * interpolation needs the column to actually shrink, which in turn needs
@@ -511,7 +518,7 @@
    one continuous strip across the viewport. */
 .session-header {
   display: flex; align-items: center; gap: 0.5rem;
-  height: 40px; min-height: 40px;
+  height: var(--session-header-height); min-height: var(--session-header-height);
   padding: 0 1rem;
   border-bottom: 1px solid var(--border);
   background: var(--background);
@@ -542,16 +549,20 @@
 .shell.sidebar-dragging .session-body { transition: none; }
 /* Draggable rail resize handle (conversation/workspace boundary). A thin
    strip straddling the conversation/workspace column boundary; absolutely
-   positioned within .main-area so it spans the full height including the
-   shell-level QuestionBar (ADR-0092). The --rail-width variable (set inline
-   on .shell by useRailResize) drives left placement. Hidden when cold-start,
-   settings mode, or the workspace is folded (.workspace-collapsed) -- the
-   4-track grid reflows for centering and the boundary no longer maps to
-   --rail-width. touch-action:none prevents the browser from interpreting the
-   drag as a pan/zoom. */
+   positioned within .main-area so its bottom spans the shell-level
+   QuestionBar (ADR-0092) while its top stops at the session header's bottom
+   edge (issue #782) -- the boundary is meaningless inside the full-width
+   header strip, so the line and its col-resize hit area stay out of it. The
+   handle's top and the header's height share --session-header-height. The
+   --rail-width variable (set
+   inline on .shell by useRailResize) drives left placement. Hidden when
+   cold-start, settings mode, or the workspace is folded
+   (.workspace-collapsed) -- the 4-track grid reflows for centering and the
+   boundary no longer maps to --rail-width. touch-action:none prevents the
+   browser from interpreting the drag as a pan/zoom. */
 .rail-resize-handle {
   position: absolute;
-  top: 0;
+  top: var(--session-header-height);
   bottom: 0;
   left: var(--rail-width, 350px);
   width: 6px;
