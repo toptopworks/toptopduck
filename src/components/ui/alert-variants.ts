@@ -18,8 +18,8 @@ import { cva } from "class-variance-authority";
 //   session-count soft-cap) -- the bespoke amber tint the legacy styles.css
 //   owned is promoted to a --warning token so the variant consumes a token
 //   rather than a hardcoded hex;
-// - destructive is the standard shadcn destructive variant, reserved for a
-//   future destructive disclosure surface (parallels Badge's reserved slot).
+// - destructive is the standard shadcn destructive variant, carrying the
+//   session-level query-failure disclosure (issue #763).
 
 export const alertVariants = cva(
   "relative w-full rounded-lg border px-4 py-3 text-sm grid gap-y-0.5 items-start grid-cols-[0_1fr] has-[>svg]:grid-cols-[calc(var(--spacing)*4)_1fr] has-[>svg]:gap-x-3 [&>svg]:size-4 [&>svg]:translate-y-0.5 [&>svg]:text-current",

@@ -429,12 +429,17 @@
 .shell.rail-dragging .shell-bar-slot.bottom .shell-bar-track,
 .shell.sidebar-dragging .shell-bar-slot.bottom .shell-bar-track { transition: none; }
 
-/* --- Pane grid: header + session-body (ADR-0083) --------------------------
- * Single column, two rows: header (auto) + session-body (1fr). The
- * session-body is the 4-track grid carrying the conversation column + the
- * workspace. ADR-0092: the QuestionBar moved to the shell level — it is a
- * flex sibling BELOW the pane host in .main-area, so the pane fills its full
- * height and the two regions never overlap (no compensation padding needed).
+/* --- Pane column: header + session-body (ADR-0083) --------------------------
+ * Flex column, three potential children: header (auto) + the optional
+ * session-query error banner (auto, #763, only while a session query is in
+ * error state) + session-body (flex: 1). A conditional banner slot is why
+ * this is a flex column rather than the original two-row grid: auto-placement
+ * would shift the body out of its positional 1fr row whenever the banner
+ * mounts. The session-body is the 4-track
+ * grid carrying the conversation column + the workspace. ADR-0092: the
+ * QuestionBar moved to the shell level — it is a flex sibling BELOW the pane
+ * host in .main-area, so the pane fills its full height and the two regions
+ * never overlap (no compensation padding needed).
  *
  * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
  * while the panel is folded away (cold-start default, session-ephemeral) --
@@ -442,9 +447,8 @@
  * flex-basis (320px) is the min-width floor (issue #350). */
 .session-pane {
   height: 100%;
-  display: grid;
-  grid-template-columns: 1fr;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
 }
 /* Workspace folded (ADR-0083, issue #298): 4-track grid centers the
  * conversation when the workspace folds. Tracks: [left-spacer] [conversation]
@@ -491,7 +495,6 @@
    chrome (height/padding/border) mirrors the topbar so the two bars read as
    one continuous strip across the viewport. */
 .session-header {
-  grid-column: 1; grid-row: 1;
   display: flex; align-items: center; gap: 0.5rem;
   height: 40px; min-height: 40px;
   padding: 0 1rem;
@@ -508,7 +511,7 @@
  * conversation/workspace boundary, mirroring the sidebar resize pattern.
  * position:relative anchors the absolutely-positioned .rail-resize-handle. */
 .session-body {
-  grid-column: 1; grid-row: 2;
+  flex: 1;
   position: relative;
   display: grid;
   grid-template-columns: var(--track-grid);

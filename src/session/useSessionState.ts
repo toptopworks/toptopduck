@@ -65,6 +65,12 @@ export interface UseSessionState {
   // Derived from the working set (runtime truth, ADR-0051). Shared with the
   // rail's stale badges so the map is built once per session, not twice.
   staleByReference: ReadonlyMap<string, StaleAnchor>;
+  /** Issue #763: the three session queries' errors in a fixed order (working
+   *  set -> active -> thread); empty while all are healthy. The `data ??`
+   *  fallbacks keep the derivations rendering through a failure, so this
+   *  aggregate is the pane's only error signal -- it drives the session-level
+   *  disclosure banner. */
+  queryErrors: Error[];
   // Client UI state.
   viewedResult: ViewedResult | null;
   workspaceContent: WorkspaceContent;
@@ -139,6 +145,10 @@ export interface UseSessionState {
   /** The session header's workspace fold toggle (ADR-0083, issue #298). */
   handleToggleWorkspace: () => void;
   clearError: () => void;
+  /** Issue #763: refetch every session query currently in error state (the
+   *  banner's Retry). Healthy queries keep their cached data untouched -- a
+   *  retry is a recovery action, not a global refresh. */
+  handleRetryQueries: () => void;
 }
 
 export function useSessionState(
@@ -183,6 +193,37 @@ export function useSessionState(
   const active = activeQuery.data ?? null;
   const activeName = active?.reference_name ?? null;
   const thread = threadQuery.data ?? EMPTY_THREAD;
+
+  // Issue #763: the queries' error states, coalesced in the same fixed order
+  // the fallbacks above drain them. The coalescing renders a failed fetch
+  // exactly like a fresh session (empty datasets / no active / empty thread),
+  // so this aggregate is what makes the failure observable; the destructured
+  // error/refetch pairs feed the memo + retry below (refetch is a stable
+  // observer method, so the callback's identity only moves when an error
+  // appears or clears).
+  const { error: workingSetError, refetch: refetchWorkingSet } = workingSetQuery;
+  const { error: activeError, refetch: refetchActive } = activeQuery;
+  const { error: threadError, refetch: refetchThread } = threadQuery;
+  const queryErrors = useMemo(() => {
+    const errs: Error[] = [];
+    if (workingSetError !== null) errs.push(workingSetError);
+
+    if (activeError !== null) errs.push(activeError);
+    if (threadError !== null) errs.push(threadError);
+    return errs;
+  }, [workingSetError, activeError, threadError]);
+  const handleRetryQueries = useCallback(() => {
+    if (workingSetError !== null) void refetchWorkingSet();
+    if (activeError !== null) void refetchActive();
+    if (threadError !== null) void refetchThread();
+  }, [
+    workingSetError,
+    refetchWorkingSet,
+    activeError,
+    refetchActive,
+    threadError,
+    refetchThread,
+  ]);
 
   // --- Client UI state -----------------------------------------------------
   // viewedResult domain lives in useViewedResult (issue #229) -- see its header
@@ -477,6 +518,7 @@ export function useSessionState(
     activeName,
     thread,
     staleByReference,
+    queryErrors,
     viewedResult,
     workspaceContent,
     workspaceCollapsed,
@@ -506,5 +548,6 @@ export function useSessionState(
     handleJumpToLatest: jumpToLatest,
     handleToggleWorkspace: toggleWorkspace,
     clearError,
+    handleRetryQueries,
   };
 }

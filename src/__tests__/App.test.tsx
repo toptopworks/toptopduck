@@ -130,6 +130,7 @@ import {
   setDatasetPrivacy,
 } from "../api";
 import { cancelled, failed, materialized } from "../session/__tests__/fixtures";
+import { log } from "../lib/log";
 
 // ADR-0093 (#512): the session-header management callback props are no-ops in
 // every SessionPane render in this file (these tests exercise session-INTERNAL
@@ -1592,5 +1593,119 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     );
     expect(onIngestConsumed).toHaveBeenCalledTimes(2);
     expect(ingestFile).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("SessionPane session-query error banner (#763)", () => {
+  // The three session queries (working set / active / thread) coalesce through
+  // `data ??` empty fallbacks, so a fetch or refetch failure used to render as
+  // a pristine empty session -- indistinguishable from a fresh one. The banner
+  // is the shared error face for all three; it is a non-blocking disclosure
+  // (derivations keep rendering, the composer stays live) with a retry that
+  // refetches only the errored queries.
+  const BANNER_TITLE = catalogFor("zh-CN")["session.queries.errorTitle"];
+  const RETRY_LABEL = catalogFor("zh-CN")["session.queries.retry"];
+  const RAIL_EMPTY = catalogFor("zh-CN")["session.rail.empty"];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(conversation).mockResolvedValue([]);
+  });
+
+  it("renders no banner while all session queries are healthy", async () => {
+    renderPane();
+
+    await waitFor(() => expect(conversation).toHaveBeenCalled());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("renders one destructive banner with a retry when the thread query fails", async () => {
+    vi.mocked(conversation).mockRejectedValue(new Error("ipc down"));
+    renderPane();
+
+    // The banner replaces the silent empty-session degradation.
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(BANNER_TITLE);
+    expect(document.querySelectorAll("[data-slot=\"alert\"]")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeEnabled();
+    // Non-blocking: the thread fell back to EMPTY_THREAD, so the rail keeps
+    // its fresh-session hint -- the error state does not blank the pane.
+    expect(screen.getByText(RAIL_EMPTY)).toBeInTheDocument();
+  });
+
+  it("shows the same banner for a working-set failure (shared error face)", async () => {
+    vi.mocked(listWorkingSet).mockRejectedValue(new Error("ws down"));
+    renderPane();
+
+    expect(await screen.findByText(BANNER_TITLE)).toBeInTheDocument();
+  });
+
+  it("shows the same banner for an active-dataset failure (shared error face)", async () => {
+    // Each query's error branch feeds the aggregate independently; pin the
+    // active branch too so a future narrowing of the memo cannot silently
+    // drop it.
+    vi.mocked(activeDataset).mockRejectedValue(new Error("active down"));
+    renderPane();
+
+    expect(await screen.findByText(BANNER_TITLE)).toBeInTheDocument();
+  });
+
+  it("renders exactly one banner when several session queries fail", async () => {
+    vi.mocked(listWorkingSet).mockRejectedValue(new Error("ws down"));
+    vi.mocked(conversation).mockRejectedValue(new Error("thread down"));
+    renderPane();
+
+    await screen.findByRole("alert");
+    expect(document.querySelectorAll("[data-slot=\"alert\"]")).toHaveLength(1);
+  });
+
+  it("keeps rendering thread-derived content alongside the banner (cached, non-blocking)", async () => {
+    // The invalidate/refetch failure path can leave OTHER queries healthy:
+    // a failed working-set read must not degrade the rail's thread view.
+    vi.mocked(listWorkingSet).mockRejectedValue(new Error("ws down"));
+    vi.mocked(conversation).mockResolvedValue([materialized("result_1")]);
+    renderPane();
+
+    await screen.findByText(BANNER_TITLE);
+    const rail = document.querySelector<HTMLElement>(".session-rail")!;
+    expect(
+      await within(rail).findByRole("button", { name: "结果：result_1" }),
+    ).toBeInTheDocument();
+  });
+
+  it("retry refetches the errored query only and clears the banner once healthy", async () => {
+    vi.mocked(conversation)
+      .mockRejectedValueOnce(new Error("ipc down"))
+      .mockResolvedValueOnce([]);
+    renderPane();
+
+    fireEvent.click(await screen.findByRole("button", { name: RETRY_LABEL }));
+
+    await waitFor(() => expect(conversation).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+    // Only the errored slice refetches: the healthy working-set + active
+    // queries stay at their mount-time call counts.
+    expect(listWorkingSet).toHaveBeenCalledTimes(1);
+    expect(activeDataset).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs a warning when a session query fails", async () => {
+    const warnSpy = vi.spyOn(log, "warn");
+    vi.mocked(conversation).mockRejectedValue(new Error("ipc down"));
+    renderPane();
+
+    // The visible banner carries the disclosure; log.warn carries the durable
+    // trace (the skill-registry warn above is the log-only precedent).
+    await waitFor(() =>
+      expect(warnSpy).toHaveBeenCalledWith(
+        "SessionPane",
+        "session query failed",
+        [expect.any(Error)],
+      ),
+    );
   });
 });

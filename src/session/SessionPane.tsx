@@ -18,7 +18,7 @@ import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
 import { ResultView } from "../components/thread/ResultView";
 import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
 import { Thread } from "../components/thread/Thread";
-import { Alert, AlertDescription } from "../components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { WorkingSetList } from "../components/dataset/WorkingSetList";
@@ -371,6 +371,18 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
       log.warn("SessionPane", "skill registry query failed", skillListing.error);
     }
   }, [skillListing.error]);
+  // Issue #763: a session query's fetch/refetch failure carries a visible
+  // banner (rendered below the header); this log is the durable trace, the
+  // same observable honest-degrade posture as the skill-registry warn above
+  // (ADR-0029). That one is log-only because the rail trades UI surfacing
+  // for readability; the session queries get the banner as well.
+  // queryErrors is a useSessionState memo, so the effect fires once per
+  // error-set change, not per render.
+  useEffect(() => {
+    if (s.queryErrors.length > 0) {
+      log.warn("SessionPane", "session query failed", s.queryErrors);
+    }
+  }, [s.queryErrors]);
   // Hoisted so the ActiveSourceDeleteDialog filter callback reads it without a
   // non-null assertion: TS narrows a const across the JSX guard + closure, but
   // not a member access like s.pendingActiveDelete.
@@ -403,6 +415,41 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
         <div className="flex-1" data-tauri-drag-region />
         <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
       </div>
+      {s.queryErrors.length > 0 && (
+        // Issue #763: the session-level data-channel error face, below the
+        // session header and spanning the conversation + workspace columns
+        // (the pane column's full width, inset to the header's rhythm). The
+        // three session queries coalesce through `data ??` empty fallbacks,
+        // so a failed fetch or refetch (reachable via an ADR-0058 region
+        // retry's resetQueries) used to render as a pristine empty session.
+        // This is a NON-BLOCKING disclosure: cached data keeps rendering,
+        // absent data keeps the empty-state derivations, the composer stays
+        // live; Retry refetches only the errored queries (useSessionState).
+        // Destructive variant keeps the Alert's assertive "alert" role
+        // default (alert-variants.ts).
+        <Alert variant="destructive" className="mx-3 my-2">
+          <AlertTitle>
+            <FormattedMessage
+              id="session.queries.errorTitle"
+              defaultMessage="Session data failed to load"
+            />
+          </AlertTitle>
+          <AlertDescription className="flex items-center justify-between gap-3">
+            <p className="m-0">
+              <FormattedMessage
+                id="session.queries.errorDescription"
+                defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
+              />
+            </p>
+            <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
+              <FormattedMessage
+                id="session.queries.retry"
+                defaultMessage="Retry"
+              />
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
       {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
           their own ErrorBoundary so a render crash in one degrades only that
           block (the shell-level QuestionBar -- a session-skeleton element,
