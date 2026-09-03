@@ -23,7 +23,8 @@
  * container), the DatasetDetail caller-scoped typography (.dataset-detail
  * h2/small, .meta, .source, .schema td code word-wrap), and the WorkingSetList
  * list/button/active-state/small rules moved to Tailwind utility + conditional
- * className + a shared BUTTON_BASE constant in issue #184 (ADR-0067); the
+ * className + a shared BUTTON_BASE constant in issue #184 (ADR-0067,
+ * since split into select/icon bases by #790); the
  * remaining shared + scattered utility classes -- the global code font-family
  * element rule, the cross-component .muted color token, the QuestionBar
  * .phase-indicator status-line font-size/color/white-space, and the SessionPane

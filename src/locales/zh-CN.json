@@ -230,7 +230,7 @@
   "session.tab.result": "结果",
   "session.tab.workingSet": "工作集",
   "session.workingSet.emptyDetail": "选择一个数据集查看其结构。",
-  "session.workingSet.title": "工作集",
+  "session.workingSet.title": "工作集 · {count}",
   "session.workspace.ariaLabel": "工作区",
   "settings.backToWorkspace": "返回工作区",
   "settings.discardNew.body": "新配置档尚未创建。放弃将丢弃所填内容。",

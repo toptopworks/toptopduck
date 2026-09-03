@@ -34,7 +34,7 @@ describe("WorkingSetList", () => {
 
   it("lifts the active select button via bg-accent + font-semibold (ADR-0067, issue #184)", () => {
     // The active STATE drives the select button's own conditional className
-    // (cn(BUTTON_BASE, isActive && "bg-accent font-semibold")), replacing the
+    // (cn(SELECT_BUTTON_BASE, isActive && "bg-accent font-semibold")), replacing the
     // retired .working-set li.active button descendant selector. The 当前表
     // suffix is driven by a separate conditional, so it does NOT pin the
     // className branch -- this assertion does. An inactive row carries neither
@@ -650,5 +650,106 @@ describe("WorkingSetList", () => {
       Replaced: true,
     };
     expect(Object.keys(arms).sort()).toEqual(["Deleted", "Replaced"]);
+  });
+
+  // --- Row layout (issue #790): each dataset renders as ONE horizontal row --
+  // the select button plus the rename/replace/delete icon actions side by
+  // side, retiring the #5-era stack of four full-width block buttons. Icons
+  // follow the #774 hit-area spec and weak-show per the #251 convention.
+
+  it("lays each dataset out as one flex row with the three icon actions inline (issue #790)", () => {
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName="people"
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    // The select button flexes to fill the row; the icon actions sit beside it.
+    const select = screen.getByRole("button", { name: /^people/ });
+    const selectClasses = select.className.split(/\s+/);
+    expect(selectClasses).toContain("flex-1");
+    expect(selectClasses).toContain("min-w-0");
+    // All four controls share one row <li>, which is itself the flex container.
+    const row = select.closest("li")!;
+    expect(row.querySelectorAll("button")).toHaveLength(4);
+    expect(row.className.split(/\s+/)).toContain("flex");
+  });
+
+  it("renders lucide glyphs on 28px hit areas, retiring the text-character buttons (issue #790, #774 spec)", () => {
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    for (const name of [/重命名/, /换源/, /删除/]) {
+      const action = screen.getByRole("button", { name });
+      // 28px hit area (h-7 w-7) wrapping a decorative 14px lucide glyph
+      // (h-3.5 w-3.5); the accessible name stays on the button's aria-label.
+      const hitClasses = action.className.split(/\s+/);
+      expect(hitClasses).toContain("h-7");
+      expect(hitClasses).toContain("w-7");
+      const glyph = action.querySelector("svg");
+      expect(glyph).not.toBeNull();
+      // svg.className is SVGAnimatedString, not a plain string -- read the
+      // attribute instead.
+      const glyphClasses = glyph!.getAttribute("class")!.split(/\s+/);
+      expect(glyphClasses).toContain("h-3.5");
+      expect(glyphClasses).toContain("w-3.5");
+    }
+    // The pre-#790 text-character glyphs are gone.
+    expect(screen.queryByText("✎")).not.toBeInTheDocument();
+    expect(screen.queryByText("↻")).not.toBeInTheDocument();
+    expect(screen.queryByText("✕")).not.toBeInTheDocument();
+  });
+
+  it("weak-shows the icon actions and restores full opacity on row hover / focus (issue #790, #251 convention)", () => {
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const rename = screen.getByRole("button", { name: /重命名/ });
+    const classes = rename.className.split(/\s+/);
+    expect(classes).toContain("opacity-60");
+    expect(classes).toContain("group-hover:opacity-100");
+    expect(classes).toContain("focus-visible:opacity-100");
+    // The row <li> carries the group hook the hover restore keys off.
+    expect(rename.closest("li")!.className.split(/\s+/)).toContain("group");
+  });
+
+  it("truncates the label but not the row-count note, and titles the full name (issue #790)", () => {
+    const long: DatasetDescriptor = {
+      ...mockDataset,
+      display_name: "a-very-long-dataset-display-label",
+    };
+    renderI18n(
+      <WorkingSetList
+        datasets={[long]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const select = screen.getByRole("button", { name: /^a-very-long/ });
+    // The native tooltip carries the untruncated display name.
+    expect(select).toHaveAttribute("title", "a-very-long-dataset-display-label");
+    // Truncation lives on the label span so the trailing row-count note stays
+    // visible (shrink-0, never the elided part) at any column width.
+    const label = select.querySelector(".truncate");
+    expect(label).toHaveTextContent("a-very-long-dataset-display-label");
+    const note = select.querySelector("small");
+    expect(note!.className.split(/\s+/)).toContain("shrink-0");
   });
 });
