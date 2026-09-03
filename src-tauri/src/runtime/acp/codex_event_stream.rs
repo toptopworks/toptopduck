@@ -219,10 +219,20 @@ fn extract_command(value: &Value) -> Option<CodexEvent> {
 // Config override builder (pure)
 // ---------------------------------------------------------------------------
 
+/// Encode `value` as a TOML string scalar. `-c key=value` override values
+/// are parsed with TOML semantics on the codex side, so a bare numeric port
+/// lands as an integer and codex rejects the whole config; Windows paths
+/// fare likewise. The `toml` encoder owns the escaping (backslashes,
+/// embedded quotes).
+fn encode_toml_string(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
+}
+
 /// Build the `-c key=value` argv segments that inject the gateway bridge MCP
 /// server entry into codex's runtime config (ADR-0094 Decision 4). Each
 /// `McpServer::Stdio` in `mcp_servers` becomes a set of `-c` overrides under
-/// `mcp_servers.<name>`.
+/// `mcp_servers.<name>`. Scalar values go through [`encode_toml_string`] so
+/// overrides stay shape-safe regardless of value content.
 pub(crate) fn build_config_overrides(mcp_servers: &[McpServer]) -> Vec<String> {
     let mut flags = Vec::new();
     for server in mcp_servers {
@@ -234,11 +244,14 @@ pub(crate) fn build_config_overrides(mcp_servers: &[McpServer]) -> Vec<String> {
         } = server
         {
             flags.push("-c".to_string());
-            flags.push(format!("mcp_servers.{name}.command={command}"));
+            flags.push(format!(
+                "mcp_servers.{name}.command={}",
+                encode_toml_string(command)
+            ));
             if !args.is_empty() {
                 let joined = args
                     .iter()
-                    .map(|a| format!("\"{a}\""))
+                    .map(|a| encode_toml_string(a))
                     .collect::<Vec<_>>()
                     .join(", ");
                 flags.push("-c".to_string());
@@ -246,7 +259,10 @@ pub(crate) fn build_config_overrides(mcp_servers: &[McpServer]) -> Vec<String> {
             }
             for (k, v) in env {
                 flags.push("-c".to_string());
-                flags.push(format!("mcp_servers.{name}.env.{k}={v}"));
+                flags.push(format!(
+                    "mcp_servers.{name}.env.{k}={}",
+                    encode_toml_string(v)
+                ));
             }
         }
     }
@@ -679,15 +695,17 @@ mod tests {
         );
         let flags = build_config_overrides(&[server]);
         assert!(flags.contains(&"-c".to_string()));
+        // Scalar values are TOML-encoded strings so `-c` overrides keep the
+        // string type codex expects, whatever the value looks like.
         assert!(flags
             .iter()
-            .any(|f| f == "mcp_servers.toptopduck-gateway.command=/abs/path/to/bridge"));
+            .any(|f| f == "mcp_servers.toptopduck-gateway.command=\"/abs/path/to/bridge\""));
         assert!(flags
             .iter()
-            .any(|f| f == "mcp_servers.toptopduck-gateway.env.TOPTOPDUCK_GATEWAY_PORT=12345"));
+            .any(|f| f == "mcp_servers.toptopduck-gateway.env.TOPTOPDUCK_GATEWAY_PORT=\"12345\""));
         assert!(flags
             .iter()
-            .any(|f| f == "mcp_servers.toptopduck-gateway.env.TOPTOPDUCK_GATEWAY_TOKEN=abc"));
+            .any(|f| f == "mcp_servers.toptopduck-gateway.env.TOPTOPDUCK_GATEWAY_TOKEN=\"abc\""));
         // No args override when args is empty.
         assert!(!flags.iter().any(|f| f.contains(".args=")));
     }
@@ -707,6 +725,86 @@ mod tests {
         assert!(args_flag.is_some());
         assert!(args_flag.unwrap().contains("\"--flag\""));
         assert!(args_flag.unwrap().contains("\"value\""));
+    }
+
+    /// Parse the RHS of a `-c key=value` override with TOML value semantics,
+    /// mirroring how codex consumes the override.
+    fn override_value(flag: &str) -> toml::Value {
+        flag.split_once('=')
+            .and_then(|(_, v)| v.parse::<toml::Value>().ok())
+            .unwrap_or_else(|| panic!("override value parses as TOML: {flag}"))
+    }
+
+    /// Regression pin for the codex config rejection: a bare numeric port
+    /// parses as a TOML integer and codex rejects the whole config
+    /// ("invalid type: integer, expected a string"). The override must carry
+    /// a quoted string that still parses as a string.
+    #[test]
+    fn config_overrides_numeric_env_value_is_toml_string() {
+        let server = McpServer::stdio_bridge(
+            "gw",
+            "/bin/gw",
+            vec![],
+            BTreeMap::from([("PORT".to_string(), "52787".to_string())]),
+        );
+        let flags = build_config_overrides(&[server]);
+        assert!(flags
+            .iter()
+            .any(|f| f == "mcp_servers.gw.env.PORT=\"52787\""));
+        let flag = flags
+            .iter()
+            .find(|f| f.starts_with("mcp_servers.gw.env.PORT="))
+            .unwrap();
+        let value = override_value(flag);
+        assert_eq!(value.as_str(), Some("52787"));
+        assert_eq!(value.as_integer(), None);
+    }
+
+    /// Windows paths and embedded quotes stay round-trip clean through the
+    /// TOML encoding codex applies to `-c` values.
+    #[test]
+    fn config_overrides_escape_windows_paths_and_embedded_quotes() {
+        let command = "C:\\dev\\toptopduck-bridge.exe";
+        let token = "a\"b\\c";
+        let server = McpServer::stdio_bridge(
+            "gw",
+            command,
+            vec![],
+            BTreeMap::from([("TOKEN".to_string(), token.to_string())]),
+        );
+        let flags = build_config_overrides(&[server]);
+        let flag = flags
+            .iter()
+            .find(|f| f.starts_with("mcp_servers.gw.command="))
+            .unwrap();
+        assert_eq!(override_value(flag).as_str(), Some(command));
+        let flag = flags
+            .iter()
+            .find(|f| f.starts_with("mcp_servers.gw.env.TOKEN="))
+            .unwrap();
+        assert_eq!(override_value(flag).as_str(), Some(token));
+    }
+
+    #[test]
+    fn config_overrides_args_values_escape_embedded_quotes() {
+        let server = McpServer::stdio_bridge(
+            "srv",
+            "/bin/srv",
+            vec!["say \"hi\"".to_string(), "C:\\path".to_string()],
+            BTreeMap::new(),
+        );
+        let flags = build_config_overrides(&[server]);
+        let flag = flags
+            .iter()
+            .find(|f| f.starts_with("mcp_servers.srv.args="))
+            .unwrap();
+        assert_eq!(
+            override_value(flag),
+            toml::Value::Array(vec![
+                toml::Value::String("say \"hi\"".into()),
+                toml::Value::String("C:\\path".into()),
+            ])
+        );
     }
 
     #[test]
