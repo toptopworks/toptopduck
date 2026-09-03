@@ -86,7 +86,7 @@ impl ApprovalSink for NoopSink {
 // Scenarios
 // ---------------------------------------------------------------------------
 
-/// A clean text reply: agent_message + turn_completed -> Text with the streamed
+/// A clean text reply: agent_message + turn.completed -> Text with the streamed
 /// text; no tool calls -> empty trace.
 #[test]
 fn text_reply_yields_text_outcome_and_no_trace() {
@@ -104,9 +104,10 @@ fn text_reply_yields_text_outcome_and_no_trace() {
     );
 }
 
-/// A tool-call trajectory: one command_execution + agent_message + completed.
-/// The trace carries one successful entry; the phase stream has the Started /
-/// Completed pair.
+/// A tool-call trajectory: one command_execution (emitted as the measured
+/// item.started / item.completed pair — the streaming variant must not double
+/// the row) + agent_message + completed. The trace carries one successful
+/// entry; the phase stream has the Started / Completed pair.
 #[test]
 fn tool_call_yields_trace_with_one_successful_entry() {
     let (outcome, phases, _) = run("tool_call", 24);
@@ -115,6 +116,11 @@ fn tool_call_yields_trace_with_one_successful_entry() {
         other => panic!("expected Text, got {other:?}"),
     }
     assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "the item.started streaming variant never doubles the row"
+    );
     let entry = &outcome.trace[0].calls[0];
     assert!(entry.success, "the call completed");
     assert_eq!(entry.name, "explore SELECT 1");
@@ -124,6 +130,22 @@ fn tool_call_yields_trace_with_one_successful_entry() {
     assert!(phases
         .iter()
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
+}
+
+/// A failed command (non-zero exit) lands a failed trace row with the exit
+/// code as the failure anchor — the end-to-end companion of the unit pins
+/// (issue #804).
+#[test]
+fn failed_command_lands_failed_trace_row() {
+    let (outcome, _, _) = run("tool_call_failure", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the command failed"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
+    let entry = &outcome.trace[0].calls[0];
+    assert!(!entry.success, "the non-zero exit fails the row");
+    assert_eq!(entry.result_excerpt, "command exited with code 1");
 }
 
 /// A multi-round trajectory (issue #613): each batch round settles with its
@@ -196,7 +218,7 @@ fn round_prose_settles_per_round_with_live_variants() {
     );
 }
 
-/// A turn_failed event maps to Transient with the error message.
+/// A turn.failed event maps to Transient with the error message.
 #[test]
 fn turn_failed_maps_to_transient() {
     let (outcome, _, _) = run("turn_failed", 24);
@@ -230,7 +252,7 @@ fn step_cap_overflow_yields_step_cap_termination() {
 /// Stdout closes mid-turn after emitting partial agent text but no terminal
 /// event. The pump's Disconnected fallback treats accumulated text as the
 /// answer (codex may close stdout after the final message without an explicit
-/// turn_completed), so the outcome is Text — not Transient.
+/// turn.completed), so the outcome is Text — not Transient.
 #[test]
 fn crash_with_partial_text_treats_as_success() {
     let (outcome, _, _) = run("crash", 24);
@@ -243,7 +265,7 @@ fn crash_with_partial_text_treats_as_success() {
     assert!(outcome.trace.is_empty(), "{:?}", outcome.trace);
 }
 
-/// Stdout closes with accumulated agent text but no explicit turn_completed.
+/// Stdout closes with accumulated agent text but no explicit turn.completed.
 /// The pump's Disconnected fallback treats accumulated text as success (codex
 /// may close stdout after the final message without an explicit terminal event).
 #[test]
@@ -329,8 +351,8 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
         "user cancel -> Cancelled: {:?}",
         outcome.termination
     );
-    // Round 1 carries the settled call row (command events carry no
-    // failure status, so it lands successful); the call-less tail round
+    // Round 1 carries the settled call row (the completed command carries
+    // exit_code 0, so it lands successful); the call-less tail round
     // keeps the prose the cancel interrupted.
     assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
     assert_eq!(outcome.trace[0].calls.len(), 1, "{:?}", outcome.trace);
