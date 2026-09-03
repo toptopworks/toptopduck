@@ -200,8 +200,10 @@ pub const fn gemini_cli() -> AdapterSpec {
 /// The codex adapter (ADR-0081 v1 validation set, issue #300). ADR-0094:
 /// codex uses native `exec --json` direct-connect (not the retired `codex-acp`
 /// bridge package). The detection binary is the official `codex` CLI; the argv
-/// puts it into structured-NDJSON mode with a read-only sandbox (native shell /
-/// file-write tools blocked platform-uniformly). The prompt is written to stdin
+/// puts it into structured-NDJSON mode with a read-only sandbox. The sandbox
+/// does not prevent native command execution (measured on codex 0.147.0 on
+/// Windows, issue #804) — a native command still runs and lands as a
+/// `command_execution` trace row (ADR-0094's trace second source). The prompt is written to stdin
 /// as flattened text; MCP tool calls route through the gateway bridge injected
 /// via `-c` config override (ADR-0085/0094). The stream format is
 /// `CodexEventStream`, so the engine dispatches to the codex event stream

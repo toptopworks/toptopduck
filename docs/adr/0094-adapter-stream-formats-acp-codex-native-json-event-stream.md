@@ -10,7 +10,7 @@
 
 4. **网关桥接经 codex 原生 MCP 配置注入**：拉起时以配置覆盖注入网关桥接的 MCP server 条目，codex 自行拉起桥接进程回连网关。桥接进程形态、per-session 隔离、网关强制边界（审批 / 审计 / 物化命名）与 ACP 路径完全一致——注入通道不同，边界同构。
 
-5. **审批与沙箱**：`exec --json` 无 `session/request_permission` 协议级预检，审批强制点落在网关桥接调用层的 inline 审批（reject → 工具调用以错误返回，agent 自纠）。codex 的 native 工具（shell / 文件改写）经 `--sandbox read-only` 全平台统一阻断——数据分析轮次中 codex 的一切数据操作走网关工具面，native shell 无合法用途。exec 形态对 native 工具的防护强于 ACP 路径（硬阻断 vs 逐调用审批）。
+5. **审批与沙箱**：`exec --json` 无 `session/request_permission` 协议级预检，审批强制点落在网关桥接调用层的 inline 审批（reject → 工具调用以错误返回，agent 自纠）。校准：`--sandbox read-only` 不阻断 native 命令执行（实测 codex 0.147.0 on Windows：命令照常运行，以 `command_execution` 事件落地为 trace 第二源，exit_code 映射成败）；数据分析轮次中 codex 的数据操作预期走网关工具面。
 
 ## Context
 
@@ -21,7 +21,7 @@ ADR-0081 定外部运行时「传输优先 ACP」——优先非排他，决策�
 1. **零额外安装**：检测面落在用户本来就会安装的官方 CLI 上；桥接包依赖与其版本维护面消失。
 2. **零 per-CLI 代码不变量保持**：流格式是数据字段，引擎 per-format 分派。今天两种格式，明天第三种只是再加一个解析器，五个适配器无一分叉。
 3. **网关边界无损**：桥接注入通道从 ACP `session/new` 描述符换为 codex 配置覆盖，形态不同但语义同构——工具调用仍全部经桥接回网关，审批 / 审计 / 物化命名无一旁路。
-4. **read-only 沙箱焊死审批缺口**：无 `request_permission` 意味着 native 工具没有协议级预检；与其补一层 codex 特有的审批 plumbing（per-CLI 代码），不如直接阻断——数据分析场景的工具面本就只有网关，native shell 被阻断不损失任何能力，还免去平台沙箱差异（Windows 上 codex 无 OS 级沙箱、workspace-write 会退化为粗粒度拒绝）。
+4. **read-only 沙箱与 native 工具面（校准）**：无 `request_permission` 意味着 native 工具没有协议级预检。原断言「read-only 全平台阻断 native 工具」经实测（codex 0.147.0 on Windows）不成立：native 命令照常运行，以 `command_execution` 事件落地（trace 第二源，exit_code 映射成败）；数据分析的工具面预期仍走网关，native 事件可观测可审计。Windows 上 codex 无 OS 级沙箱的平台差异事实保留（workspace-write 会退化为粗粒度拒绝）。
 5. **无状态与 resume 正交保持**：不持 upstream thread，resume / 运行时切换 / 窗口管理全在 app 侧（ADR-0076），与 ACP 路径同构。
 
 ## Considered options
@@ -35,9 +35,9 @@ ADR-0081 定外部运行时「传输优先 ACP」——优先非排他，决策�
 ## Consequences
 
 - **校准 ADR-0081**：「传输优先 ACP」落回字面——引擎支持多流格式（ACP + JSON 事件流），格式为 AdapterSpec 数据字段；codex 验证集由桥接包形态改为原生 exec 形态；零 per-CLI 代码不变量不变（per-format 分派）。0081 Context「ACP 自 2026 年起被 claude-code / gemini-cli / codex / copilot 等原生支持」对 codex 不成立（codex 无原生 ACP 模式），由本 ADR 的直连形态了结。
-- **校准 ADR-0085**：三处。(1) 审批两正交面在 exec 形态退化为单面——ACP `request_permission` 面仅对 ACP 形态适配器存在，exec 形态的 agent 自带工具由 read-only 沙箱硬阻断取代（阻断面替代审批面）；网关面（MCP `tools/call` 分级审批）对两形态同构适用。(2) 桥接注入通道从 ACP `session/new` 描述符单一通道延伸出 codex 配置覆盖通道；桥接进程形态（纯 std proxy `[[bin]]`）与 per-session 隔离不变。(3) trace 双源合并规则按流格式泛化——权威源恒为网关 `tools/call` 记录，第二源为流格式自身的 native 工具事件（ACP pump `session/update` / exec 事件流 `command_execution` 等）；exec + read-only 下第二源实际为空（native 工具被阻断）。引擎完成驱动 serve 收尾的机制随流格式泛化（前提：CLI 阻塞等 `tools/call` 响应——codex 对 MCP 调用同样成立）。
+- **校准 ADR-0085**：三处。(1) 审批两正交面在 exec 形态退化为单面——ACP `request_permission` 面仅对 ACP 形态适配器存在，exec 形态的 agent 自带工具由 read-only 沙箱硬阻断取代（阻断面替代审批面）；网关面（MCP `tools/call` 分级审批）对两形态同构适用。(2) 桥接注入通道从 ACP `session/new` 描述符单一通道延伸出 codex 配置覆盖通道；桥接进程形态（纯 std proxy `[[bin]]`）与 per-session 隔离不变。(3) trace 双源合并规则按流格式泛化——权威源恒为网关 `tools/call` 记录，第二源为流格式自身的 native 工具事件（ACP pump `session/update` / exec 事件流 `command_execution` 等）；exec + read-only 下第二源非空（校准：read-only 不阻断 native 命令执行，实测 codex 0.147.0 on Windows——`command_execution` 事件照常落地，exit_code 映射 trace 成败）。引擎完成驱动 serve 收尾的机制随流格式泛化（前提：CLI 阻塞等 `tools/call` 响应——codex 对 MCP 调用同样成立）。
 - **ADR-0080 不变**：网关分级审批（内置放行 / 外部逐次确认 / 免确认姿态 / 会话级信任）作用于一切经网关调用，exec 形态直接适用，无新增审批语义；网关挂起等待用户的 UI 打断点对两形态同构。
 - **CONTEXT.md 不变**：流格式是实现概念非领域概念；运行时 / 网关 / 桥接词汇表已足。
-- **未决（实施期）**：事件流到 TurnPhase / TraceEntry / Termination 的完整映射（含 MCP 工具调用事件的实测形态）；stdin 窗口扁平化的分隔符形态；read-only 沙箱在无 OS 级沙箱平台上的实际行为验证；exec 对未信任目录的 trust 检查路径；codex 适配器的 real-CLI 端到端验证（替换既有桥接包形态的验证项）。
+- **未决（实施期）**：事件流到 TurnPhase / TraceEntry / Termination 的完整映射（含 MCP 工具调用事件的实测形态）；stdin 窗口扁平化的分隔符形态；exec 对未信任目录的 trust 检查路径；codex 适配器的 real-CLI 端到端验证（替换既有桥接包形态的验证项）。
 - **被 ADR-0095 延伸**：`StreamFormat` 不仅决定解析器分派，也隐含决定模型发现策略——`Acp` 从每轮握手 `config_options` 提取模型列表与思考强度选项，`JsonEventStream` 无动态发现。
 - **被 ADR-0097 延伸**：流格式集扩为三值，`JsonEventStream` 更名 `CodexEventStream`；claude-code 以 `ClaudeStreamJson` 直连形态接入。

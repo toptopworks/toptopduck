@@ -126,6 +126,26 @@ fn main() {
                 &serde_json::json!({"type": "turn.failed", "error": "rate limited"}),
             );
         }
+        // A failed command (non-zero exit) plus the answer text: the row
+        // lands failed with the exit code as the failure anchor (issue #804).
+        "tool_call_failure" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_1",
+                        "type": "command_execution",
+                        "command": "false",
+                        "aggregated_output": "",
+                        "exit_code": 1,
+                        "status": "completed"
+                    }
+                }),
+            );
+            emit(&mut out, &agent_message("item_2", "the command failed"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
         "round_prose" => {
             // Two batch rounds, each with its own prose, then the trailing
             // answer stretch (issue #613's per-round grouping scenario).

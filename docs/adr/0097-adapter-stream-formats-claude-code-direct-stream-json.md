@@ -23,7 +23,7 @@ claude-code 无原生 ACP 模式（实测 2.1.222：`--acp` 选项不存在，sp
 ## Why
 
 1. **无状态同构**：窗口装配器与 upstream 会话状态是两套上下文管理，全量窗口喂入再 resume 叠加致上下文不可控；每轮 spawn 使 resume / 切换 / 并发会话语义全留 app 侧（ADR-0076 不变量，codex 路径已验证）。
-2. **阻断而非审批**：数据分析轮次的数据操作走网关工具面，claude native 工具无合法用途；审批 UI 只会批准永不该用的调用。headless 自动拒 + 显式 deny 清单以零 plumbing 达成与 codex read-only 沙箱同构的阻断面。
+2. **阻断而非审批**：数据分析轮次的数据操作走网关工具面，claude native 工具无合法用途；审批 UI 只会批准永不该用的调用。headless 自动拒 + 显式 deny 清单以零 plumbing 达成 native 工具阻断面（codex read-only 沙箱的「同构阻断」经实测不成立，见 ADR-0094 校准）。
 3. **命名消歧**：枚举值与解析器一一对应，`JsonEventStream` 与 `ClaudeStreamJson` 同名会致 claude-code 适配器被误关联到 codex 解析器；更名成本一次付清（缓存丢弃重探测走既有降级路径）。
 4. **控制平面发现优于静态集与自由输入**：目录 provider 感知、零 API 成本、含 per-model 思考强度值域；静态集在第三方 provider 下失真，自由输入弃既有选择器目录形态。
 5. **strict MCP 落实网关独占工具面**：机器自带 MCP 若放行即旁路网关审计，与「工具调用全部经网关」的结构性承诺冲突。

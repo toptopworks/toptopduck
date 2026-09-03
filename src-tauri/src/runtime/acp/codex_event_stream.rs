@@ -13,7 +13,8 @@
 //! carry the approval gate at the gateway (ADR-0085/0094). `--sandbox
 //! read-only` does not prevent native command execution — a native
 //! command still runs and lands here as a `command_execution` trace row
-//! (ADR-0094's trace second source; measured on codex 0.147.0, issue #804).
+//! (ADR-0094's trace second source; measured on codex 0.147.0 on Windows,
+//! issue #804).
 //!
 //! [`StreamFormat`]: super::adapter::StreamFormat
 //! [`CodexEventStream`]: super::adapter::StreamFormat::CodexEventStream
@@ -87,8 +88,14 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
     match event_type {
         "turn.started" => CodexEvent::TurnStarted,
         "turn.completed" => CodexEvent::TurnCompleted,
-        "turn.failed" | "turn.aborted" => CodexEvent::TurnFailed {
+        "turn.failed" => CodexEvent::TurnFailed {
             error: extract_error(value),
+        },
+        "turn.aborted" => CodexEvent::TurnFailed {
+            // The abort vocabulary stays visible: an aborted turn is a
+            // distinct wire event, not a failed one with a lost detail.
+            error: extract_error_detail(value)
+                .unwrap_or_else(|| "turn aborted (no error detail)".to_string()),
         },
         "item.completed" => parse_item(value.get("item")).unwrap_or(CodexEvent::Other),
         _ => CodexEvent::Other,
@@ -113,9 +120,9 @@ fn parse_item(item: Option<&Value>) -> Option<CodexEvent> {
     }
 }
 
-/// Extract the error message from a failed-turn event. Falls back through
-/// common field names, then to a generic string.
-fn extract_error(value: &Value) -> String {
+/// Extract the error detail from a terminal-turn event, falling back
+/// through common field names; `None` when the wire carried no detail.
+fn extract_error_detail(value: &Value) -> Option<String> {
     value
         .get("error")
         .and_then(|v| {
@@ -131,24 +138,29 @@ fn extract_error(value: &Value) -> String {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         })
-        .unwrap_or_else(|| "turn failed (no error detail)".to_string())
+}
+
+/// The failed-turn error message: the wire detail, or the generic failed
+/// fallback.
+fn extract_error(value: &Value) -> String {
+    extract_error_detail(value).unwrap_or_else(|| "turn failed (no error detail)".to_string())
 }
 
 /// Extract a completed `command_execution` item into its
 /// [`CodexEvent::CommandExecution`] variant. The call id is `item.id` (a
 /// `call_id` spelling is tolerated); a missing command contributes nothing.
 fn extract_command(item: &Value) -> Option<CodexEvent> {
-    let call_id = item
-        .get("call_id")
-        .or_else(|| item.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
     let command = item
         .get("command")
         .and_then(|v| v.as_str())
         .map(str::to_string)?;
+
+    let call_id = item
+        .get("id")
+        .or_else(|| item.get("call_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // as_i64 is None for a missing or null code -- an unknown outcome.
     let exit_code = item.get("exit_code").and_then(|v| v.as_i64());
@@ -411,10 +423,10 @@ impl JsonPump {
             CodexEvent::TurnCompleted => Some(Termination::Text(self.tracker.terminal_text())),
             CodexEvent::TurnFailed { error } => Some(Termination::Transient(error)),
             CodexEvent::AgentMessage { text } => {
-                // Empty text (a wire event with no message/content payload)
-                // would open a ghost round and fire a phantom Thinking
-                // pointer; skip it (the claude path guards the same case
-                // before push_prose).
+                // Empty text (an `agent_message` item carrying an empty
+                // text string) would open a ghost round and fire a phantom
+                // Thinking pointer; skip it (the claude path guards the
+                // same case before push_prose).
                 if !text.is_empty() {
                     self.tracker.push_prose(&text, on_phase);
                 }
@@ -555,13 +567,15 @@ mod tests {
         );
     }
 
+    /// An aborted turn keeps its abort vocabulary in the fallback — an
+    /// abort is a distinct wire event, not a failure with a lost detail.
     #[test]
     fn parse_turn_aborted_without_error_detail() {
         let v: Value = serde_json::json!({"type": "turn.aborted"});
         assert_eq!(
             parse_event(&v),
             CodexEvent::TurnFailed {
-                error: "turn failed (no error detail)".into()
+                error: "turn aborted (no error detail)".into()
             }
         );
     }
@@ -608,6 +622,32 @@ mod tests {
                 exit_code: Some(2),
             }
         );
+    }
+
+    /// The measured wire carries `id`; a `call_id` spelling is tolerated
+    /// as the fallback, never the winner when both are present.
+    #[test]
+    fn parse_item_completed_command_execution_call_id_spelling() {
+        for (item, want) in [
+            (
+                serde_json::json!({"id": "item_a", "call_id": "call_b", "type": "command_execution", "command": "ls"}),
+                "item_a",
+            ),
+            (
+                serde_json::json!({"call_id": "call_b", "type": "command_execution", "command": "ls"}),
+                "call_b",
+            ),
+        ] {
+            let v: Value = serde_json::json!({"type": "item.completed", "item": item});
+            assert_eq!(
+                parse_event(&v),
+                CodexEvent::CommandExecution {
+                    call_id: want.into(),
+                    command: "ls".into(),
+                    exit_code: None,
+                }
+            );
+        }
     }
 
     /// The streaming variant never folds: its aggregated_output is empty and
@@ -1081,7 +1121,7 @@ mod tests {
             .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking")));
     }
 
-    /// An empty agent_message (no message/content payload on the wire)
+    /// An empty agent_message (an item whose `text` is an empty string)
     /// opens no round and fires no phantom round pointer -- the pre-#613
     /// no-op shape (the claude path guards the same case before
     /// push_prose).
@@ -1230,7 +1270,7 @@ mod tests {
     }
 
     /// An absent / null exit code is an unknown outcome -- it stays a
-    /// succeeded row (the pre-0.147 default-true behavior).
+    /// succeeded row (the pre-#804 default-true behavior).
     #[test]
     fn unknown_exit_stays_succeeded() {
         let mut pump = JsonPump::new(24);
