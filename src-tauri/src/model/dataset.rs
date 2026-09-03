@@ -412,37 +412,55 @@ pub enum RowReadError {
     /// counting or paging rows), or the session engine failed to materialize.
     /// Distinct from a turn's SQL failing, which is now a [`TurnOutcome::Failed`].
     Execute(String),
+    /// A full-result pull (export / copy, issue #779) exceeded the confirm
+    /// threshold and the caller did not pass `confirmed`. Carries the actual
+    /// row count and the threshold so the confirm prompt can quote real
+    /// numbers; resending with `confirmed: true` proceeds past the gate.
+    TooLarge { row_count: u64, limit: u64 },
+    /// A full-result pull (export / copy, issue #779) observed the session's
+    /// cancel token mid-scan and stopped. The flag is only read here -- the
+    /// next turn's `begin_turn` clears it, exactly like a turn cancel.
+    Cancelled,
 }
 
 impl std::fmt::Display for RowReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Rust-log-only (issue #121/#125): the IPC contract is the serde struct
         // above and the authoritative user wording lives in the frontend locale
-        // catalog. Both variants are English log identifiers; Execute no longer
+        // catalog. All variants are English log identifiers; Execute no longer
         // shares a Chinese prefix with TurnOutcome::Failed -- that outcome now
         // carries a typed TurnFailure whose wording also lives in the catalog.
         match self {
             Self::UnknownDataset(name) => write!(f, "unknown dataset: {name}"),
             Self::Execute(detail) => write!(f, "row read failed: {detail}"),
+            Self::TooLarge { row_count, limit } => {
+                write!(f, "full pull too large: {row_count} rows over {limit}")
+            }
+            Self::Cancelled => write!(f, "full pull cancelled"),
         }
     }
 }
 impl std::error::Error for RowReadError {}
 
 /// Which destination-file operation failed during a full-result CSV export
-/// (issue #769): opening the path, a buffered write, or the closing flush.
-/// Crosses IPC as a bare string inside [`ExportRowsError::Io`]'s payload.
+/// (issue #769): opening the temp file, a buffered write, the closing flush,
+/// or the final rename that places the temp file at the user-chosen path
+/// (issue #779 review -- the export writes a temp sibling and renames on
+/// success, so a stopped or failed export never touches a pre-existing
+/// destination). Crosses IPC as a bare string inside [`ExportRowsError::Io`]'s
+/// payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportIoStep {
     Create,
     Write,
     Flush,
+    Rename,
 }
 
 /// Why a full-result CSV export failed (issue #769). The data-source half
 /// reuses [`RowReadError`] 1:1 with the paged read; a destination-file failure
-/// (create / write / flush) carries the step, the path, and the underlying
-/// detail. The whole type crosses IPC wrapped in
+/// (create / write / flush / rename) carries the step, the path, and the
+/// underlying detail. The whole type crosses IPC wrapped in
 /// [`SessionError::Export`](crate::session_store::SessionError) -- the
 /// frontend recurses `Export.data.kind` and renders the export-domain locale
 /// message (the destination half previously rode `SessionError::Engine` and

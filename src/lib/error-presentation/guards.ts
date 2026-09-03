@@ -273,8 +273,9 @@ export function isRenameError(e: unknown): e is RenameError {
 }
 
 // Narrow an unknown value to a RowReadError (issue #121) -- the read_rows error.
-// Reached via isSessionError's Turn branch. Both variants carry a string under
-// data (the reference name / the engine detail).
+// Reached via isSessionError's Turn branch. UnknownDataset / Execute carry a
+// string under data (the reference name / the engine detail); TooLarge carries
+// the row count + threshold pair (issue #779); Cancelled is a unit variant.
 export function isRowReadError(e: unknown): e is RowReadError {
   if (typeof e !== "object" || e === null) return false;
   const kind = (e as { kind?: unknown }).kind;
@@ -282,9 +283,46 @@ export function isRowReadError(e: unknown): e is RowReadError {
     case "UnknownDataset":
     case "Execute":
       return typeof (e as { data?: unknown }).data === "string";
+    case "TooLarge": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { row_count?: unknown }).row_count === "number" &&
+        typeof (d as { limit?: unknown }).limit === "number"
+      );
+    }
+    case "Cancelled":
+      return true;
     default:
       return false;
   }
+}
+
+// Classify a full-pull IPC reject against the guardrails (issue #779): the
+// confirm gate's refusal (with the row count the prompt quotes), the mid-scan
+// cancel observation, or null when the reject is anything else (a real
+// failure -- the caller's error lane handles those). The TSV copy rides
+// SessionError::RowRead, whose serde wire kind is "Turn" (renamed in Rust,
+// issue #121) -- entering through isSessionError's narrowing is what matches
+// the renamed kind where it is defined instead of hand-matching a wire string
+// (the review catch: a hand-matched "RowRead" never occurs on the wire, so
+// the copy path's guardrails were dead code). The CSV export rides
+// SessionError::Export's RowRead half one level deeper.
+export function classifyFullPullRejection(
+  e: unknown,
+): { kind: "tooLarge"; rowCount: number } | { kind: "cancelled" } | null {
+  if (!isSessionError(e)) return null;
+  let inner: RowReadError | null = null;
+  if (e.kind === "Turn") {
+    inner = e.data;
+  } else if (e.kind === "Export" && e.data.kind === "RowRead") {
+    inner = e.data.data;
+  }
+  if (inner === null) return null;
+  if (inner.kind === "TooLarge") return { kind: "tooLarge", rowCount: inner.data.row_count };
+  if (inner.kind === "Cancelled") return { kind: "cancelled" };
+  return null;
 }
 
 // Narrow an unknown value to an ExportRowsError (issue #769) -- the
@@ -302,7 +340,7 @@ export function isExportRowsError(e: unknown): e is ExportRowsError {
       if (typeof d !== "object" || d === null) return false;
       const step = (d as { step?: unknown }).step;
       return (
-        (step === "Create" || step === "Write" || step === "Flush") &&
+        (step === "Create" || step === "Write" || step === "Flush" || step === "Rename") &&
         typeof (d as { path?: unknown }).path === "string" &&
         typeof (d as { detail?: unknown }).detail === "string"
       );

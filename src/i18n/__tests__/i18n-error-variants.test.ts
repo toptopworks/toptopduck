@@ -74,6 +74,8 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
   RowReadError: {
     UnknownDataset: "error.dataset.notFound",
     Execute: "error.turn.execute",
+    TooLarge: "error.rowRead.tooLarge",
+    Cancelled: "error.rowRead.cancelled",
   },
   ResumeError: {
     Load: null, // recurses DuckLoadError

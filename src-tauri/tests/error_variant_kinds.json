@@ -33,7 +33,9 @@
     "SourceMissing"
   ],
   "RowReadError": [
+    "Cancelled",
     "Execute",
+    "TooLarge",
     "UnknownDataset"
   ],
   "SaveError": [

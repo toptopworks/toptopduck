@@ -74,6 +74,17 @@ pub use resume::{is_resuming, resuming_count};
 /// table into memory; the physical table still holds the full result.
 const MAX_READ_ROWS: u64 = 10_000;
 
+/// The full-result confirm threshold (issue #779): a full pull (CSV export or
+/// TSV copy) over this many rows is refused with `RowReadError::TooLarge`
+/// unless the caller passes `confirmed`. Both full paths hold the session
+/// lock for the whole scan (ADR-0021's single-flight gate) -- a
+/// multi-million-row pull queues every other command on that session for its
+/// duration -- and the TSV half materializes the whole payload, so a pull
+/// this large must be a deliberate act, not an accidental click. Sits beside
+/// MAX_READ_ROWS on purpose: both bound how much of a table one call may
+/// pull, one for the display page, one for the full path.
+const MAX_UNCONFIRMED_FULL_ROWS: u64 = 1_000_000;
+
 /// The UTF-8 BOM written ahead of an exported CSV's first record (issue #769):
 /// Excel-family spreadsheets autodetect UTF-8 by its presence -- without it a
 /// CJK column name or value garbles on open.
@@ -2006,21 +2017,68 @@ impl Session {
     /// [`ExportRowsError::Io`]; everything else matches `read_rows` 1:1. Stale
     /// results export too -- the rows are real and the payload carries no
     /// status markers.
-    pub fn export_rows_csv(&self, reference_name: &str, path: &str) -> Result<(), ExportRowsError> {
-        let (columns, sql, _) = self.full_rows_sql(reference_name)?;
-        // Create the destination first; the streaming half writes the BOM and
-        // hands the file to the csv writer (which adds its own buffer and
-        // flushes through it at the end).
-        let file = fs::File::create(path).map_err(|e| export_io(ExportIoStep::Create, path, e))?;
-        let result = self.export_csv_stream(file, &columns, &sql, path);
-        if result.is_err() {
-            // Create truncated any pre-existing file at the path, so a failed
-            // export must not leave the half-written artifact behind -- a
-            // truncated CSV opens as a valid-looking export. Best-effort
-            // removal; the error itself still crosses IPC.
-            let _ = fs::remove_file(path);
+    ///
+    /// Full-path guardrails (issue #779): a result over
+    /// `MAX_UNCONFIRMED_FULL_ROWS` refuses with `RowReadError::TooLarge`
+    /// unless `confirmed` (the lock a full pull holds is O(all rows) long, so
+    /// a pull that large must be deliberate), and a cancel observed mid-scan
+    /// stops the export with `RowReadError::Cancelled` -- the session's
+    /// [`CancelToken`] fires without the session lock (ADR-0021's
+    /// outside-the-lock cancel path), so the export's own lock hold cannot
+    /// shield it from the cancel command. The pull's start retires the
+    /// token's generation (see [`Self::start_full_pull`]), so a past stop or
+    /// a still-sleeping wall-clock watchdog from the last turn never kills
+    /// the pull. A cancelled export leaves no artifact: the destination is a
+    /// temp sibling until success, and the failed-write cleanup below removes
+    /// it -- a pre-existing file at the user-chosen path stays untouched.
+    pub fn export_rows_csv(
+        &self,
+        reference_name: &str,
+        path: &str,
+        confirmed: bool,
+    ) -> Result<(), ExportRowsError> {
+        self.export_rows_csv_gated(reference_name, path, confirmed, MAX_UNCONFIRMED_FULL_ROWS)
+    }
+
+    /// The full-path size gate (issue #779): a result over `confirm_above`
+    /// rows refuses unless `confirmed`, quoting the real row count. Delegates
+    /// to [`Self::export_rows_csv`] for everything else. The threshold is a
+    /// parameter (not the constant) so tests exercise the gate with small
+    /// fixtures -- the `read_line_bounded` `max` precedent.
+    pub fn export_rows_csv_gated(
+        &self,
+        reference_name: &str,
+        path: &str,
+        confirmed: bool,
+        confirm_above: u64,
+    ) -> Result<(), ExportRowsError> {
+        let (columns, sql) = self.start_full_pull(reference_name, confirmed, confirm_above)?;
+        // Write to a temp sibling and rename on success (issue #779 review):
+        // File::create truncates, so writing the chosen path directly would
+        // destroy a pre-existing file the moment the export starts -- a
+        // stopped or failed export must leave it exactly as it was. The
+        // streaming half writes the BOM to the temp file and hands it to the
+        // csv writer (which adds its own buffer and flushes through it at the
+        // end). Create / Rename errors report the user-chosen path; the
+        // streaming half's Write / Flush errors report the temp sibling (the
+        // file the OS actually failed on).
+        let temp_path = format!("{path}.part");
+        let file =
+            fs::File::create(&temp_path).map_err(|e| export_io(ExportIoStep::Create, path, e))?;
+        let result = self.export_csv_stream(file, &columns, &sql, &temp_path);
+        match result {
+            Ok(()) => {
+                fs::rename(&temp_path, path).map_err(|e| export_io(ExportIoStep::Rename, path, e))
+            }
+            Err(e) => {
+                // The failed write must not leave the half-written artifact
+                // behind -- a truncated CSV opens as a valid-looking export.
+                // Best-effort removal of the temp sibling; the error itself
+                // still crosses IPC and the user-chosen path is untouched.
+                let _ = fs::remove_file(&temp_path);
+                Err(e)
+            }
         }
-        result
     }
 
     /// The post-create half of [`Self::export_rows_csv`] (issue #769): BOM,
@@ -2042,6 +2100,12 @@ impl Session {
         wtr.write_record(columns.iter().map(|c| c.name.as_str()))
             .map_err(|e| export_io(ExportIoStep::Write, path, e))?;
         self.scan_rows(sql, columns.len(), |cells| {
+            // The cancel checkpoint (issue #779): every row consults the
+            // session token, so a cancel during a multi-minute scan stops the
+            // export within one row instead of at its natural end.
+            if self.cancel.is_requested() {
+                return Err(RowReadError::Cancelled.into());
+            }
             wtr.write_record(cells)
                 .map_err(|e| export_io(ExportIoStep::Write, path, e))
         })?;
@@ -2057,15 +2121,77 @@ impl Session {
     /// CR, or LF would silently split one cell across columns -- those control
     /// characters are sanitized to a space (see [`push_tsv_line`]). Stale
     /// results copy too; the payload carries no status markers.
-    pub fn read_rows_tsv(&self, reference_name: &str) -> Result<String, RowReadError> {
-        let (columns, sql, _) = self.full_rows_sql(reference_name)?;
+    ///
+    /// Memory upper bound, deliberately NOT chunked (issue #779 AC3): the
+    /// clipboard write takes exactly one string, so chunking the scan would
+    /// only move the peak (the chunks plus the joined result), never lower
+    /// it. The bound on that peak is the confirm gate -- a result over
+    /// `MAX_UNCONFIRMED_FULL_ROWS` rows refuses with `RowReadError::TooLarge`
+    /// unless `confirmed`, so a copy that large is an explicit choice, and a
+    /// cancel observed mid-scan stops it with `RowReadError::Cancelled`
+    /// (the [`CancelToken`] fires without the session lock, ADR-0021; the
+    /// pull's start retires the token's generation -- consuming a leftover
+    /// request and standing down a still-sleeping wall-clock watchdog from
+    /// the last turn -- see [`Self::start_full_pull`]).
+    pub fn read_rows_tsv(
+        &self,
+        reference_name: &str,
+        confirmed: bool,
+    ) -> Result<String, RowReadError> {
+        self.read_rows_tsv_gated(reference_name, confirmed, MAX_UNCONFIRMED_FULL_ROWS)
+    }
+
+    /// The full-path size gate for the TSV copy (issue #779) -- the
+    /// [`Self::read_rows_tsv`] twin of [`Self::export_rows_csv_gated`]: the
+    /// threshold is a parameter so tests exercise the gate with small
+    /// fixtures (the `read_line_bounded` `max` precedent).
+    pub fn read_rows_tsv_gated(
+        &self,
+        reference_name: &str,
+        confirmed: bool,
+        confirm_above: u64,
+    ) -> Result<String, RowReadError> {
+        let (columns, sql) = self.start_full_pull(reference_name, confirmed, confirm_above)?;
         let mut out = String::new();
         push_tsv_line(&mut out, columns.iter().map(|c| c.name.as_str()));
         self.scan_rows(&sql, columns.len(), |cells| {
+            // The cancel checkpoint (issue #779), symmetric with the export
+            // path's: every row consults the session token.
+            if self.cancel.is_requested() {
+                return Err(RowReadError::Cancelled);
+            }
             push_tsv_line(&mut out, cells.iter());
             Ok(())
         })?;
         Ok(out)
+    }
+
+    /// The shared full-pull preamble (issue #779): resolve the data source,
+    /// run the confirm gate over the descriptor's row count, then retire the
+    /// token's generation -- consuming any leftover cancel request (a stop
+    /// that landed after the last turn or pull cannot silently kill this pull
+    /// on its first row) AND standing down any still-sleeping wall-clock
+    /// watchdog from the last turn, which would otherwise fire into a pull
+    /// the user never stopped and land as a quiet Cancelled (the begin_turn
+    /// word update, minus the in-flight half; a pull is not a turn). A
+    /// request that fires AFTER this point is honored by the row loop's
+    /// checkpoint; one racing it is either wiped or honored, the same
+    /// nondeterminism `begin_turn` documents.
+    fn start_full_pull(
+        &self,
+        reference_name: &str,
+        confirmed: bool,
+        confirm_above: u64,
+    ) -> Result<(Vec<ColumnSchema>, String), RowReadError> {
+        let (columns, sql, row_count) = self.full_rows_sql(reference_name)?;
+        if !confirmed && row_count > confirm_above {
+            return Err(RowReadError::TooLarge {
+                row_count,
+                limit: confirm_above,
+            });
+        }
+        self.cancel.retire_generation();
+        Ok((columns, sql))
     }
 
     /// Run arbitrary SQL on the session connection, materializing the engine

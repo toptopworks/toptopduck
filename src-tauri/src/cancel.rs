@@ -195,6 +195,22 @@ impl CancelToken {
             generation,
         }
     }
+
+    /// Advance the turn generation and clear the request flag in one swap --
+    /// [`Self::begin_turn`]'s word update without the in-flight half, for the
+    /// full-pull paths' start (issue #779). A pull is not a turn, so this
+    /// both consumes a leftover request (a stop that landed after the last
+    /// turn or pull must not kill this pull on its first row) and retires any
+    /// still-sleeping wall-clock watchdog from the last turn: the watchdog
+    /// fires `request_if(old_generation)` into a generation that no longer
+    /// exists and stands down, instead of cancelling a pull the user never
+    /// stopped. A racing `request()` has the same nondeterminism `begin_turn`
+    /// documents above: it either lands before the swap (wiped with it) or
+    /// after (honored by the pull's row loop).
+    pub fn retire_generation(&self) {
+        let generation = TurnGeneration((self.state.load(Ordering::SeqCst) >> 1) + 1);
+        self.state.swap(generation.0 << 1, Ordering::SeqCst);
+    }
 }
 
 /// RAII guard for the in-flight flag. Created by
@@ -261,6 +277,29 @@ mod tests {
         assert!(token.is_requested());
         let _guard = token.begin_turn();
         assert!(!token.is_requested(), "stale request must be cleared");
+    }
+
+    #[test]
+    fn retire_generation_consumes_a_stale_request_and_stands_down_its_watchdog() {
+        // Issue #779: a full pull starts by retiring the token's generation
+        // (the begin_turn word update minus in-flight). Two contracts: the
+        // leftover request flag is consumed, and a watchdog still holding the
+        // retired generation stands down -- request_if(old) must NOT fire,
+        // which is exactly the wall-clock leftover that would otherwise kill
+        // a pull the user never stopped.
+        let token = Arc::new(CancelToken::new());
+        let guard = token.begin_turn();
+        let generation = guard.generation();
+        drop(guard);
+        token.request();
+        assert!(token.is_requested());
+        token.retire_generation();
+        assert!(!token.is_requested(), "stale request must be consumed");
+        assert!(
+            !token.request_if(generation),
+            "a watchdog on the retired generation must stand down"
+        );
+        assert!(!token.is_requested(), "the stood-down watchdog set no flag");
     }
 
     #[test]

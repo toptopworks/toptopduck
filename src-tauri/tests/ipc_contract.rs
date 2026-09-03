@@ -288,8 +288,13 @@ fn chart_kind_serializes_as_a_lowercase_variant_string() {
 fn row_read_error_serializes_adjacently_tagged() {
     // RowReadError crosses IPC as a serde struct wrapped in SessionError::RowRead
     // (issue #121), no longer as its Display string. The hand-written Display is
-    // Rust-log-only. Turn failures are TurnOutcome::Failed (ADR-0028); this type
-    // now carries only the read_rows errors (UnknownDataset, Execute).
+    // Rust-log-only. Turn failures are TurnOutcome::Failed (ADR-0028); the
+    // read errors were UnknownDataset / Execute (issue #121), joined by the
+    // full-pull guardrails TooLarge / Cancelled (issue #779). Each variant's
+    // full wire shape is pinned one literal at a time -- TooLarge's payload
+    // field names are load-bearing on the TS side (isRowReadError verifies
+    // them; a rename would otherwise pass every Rust test), and Cancelled is
+    // a unit variant (kind only, no data key).
     use toptopduck_lib::RowReadError;
     assert_wire(
         &RowReadError::Execute("detail".into()),
@@ -299,6 +304,14 @@ fn row_read_error_serializes_adjacently_tagged() {
         &RowReadError::UnknownDataset("result_1".into()),
         r#"{"kind":"UnknownDataset","data":"result_1"}"#,
     );
+    assert_wire(
+        &RowReadError::TooLarge {
+            row_count: 3,
+            limit: 2,
+        },
+        r#"{"kind":"TooLarge","data":{"row_count":3,"limit":2}}"#,
+    );
+    assert_wire(&RowReadError::Cancelled, r#"{"kind":"Cancelled"}"#);
 }
 
 #[test]
