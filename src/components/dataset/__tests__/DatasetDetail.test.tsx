@@ -18,6 +18,17 @@ describe("DatasetDetail", () => {
     expect(screen.queryByText(/隐私控制/)).toBeNull();
   });
 
+  it("keeps the meta line to the row count; the full fingerprint rides the tooltip (issue #793)", () => {
+    // AC3: the always-on 12-char fingerprint slice is near-zero value at a
+    // glance -- it exists to prove "the file really did change" during
+    // troubleshooting. The visible meta keeps Rows only; the tooltip carries
+    // the full (untruncated) fingerprint so that check stays one hover away.
+    renderI18n(<DatasetDetail dataset={mockDataset} />);
+    const meta = screen.getByText(/行数：5/);
+    expect(meta).not.toHaveTextContent(/指纹/);
+    expect(meta).toHaveAttribute("title", `指纹：${mockDataset.fingerprint}`);
+  });
+
   it("pins the schema-type <code> to font-mono (ADR-0067, issue #185)", () => {
     // The global code { font-family } element rule retired; each <code> now
     // carries font-mono inline. With the global backstop gone, a future <code>
