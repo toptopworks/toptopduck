@@ -1,4 +1,4 @@
-import { FormattedMessage } from "react-intl";
+import { FormattedMessage, useIntl } from "react-intl";
 import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 import { PrivacyControls } from "./PrivacyControls";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
@@ -12,6 +12,7 @@ interface DatasetDetailProps {
 }
 
 export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: DatasetDetailProps) {
+  const intl = useIntl();
   return (
     // ADR-0067 (issue #184): the caller-scoped visual rules that lived under
     // .dataset-detail h2 / .dataset-detail small / .meta / .source / .schema td
@@ -38,11 +39,24 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
           />
         </small>
       </h2>
-      <p className="meta text-muted-foreground mt-1 mb-3">
+      {/* #793: the always-on 12-char fingerprint slice is near-zero value at a
+          glance (it proves "the file really did change" during troubleshooting)
+          -- the meta line keeps Rows only, the full fingerprint rides the
+          native tooltip. */}
+      <p
+        className="meta text-muted-foreground mt-1 mb-3"
+        title={intl.formatMessage(
+          {
+            id: "workingSet.detail.fingerprintTitle",
+            defaultMessage: "Fingerprint: {fingerprint}",
+          },
+          { fingerprint: dataset.fingerprint },
+        )}
+      >
         <FormattedMessage
           id="workingSet.detail.meta"
-          defaultMessage="Rows: {rows} · fingerprint: {fingerprint}…"
-          values={{ rows: dataset.row_count, fingerprint: dataset.fingerprint.slice(0, 12) }}
+          defaultMessage="Rows: {rows}"
+          values={{ rows: dataset.row_count }}
         />
       </p>
 

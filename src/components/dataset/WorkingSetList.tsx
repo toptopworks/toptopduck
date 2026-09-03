@@ -283,15 +283,14 @@ export function WorkingSetList({
         {datasets.map((d) => (
           // One horizontal row per dataset (issue #790): the select button and
           // the icon actions side by side; group is the hover hook the icon
-          // weak-show restore keys off. A stale dataset renders the badge after
-          // the row actions, where its basis-full under flex-wrap puts it alone
-          // on the line below -- flex line collection follows source order, so
-          // the badge must stay after the icons or it pushes them onto a third
-          // line.
+          // weak-show restore keys off. A stale dataset renders its short chip
+          // after the row actions (issue #793 retired the #790 basis-full badge
+          // + flex-wrap second line -- the chip is an inline shrink-0 peer, so
+          // the row stays one flex line at any column width).
           <li
             key={d.reference_name}
             className={cn(
-              "group my-[0.2rem] flex flex-wrap items-center gap-1",
+              "group my-[0.2rem] flex items-center gap-1",
               d.reference_name === activeName && "active",
               d.stale && "stale",
             )}
@@ -305,12 +304,10 @@ export function WorkingSetList({
               )}
               onClick={() => onSelect(d.reference_name)}
             >
-              <span className="min-w-0 flex-1 truncate">
-                {d.display_name}
-                {d.reference_name === activeName ? (
-                  <FormattedMessage id="workingSet.activeSuffix" defaultMessage=" · current table" />
-                ) : null}
-              </span>
+              {/* #793: the " · current table" suffix is retired -- active is
+                  carried by the row highlight (below) and the tab-row Targets
+                  badge, so the label truncates cleanly in narrow columns. */}
+              <span className="min-w-0 flex-1 truncate">{d.display_name}</span>
               {/* font-normal overrides the active button's font-semibold so the
                   row-count annotation stays muted-weight in either state;
                   shrink-0 + nowrap keep truncation from ever eliding the note. */}
@@ -373,12 +370,23 @@ export function WorkingSetList({
               </button>
             )}
             {d.stale && (
-              <Badge variant="secondary" className="stale-badge basis-full">
-                <FormattedMessage
-                  id="workingSet.staleRow"
-                  defaultMessage="Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}"
-                  values={{ name: d.stale.display_name, reason: d.stale.reason }}
-                />
+              // #793: a short chip with the full causal sentence on the native
+              // tooltip -- the sentence used to wrap inside the badge and break
+              // the chip shape in narrow columns. No action outlet here: the
+              // rerun path lives with the result panel's stale banner (#758).
+              <Badge
+                variant="secondary"
+                className="stale-badge shrink-0"
+                title={intl.formatMessage(
+                  {
+                    id: "workingSet.staleRow.title",
+                    defaultMessage:
+                      "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
+                  },
+                  { name: d.stale.display_name, reason: d.stale.reason },
+                )}
+              >
+                <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
               </Badge>
             )}
           </li>

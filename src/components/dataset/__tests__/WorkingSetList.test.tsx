@@ -16,7 +16,7 @@ describe("WorkingSetList", () => {
   // Spies must not leak between tests.
   afterEach(() => vi.restoreAllMocks());
 
-  it("lists datasets and marks the active one", () => {
+  it("lists the datasets as selectable rows", () => {
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -27,18 +27,19 @@ describe("WorkingSetList", () => {
     );
     // The select button's accessible name starts with the display label; the
     // rename sibling's starts with "重命名" -- anchor on the leading label so
-    // the two buttons never collide on a /people/ substring match.
+    // the two buttons never collide on a /people/ substring match. The active
+    // marking itself is pinned by the className test below (#793 retired the
+    // suffix text this test used to assert).
     expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument();
-    expect(screen.getByText(/当前表/)).toBeInTheDocument();
   });
 
   it("lifts the active select button via bg-accent + font-semibold (ADR-0067, issue #184)", () => {
     // The active STATE drives the select button's own conditional className
     // (cn(SELECT_BUTTON_BASE, isActive && "bg-accent font-semibold")), replacing the
-    // retired .working-set li.active button descendant selector. The 当前表
-    // suffix is driven by a separate conditional, so it does NOT pin the
-    // className branch -- this assertion does. An inactive row carries neither
-    // class.
+    // retired .working-set li.active button descendant selector. Since #793
+    // retired the " · current table" suffix, this className branch is the
+    // row's only in-list active marker -- this assertion pins it. An inactive
+    // row carries neither class.
     const { rerender } = renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -552,12 +553,13 @@ describe("WorkingSetList", () => {
     expect(screen.getByRole("button", { name: /删除/ })).toBeDisabled();
   });
 
-  it("renders a stale badge whose verb follows the anchor reason (issue #41 AC4)", () => {
-    // AC4: a stale result row carries a badge naming the invalidating source,
-    // with "已删除" for a Deleted anchor and "已更新" for a Replaced anchor
-    // (wording sourced from the workingSet.staleRow ICU select message; Thread's
-    // chip uses its own i18n staleChipVerb, so the two surfaces do not share
-    // wording -- issue #107 retired staleBadge.ts when the badge became a Badge).
+  it("renders a short stale chip whose title carries the Deleted causal sentence (issue #793)", () => {
+    // #793 AC1: the row badge is the short "已失效" chip; the full causal
+    // sentence -- with "已删除" for a Deleted anchor and "已更新" for a
+    // Replaced one, from the workingSet.staleRow.title ICU select -- moves to
+    // the native tooltip, so a narrow column can no longer wrap the sentence
+    // inside the chip. No action outlet rides the chip: the rerun path stays
+    // with the result panel's stale banner (#758).
     const stale: DatasetDescriptor = {
       ...mockDataset,
       reference_name: "result_1",
@@ -576,7 +578,8 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    expect(screen.getByText(/因「员工表」已删除而失效/)).toBeInTheDocument();
+    const chip = screen.getByText("已失效");
+    expect(chip).toHaveAttribute("title", "因「员工表」已删除而失效");
   });
 
   it("renders the row-count plural 'one' branch via the en defaultMessage (ADR-0052)", () => {
@@ -613,10 +616,11 @@ describe("WorkingSetList", () => {
     expect(screen.getByRole("button", { name: /5 rows/ })).toBeInTheDocument();
   });
 
-  it("renders the stale badge verb for a Replaced anchor (issue #41 AC4)", () => {
-    // Pins the Replaced arm of the workingSet.staleRow ICU select (the Deleted
-    // arm is covered above) so a regression that drops the arm renders empty;
-    // mirrors the ResultView stale-verb coverage in the Thread suite.
+  it("renders the stale chip title verb for a Replaced anchor (issue #41 AC4)", () => {
+    // Pins the Replaced arm of the workingSet.staleRow.title ICU select (the
+    // Deleted arm is covered above) so a regression that drops the arm renders
+    // an incomplete tooltip; mirrors the ResultView stale-verb coverage in the
+    // Thread suite.
     const stale: DatasetDescriptor = {
       ...mockDataset,
       reference_name: "result_1",
@@ -635,14 +639,16 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    expect(screen.getByText(/因「员工表」已更新而失效/)).toBeInTheDocument();
+    const chip = screen.getByText("已失效");
+    expect(chip).toHaveAttribute("title", "因「员工表」已更新而失效");
   });
 
-  it("exhausts every StaleReason variant in the workingSet.staleRow select (ADR-0041)", () => {
-    // Compile-time guard: the workingSet.staleRow ICU {reason, select} must name
-    // every StaleReason variant as an arm. Adding a variant without extending
-    // this map fails tsc (mirrors Thread.tsx staleChipVerb's never-guard), so the
-    // select's `other` arm stays unreachable instead of silently masking a new case.
+  it("exhausts every StaleReason variant in the workingSet.staleRow.title select (ADR-0041)", () => {
+    // Compile-time guard: the workingSet.staleRow.title ICU {reason, select}
+    // must name every StaleReason variant as an arm. Adding a variant without
+    // extending this map fails tsc (mirrors Thread.tsx staleChipVerb's
+    // never-guard), so the select's `other` arm stays unreachable instead of
+    // silently masking a new case.
     const arms: Record<StaleReason, true> = {
       Deleted: true,
       Replaced: true,
@@ -751,7 +757,7 @@ describe("WorkingSetList", () => {
     expect(note!.className.split(/\s+/)).toContain("shrink-0");
   });
 
-  it("renders the stale badge after the row actions so the icons share the select line (issue #790)", () => {
+  it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
     const stale: DatasetDescriptor = {
       ...mockDataset,
       stale: {
@@ -770,17 +776,45 @@ describe("WorkingSetList", () => {
         onDelete={() => {}}
       />,
     );
-    // jsdom has no layout engine, so the guard pins the DOM order the
-    // flex-wrap packing depends on: select + three icon actions first, badge
-    // last -- its basis-full lands alone on the line below only when it
-    // follows the icons (a badge before them would push the icons onto a
-    // third line).
+    // jsdom has no layout engine, so the guard pins the DOM order and the
+    // class contract the single-line layout depends on: select + three icon
+    // actions, then the short chip last. The #790 shape (basis-full badge
+    // wrapping onto its own line via flex-wrap) is retired with #793 -- the
+    // chip is a shrink-0 inline peer that never compresses and never needs
+    // to wrap, so the row stays one flex line.
     const row = screen.getByRole("button", { name: /^people/ }).closest("li")!;
-    expect(row.className.split(/\s+/)).toContain("flex-wrap");
+    const rowClasses = row.className.split(/\s+/);
+    expect(rowClasses).toContain("flex");
+    expect(rowClasses).not.toContain("flex-wrap");
     const children = [...row.children];
     const badge = children[children.length - 1];
-    expect(badge.className.split(/\s+/)).toContain("stale-badge");
-    expect(badge.className.split(/\s+/)).toContain("basis-full");
+    const badgeClasses = badge.className.split(/\s+/);
+    expect(badgeClasses).toContain("stale-badge");
+    expect(badgeClasses).toContain("shrink-0");
+    expect(badgeClasses).not.toContain("basis-full");
     expect(children.slice(1, -1).filter((el) => el.tagName === "BUTTON")).toHaveLength(3);
+  });
+
+  it("retires the ' · current table' suffix; the active fact rides the highlight alone (issue #793)", () => {
+    // AC2: active was stated three ways (row suffix + tab-row Targets badge +
+    // row highlight). The suffix is deleted; the highlight (bg-accent +
+    // font-semibold) and the Targets badge keep the two remaining surfaces.
+    // The label pins to exactly the display name so a restored suffix fails
+    // in either locale: the zh catalog supplies the zh word when the key
+    // exists, and the en defaultMessage covers the partial revert where only
+    // the source hunk comes back and the catalog keys stay deleted.
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName="people"
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const select = screen.getByRole("button", { name: /^people/ });
+    expect(select.querySelector(".truncate")).toHaveTextContent(/^people$/);
+    const classes = select.className.split(/\s+/);
+    expect(classes).toContain("bg-accent");
+    expect(classes).toContain("font-semibold");
   });
 });
