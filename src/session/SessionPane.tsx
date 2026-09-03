@@ -847,10 +847,12 @@ function WorkspaceWorkingSet({
 
   return (
     // ADR-0067 (issue #184): the WorkspaceWorkingSet div carries the .layout
-    // grid (280px/1fr two-column master-detail, ADR-0067 Decision 1); both
-    // sections share the PANEL_CARD_BASE chrome (defined above). The .layout /
-    // .working-set-layout / .panel class hooks stay as anchor points;
-    // per-consumer margins live on the consumer, not the shared .layout rule.
+    // grid (280px/1fr two-column master-detail, ADR-0067 Decision 1;
+    // single-column fallback at container widths <=600px, styles.css issue
+    // #791); both sections share the PANEL_CARD_BASE chrome (defined above).
+    // The .layout / .working-set-layout / .panel class hooks stay as anchor
+    // points; per-consumer margins live on the consumer, not the shared
+    // .layout rule.
     <div className="layout working-set-layout">
       <section className={PANEL_CARD_BASE}>
         <h2>

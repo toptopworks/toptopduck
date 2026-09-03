@@ -45,6 +45,26 @@
    (SessionPane WorkspaceWorkingSet) as utility. Single consumer. */
 .layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; }
 
+/* Narrow-workspace fallback (issue #791): .session-workspace is an
+   inline-size container (rule with .session-workspace below); when the
+   panel lands in the 320px track floor (issue #770) to 600px band, the
+   280px/1fr pair starves the detail column (280px list + 1.25rem gap), so
+   the grid stacks one column -- list first, detail below (DOM order).
+   minmax(0, 1fr) + the items' min-width: 0 pin the track and the panels
+   to the container's free space (a bare 1fr track and the items' auto
+   minimum would let a wide table re-widen the column into overflow; the
+   Table primitive's overflow-x-auto then scrolls the table itself,
+   ADR-0057). Container query rather than a media query: the panel width
+   comes from the shell grid + the draggable rail, not the viewport. The
+   fold/expand slide crosses 600px mid-flight; that transient reflow is
+   the already-handled class (fold: clipped by the workspace-collapsed
+   overflow rules below; expand: masked by the .workspace-body staged
+   fade-in below). */
+@container workspace (max-width: 600px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  .layout > .panel { min-width: 0; }
+}
+
 /* Privacy controls (ADR-0011, issue #9): sample switch + per-column type-only.
  * ADR-0067 (issue #183): the .privacy / .privacy h3 / .privacy-samples /
  * .privacy-cols / .privacy-cols last-column / .disclosure-summary /
@@ -640,6 +660,15 @@
   display: flex; flex-direction: column;
   background: var(--card);
   transition: opacity 200ms ease;
+  /* Inline-size container (issue #791): the .layout working-set grid (rule
+     at the top of this file) queries this column's width for the narrow
+     single-column fallback. Named so the query cannot silently re-target a
+     nearer container added later inside the pane. Containment side effects
+     are inert here: the column's width comes from the track, not content
+     (minmax(320px, 1fr) ignores intrinsic sizes), and the subtree is
+     already clipped by this rule's own overflow and self-contained by
+     its flex formatting context. */
+  container: workspace / inline-size;
 }
 /* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
  * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
