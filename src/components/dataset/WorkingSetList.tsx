@@ -247,16 +247,9 @@ export function WorkingSetList({
     setDeleteTarget(d);
   };
 
-  if (datasets.length === 0) {
-    return (
-      <p className="text-muted-foreground">
-        <FormattedMessage
-          id="workingSet.empty"
-          defaultMessage="Working set is empty — drop or pick a data file to start."
-        />
-      </p>
-    );
-  }
+  // The empty set never reaches this list: WorkspaceWorkingSet renders the
+  // single empty-state card instead (issue #792), so the two-column shell and
+  // this list mount only for a non-empty set.
 
   // Pick a structured file to swap in under this dataset's reference name. The
   // picker excludes .xlsx on purpose: the backend's replace path is structured-

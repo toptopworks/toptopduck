@@ -1029,6 +1029,34 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
   });
 });
 
+describe("App working-set empty state (issue #792)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+  });
+
+  it("routes the empty card's add entry through the ingest pipeline", async () => {
+    // AC2: the single empty-state card's inline button opens the file picker
+    // and the picked path enters the SAME handleIngestMany pipeline as the
+    // composer's + entry -- session identity + path are the contract.
+    vi.mocked(open).mockResolvedValue("/x/a.csv");
+    vi.mocked(ingestFile).mockImplementation(async () => {
+      state.workingSet = [guidedDataset];
+      return { kind: "Loaded", data: guidedDataset };
+    });
+    renderPane();
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据文件" }));
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"));
+    // The load settles and the row replaces the empty card.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/工作集为空/)).not.toBeInTheDocument();
+  });
+});
+
 describe("App delete-source flow (issue #38)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
