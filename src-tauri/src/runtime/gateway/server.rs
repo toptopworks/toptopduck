@@ -156,10 +156,28 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// the loop-top cancel / engine-done checks, it never re-frames.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Whether an io error kind means the bridge connection died hard (issue
+/// #801, ADR-0085 disconnect immunity): a reset, a broken pipe (POSIX
+/// surfaces a dead-peer write as EPIPE), or the Windows local-stack abort
+/// variant (os error 10053; the routine hard death maps to os error 10054 --
+/// ConnectionReset -- on both sides). Shared by the serve loop's read and
+/// write tolerance arms so the twin sets cannot drift from the one decision
+/// the ADR records; kinds the read path cannot produce are harmless
+/// superset members there.
+fn is_bridge_gone(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+    )
+}
+
 /// Accept one bridge connection, verify its token, and drive the MCP subset
 /// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
-/// (read EOF, or a reset -- a hard bridge death, issue #801), the cancel
-/// token fires, OR the engine-completion flag (`engine_done`) is set.
+/// (read EOF, or a reset -- a hard bridge death, issue #801 -- or a failed
+/// response write to the dead bridge), the cancel token fires, OR the
+/// engine-completion flag (`engine_done`) is set.
 ///
 /// `engine_done` is the deterministic terminator: the caller sets it when the
 /// ACP engine's prompt pump returns. The pump returning means the CLI sent its
@@ -242,12 +260,14 @@ pub fn serve_connection(
             // A bridge that dies hard (the turn's CLI exits or is killed)
             // closes with a reset, not a FIN -- Windows surfaces it as os
             // error 10054 (issue #801). The reset lands within milliseconds
-            // of the turn's end, so this arm is what a healthy external run
-            // exercises on every turn, not an exotic failure. Same
-            // disposition as the EOF arm: return what was collected and let
-            // the ACP engine's termination decide the turn (the same
-            // single-source principle the loop-top cancel arm follows).
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
+            // of the turn's end, so this is the arm a healthy external run
+            // typically exercises, not an exotic failure (it races the
+            // loop-top engine_done check, which the ADR bullet hedges the
+            // same way). Same disposition as the EOF arm: return what was
+            // collected and let the ACP engine's termination decide the
+            // turn (the same single-source principle the loop-top cancel
+            // arm follows).
+            Err(e) if is_bridge_gone(e.kind()) => {
                 return Ok(outcome);
             }
             Err(e) => return Err(e),
@@ -262,10 +282,7 @@ pub fn serve_connection(
                 // reset / broken pipe. The request was served; the turn's
                 // fate belongs to the ACP engine.
                 if let Err(e) = framing::write_message(&mut writer, &envelope) {
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
-                    ) {
+                    if is_bridge_gone(e.kind()) {
                         return Ok(outcome);
                     }
                     return Err(e);
@@ -1515,8 +1532,9 @@ mod tests {
             // response parks in this socket's receive buffer, and closing a
             // socket with unread received data makes the OS send RST instead
             // of FIN (Windows + Linux alike) -- a real reset without the
-            // unstable std SO_LINGER API. The sleep guarantees the response
-            // has landed before the close; `s` + `r` then drop at thread end.
+            // unstable std SO_LINGER API. The sleep gives the response time
+            // to land unread before the close (a race would fall back to FIN
+            // + the EOF arm, same disposition); `s` + `r` drop at thread end.
             framing::write_message(
                 &mut s,
                 &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
@@ -1533,17 +1551,23 @@ mod tests {
             1,
             "the served call's trace row survives the reset"
         );
+        assert_eq!(
+            outcome.trace[0].name, "mcp_list_servers",
+            "the survived row is the served call itself"
+        );
         assert!(outcome.promotions.is_empty(), "no materialize");
     }
 
     /// Issue #801, write arm: a bridge that dies while serve is parked in a
     /// response write aborts the write with ConnectionReset / BrokenPipe.
     /// Same collected-Ok disposition -- the request was already served, the
-    /// turn's fate belongs to the ACP engine. Deterministic shape: the client
-    /// never reads the response, so a tools/list table inflated past the
-    /// receive window parks serve in `write_all`; the client's reset then
-    /// aborts the parked write. The request itself was fully read, so the
-    /// failure can only surface on the write path.
+    /// turn's fate belongs to the ACP engine. The client never reads the
+    /// response: on a default-tuned stack (64 KiB-class buffers) the
+    /// inflated tools/list table exceeds what the un-read socket absorbs, so
+    /// serve parks in the response write and the client's reset aborts it; a
+    /// stack with a larger autotuned window absorbs the write and the reset
+    /// falls to the read arm instead -- the assertion holds under either
+    /// path.
     #[test]
     fn serve_connection_tolerates_bridge_reset_during_response_write() {
         // 64 registrations x 4 KiB descriptions inflate the table to ~256 KiB,
@@ -1566,9 +1590,11 @@ mod tests {
             let mut line = String::new();
             r.read_line(&mut line).expect("ok line");
             assert_eq!(line, "BRIDGE_OK\n");
-            // Request the inflated table and read NOTHING back: the response
-            // outgrows any loopback receive window, so serve parks in
-            // write_all; the sleep guarantees it is parked by now.
+            // Request the inflated table and read NOTHING back: on this
+            // default-tuned stack the table exceeds what the un-read socket
+            // absorbs, so serve parks in the response write; the sleep gives
+            // the park time to settle (a window large enough to absorb the
+            // write routes the reset to the read arm -- same disposition).
             framing::write_message(
                 &mut s,
                 &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
