@@ -158,8 +158,8 @@ const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Accept one bridge connection, verify its token, and drive the MCP subset
 /// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
-/// (read EOF), the cancel token fires, OR the engine-completion flag
-/// (`engine_done`) is set.
+/// (read EOF, or a reset -- a hard bridge death, issue #801), the cancel
+/// token fires, OR the engine-completion flag (`engine_done`) is set.
 ///
 /// `engine_done` is the deterministic terminator: the caller sets it when the
 /// ACP engine's prompt pump returns. The pump returning means the CLI sent its
@@ -239,6 +239,17 @@ pub fn serve_connection(
             {
                 continue;
             }
+            // A bridge that dies hard (the turn's CLI exits or is killed)
+            // closes with a reset, not a FIN -- Windows surfaces it as os
+            // error 10054 (issue #801). The reset lands within milliseconds
+            // of the turn's end, so this arm is what a healthy external run
+            // exercises on every turn, not an exotic failure. Same
+            // disposition as the EOF arm: return what was collected and let
+            // the ACP engine's termination decide the turn (the same
+            // single-source principle the loop-top cancel arm follows).
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
+                return Ok(outcome);
+            }
             Err(e) => return Err(e),
         };
         let id = msg.get("id").cloned();
@@ -246,7 +257,19 @@ pub fn serve_connection(
         let response = handle_method(method, &msg, &mut ctx, &mut outcome);
         if let Some(id) = id {
             if let Some(envelope) = response.into_envelope(id) {
-                framing::write_message(&mut writer, &envelope)?;
+                // The write twin of the read-side reset arm (issue #801): a
+                // bridge that dies mid-response aborts the write with a
+                // reset / broken pipe. The request was served; the turn's
+                // fate belongs to the ACP engine.
+                if let Err(e) = framing::write_message(&mut writer, &envelope) {
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+                    ) {
+                        return Ok(outcome);
+                    }
+                    return Err(e);
+                }
             }
         }
     }
@@ -1453,6 +1476,139 @@ mod tests {
             outcome.promotions.is_empty(),
             "no materialize -> no promotion"
         );
+    }
+
+    /// Issue #801: the bridge process dies with the turn's CLI, and a hard
+    /// death closes the TCP connection with a reset, not a FIN. The reset
+    /// must land in the same disposition as the read EOF -- serve returns
+    /// what it collected, the ACP engine owns the turn's fate -- instead of
+    /// failing the whole turn (`gateway serve failed: ... os error 10054`).
+    /// A `mcp_list_servers` call is served first so the collected trace is
+    /// non-empty: its survival across the reset is the contract's payload.
+    #[test]
+    fn serve_connection_tolerates_bridge_reset_after_served_call() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let token = handle.token.clone();
+
+        let client = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut r = std::io::BufReader::new(s.try_clone().expect("clone"));
+            s.write_all(format!("BRIDGE_AUTH {token}\n").as_bytes())
+                .expect("auth write");
+            let mut line = String::new();
+            r.read_line(&mut line).expect("ok line");
+            assert_eq!(line, "BRIDGE_OK\n");
+            // A served local meta call: one trace row, no gate, no DuckDB.
+            framing::write_message(
+                &mut s,
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "mcp_list_servers", "arguments": {}}}),
+            )
+            .expect("send call");
+            let resp = framing::read_message(&mut r)
+                .expect("read call")
+                .expect("resp");
+            assert_eq!(resp["id"], 1);
+            // Then request the tool table and read NOTHING back: the unread
+            // response parks in this socket's receive buffer, and closing a
+            // socket with unread received data makes the OS send RST instead
+            // of FIN (Windows + Linux alike) -- a real reset without the
+            // unstable std SO_LINGER API. The sleep guarantees the response
+            // has landed before the close; `s` + `r` then drop at thread end.
+            framing::write_message(
+                &mut s,
+                &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            )
+            .expect("send list");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+
+        client.join().expect("client thread panicked");
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "the served call's trace row survives the reset"
+        );
+        assert!(outcome.promotions.is_empty(), "no materialize");
+    }
+
+    /// Issue #801, write arm: a bridge that dies while serve is parked in a
+    /// response write aborts the write with ConnectionReset / BrokenPipe.
+    /// Same collected-Ok disposition -- the request was already served, the
+    /// turn's fate belongs to the ACP engine. Deterministic shape: the client
+    /// never reads the response, so a tools/list table inflated past the
+    /// receive window parks serve in `write_all`; the client's reset then
+    /// aborts the parked write. The request itself was fully read, so the
+    /// failure can only surface on the write path.
+    #[test]
+    fn serve_connection_tolerates_bridge_reset_during_response_write() {
+        // 64 registrations x 4 KiB descriptions inflate the table to ~256 KiB,
+        // past any receive window a shrunk buffer admits.
+        let cli: Vec<crate::cli_tools::config::CliToolConfig> = (0..64)
+            .map(|i| bulky_cli_tool(format!("bulk-{i:02}"), "x".repeat(4096)))
+            .collect();
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
+        let ctx = gate_ctx(cli, approval, sink);
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let token = handle.token.clone();
+
+        let client = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut r = std::io::BufReader::new(s.try_clone().expect("clone"));
+            s.write_all(format!("BRIDGE_AUTH {token}\n").as_bytes())
+                .expect("auth write");
+            let mut line = String::new();
+            r.read_line(&mut line).expect("ok line");
+            assert_eq!(line, "BRIDGE_OK\n");
+            // Request the inflated table and read NOTHING back: the response
+            // outgrows any loopback receive window, so serve parks in
+            // write_all; the sleep guarantees it is parked by now.
+            framing::write_message(
+                &mut s,
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            )
+            .expect("send list");
+            thread::sleep(Duration::from_millis(300));
+            // Closing with the partial response still unread sends RST,
+            // aborting serve's parked write with ConnectionReset /
+            // BrokenPipe. `s` + `r` drop at thread end.
+        });
+
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+
+        client.join().expect("client thread panicked");
+        assert!(
+            outcome.trace.is_empty(),
+            "tools/list touches no trace (no call landed)"
+        );
+        assert!(outcome.promotions.is_empty(), "no materialize");
+    }
+
+    /// The write-arm test's table inflator: a registration carrying nothing
+    /// but a large LLM-visible description -- the `tools/list` table's size
+    /// is the only property the test needs from it.
+    fn bulky_cli_tool(
+        name: String,
+        description: String,
+    ) -> crate::cli_tools::config::CliToolConfig {
+        use crate::cli_tools::config::{CliToolConfig, CliToolSource};
+        CliToolConfig {
+            name,
+            description,
+            executable: "/no/such/cli-fixture-exe".into(),
+            argv_template: Vec::new(),
+            params: Vec::new(),
+            env: Default::default(),
+            enabled: true,
+            source: CliToolSource::User,
+            baseline: None,
+        }
     }
 
     /// Issue #646: an over-long request frame from the bridge fails the serve
