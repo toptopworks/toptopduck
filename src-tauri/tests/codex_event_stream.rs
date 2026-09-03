@@ -104,9 +104,10 @@ fn text_reply_yields_text_outcome_and_no_trace() {
     );
 }
 
-/// A tool-call trajectory: one command_execution + agent_message + completed.
-/// The trace carries one successful entry; the phase stream has the Started /
-/// Completed pair.
+/// A tool-call trajectory: one command_execution (emitted as the measured
+/// item.started / item.completed pair — the streaming variant must not double
+/// the row) + agent_message + completed. The trace carries one successful
+/// entry; the phase stream has the Started / Completed pair.
 #[test]
 fn tool_call_yields_trace_with_one_successful_entry() {
     let (outcome, phases, _) = run("tool_call", 24);
@@ -115,6 +116,11 @@ fn tool_call_yields_trace_with_one_successful_entry() {
         other => panic!("expected Text, got {other:?}"),
     }
     assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "the item.started streaming variant never doubles the row"
+    );
     let entry = &outcome.trace[0].calls[0];
     assert!(entry.success, "the call completed");
     assert_eq!(entry.name, "explore SELECT 1");
@@ -329,8 +335,8 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
         "user cancel -> Cancelled: {:?}",
         outcome.termination
     );
-    // Round 1 carries the settled call row (command events carry no
-    // failure status, so it lands successful); the call-less tail round
+    // Round 1 carries the settled call row (the completed command carries
+    // exit_code 0, so it lands successful); the call-less tail round
     // keeps the prose the cancel interrupted.
     assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
     assert_eq!(outcome.trace[0].calls.len(), 1, "{:?}", outcome.trace);

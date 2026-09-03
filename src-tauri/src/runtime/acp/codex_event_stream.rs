@@ -9,10 +9,11 @@
 //! shape the ACP path and the built-in loop return.
 //!
 //! Approval: unlike the ACP path (inline `session/request_permission`), the
-//! codex event stream has no protocol-level pre-check. All tool calls route
-//! through the gateway bridge MCP server, where the gateway enforces the
-//! approval gate (ADR-0085/0094). Native codex tools (shell / file write) are
-//! blocked by `--sandbox read-only` — no native tool event is expected.
+//! codex event stream has no protocol-level pre-check. Gateway tool calls
+//! carry the approval gate at the gateway (ADR-0085/0094). `--sandbox
+//! read-only` does not prevent native command execution — a native
+//! command still runs and lands here as a `command_execution` trace row
+//! (ADR-0094's trace second source; measured on codex 0.147.0, issue #804).
 //!
 //! [`StreamFormat`]: super::adapter::StreamFormat
 //! [`CodexEventStream`]: super::adapter::StreamFormat::CodexEventStream
@@ -52,15 +53,19 @@ pub(crate) enum CodexEvent {
     TurnCompleted,
     /// The turn failed with an error message (`turn.failed` + `error`).
     TurnFailed { error: String },
-    /// Agent text fragment — accumulated across the turn (`agent_message`
-    /// or `item` with `subtype: agent_message`).
+    /// Agent text fragment — accumulated across the turn (the `text` of an
+    /// `agent_message` item).
     AgentMessage { text: String },
-    /// A tool / command was executed (`command_execution`).
+    /// A completed command execution (`command_execution` item). `exit_code`
+    /// maps the trace outcome: zero succeeds, non-zero fails; an absent /
+    /// null code is an unknown outcome that stays success.
     CommandExecution {
         /// Call id or command identifier (for trace row pairing).
         call_id: String,
         /// Human-readable command / tool name.
         command: String,
+        /// The item's `exit_code`, when the wire carried one.
+        exit_code: Option<i64>,
     },
     /// Any other event type (ignored by the engine).
     Other,
@@ -70,64 +75,42 @@ pub(crate) enum CodexEvent {
 /// [`CodexEvent`]. Defensive: unknown shapes, missing fields, or type
 /// mismatches produce [`CodexEvent::Other`], never panic.
 ///
-/// The parser handles both the combined-type pattern (`"type":
-/// "turn_started"`) and the nested type+status pattern (`"type": "turn",
-/// "status": "started"`) — the exact wire format is implementation-period
-/// unresolved (ADR-0094 Consequences) and verified against a real CLI in E2E.
+/// The accepted shapes are the ones `codex exec --json` actually emits
+/// (measured on codex 0.147.0, issue #804): dot-typed turn events and
+/// `item.completed` envelopes whose nested `item.type` discriminates the
+/// payload. `item.started` is the streaming variant of the same items —
+/// its output is not yet aggregated and folding it would double every
+/// row, so it stays [`CodexEvent::Other`] like every other unmeasured
+/// type (`thread.started`, `reasoning` items, ...).
 pub(crate) fn parse_event(value: &Value) -> CodexEvent {
     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
-
-    // Combined type pattern: turn_started, turn_completed, etc.
     match event_type {
-        "turn_started" => return CodexEvent::TurnStarted,
-        "turn_completed" => return CodexEvent::TurnCompleted,
-        "turn_failed" | "turn_aborted" => {
-            return CodexEvent::TurnFailed {
-                error: extract_error(value),
-            }
-        }
+        "turn.started" => CodexEvent::TurnStarted,
+        "turn.completed" => CodexEvent::TurnCompleted,
+        "turn.failed" | "turn.aborted" => CodexEvent::TurnFailed {
+            error: extract_error(value),
+        },
+        "item.completed" => parse_item(value.get("item")).unwrap_or(CodexEvent::Other),
+        _ => CodexEvent::Other,
+    }
+}
+
+/// Parse the nested `item` of an `item.completed` envelope. Only the two
+/// item types that drive the turn are recognized: `agent_message` (the
+/// text rides `item.text`) and `command_execution` (issue #804).
+fn parse_item(item: Option<&Value>) -> Option<CodexEvent> {
+    let item = item?;
+    match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
         "agent_message" => {
-            return CodexEvent::AgentMessage {
-                text: extract_message_text(value),
-            }
+            item.get("text")
+                .and_then(|v| v.as_str())
+                .map(|text| CodexEvent::AgentMessage {
+                    text: text.to_string(),
+                })
         }
-        "command_execution" => {
-            return extract_command(value).unwrap_or(CodexEvent::Other);
-        }
-        _ => {}
+        "command_execution" => extract_command(item),
+        _ => None,
     }
-
-    // Nested type+status pattern: { "type": "turn", "status": "started" }
-    if event_type == "turn" {
-        return match status {
-            "started" => CodexEvent::TurnStarted,
-            "completed" => CodexEvent::TurnCompleted,
-            "failed" | "aborted" => CodexEvent::TurnFailed {
-                error: extract_error(value),
-            },
-            _ => CodexEvent::Other,
-        };
-    }
-
-    // Item with subtype pattern: { "type": "item", "subtype": "agent_message",
-    // "status": "completed" }
-    if event_type == "item" {
-        let subtype = value
-            .get("subtype")
-            .or_else(|| value.get("item_type"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        return match (subtype, status) {
-            ("agent_message", "completed") => CodexEvent::AgentMessage {
-                text: extract_message_text(value),
-            },
-            ("command_execution", _) => extract_command(value).unwrap_or(CodexEvent::Other),
-            _ => CodexEvent::Other,
-        };
-    }
-
-    CodexEvent::Other
 }
 
 /// Extract the error message from a failed-turn event. Falls back through
@@ -151,68 +134,30 @@ fn extract_error(value: &Value) -> String {
         .unwrap_or_else(|| "turn failed (no error detail)".to_string())
 }
 
-/// Extract the assistant message text from an `agent_message` event. The codex
-/// wire form carries content as an array of `{ "type": "output_text", "text":
-/// "..." }` blocks (mirrors the OpenAI Responses API) or as a bare `message`
-/// string; both are handled.
-fn extract_message_text(value: &Value) -> String {
-    // Bare `message` string form.
-    if let Some(msg) = value.get("message").and_then(|v| v.as_str()) {
-        return msg.to_string();
-    }
-    // Content-array form: collect all output_text blocks.
-    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
-        let text: String = content
-            .iter()
-            .filter_map(|block| {
-                block
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .or_else(|| block.get("output_text").and_then(|t| t.as_str()))
-            })
-            .collect();
-        if !text.is_empty() {
-            return text;
-        }
-    }
-    String::new()
-}
-
-/// Extract a command execution event into its [`CodexEvent::CommandExecution`]
-/// variant. The `command` field may be a string or an array of strings (argv
-/// form); the call id may be under `call_id` or `id`.
-fn extract_command(value: &Value) -> Option<CodexEvent> {
-    let call_id = value
+/// Extract a completed `command_execution` item into its
+/// [`CodexEvent::CommandExecution`] variant. The call id is `item.id` (a
+/// `call_id` spelling is tolerated); a missing command contributes nothing.
+fn extract_command(item: &Value) -> Option<CodexEvent> {
+    let call_id = item
         .get("call_id")
-        .or_else(|| value.get("id"))
+        .or_else(|| item.get("id"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
 
-    let command = value
+    let command = item
         .get("command")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            value
-                .get("command")
-                .and_then(|v| v.as_array())
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .filter_map(|p| p.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-        })
-        .or_else(|| {
-            value
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })?;
+        .map(str::to_string)?;
 
-    Some(CodexEvent::CommandExecution { call_id, command })
+    // as_i64 is None for a missing or null code -- an unknown outcome.
+    let exit_code = item.get("exit_code").and_then(|v| v.as_i64());
+
+    Some(CodexEvent::CommandExecution {
+        call_id,
+        command,
+        exit_code,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -475,18 +420,32 @@ impl JsonPump {
                 }
                 None
             }
-            CodexEvent::CommandExecution { call_id, command } => {
+            CodexEvent::CommandExecution {
+                call_id,
+                command,
+                exit_code,
+            } => {
                 self.tool_call_count += 1;
-                // codex command_execution events carry no success/failure
-                // status (unlike ACP ToolCall); success defaults to true.
+                // exit_code maps the row's success (issue #804): zero (or
+                // absent -- an unknown outcome) succeeds, non-zero fails
+                // with the code as the failure anchor.
                 let summary = truncate_trace_excerpt(&command, TRACE_EXCERPT_MAX);
-                let entry = TraceEntry::succeeded(
-                    call_id,
-                    command.clone(),
-                    OperationKind::Execute,
-                    summary.clone(),
-                    String::new(),
-                );
+                let entry = match exit_code {
+                    Some(code) if code != 0 => TraceEntry::failed(
+                        call_id,
+                        command.clone(),
+                        OperationKind::Execute,
+                        summary.clone(),
+                        format!("command exited with code {code}"),
+                    ),
+                    _ => TraceEntry::succeeded(
+                        call_id,
+                        command.clone(),
+                        OperationKind::Execute,
+                        summary.clone(),
+                        String::new(),
+                    ),
+                };
                 // The round's first call fires its prose prelude BEFORE the
                 // batch's ToolCallStarted (the ADR-0103 live order the
                 // frontend's round grouping relies on).
@@ -534,21 +493,48 @@ mod tests {
 
     // --- parse_event --------------------------------------------------------
 
-    #[test]
-    fn parse_combined_turn_started() {
-        let v: Value = serde_json::json!({"type": "turn_started"});
-        assert_eq!(parse_event(&v), CodexEvent::TurnStarted);
+    /// One full turn as the real CLI emits it (codex 0.147.0, captured in
+    /// issue #804; values neutralized). Every wire-format pin below traces
+    /// back to these lines.
+    const MEASURED_TURN_NDJSON: &[&str] = &[
+        r#"{"type":"thread.started","thread_id":"<uuid>"}"#,
+        r#"{"type":"turn.started"}"#,
+        r#"{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"thinking..."}}"#,
+        r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"<command>","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
+        r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"<command>","aggregated_output":"<output>","exit_code":0,"status":"completed"}}"#,
+        r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"the answer"}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}"#,
+    ];
+
+    /// Parse one fixture line (the lines are literals; a deserialization
+    /// failure is a fixture-authoring error, never a runtime one).
+    fn fixture_event(line: &str) -> CodexEvent {
+        let v: Value = serde_json::from_str(line).unwrap();
+        parse_event(&v)
     }
 
     #[test]
-    fn parse_combined_turn_completed() {
-        let v: Value = serde_json::json!({"type": "turn_completed"});
-        assert_eq!(parse_event(&v), CodexEvent::TurnCompleted);
+    fn parse_turn_started() {
+        assert_eq!(
+            fixture_event(MEASURED_TURN_NDJSON[1]),
+            CodexEvent::TurnStarted
+        );
     }
 
+    /// The terminal event carries a usage payload the parser ignores.
     #[test]
-    fn parse_combined_turn_failed_with_error_string() {
-        let v: Value = serde_json::json!({"type": "turn_failed", "error": "rate limited"});
+    fn parse_turn_completed_with_usage() {
+        assert_eq!(
+            fixture_event(MEASURED_TURN_NDJSON[6]),
+            CodexEvent::TurnCompleted
+        );
+    }
+
+    /// The `error` field never triggered in the captured turns; both field
+    /// forms stay defensive fallbacks (issue #804).
+    #[test]
+    fn parse_turn_failed_error_string() {
+        let v: Value = serde_json::json!({"type": "turn.failed", "error": "rate limited"});
         assert_eq!(
             parse_event(&v),
             CodexEvent::TurnFailed {
@@ -558,9 +544,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_combined_turn_failed_with_error_object() {
+    fn parse_turn_failed_error_object() {
         let v: Value =
-            serde_json::json!({"type": "turn_failed", "error": {"message": "bad config"}});
+            serde_json::json!({"type": "turn.failed", "error": {"message": "bad config"}});
         assert_eq!(
             parse_event(&v),
             CodexEvent::TurnFailed {
@@ -570,102 +556,121 @@ mod tests {
     }
 
     #[test]
-    fn parse_nested_turn_started() {
-        let v: Value = serde_json::json!({"type": "turn", "status": "started"});
-        assert_eq!(parse_event(&v), CodexEvent::TurnStarted);
-    }
-
-    #[test]
-    fn parse_nested_turn_completed() {
-        let v: Value = serde_json::json!({"type": "turn", "status": "completed"});
-        assert_eq!(parse_event(&v), CodexEvent::TurnCompleted);
-    }
-
-    #[test]
-    fn parse_nested_turn_failed() {
-        let v: Value = serde_json::json!({"type": "turn", "status": "failed", "error": "oops"});
+    fn parse_turn_aborted_without_error_detail() {
+        let v: Value = serde_json::json!({"type": "turn.aborted"});
         assert_eq!(
             parse_event(&v),
             CodexEvent::TurnFailed {
-                error: "oops".into()
+                error: "turn failed (no error detail)".into()
             }
         );
     }
 
     #[test]
-    fn parse_agent_message_bare_string() {
-        let v: Value = serde_json::json!({"type": "agent_message", "message": "hello world"});
+    fn parse_item_completed_agent_message() {
         assert_eq!(
-            parse_event(&v),
+            fixture_event(MEASURED_TURN_NDJSON[5]),
             CodexEvent::AgentMessage {
-                text: "hello world".into()
+                text: "the answer".into()
             }
         );
     }
 
     #[test]
-    fn parse_agent_message_content_array() {
-        let v: Value = serde_json::json!({
-            "type": "agent_message",
-            "content": [
-                {"type": "output_text", "text": "part 1"},
-                {"type": "output_text", "text": "part 2"}
-            ]
-        });
+    fn parse_item_completed_command_execution_zero_exit() {
         assert_eq!(
-            parse_event(&v),
-            CodexEvent::AgentMessage {
-                text: "part 1part 2".into()
+            fixture_event(MEASURED_TURN_NDJSON[4]),
+            CodexEvent::CommandExecution {
+                call_id: "item_1".into(),
+                command: "<command>".into(),
+                exit_code: Some(0),
             }
         );
     }
 
     #[test]
-    fn parse_item_agent_message_completed() {
+    fn parse_item_completed_command_execution_nonzero_exit() {
         let v: Value = serde_json::json!({
-            "type": "item",
-            "subtype": "agent_message",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": "final answer"}]
-        });
-        assert_eq!(
-            parse_event(&v),
-            CodexEvent::AgentMessage {
-                text: "final answer".into()
+            "type": "item.completed",
+            "item": {
+                "id": "item_7",
+                "type": "command_execution",
+                "command": "<command>",
+                "exit_code": 2,
+                "status": "completed"
             }
-        );
-    }
-
-    #[test]
-    fn parse_command_execution_string_command() {
-        let v: Value = serde_json::json!({
-            "type": "command_execution",
-            "call_id": "call_1",
-            "command": "ls -la"
         });
         assert_eq!(
             parse_event(&v),
             CodexEvent::CommandExecution {
-                call_id: "call_1".into(),
-                command: "ls -la".into()
+                call_id: "item_7".into(),
+                command: "<command>".into(),
+                exit_code: Some(2),
             }
         );
     }
 
+    /// The streaming variant never folds: its aggregated_output is empty and
+    /// its exit_code is null — folding it would double every trace row.
     #[test]
-    fn parse_command_execution_array_command() {
+    fn parse_item_started_command_execution_is_other() {
+        assert_eq!(fixture_event(MEASURED_TURN_NDJSON[3]), CodexEvent::Other);
+    }
+
+    #[test]
+    fn parse_thread_started_is_other() {
+        assert_eq!(fixture_event(MEASURED_TURN_NDJSON[0]), CodexEvent::Other);
+    }
+
+    #[test]
+    fn parse_reasoning_item_is_other() {
+        assert_eq!(fixture_event(MEASURED_TURN_NDJSON[2]), CodexEvent::Other);
+    }
+
+    #[test]
+    fn parse_item_completed_unknown_item_type_is_other() {
         let v: Value = serde_json::json!({
-            "type": "command_execution",
-            "call_id": "call_2",
-            "command": ["grep", "-r", "pattern"]
+            "type": "item.completed",
+            "item": {"id": "item_8", "type": "file_change", "path": "x.txt"}
         });
-        assert_eq!(
-            parse_event(&v),
-            CodexEvent::CommandExecution {
-                call_id: "call_2".into(),
-                command: "grep -r pattern".into()
-            }
-        );
+        assert_eq!(parse_event(&v), CodexEvent::Other);
+    }
+
+    /// An `item.completed` envelope with no item object at all.
+    #[test]
+    fn parse_item_completed_missing_item_is_other() {
+        let v: Value = serde_json::json!({"type": "item.completed"});
+        assert_eq!(parse_event(&v), CodexEvent::Other);
+    }
+
+    /// A command_execution item without a command string contributes
+    /// nothing (no row to pair).
+    #[test]
+    fn parse_command_execution_without_command_is_other() {
+        let v: Value = serde_json::json!({
+            "type": "item.completed",
+            "item": {"id": "item_9", "type": "command_execution", "exit_code": 0}
+        });
+        assert_eq!(parse_event(&v), CodexEvent::Other);
+    }
+
+    /// The pre-measurement guessed shapes (underscore types, the nested
+    /// `{"type":"turn",...}` / `{"type":"item",...}` envelopes) have no
+    /// source on the wire — they stay unaccepted, no dual-format
+    /// compatibility (issue #804).
+    #[test]
+    fn guessed_pre_measurement_shapes_stay_other() {
+        for v in [
+            serde_json::json!({"type": "turn_completed"}),
+            serde_json::json!({"type": "turn", "status": "completed"}),
+            serde_json::json!({"type": "item", "subtype": "agent_message", "status": "completed"}),
+        ] {
+            assert_eq!(
+                parse_event(&v),
+                CodexEvent::Other,
+                "guessed shape parsed: {v}"
+            );
+        }
     }
 
     #[test]
@@ -833,6 +838,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "explore SELECT 1".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -876,6 +882,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "ls".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -901,6 +908,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "ls".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -932,6 +940,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "explore SELECT 1".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -972,6 +981,7 @@ mod tests {
                 CodexEvent::CommandExecution {
                     call_id: call.into(),
                     command: "ls".into(),
+                    exit_code: None,
                 },
                 &mut |p| phases.push(p),
             );
@@ -1043,6 +1053,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "ls".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -1088,6 +1099,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "ls".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -1127,6 +1139,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "ls".into(),
+                exit_code: None,
             },
             &mut |_| {},
         );
@@ -1159,6 +1172,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
                 command: "explore SELECT 1".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -1166,6 +1180,7 @@ mod tests {
             CodexEvent::CommandExecution {
                 call_id: "call_2".into(),
                 command: "explore SELECT 2".into(),
+                exit_code: None,
             },
             &mut |p| phases.push(p),
         );
@@ -1189,5 +1204,84 @@ mod tests {
                 .any(|p| matches!(p, TurnPhase::Thinking { attempt: 2 })),
             "no round pointer mid-batch"
         );
+    }
+
+    // --- pump fold: exit_code mapping (issue #804) ---------------------------
+
+    /// A non-zero exit code lands a failed trace row whose failure anchor
+    /// keeps the code (the cross-turn retrospection surface renders it).
+    #[test]
+    fn nonzero_exit_lands_failed_trace_row() {
+        let mut pump = JsonPump::new(24);
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "item_7".into(),
+                command: "false".into(),
+                exit_code: Some(1),
+            },
+            &mut |_| {},
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
+        let call = &rounds[0].calls[0];
+        assert!(!call.success);
+        assert_eq!(call.result_excerpt, "command exited with code 1");
+    }
+
+    /// An absent / null exit code is an unknown outcome -- it stays a
+    /// succeeded row (the pre-0.147 default-true behavior).
+    #[test]
+    fn unknown_exit_stays_succeeded() {
+        let mut pump = JsonPump::new(24);
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+                exit_code: None,
+            },
+            &mut |_| {},
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
+        assert!(rounds[0].calls[0].success);
+    }
+
+    // --- measured wire sequence, end to end (issue #804) ---------------------
+
+    /// The measured turn drives the pump to a normal Text termination: the
+    /// agent_message lands the terminal text, the command lands exactly one
+    /// trace row (the streaming `item.started` variant never folds), and
+    /// `turn.completed` settles the turn before any stdout-close fallback
+    /// could fire (issue #804 acceptance criteria 1-4).
+    #[test]
+    fn measured_turn_sequence_settles_as_text() {
+        let mut pump = JsonPump::new(24);
+        let mut termination = None;
+        for line in MEASURED_TURN_NDJSON {
+            if let Some(term) = pump.fold(fixture_event(line), &mut |_| {}) {
+                termination = Some(term);
+                break;
+            }
+        }
+        assert_eq!(
+            termination,
+            Some(Termination::Text("the answer".into())),
+            "turn.completed settles the turn; the stdout-close fallback never fires"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("the answer".into()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(
+            rounds[0].calls.len(),
+            1,
+            "the item.started streaming variant must not double the row"
+        );
+        let call = &rounds[0].calls[0];
+        assert_eq!(call.tool_use_id, "item_1");
+        assert_eq!(call.name, "<command>");
+        assert!(call.success, "exit_code 0 lands a succeeded row");
     }
 }
