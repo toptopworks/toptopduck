@@ -11,7 +11,6 @@ import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
 import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDeleteDialog";
-import { DatasetDetail } from "../components/dataset/DatasetDetail";
 import { ErrorBanner } from "../components/common/ErrorBanner";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
@@ -21,9 +20,8 @@ import { Thread } from "../components/thread/Thread";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { WorkingSetList } from "../components/dataset/WorkingSetList";
+import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
 import { cn } from "@/lib/utils";
-import type { DatasetDescriptor, DatasetPrivacy } from "../types/dataset";
 import type { SkillEntry } from "../types/skills";
 import type { ThreadEntry } from "../types/thread";
 import type { WorkspaceContent } from "./workspace";
@@ -661,6 +659,9 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
                 onReplace={s.handleReplace}
                 onDelete={s.handleDelete}
                 onPrivacyChange={s.handlePrivacyChange}
+                // The empty card's inline add entry rides the same pipeline
+                // as the composer's + entry (issue #792).
+                onAddFiles={s.handleIngestMany}
               />
             )}
           </div>
@@ -804,92 +805,6 @@ function WorkspaceResult({
       throw new Error(`unhandled workspace content: ${JSON.stringify(unhandled)}`);
     }
   }
-}
-
-// The "工作集" tab (ADR-0045): source management -- rename / replace / delete /
-// privacy. The list + detail pair moved here from the old single-column layout.
-//
-// Panel card chrome for the master/detail sections (issue #184 + #222): bg-card
-// + border + rounded-lg + p-4 carry the surface (ADR-0067 (1) .panel layout hook
-// + visual utility); shadow-sm shares the elevation language of the floating
-// dialog / popover layer (Tailwind scale, no new token, ADR-0067 (2)).
-// Shared by the list and detail sections so the pair reads as one surface.
-const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
-function WorkspaceWorkingSet({
-  datasets,
-  activeName,
-  loading,
-  viewedDescriptor,
-  onRename,
-  onReplace,
-  onDelete,
-  onPrivacyChange,
-}: {
-  datasets: DatasetDescriptor[];
-  activeName: string | null;
-  loading: boolean;
-  viewedDescriptor: DatasetDescriptor | null;
-  onRename: (referenceName: string, newDisplay: string) => void;
-  onReplace: (referenceName: string, path: string) => void;
-  onDelete: (referenceName: string) => void;
-  onPrivacyChange: (
-    referenceName: string,
-    privacy: DatasetPrivacy,
-  ) => void;
-}) {
-  // The 工作集 tab's own selection (which dataset's detail to show). Kept local
-  // and separate from viewedResult: picking a dataset here is a management
-  // action, not a workspace view selection (ADR-0051 active/viewed split).
-  const [selected, setSelected] = useState<string | null>(
-    viewedDescriptor?.reference_name ?? activeName ?? null,
-  );
-  const shown = datasets.find((d) => d.reference_name === selected) ?? null;
-
-  return (
-    // ADR-0067 (issue #184): the WorkspaceWorkingSet div carries the .layout
-    // grid (280px/1fr two-column master-detail, ADR-0067 Decision 1;
-    // single-column fallback at container widths <=600px, styles.css issue
-    // #791); both sections share the PANEL_CARD_BASE chrome (defined above).
-    // The .layout / .working-set-layout / .panel class hooks stay as anchor
-    // points; per-consumer margins live on the consumer, not the shared
-    // .layout rule.
-    <div className="layout working-set-layout">
-      <section className={PANEL_CARD_BASE}>
-        <h2>
-          <FormattedMessage
-            id="session.workingSet.title"
-            defaultMessage="Working set · {count}"
-            values={{ count: datasets.length }}
-          />
-        </h2>
-        <WorkingSetList
-          datasets={datasets}
-          activeName={activeName}
-          onSelect={setSelected}
-          onRename={onRename}
-          onReplace={onReplace}
-          onDelete={onDelete}
-          loading={loading}
-        />
-      </section>
-      <section className={PANEL_CARD_BASE}>
-        {shown ? (
-          <DatasetDetail
-            dataset={shown}
-            loading={loading}
-            onPrivacyChange={onPrivacyChange}
-          />
-        ) : (
-          <p className="text-muted-foreground">
-            <FormattedMessage
-              id="session.workingSet.emptyDetail"
-              defaultMessage="Select a dataset to see its structure."
-            />
-          </p>
-        )}
-      </section>
-    </div>
-  );
 }
 
 // Re-exported for tests that want to assert on the thread type without reaching

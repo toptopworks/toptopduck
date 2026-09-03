@@ -11,7 +11,7 @@
 //    (stale / columns / rows / privacy). The stale anchor on a viewed result
 //    is read from the descriptor by the caller, never from the thread snapshot.
 
-import type { StaleAnchor } from "../types/dataset";
+import type { DatasetDescriptor, StaleAnchor } from "../types/dataset";
 import type { ThreadEntry, VizSpec } from "../types/thread";
 
 /** The user's workspace view selection (ADR-0051): a thin reference to the
@@ -141,4 +141,20 @@ export function deriveWorkspaceContent(
     // render a result whose rows/viz we cannot resolve.
   }
   return { kind: "hero" };
+}
+
+/** The working-set tab's detail target (issue #792): the tab's own explicit
+ * pick wins while it still resolves; a pick that no longer does (the dataset
+ * was deleted) falls back to the ACTIVE dataset (server truth, ADR-0051),
+ * then to the first list item. While the list is non-empty the detail always
+ * shows SOMETHING -- the empty working set is the empty-state card, never a
+ * placeholder detail pane. Pure in (datasets, selected, activeName). */
+export function resolveWorkingSetDetail(
+  datasets: DatasetDescriptor[],
+  selected: string | null,
+  activeName: string | null,
+): DatasetDescriptor | null {
+  const byName = (name: string | null) =>
+    name === null ? undefined : datasets.find((d) => d.reference_name === name);
+  return byName(selected) ?? byName(activeName) ?? datasets[0] ?? null;
 }

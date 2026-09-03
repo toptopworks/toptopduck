@@ -3,8 +3,10 @@ import {
   deriveWorkspaceContent,
   findLatestMaterializedPrimary,
   findMaterializedPayload,
+  resolveWorkingSetDetail,
 } from "../workspace";
 import { materialized, src, textual } from "./fixtures";
+import type { DatasetDescriptor } from "../../types/dataset";
 import type { ThreadEntry } from "../../types/thread";
 
 // Unit tests for the pure workspace-derivation helpers (ADR-0051 / ADR-0062
@@ -234,5 +236,50 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
       expect(tail.kind).toBe("result");
       if (tail.kind === "result") expect(tail.viewingHistory).toBe(false);
     });
+  });
+});
+
+describe("resolveWorkingSetDetail (issue #792)", () => {
+  // A minimal-but-complete descriptor: the type demands every field, but the
+  // derivation only reads reference_name -- the rest are inert fillers.
+  function detailDataset(reference_name: string): DatasetDescriptor {
+    return {
+      reference_name,
+      display_name: reference_name,
+      source_path: `/x/${reference_name}.csv`,
+      row_count: 1,
+      fingerprint: "0".repeat(64),
+      columns: [],
+      sample: [],
+      rectify: { kind: "NotApplicable" },
+      privacy: { send_samples: true, type_only_columns: [] },
+    };
+  }
+  const people = detailDataset("people");
+  const orders = detailDataset("orders");
+
+  it("keeps the tab's explicit pick when it still resolves", () => {
+    expect(resolveWorkingSetDetail([people, orders], "orders", "people")).toBe(orders);
+  });
+
+  it("falls back to the active dataset when the pick was deleted", () => {
+    // Delete the selected row -> the pick no longer resolves; the detail
+    // follows the server's active truth (ADR-0051) instead of a placeholder.
+    expect(resolveWorkingSetDetail([people], "orders", "people")).toBe(people);
+  });
+
+  it("falls back to the first list item when the active is absent too", () => {
+    expect(resolveWorkingSetDetail([people, orders], "ghost", null)).toBe(people);
+    // An active name that no longer resolves (GC'd between refreshes) hits
+    // the same floor.
+    expect(resolveWorkingSetDetail([people, orders], "ghost", "ghost2")).toBe(people);
+  });
+
+  it("resolves the active dataset when the tab has no pick yet (mount default)", () => {
+    expect(resolveWorkingSetDetail([people, orders], null, "orders")).toBe(orders);
+  });
+
+  it("returns null only for an empty working set", () => {
+    expect(resolveWorkingSetDetail([], null, null)).toBeNull();
   });
 });

@@ -66,12 +66,10 @@ describe("WorkingSetList", () => {
     expect(inactiveClasses).not.toContain("font-semibold");
   });
 
-  it("shows an empty hint when there are no datasets", () => {
-    renderI18n(
-      <WorkingSetList datasets={[]} activeName={null} onSelect={() => {}} onRename={() => {}} />,
-    );
-    expect(screen.getByText(/工作集为空/)).toBeInTheDocument();
-  });
+  // The empty-set face is no longer this list's concern: WorkspaceWorkingSet
+  // renders the single empty-state card instead (issue #792), so the list
+  // mounts only for a non-empty set -- its empty-branch test moved to the
+  // WorkingSetEmptyState suite.
 
   // --- Rename dialog (issue #759): the native window.prompt retired onto an
   // in-app Dialog + Input (ADR-0037 semantics unchanged -- display label only,

@@ -1,6 +1,6 @@
 import { useIntl } from "react-intl";
-import { open } from "@tauri-apps/plugin-dialog";
 import { Plus, X } from "lucide-react";
+import { pickDataFiles } from "../dataset/pickDataFiles";
 
 // The composer "+" files button (ADR-0083, issue #351). A single action button
 // that opens the multi-select file dialog directly -- no popover shell. Skills
@@ -20,8 +20,6 @@ import { Plus, X } from "lucide-react";
 // as a compact count chip beside the "+" button (file names in the tooltip,
 // X clears the whole queue) so the queued state is visible instead of silent.
 // Session-active bars omit the chip (pendingFiles is undefined).
-
-const DATA_FILE_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson", "xlsx"];
 
 const TRIGGER_CLASS =
   "composer-context-trigger relative inline-flex size-9 items-center justify-center rounded-md border border-border bg-card text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50";
@@ -57,19 +55,7 @@ export function ComposerContextPanel({
   const intl = useIntl();
 
   async function pickFiles() {
-    const selected = await open({
-      multiple: true,
-      filters: [
-        {
-          name: intl.formatMessage({
-            id: "workingSet.fileFilter",
-            defaultMessage: "Data files",
-          }),
-          extensions: DATA_FILE_EXTENSIONS,
-        },
-      ],
-    });
-    const paths = typeof selected === "string" ? [selected] : selected ?? [];
+    const paths = await pickDataFiles(intl);
     if (paths.length === 0) return;
     onIngestFiles(paths);
   }
