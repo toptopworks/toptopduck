@@ -618,13 +618,15 @@ fn export_observe_the_cancel_token_mid_scan_from_outside_the_lock() {
             s.export_rows_csv("result_1", &export_path, false)
         })
     };
-    // Wait for the scan to be underway (destination created), then fire the
-    // cancel the way the cancel command does -- from this thread, without
-    // the session lock the worker holds.
+    // Wait for the scan to be underway (the temp sibling created -- the
+    // destination is a temp file until the final rename, issue #779 review),
+    // then fire the cancel the way the cancel command does -- from this
+    // thread, without the session lock the worker holds.
+    let temp_sibling = dir.path().join("result_1.csv.part");
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !path.exists() {
+    while !temp_sibling.exists() {
         if std::time::Instant::now() > deadline {
-            panic!("export never created the destination within 30s");
+            panic!("export never created the temp sibling within 30s");
         }
         thread::sleep(Duration::from_millis(2));
     }
@@ -669,6 +671,107 @@ fn copy_observe_the_cancel_token_mid_scan() {
         Err(RowReadError::Cancelled) => {}
         other => panic!("expected a cancelled copy, got {other:?}"),
     }
+}
+
+#[test]
+fn a_leftover_watchdog_window_does_not_kill_a_full_pull() {
+    // Issue #779 review: the wall-clock watchdog of the turn that produced
+    // the result has no disarm -- at its 120s mark it fires
+    // request_if(the generation it captured). The pull's start retires the
+    // token's generation (the begin_turn word update minus in-flight), so
+    // that request_if stands down instead of killing the pull mid-scan and
+    // landing as a quiet Cancelled. The stale generation is taken the way a
+    // real watchdog holds it: from the last begin_turn before the pull.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "大结果",
+        productive("SELECT i AS n FROM range(1, 1000001) t(i)"),
+    );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("大结果"); // result_1: 1_000_000 rows
+
+    // The turn ended; a watchdog from it would still hold the turn's
+    // generation (nothing disarms it).
+    let guard = cancel.begin_turn();
+    let stale_generation = guard.generation();
+    drop(guard);
+
+    let session = Arc::new(Mutex::new(session));
+    let worker = {
+        let session = Arc::clone(&session);
+        thread::spawn(move || {
+            let s = session.lock().unwrap();
+            s.read_rows_tsv("result_1", false)
+        })
+    };
+    // Fire the way the sleeping watchdog would: after the pull is underway
+    // (its start has retired the generation well inside the beat), against
+    // the generation it captured.
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        !cancel.request_if(stale_generation),
+        "the retired generation must stand the stale watchdog down"
+    );
+    match worker.join().expect("copy thread") {
+        Ok(tsv) => assert_eq!(tsv.lines().count(), 1_000_001, "header + every row"),
+        other => panic!("the pull must survive the stale watchdog, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_stopped_export_leaves_a_pre_existing_destination_untouched() {
+    // Issue #779 review: the export writes a temp sibling and renames only
+    // on success, so a stop mid-scan (or any failure) leaves a pre-existing
+    // file at the user-chosen path byte-identical -- File::create truncates,
+    // and writing the chosen path directly would have destroyed it the
+    // moment the export started.
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new().scripted_tool_turn_seq(
+        "大结果",
+        productive("SELECT i AS n FROM range(1, 1000001) t(i)"),
+    );
+    let mut session =
+        Session::with_provider_and_cancel(Box::new(provider), cancel.clone(), Default::default())
+            .expect("session");
+    load_source(&mut session, &fixture("people.csv"));
+    session.ask("大结果"); // result_1: 1_000_000 rows
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("existing.csv");
+    std::fs::write(&path, b"previous export\n").expect("pre-existing file");
+    let temp_sibling = dir.path().join("existing.csv.part");
+    let session = Arc::new(Mutex::new(session));
+    let export_path = path.to_str().unwrap().to_string();
+    let worker = {
+        let session = Arc::clone(&session);
+        let export_path = export_path.clone();
+        thread::spawn(move || {
+            let s = session.lock().unwrap();
+            s.export_rows_csv("result_1", &export_path, false)
+        })
+    };
+    // Wait until the export is writing its temp sibling, then stop the way
+    // the header's stop entry does -- from this thread, without the lock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !temp_sibling.exists() {
+        if std::time::Instant::now() > deadline {
+            panic!("export never created the temp sibling within 30s");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    cancel.request();
+    match worker.join().expect("export thread") {
+        Err(ExportRowsError::RowRead(RowReadError::Cancelled)) => {}
+        other => panic!("expected a cancelled export, got {other:?}"),
+    }
+    let bytes = std::fs::read(&path).expect("pre-existing file intact");
+    assert_eq!(
+        bytes, b"previous export\n",
+        "a stopped export must leave the pre-existing destination untouched"
+    );
 }
 
 #[test]

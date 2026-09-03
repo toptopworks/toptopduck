@@ -196,15 +196,20 @@ impl CancelToken {
         }
     }
 
-    /// Consume a leftover cancel request without touching the turn
-    /// generation: the full-pull paths' analogue of [`Self::begin_turn`]'s
-    /// flag reset (issue #779). A pull is not a turn, so a request left over
-    /// from the last cancelled turn or stopped pull would otherwise kill the
-    /// next pull on its first row. A racing `request()` has the same
-    /// nondeterminism `begin_turn` documents above: it either lands before
-    /// (wiped) or after (honored by the pull's row loop).
-    pub fn clear_request(&self) {
-        self.state.fetch_and(!1u64, Ordering::SeqCst);
+    /// Advance the turn generation and clear the request flag in one swap --
+    /// [`Self::begin_turn`]'s word update without the in-flight half, for the
+    /// full-pull paths' start (issue #779). A pull is not a turn, so this
+    /// both consumes a leftover request (a stop that landed after the last
+    /// turn or pull must not kill this pull on its first row) and retires any
+    /// still-sleeping wall-clock watchdog from the last turn: the watchdog
+    /// fires `request_if(old_generation)` into a generation that no longer
+    /// exists and stands down, instead of cancelling a pull the user never
+    /// stopped. A racing `request()` has the same nondeterminism `begin_turn`
+    /// documents above: it either lands before the swap (wiped with it) or
+    /// after (honored by the pull's row loop).
+    pub fn retire_generation(&self) {
+        let generation = TurnGeneration((self.state.load(Ordering::SeqCst) >> 1) + 1);
+        self.state.swap(generation.0 << 1, Ordering::SeqCst);
     }
 }
 
@@ -275,26 +280,26 @@ mod tests {
     }
 
     #[test]
-    fn clear_request_consumes_a_stale_request_without_touching_generation() {
-        // Issue #779: a full pull starts by consuming a leftover request (the
-        // begin_turn analogue), and the turn generation must survive --
-        // request_if for the still-current generation still fires, so a
-        // watchdog paired with this turn is unaffected by the clear.
+    fn retire_generation_consumes_a_stale_request_and_stands_down_its_watchdog() {
+        // Issue #779: a full pull starts by retiring the token's generation
+        // (the begin_turn word update minus in-flight). Two contracts: the
+        // leftover request flag is consumed, and a watchdog still holding the
+        // retired generation stands down -- request_if(old) must NOT fire,
+        // which is exactly the wall-clock leftover that would otherwise kill
+        // a pull the user never stopped.
         let token = Arc::new(CancelToken::new());
         let guard = token.begin_turn();
         let generation = guard.generation();
         drop(guard);
         token.request();
         assert!(token.is_requested());
-        token.clear_request();
+        token.retire_generation();
         assert!(!token.is_requested(), "stale request must be consumed");
-        // The generation survived the clear: the paired request_if still
-        // recognizes it as current (fires and re-sets the flag).
         assert!(
-            token.request_if(generation),
-            "generation untouched by the clear"
+            !token.request_if(generation),
+            "a watchdog on the retired generation must stand down"
         );
-        assert!(token.is_requested());
+        assert!(!token.is_requested(), "the stood-down watchdog set no flag");
     }
 
     #[test]

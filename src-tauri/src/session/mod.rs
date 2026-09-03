@@ -2025,10 +2025,12 @@ impl Session {
     /// stops the export with `RowReadError::Cancelled` -- the session's
     /// [`CancelToken`] fires without the session lock (ADR-0021's
     /// outside-the-lock cancel path), so the export's own lock hold cannot
-    /// shield it from the cancel command. A leftover request from before the
-    /// pull is consumed at its start (see [`Self::start_full_pull`]), so a
-    /// past stop never kills a later pull. A cancelled export leaves no
-    /// artifact: the failed-write cleanup below removes the truncated file.
+    /// shield it from the cancel command. The pull's start retires the
+    /// token's generation (see [`Self::start_full_pull`]), so a past stop or
+    /// a still-sleeping wall-clock watchdog from the last turn never kills
+    /// the pull. A cancelled export leaves no artifact: the destination is a
+    /// temp sibling until success, and the failed-write cleanup below removes
+    /// it -- a pre-existing file at the user-chosen path stays untouched.
     pub fn export_rows_csv(
         &self,
         reference_name: &str,
@@ -2051,19 +2053,32 @@ impl Session {
         confirm_above: u64,
     ) -> Result<(), ExportRowsError> {
         let (columns, sql) = self.start_full_pull(reference_name, confirmed, confirm_above)?;
-        // Create the destination first; the streaming half writes the BOM and
-        // hands the file to the csv writer (which adds its own buffer and
-        // flushes through it at the end).
-        let file = fs::File::create(path).map_err(|e| export_io(ExportIoStep::Create, path, e))?;
-        let result = self.export_csv_stream(file, &columns, &sql, path);
-        if result.is_err() {
-            // Create truncated any pre-existing file at the path, so a failed
-            // export must not leave the half-written artifact behind -- a
-            // truncated CSV opens as a valid-looking export. Best-effort
-            // removal; the error itself still crosses IPC.
-            let _ = fs::remove_file(path);
+        // Write to a temp sibling and rename on success (issue #779 review):
+        // File::create truncates, so writing the chosen path directly would
+        // destroy a pre-existing file the moment the export starts -- a
+        // stopped or failed export must leave it exactly as it was. The
+        // streaming half writes the BOM to the temp file and hands it to the
+        // csv writer (which adds its own buffer and flushes through it at the
+        // end). Create / Rename errors report the user-chosen path; the
+        // streaming half's Write / Flush errors report the temp sibling (the
+        // file the OS actually failed on).
+        let temp_path = format!("{path}.part");
+        let file =
+            fs::File::create(&temp_path).map_err(|e| export_io(ExportIoStep::Create, path, e))?;
+        let result = self.export_csv_stream(file, &columns, &sql, &temp_path);
+        match result {
+            Ok(()) => {
+                fs::rename(&temp_path, path).map_err(|e| export_io(ExportIoStep::Rename, path, e))
+            }
+            Err(e) => {
+                // The failed write must not leave the half-written artifact
+                // behind -- a truncated CSV opens as a valid-looking export.
+                // Best-effort removal of the temp sibling; the error itself
+                // still crosses IPC and the user-chosen path is untouched.
+                let _ = fs::remove_file(&temp_path);
+                Err(e)
+            }
         }
-        result
     }
 
     /// The post-create half of [`Self::export_rows_csv`] (issue #769): BOM,
@@ -2114,9 +2129,10 @@ impl Session {
     /// `MAX_UNCONFIRMED_FULL_ROWS` rows refuses with `RowReadError::TooLarge`
     /// unless `confirmed`, so a copy that large is an explicit choice, and a
     /// cancel observed mid-scan stops it with `RowReadError::Cancelled`
-    /// (the [`CancelToken`] fires without the session lock, ADR-0021; a
-    /// leftover request from before the pull is consumed at its start, see
-    /// [`Self::start_full_pull`]).
+    /// (the [`CancelToken`] fires without the session lock, ADR-0021; the
+    /// pull's start retires the token's generation -- consuming a leftover
+    /// request and standing down a still-sleeping wall-clock watchdog from
+    /// the last turn -- see [`Self::start_full_pull`]).
     pub fn read_rows_tsv(
         &self,
         reference_name: &str,
@@ -2151,12 +2167,16 @@ impl Session {
     }
 
     /// The shared full-pull preamble (issue #779): resolve the data source,
-    /// run the confirm gate over the descriptor's row count, then consume any
-    /// leftover cancel request so a stop that landed after the last turn or
-    /// pull cannot silently kill this pull on its first row -- the full-pull
-    /// analogue of `begin_turn`'s flag reset. A request that fires AFTER this
-    /// point is honored by the row loop's checkpoint; one racing it is either
-    /// wiped or honored, the same nondeterminism `begin_turn` documents.
+    /// run the confirm gate over the descriptor's row count, then retire the
+    /// token's generation -- consuming any leftover cancel request (a stop
+    /// that landed after the last turn or pull cannot silently kill this pull
+    /// on its first row) AND standing down any still-sleeping wall-clock
+    /// watchdog from the last turn, which would otherwise fire into a pull
+    /// the user never stopped and land as a quiet Cancelled (the begin_turn
+    /// word update, minus the in-flight half; a pull is not a turn). A
+    /// request that fires AFTER this point is honored by the row loop's
+    /// checkpoint; one racing it is either wiped or honored, the same
+    /// nondeterminism `begin_turn` documents.
     fn start_full_pull(
         &self,
         reference_name: &str,
@@ -2170,7 +2190,7 @@ impl Session {
                 limit: confirm_above,
             });
         }
-        self.cancel.clear_request();
+        self.cancel.retire_generation();
         Ok((columns, sql))
     }
 

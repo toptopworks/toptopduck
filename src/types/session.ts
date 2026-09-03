@@ -84,7 +84,7 @@ export type ExportRowsError =
   | { kind: "RowRead"; data: RowReadError }
   | {
     kind: "Io";
-    data: { step: "Create" | "Write" | "Flush"; path: string; detail: string };
+    data: { step: "Create" | "Write" | "Flush" | "Rename"; path: string; detail: string };
   };
 
 // Why a forward migration step failed (issue #120). Rides DuckLoadError::

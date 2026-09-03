@@ -443,19 +443,24 @@ impl std::fmt::Display for RowReadError {
 impl std::error::Error for RowReadError {}
 
 /// Which destination-file operation failed during a full-result CSV export
-/// (issue #769): opening the path, a buffered write, or the closing flush.
-/// Crosses IPC as a bare string inside [`ExportRowsError::Io`]'s payload.
+/// (issue #769): opening the temp file, a buffered write, the closing flush,
+/// or the final rename that places the temp file at the user-chosen path
+/// (issue #779 review -- the export writes a temp sibling and renames on
+/// success, so a stopped or failed export never touches a pre-existing
+/// destination). Crosses IPC as a bare string inside [`ExportRowsError::Io`]'s
+/// payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportIoStep {
     Create,
     Write,
     Flush,
+    Rename,
 }
 
 /// Why a full-result CSV export failed (issue #769). The data-source half
 /// reuses [`RowReadError`] 1:1 with the paged read; a destination-file failure
-/// (create / write / flush) carries the step, the path, and the underlying
-/// detail. The whole type crosses IPC wrapped in
+/// (create / write / flush / rename) carries the step, the path, and the
+/// underlying detail. The whole type crosses IPC wrapped in
 /// [`SessionError::Export`](crate::session_store::SessionError) -- the
 /// frontend recurses `Export.data.kind` and renders the export-domain locale
 /// message (the destination half previously rode `SessionError::Engine` and

@@ -303,27 +303,23 @@ export function isRowReadError(e: unknown): e is RowReadError {
 // confirm gate's refusal (with the row count the prompt quotes), the mid-scan
 // cancel observation, or null when the reject is anything else (a real
 // failure -- the caller's error lane handles those). The TSV copy rides
-// SessionError::RowRead directly, the CSV export rides SessionError::Export's
-// RowRead half one level deeper -- both unwrapped through the existing
-// narrowings, never re-matched by hand.
+// SessionError::RowRead, whose serde wire kind is "Turn" (renamed in Rust,
+// issue #121) -- entering through isSessionError's narrowing is what matches
+// the renamed kind where it is defined instead of hand-matching a wire string
+// (the review catch: a hand-matched "RowRead" never occurs on the wire, so
+// the copy path's guardrails were dead code). The CSV export rides
+// SessionError::Export's RowRead half one level deeper.
 export function classifyFullPullRejection(
   e: unknown,
 ): { kind: "tooLarge"; rowCount: number } | { kind: "cancelled" } | null {
-  if (typeof e !== "object" || e === null) return null;
-  const kind = (e as { kind?: unknown }).kind;
-  let inner: unknown = null;
-  if (kind === "RowRead") {
-    inner = (e as { data?: unknown }).data;
-  } else if (kind === "Export") {
-    const wrapped = (e as { data?: unknown }).data;
-    if (isExportRowsError(wrapped) && wrapped.kind === "RowRead") {
-      // isExportRowsError's RowRead branch already verified the nested
-      // RowReadError shape; the shared tail re-checks it for the direct
-      // branch anyway.
-      inner = wrapped.data;
-    }
+  if (!isSessionError(e)) return null;
+  let inner: RowReadError | null = null;
+  if (e.kind === "Turn") {
+    inner = e.data;
+  } else if (e.kind === "Export" && e.data.kind === "RowRead") {
+    inner = e.data.data;
   }
-  if (!isRowReadError(inner)) return null;
+  if (inner === null) return null;
   if (inner.kind === "TooLarge") return { kind: "tooLarge", rowCount: inner.data.row_count };
   if (inner.kind === "Cancelled") return { kind: "cancelled" };
   return null;
@@ -344,7 +340,7 @@ export function isExportRowsError(e: unknown): e is ExportRowsError {
       if (typeof d !== "object" || d === null) return false;
       const step = (d as { step?: unknown }).step;
       return (
-        (step === "Create" || step === "Write" || step === "Flush") &&
+        (step === "Create" || step === "Write" || step === "Flush" || step === "Rename") &&
         typeof (d as { path?: unknown }).path === "string" &&
         typeof (d as { detail?: unknown }).detail === "string"
       );

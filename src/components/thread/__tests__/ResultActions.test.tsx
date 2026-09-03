@@ -58,7 +58,9 @@ function copyButton() {
 
 // The confirm gate's typed refusal as it crosses IPC: the CSV export rides
 // SessionError::Export's RowRead half, the TSV copy rides SessionError::RowRead
-// directly (issue #779).
+// whose serde wire kind is "Turn" (renamed in Rust, issue #121) -- pinning the
+// literal wire shape is what guards the classifier against a hand-matched
+// kind string (issue #779 review).
 const tooLargeExportReject = {
   kind: "Export",
   data: {
@@ -68,12 +70,12 @@ const tooLargeExportReject = {
 };
 
 const tooLargeCopyReject = {
-  kind: "RowRead",
+  kind: "Turn",
   data: { kind: "TooLarge", data: { row_count: 1_200_000, limit: 1_000_000 } },
 };
 
 const cancelledCopyReject = {
-  kind: "RowRead",
+  kind: "Turn",
   data: { kind: "Cancelled" },
 };
 
@@ -188,9 +190,13 @@ describe("ResultActions", () => {
 
   it("abandons a TooLarge export when the confirm dialog is cancelled", async () => {
     // Cancel is a quiet no-op: no confirmed re-send, no error lane -- nothing
-    // ran, exactly like a cancelled save dialog.
+    // ran, exactly like a cancelled save dialog. The second refusal re-parks
+    // the dialog: Cancel's state clear is what lets the next refusal mount a
+    // fresh defaultOpen dialog (issue #766's stranded-state failure class).
     vi.mocked(saveDialog).mockResolvedValue("C:/out/result_1.csv");
-    vi.mocked(exportRowsCsv).mockRejectedValueOnce(tooLargeExportReject);
+    vi.mocked(exportRowsCsv)
+      .mockRejectedValueOnce(tooLargeExportReject)
+      .mockRejectedValueOnce(tooLargeExportReject);
     const { onError } = renderActions();
     fireEvent.click(exportButton());
     await screen.findByRole("alertdialog");
@@ -200,6 +206,10 @@ describe("ResultActions", () => {
     );
     expect(exportRowsCsv).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
+    // A later oversized pull parks the confirm dialog again.
+    fireEvent.click(exportButton());
+    await screen.findByRole("alertdialog");
+    expect(exportRowsCsv).toHaveBeenCalledTimes(2);
   });
 
   it("parks a TooLarge copy refusal and acknowledges after the confirmed re-send", async () => {
@@ -325,5 +335,39 @@ describe("ResultActions", () => {
     await waitFor(() => expect(copyButton()).toBeEnabled());
     expect(onError).not.toHaveBeenCalled();
     expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("drops a TooLarge refusal when the result switched under it", async () => {
+    // The stale guard covers the guardrail lane too: a confirm-gate refusal
+    // arriving after the result switched parks no dialog (a prompt quoting
+    // the departed result's row count over the new one's header would
+    // misdirect the user) and feeds no error lane -- the pull is simply not
+    // happening on this result anymore.
+    let rejectTsv: (e: unknown) => void = () => {};
+    vi.mocked(readRowsTsv).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectTsv = reject;
+        }),
+    );
+    const onError = vi.fn();
+    const { rerender } = renderI18n(
+      <TooltipProvider>
+        <ResultActions sessionId="sess-1" referenceName="result_1" onError={onError} />
+      </TooltipProvider>,
+    );
+    fireEvent.click(copyButton());
+    await waitFor(() => expect(readRowsTsv).toHaveBeenCalledTimes(1));
+    rerender(
+      withIntl(
+        <TooltipProvider>
+          <ResultActions sessionId="sess-1" referenceName="result_2" onError={onError} />
+        </TooltipProvider>,
+      ),
+    );
+    rejectTsv(tooLargeCopyReject);
+    await waitFor(() => expect(copyButton()).toBeEnabled());
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(onError).not.toHaveBeenCalled();
   });
 });
