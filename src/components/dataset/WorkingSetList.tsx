@@ -290,8 +290,11 @@ export function WorkingSetList({
         {datasets.map((d) => (
           // One horizontal row per dataset (issue #790): the select button and
           // the icon actions side by side; group is the hover hook the icon
-          // weak-show restore keys off. A stale dataset wraps the long badge
-          // onto its own line below the row (basis-full under flex-wrap).
+          // weak-show restore keys off. A stale dataset renders the badge after
+          // the row actions, where its basis-full under flex-wrap puts it alone
+          // on the line below -- flex line collection follows source order, so
+          // the badge must stay after the icons or it pushes them onto a third
+          // line.
           <li
             key={d.reference_name}
             className={cn(
@@ -327,15 +330,6 @@ export function WorkingSetList({
                 />
               </small>
             </button>
-            {d.stale && (
-              <Badge variant="secondary" className="stale-badge basis-full">
-                <FormattedMessage
-                  id="workingSet.staleRow"
-                  defaultMessage="Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}"
-                  values={{ name: d.stale.display_name, reason: d.stale.reason }}
-                />
-              </Badge>
-            )}
             <button
               type="button"
               className={cn(ICON_BUTTON_BASE, "rename")}
@@ -384,6 +378,15 @@ export function WorkingSetList({
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
+            )}
+            {d.stale && (
+              <Badge variant="secondary" className="stale-badge basis-full">
+                <FormattedMessage
+                  id="workingSet.staleRow"
+                  defaultMessage="Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}"
+                  values={{ name: d.stale.display_name, reason: d.stale.reason }}
+                />
+              </Badge>
             )}
           </li>
         ))}

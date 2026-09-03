@@ -752,4 +752,37 @@ describe("WorkingSetList", () => {
     const note = select.querySelector("small");
     expect(note!.className.split(/\s+/)).toContain("shrink-0");
   });
+
+  it("renders the stale badge after the row actions so the icons share the select line (issue #790)", () => {
+    const stale: DatasetDescriptor = {
+      ...mockDataset,
+      stale: {
+        reference_name: "people",
+        display_name: "员工表",
+        reason: "Deleted" as const,
+      },
+    };
+    renderI18n(
+      <WorkingSetList
+        datasets={[stale]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    // jsdom has no layout engine, so the guard pins the DOM order the
+    // flex-wrap packing depends on: select + three icon actions first, badge
+    // last -- its basis-full lands alone on the line below only when it
+    // follows the icons (a badge before them would push the icons onto a
+    // third line).
+    const row = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    expect(row.className.split(/\s+/)).toContain("flex-wrap");
+    const children = [...row.children];
+    const badge = children[children.length - 1];
+    expect(badge.className.split(/\s+/)).toContain("stale-badge");
+    expect(badge.className.split(/\s+/)).toContain("basis-full");
+    expect(children.slice(1, -1).filter((el) => el.tagName === "BUTTON")).toHaveLength(3);
+  });
 });
