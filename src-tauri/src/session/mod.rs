@@ -2429,27 +2429,41 @@ fn clamp_settle(now: Option<u64>, asked: Option<u64>) -> Option<u64> {
     }
 }
 
+/// The env var carrying the ACP bridge binary's absolute path (ADR-0085).
+/// Declared by the reader (turn orchestration) and shared with the dev-side
+/// injector in `lib.rs` (`inject_dev_bridge_bin`, debug-only) so the name
+/// cannot drift between inject and read. The integration-test injector lives
+/// in a separate crate and hardcodes the literal -- a rename caught by those
+/// tests failing loudly, the same drift guard `ENV_PORT` below documents.
+pub(crate) const ACP_BRIDGE_BIN_ENV: &str = "TOPTOPDUCK_ACP_BRIDGE_BIN";
+
 /// Resolve the ACP bridge binary path (issue #299 slice 9c, ADR-0085).
 ///
-/// Returns `Err` with a turn-failure detail when `TOPTOPDUCK_ACP_BRIDGE_BIN` is
+/// Returns `Err` with a turn-failure detail when [`ACP_BRIDGE_BIN_ENV`] is
 /// unset so the orchestrator surfaces a `TurnOutcome::Failed(Execute)` --
 /// consistent with the `detect_adapter` and `bind_gateway` failure paths in
 /// [`Session::run_external_turn`] -- instead of poisoning the session mutex
 /// with a panic. The var is read at run time (`env!`/`option_env!` are
 /// compile-time, and cargo only sets `CARGO_BIN_EXE_toptopduck-acp-bridge`
 /// while compiling same-package integration tests, which the lib build never
-/// sees). Integration tests set it (serially, mirroring the 9a
-/// `ACP_FAKE_SCENARIO` env lock) to `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")`
-/// before driving a turn. Production Tauri sidecar bundling is a packaging-time
-/// decision (ADR-0085 Consequences: the bridge bin production path) -- the
-/// `[[bin]]` does not enter the default Tauri bundle, so a shipped app cannot
-/// yet resolve this path; a follow-up ADR wires the sidecar. Centralizing the
-/// lookup here means the follow-up changes one site.
+/// sees). Injectors: dev builds resolve the `current_exe()` sibling in
+/// `.setup()` (debug-only; an explicit export wins); integration tests set it
+/// (serially, mirroring the 9a `ACP_FAKE_SCENARIO` env lock) to
+/// `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")` before driving a turn.
+/// Production Tauri sidecar bundling is a packaging-time decision (ADR-0085
+/// Consequences: the bridge bin production path) -- the `[[bin]]` does not
+/// enter the default Tauri bundle, so a shipped app cannot yet resolve this
+/// path; a follow-up ADR wires the sidecar. Centralizing the lookup here
+/// means the follow-up changes one site.
 fn bridge_bin_path() -> Result<String, String> {
-    std::env::var("TOPTOPDUCK_ACP_BRIDGE_BIN").map_err(|_| {
-        "TOPTOPDUCK_ACP_BRIDGE_BIN not set; the bridge binary path is injected by the \
-         orchestrator (integration tests today; the Tauri sidecar bundle is the \
-         ADR-0085 packaging-time follow-up)"
+    std::env::var(ACP_BRIDGE_BIN_ENV).map_err(|_| {
+        "TOPTOPDUCK_ACP_BRIDGE_BIN is not set, so no ACP bridge binary is \
+         available. Injection sources: tauri dev resolves the sibling built by \
+         beforeDevCommand; integration tests set \
+         CARGO_BIN_EXE_toptopduck-acp-bridge; production sidecar bundling is \
+         the ADR-0085 packaging-time follow-up. For a dev run bypassing the \
+         tauri CLI (e.g. cargo run), build the bridge first: cargo build \
+         --manifest-path src-tauri/Cargo.toml --bin toptopduck-acp-bridge"
             .to_string()
     })
 }
