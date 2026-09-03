@@ -799,6 +799,10 @@ describe("WorkingSetList", () => {
     // AC2: active was stated three ways (row suffix + tab-row Targets badge +
     // row highlight). The suffix is deleted; the highlight (bg-accent +
     // font-semibold) and the Targets badge keep the two remaining surfaces.
+    // The label pins to exactly the display name so a restored suffix fails
+    // in either locale: the zh catalog supplies the zh word when the key
+    // exists, and the en defaultMessage covers the partial revert where only
+    // the source hunk comes back and the catalog keys stay deleted.
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -807,8 +811,8 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    expect(screen.queryByText(/当前表/)).not.toBeInTheDocument();
     const select = screen.getByRole("button", { name: /^people/ });
+    expect(select.querySelector(".truncate")).toHaveTextContent(/^people$/);
     const classes = select.className.split(/\s+/);
     expect(classes).toContain("bg-accent");
     expect(classes).toContain("font-semibold");
