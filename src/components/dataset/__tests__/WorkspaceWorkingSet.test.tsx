@@ -50,6 +50,24 @@ describe("WorkspaceWorkingSet", () => {
     expect(screen.queryByText(/选择一个数据集/)).not.toBeInTheDocument();
   });
 
+  it("seeds the detail from the viewed descriptor on mount (issue #792)", () => {
+    // The tab's initial pick seeds from the VIEWED descriptor before the
+    // active dataset: viewing a non-active result in the result tab and then
+    // entering this tab must open the viewed dataset's detail. Every other
+    // test here mounts with viewedDescriptor={null}, so removing the seed
+    // from the useState initializer survives them all.
+    renderI18n(
+      <WorkspaceWorkingSet
+        datasets={[mockDataset, orders]}
+        activeName="people"
+        loading={false}
+        viewedDescriptor={orders}
+        {...NOOPS}
+      />,
+    );
+    expect(screen.getByText(/行数：9/)).toBeInTheDocument();
+  });
+
   it("shows the picked dataset's detail over the active one", () => {
     renderI18n(
       <WorkspaceWorkingSet
