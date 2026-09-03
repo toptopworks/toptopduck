@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useIntl, FormattedMessage } from "react-intl";
+import { Pencil, RefreshCw, X } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { buttonVariants } from "../ui/button-variants";
@@ -21,15 +22,23 @@ import { cn } from "../../lib/utils";
 import type { DatasetDescriptor } from "../../types/dataset";
 
 // ADR-0067 (issue #184): the .working-set button rule (all: unset + cursor +
-// padding + radius + display:block + width:100%) retired onto this shared
-// utility constant. Tailwind v4's Preflight already resets the button's
-// background to transparent, inherits font/color, and zeroes margin/padding, so
-// only the residual visual contract is re-stated here: strip the native border
-// + appearance, set the compact padding, the var(--radius) corner, the
-// full-width block layout, and left alignment (UA button text is centered).
-// Active state (bg-accent + font-semibold) layers on via cn() at the call site.
-const BUTTON_BASE =
-  "appearance-none border-0 cursor-pointer p-[0.4rem_0.5rem] rounded-md block w-full text-left";
+// padding + radius + display:block + width:100%) retired onto Tailwind
+// utilities. Tailwind v4's Preflight already resets the button's background
+// to transparent, inherits font/color, and zeroes margin/padding, so only the
+// residual visual contract is re-stated here: strip the native border +
+// appearance and set the var(--radius) corner. Issue #790 splits the former
+// single full-width constant into the two row shapes below (select + icon).
+const BUTTON_CHROME = "appearance-none border-0 cursor-pointer rounded-md";
+// The select button: fills the row's leftover width (flex-1 + min-w-0 so the
+// label can truncate inside), compact padding, left alignment (UA button text
+// is centered). Active state (bg-accent + font-semibold) layers on via cn()
+// at the call site.
+const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left`;
+// The per-row icon actions (issue #790): a 28px square hit area (h-7 w-7)
+// wrapping a 14px glyph -- the #774 header-chrome spec. Weakly visible at
+// opacity-60 and restored to full opacity on row hover / keyboard focus (the
+// #251 sidebar inline-action convention; fully hiding was rejected there).
+const ICON_BUTTON_BASE = `${BUTTON_CHROME} h-7 w-7 shrink-0 flex items-center justify-center text-foreground opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
 
 // Rename dialog (issue #759, ADR-0037): display label only -- the reference
 // name is never touched, so selection / SQL / active references all stay
@@ -271,37 +280,48 @@ export function WorkingSetList({
   return (
     // ADR-0067 (issue #184): the working-set list / button / active-state /
     // small visuals ride Tailwind utility on each element below + the
-    // BUTTON_BASE constant above (shared by the select + icon buttons). The
-    // active STATE drives the select button's own conditional className
-    // (bg-accent + font-semibold). The class hooks (.working-set / .rename /
-    // .replace / .delete / .active / .stale) stay on the elements as anchor
-    // points for selector queries and future migration slices.
+    // BUTTON_CHROME-derived constants above (select + icon actions, issue
+    // #790). The active STATE drives the select button's own conditional
+    // className (bg-accent + font-semibold). The class hooks (.working-set /
+    // .rename / .replace / .delete / .active / .stale) stay on the elements as
+    // anchor points for selector queries and future migration slices.
     <>
       <ul ref={listRef} tabIndex={-1} className="working-set list-none m-0 p-0 outline-none">
         {datasets.map((d) => (
+          // One horizontal row per dataset (issue #790): the select button and
+          // the icon actions side by side; group is the hover hook the icon
+          // weak-show restore keys off. A stale dataset renders the badge after
+          // the row actions, where its basis-full under flex-wrap puts it alone
+          // on the line below -- flex line collection follows source order, so
+          // the badge must stay after the icons or it pushes them onto a third
+          // line.
           <li
             key={d.reference_name}
             className={cn(
-              "my-[0.2rem]",
+              "group my-[0.2rem] flex flex-wrap items-center gap-1",
               d.reference_name === activeName && "active",
               d.stale && "stale",
             )}
           >
             <button
               type="button"
+              title={d.display_name}
               className={cn(
-                BUTTON_BASE,
+                SELECT_BUTTON_BASE,
                 d.reference_name === activeName && "bg-accent font-semibold",
               )}
               onClick={() => onSelect(d.reference_name)}
             >
-              {d.display_name}
-              {d.reference_name === activeName ? (
-                <FormattedMessage id="workingSet.activeSuffix" defaultMessage=" · current table" />
-              ) : null}
+              <span className="min-w-0 flex-1 truncate">
+                {d.display_name}
+                {d.reference_name === activeName ? (
+                  <FormattedMessage id="workingSet.activeSuffix" defaultMessage=" · current table" />
+                ) : null}
+              </span>
               {/* font-normal overrides the active button's font-semibold so the
-                  row-count annotation stays muted-weight in either state. */}
-              <small className="text-muted-foreground font-normal">
+                  row-count annotation stays muted-weight in either state;
+                  shrink-0 + nowrap keep truncation from ever eliding the note. */}
+              <small className="shrink-0 whitespace-nowrap text-muted-foreground font-normal">
                 {" "}
                 <FormattedMessage
                   id="workingSet.rowCount"
@@ -310,18 +330,9 @@ export function WorkingSetList({
                 />
               </small>
             </button>
-            {d.stale && (
-              <Badge variant="secondary" className="stale-badge">
-                <FormattedMessage
-                  id="workingSet.staleRow"
-                  defaultMessage="Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}"
-                  values={{ name: d.stale.display_name, reason: d.stale.reason }}
-                />
-              </Badge>
-            )}
             <button
               type="button"
-              className={cn(BUTTON_BASE, "rename")}
+              className={cn(ICON_BUTTON_BASE, "rename")}
               aria-label={intl.formatMessage(
                 { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
                 { name: d.display_name },
@@ -330,12 +341,12 @@ export function WorkingSetList({
               disabled={loading}
               onClick={(e) => openRename(d, e.currentTarget)}
             >
-              ✎
+              <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
             {onReplace && (
               <button
                 type="button"
-                className={cn(BUTTON_BASE, "replace")}
+                className={cn(ICON_BUTTON_BASE, "replace")}
                 aria-label={intl.formatMessage(
                   { id: "workingSet.replace.ariaLabel", defaultMessage: "Replace source {name}" },
                   { name: d.display_name },
@@ -347,13 +358,13 @@ export function WorkingSetList({
                 disabled={loading}
                 onClick={() => void pickReplace(d)}
               >
-                ↻
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
             )}
             {onDelete && (
               <button
                 type="button"
-                className={cn(BUTTON_BASE, "delete")}
+                className={cn(ICON_BUTTON_BASE, "delete")}
                 aria-label={intl.formatMessage(
                   { id: "workingSet.delete.ariaLabel", defaultMessage: "Delete {name}" },
                   { name: d.display_name },
@@ -365,8 +376,17 @@ export function WorkingSetList({
                 disabled={loading}
                 onClick={(e) => openDelete(d, e.currentTarget)}
               >
-                ✕
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
+            )}
+            {d.stale && (
+              <Badge variant="secondary" className="stale-badge basis-full">
+                <FormattedMessage
+                  id="workingSet.staleRow"
+                  defaultMessage="Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}"
+                  values={{ name: d.stale.display_name, reason: d.stale.reason }}
+                />
+              </Badge>
             )}
           </li>
         ))}

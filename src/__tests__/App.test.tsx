@@ -1036,6 +1036,18 @@ describe("App delete-source flow (issue #38)", () => {
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
   });
 
+  it("titles the list panel with the dataset count (issue #790)", async () => {
+    renderPane();
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
+    // The h2 count form (Working set · N) tracks the working-set length once
+    // the load settles.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "工作集 · 1" }),
+      ).toBeInTheDocument(),
+    );
+  });
+
   it("removes a source via removeSource then refreshes the working set", async () => {
     // AC: the per-row delete (after the in-app confirm gate, #759) calls
     // removeSource with the stable reference name, then refreshes so the list

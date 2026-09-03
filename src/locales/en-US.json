@@ -230,7 +230,7 @@
   "session.tab.result": "Results",
   "session.tab.workingSet": "Working set",
   "session.workingSet.emptyDetail": "Select a dataset to see its structure.",
-  "session.workingSet.title": "Working set",
+  "session.workingSet.title": "Working set · {count}",
   "session.workspace.ariaLabel": "Workspace",
   "settings.backToWorkspace": "Back to workspace",
   "settings.discardNew.body": "The new profile hasn't been created yet. Discarding drops everything you typed.",

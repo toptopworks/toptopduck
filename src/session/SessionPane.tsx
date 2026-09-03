@@ -854,7 +854,11 @@ function WorkspaceWorkingSet({
     <div className="layout working-set-layout">
       <section className={PANEL_CARD_BASE}>
         <h2>
-          <FormattedMessage id="session.workingSet.title" defaultMessage="Working set" />
+          <FormattedMessage
+            id="session.workingSet.title"
+            defaultMessage="Working set · {count}"
+            values={{ count: datasets.length }}
+          />
         </h2>
         <WorkingSetList
           datasets={datasets}
