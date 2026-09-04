@@ -320,7 +320,13 @@ pub const fn claude_code() -> AdapterSpec {
         binary_names: &["claude"],
         // ADR-0097 Decision 7: the minimal flag set, no version gating. The
         // deny list is one comma-joined argv element (claude-code's
-        // `--disallowedTools` spelling).
+        // `--disallowedTools` spelling). The allow list opens ONLY the
+        // gateway MCP server's tools (issue #800): headless `--print` mode
+        // auto-rejects permission requests for tools it was not told to
+        // allow, which sealed `mcp__toptopduck-gateway__*` before the call
+        // ever reached the gateway. With both lists present deny wins on
+        // overlap, so the native tools stay sealed (the literal is
+        // drift-guarded by a test against the canonical server name).
         argv: &[
             "--print",
             "--output-format",
@@ -330,6 +336,8 @@ pub const fn claude_code() -> AdapterSpec {
             "--disallowedTools",
             "Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,\
              TodoWrite,BashOutput,KillShell,SlashCommand",
+            "--allowedTools",
+            "mcp__toptopduck-gateway",
         ],
         stream_format: StreamFormat::ClaudeStreamJson,
         // The probe surface is the stream-json CONTROL PLANE (ADR-0097
@@ -350,6 +358,8 @@ pub const fn claude_code() -> AdapterSpec {
             "--disallowedTools",
             "Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,\
              TodoWrite,BashOutput,KillShell,SlashCommand",
+            "--allowedTools",
+            "mcp__toptopduck-gateway",
             "--input-format",
             "stream-json",
         ]),
@@ -878,6 +888,34 @@ mod tests {
             &probe[spec.argv.len()..],
             &["--input-format", "stream-json"]
         );
+    }
+
+    /// Issue #800: both claude-code argv surfaces carry `--allowedTools
+    /// mcp__toptopduck-gateway` so headless `--print` mode does not
+    /// auto-reject the gateway MCP tools. With deny and allow both present
+    /// deny wins on overlap, so the native-tool deny list stays sealed. The
+    /// literal is drift-guarded against the canonical gateway server name —
+    /// a rename there must fail here instead of silently un-allowing the
+    /// gateway surface.
+    #[test]
+    fn claude_code_allows_the_gateway_mcp_surface() {
+        let spec = claude_code();
+        let expected = format!("mcp__{}", crate::session::GATEWAY_SERVER_NAME);
+        for surface in [
+            spec.argv,
+            spec.probe_argv
+                .expect("claude-code probes via its own argv"),
+        ] {
+            let position = surface
+                .iter()
+                .position(|a| *a == "--allowedTools")
+                .expect("--allowedTools rides the argv");
+            assert_eq!(
+                surface[position + 1],
+                expected,
+                "the allow value is the gateway server prefix"
+            );
+        }
     }
 
     /// v1_adapters is internally consistent: non-empty, unique ids, every

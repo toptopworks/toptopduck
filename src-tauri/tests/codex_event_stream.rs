@@ -404,4 +404,11 @@ fn selected_model_and_effort_ride_the_spawn_argv() {
         argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --ephemeral --sandbox read-only --model gpt-5.1 -c model_reasoning_effort=high"),
         "model + effort must ride the spawn argv in the documented order; got: {argv}"
     );
+    // Issue #800 (review follow-up): the gateway approval exemption rides
+    // the REAL spawn argv — the pure-builder pin alone would miss a
+    // config_flags wiring regression.
+    assert!(
+        argv.contains("-c mcp_servers.toptopduck-gateway.default_tools_approval_mode=\"approve\""),
+        "the gateway tool-approval exemption must ride the spawn argv; got: {argv}"
+    );
 }

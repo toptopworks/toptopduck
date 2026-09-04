@@ -531,6 +531,12 @@ fn spawn_argv_carries_selections_mcp_config_and_stateless_flags() {
         argv.contains("--disallowedTools Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,TodoWrite,BashOutput,KillShell,SlashCommand"),
         "the native-tool deny list rides the argv; got: {argv}"
     );
+    // AC (issue #800): the gateway-only allow list — without it headless
+    // `--print` auto-rejects every `mcp__toptopduck-gateway__*` call.
+    assert!(
+        argv.contains("--allowedTools mcp__toptopduck-gateway"),
+        "the gateway MCP allow list rides the argv; got: {argv}"
+    );
     // ADR-0095/0097 selections: `--model` then `--effort`.
     assert!(
         argv.contains("--model claude-fake-picked --effort high"),
