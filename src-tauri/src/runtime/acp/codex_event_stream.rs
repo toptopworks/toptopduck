@@ -347,14 +347,14 @@ pub(super) fn run_codex_event_stream(
     let stdin = child.stdin.take().expect("piped stdin");
     let prompt = flatten_prompt(&input.prompt_blocks);
     match super::process::write_prompt_with_cancel(stdin, prompt, &cancel, &mut child) {
-        super::process::PromptWriteOutcome::Done => {}
-        super::process::PromptWriteOutcome::Failed(e) => {
+        super::process::StdinWriteOutcome::Done => {}
+        super::process::StdinWriteOutcome::Failed(e) => {
             return outcome(
                 Termination::Transient(format!("stdin write failed: {e}")),
                 Vec::new(),
             )
         }
-        super::process::PromptWriteOutcome::Cancelled => {
+        super::process::StdinWriteOutcome::Cancelled => {
             return outcome(Termination::Cancelled, Vec::new())
         }
     }

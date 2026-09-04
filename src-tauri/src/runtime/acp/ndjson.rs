@@ -11,7 +11,7 @@
 //! here plus a per-site mapping, issue #543).
 
 use std::io::Write;
-use std::process::{ChildStdin, ChildStdout};
+use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -53,7 +53,10 @@ pub(super) enum RoundtripError<A> {
 /// EOF closes the channel (tx dropped) so the pump's recv returns
 /// Disconnected -- every caller treats that as the child dying.
 pub(super) struct NdjsonIo {
-    stdin: ChildStdin,
+    /// `None` once a cancelled write detached its writer (the child was
+    /// killed, so the channel is dead); every later write fails fast
+    /// instead of blocking on a gone pipe.
+    stdin: Option<ChildStdin>,
     rx: mpsc::Receiver<String>,
 }
 
@@ -62,19 +65,63 @@ impl NdjsonIo {
         // Shared line-capped reader (see `spawn_line_reader`); EOF drops
         // the sender.
         let rx = super::process::spawn_line_reader(stdout);
-        Self { stdin, rx }
+        Self {
+            stdin: Some(stdin),
+            rx,
+        }
     }
 
     /// Serialize + write one JSON message as a single NDJSON line. Flushes so
     /// the child receives it immediately (NDJSON is line-buffered).
+    ///
+    /// The bare write, for the structurally small payloads whose channel
+    /// has no cancel-driven abort (the probe paths): a few hundred bytes
+    /// can never fill the ~64-KiB OS pipe buffer, so the write cannot block
+    /// on a fresh channel and the caller's own deadline guards the read.
+    /// The turn path -- whose `session/prompt` carries the whole windowed
+    /// context -- goes through [`Self::write_json_with_cancel`] instead.
     pub(super) fn write_json<T: serde::Serialize>(
         &mut self,
         msg: &T,
     ) -> Result<(), std::io::Error> {
         let mut s = serde_json::to_string(msg)?;
         s.push('\n');
-        self.stdin.write_all(s.as_bytes())?;
-        self.stdin.flush()
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::other("stdin writer detached after cancel"));
+        };
+        stdin.write_all(s.as_bytes())?;
+        stdin.flush()
+    }
+
+    /// Serialize + write one JSON message as a single NDJSON line through the
+    /// cancel-aware bounded writer (issue #813): a child that stalls before
+    /// draining stdin cannot wedge the turn's oversized `session/prompt` or
+    /// the pump's mid-turn responses, and the handed-back stdin keeps the
+    /// channel alive for the later writes the round-trip protocol needs.
+    /// Outcome semantics mirror the stream drivers' #808 shape.
+    pub(super) fn write_json_with_cancel<T: serde::Serialize>(
+        &mut self,
+        msg: &T,
+        cancel: &CancelToken,
+        child: &mut Child,
+    ) -> super::process::StdinWriteOutcome {
+        let mut s = match serde_json::to_string(msg) {
+            Ok(s) => s,
+            Err(e) => {
+                return super::process::StdinWriteOutcome::Failed(std::io::Error::other(
+                    e.to_string(),
+                ))
+            }
+        };
+        s.push('\n');
+        let Some(stdin) = self.stdin.take() else {
+            return super::process::StdinWriteOutcome::Failed(std::io::Error::other(
+                "stdin writer detached after cancel",
+            ));
+        };
+        let (outcome, stdin) = super::process::write_line_with_cancel(stdin, s, cancel, child);
+        self.stdin = stdin;
+        outcome
     }
 
     /// One receive step for multiplexing loops (the turn pump), which own
@@ -89,13 +136,18 @@ impl NdjsonIo {
     /// round-trip). `target` is the request id the response must carry (and
     /// no `method` field); a stray notification / unrelated message is
     /// dropped (not an error) so a chatty child cannot break the exchange.
+    /// The write rides the cancel-aware bounded writer (issue #813), so a
+    /// stalled child cannot wedge the turn before this loop's cancel check
+    /// becomes reachable; a cancel during the write aborts exactly like the
+    /// loop's own check would.
     pub(super) fn request_roundtrip_cancel<R: serde::de::DeserializeOwned>(
         &mut self,
         req: &impl serde::Serialize,
         target: &Value,
         cancel: &CancelToken,
+        child: &mut Child,
     ) -> Result<R, RoundtripError<Cancelled>> {
-        self.write_request(req)?;
+        self.write_request_with_cancel(req, cancel, child)?;
         loop {
             if cancel.is_requested() {
                 return Err(RoundtripError::Abort(Cancelled));
@@ -143,17 +195,55 @@ impl NdjsonIo {
         }
     }
 
-    /// Serialize + write one request as a single NDJSON line + flush. Generic
-    /// over the abort marker so both drivers lift the write failure into
-    /// their own error type.
+    /// Serialize + write one request as a single NDJSON line + flush. The
+    /// bare write, for the deadline-driven probe round-trips: their payloads
+    /// are structurally small (a few hundred bytes, far under the pipe
+    /// buffer), so the write cannot block on a fresh channel and the
+    /// caller's deadline guards the read. Generic over the abort marker so
+    /// the driver lifts the write failure into its own error type.
     fn write_request<A>(&mut self, req: &impl serde::Serialize) -> Result<(), RoundtripError<A>> {
         let mut msg =
             serde_json::to_string(req).map_err(|e| RoundtripError::Serialize(e.to_string()))?;
         msg.push('\n');
-        self.stdin
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(RoundtripError::Write(
+                "stdin writer detached after cancel".into(),
+            ));
+        };
+        stdin
             .write_all(msg.as_bytes())
-            .and_then(|_| self.stdin.flush())
+            .and_then(|_| stdin.flush())
             .map_err(|e| RoundtripError::Write(e.to_string()))
+    }
+
+    /// The cancel-driven round-trip's prelude write (issue #813): serialize,
+    /// then ride the bounded writer with the child in hand so a stalled
+    /// child cannot wedge the pre-loop write. The handed-back stdin keeps
+    /// the channel alive for the response pump and later round-trips.
+    fn write_request_with_cancel(
+        &mut self,
+        req: &impl serde::Serialize,
+        cancel: &CancelToken,
+        child: &mut Child,
+    ) -> Result<(), RoundtripError<Cancelled>> {
+        let mut msg =
+            serde_json::to_string(req).map_err(|e| RoundtripError::Serialize(e.to_string()))?;
+        msg.push('\n');
+        let Some(stdin) = self.stdin.take() else {
+            return Err(RoundtripError::Write(
+                "stdin writer detached after cancel".into(),
+            ));
+        };
+        let (outcome, stdin) = super::process::write_line_with_cancel(stdin, msg, cancel, child);
+        self.stdin = stdin;
+        match outcome {
+            super::process::StdinWriteOutcome::Done => Ok(()),
+            super::process::StdinWriteOutcome::Failed(e) => {
+                Err(RoundtripError::Write(e.to_string()))
+            }
+            // Same abort the loop below would have reported.
+            super::process::StdinWriteOutcome::Cancelled => Err(RoundtripError::Abort(Cancelled)),
+        }
     }
 
     /// One incoming line against the awaited response: `Some(deserialize)` when

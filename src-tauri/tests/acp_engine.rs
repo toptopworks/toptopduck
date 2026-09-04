@@ -603,6 +603,99 @@ fn wall_clock_watchdog_fires_cancel_on_a_stuck_agent() {
     );
 }
 
+/// Issue #813: an agent that stalls before draining the oversized
+/// `session/prompt` (past the ~64-KiB OS pipe buffer) wedges the unbounded
+/// `write_all` before the pump loop's cancel check is reachable. The
+/// cancel-aware NDJSON write must settle the turn as Cancelled instead of
+/// hanging forever (the codex_event_stream.rs #808 peer's rationale, on the
+/// long-lived ACP stdin the fix must keep alive for later writes).
+#[test]
+fn cancel_during_blocked_stdin_write_settles_the_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    // No wall-clock: the user cancel alone must break the blocked write (the
+    // fixture's 30s hold fails loudly if the cancel cannot).
+    let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "no_stdin_hold");
+    // 1 MiB of text: past the OS pipe buffer, so the prompt write blocks in
+    // the pipe once the fixture stops reading after the handshake.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    // The cancel is gated on the pre-prompt Thinking phase + 200ms instead of
+    // a blind sleep (the `runaway` peer's rationale): the phase fires only
+    // once the handshake is done and the prompt write is about to go out, so
+    // a slow spawn cannot make the cancel land on the handshake's own write
+    // instead of the blocked prompt write this test exists to pin.
+    let (prompt_out, prompt_seen) = std::sync::mpsc::channel::<()>();
+    let mut prompt_out = Some(prompt_out);
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        let _ = prompt_seen.recv();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &sink, |p| {
+        if matches!(p, TurnPhase::Thinking { attempt: 1 }) {
+            if let Some(tx) = prompt_out.take() {
+                let _ = tx.send(());
+            }
+        }
+    });
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "blocked prompt write + cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Same window pin as the #808 peers: catch a slow-but-correct resolution
+    // (cancel poll + kill + reap), not the outright miss.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the cancel never broke the blocked prompt write"
+    );
+}
+
+/// An agent that dies before draining the oversized `session/prompt` breaks
+/// the write mid-pipe: the turn settles as the Transient the engine has
+/// always produced for a dead-channel prompt send -- the
+/// `session/prompt: broken pipe before send` contract stays pinned across
+/// the #813 write fix (the #808 codex peer's rationale).
+#[test]
+fn cli_death_during_stdin_write_settles_transient() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ACP_FAKE_SCENARIO", "die_before_stdin");
+    // 1 MiB of text: past the OS pipe buffer, and the fixture never reads
+    // the prompt line, so the write can never complete -- it is either still
+    // blocked in the pipe when the fixture exits (the closed read end
+    // unblocks it) or fails on the closed pipe outright; both land on the
+    // same write-failure settle.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &sink, |_| {});
+    match &outcome.termination {
+        Termination::Transient(msg) => assert!(
+            msg.contains("session/prompt: broken pipe before send"),
+            "expected the broken-pipe prompt send to ride the Transient: {msg}"
+        ),
+        other => panic!("blocked prompt write + CLI death -> Transient: {other:?}"),
+    }
+    // The fixture's own death breaks the pipe: no cancel thread, no 30s hold
+    // on this path.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the CLI death did not break the blocked prompt write"
+    );
+}
+
 /// Issue #640: a runaway agent flooding update lines far faster than the pump
 /// folds them resolves through the bounded reader channel exactly as before
 /// it -- the cancel fires, the cooperative fixture answers Cancelled, and the

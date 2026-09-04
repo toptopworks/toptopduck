@@ -9,10 +9,12 @@
 //! shapes, the constants, and the kill-reap logic here prevents drift -- a
 //! change to either lands in one place, not several.
 //!
-//! The stdin prompt writer is shared here too (issue #808): both native
-//! stream drivers feed the flattened prompt through the same cancel-aware
-//! write, so a CLI that stalls before draining stdin cannot wedge the turn
-//! before the pump loop's cancel check becomes reachable.
+//! The stdin writers are shared here too (issues #808/#813): the native
+//! stream drivers feed the flattened prompt through the one-shot cancel-aware
+//! write (EOF on completion), and the ACP channel's NDJSON lines ride the
+//! same doctrine with the stdin handle handed back (the channel lives for
+//! the whole turn) -- so a CLI that stalls before draining stdin cannot
+//! wedge the turn before the pump loop's cancel check becomes reachable.
 //!
 //! The stdout reader thread is shared here too (issues #629/#639/#640): every
 //! adapter surface's reader -- the NDJSON channel and both native stream
@@ -118,12 +120,15 @@ pub(super) fn kill_and_reap(child: &mut Child) {
 }
 
 // ---------------------------------------------------------------------------
-// Stdin prompt writer (cancel-aware, issue #808)
+// Stdin writers (cancel-aware, issues #808/#813)
 // ---------------------------------------------------------------------------
 
-/// Outcome of feeding the flattened prompt to a turn child's stdin.
-pub(super) enum PromptWriteOutcome {
-    /// Fully written and stdin dropped (EOF signaled); the turn proceeds.
+/// Outcome of feeding a line of stdin to a turn child. Whether the stdin
+/// handle was consumed (the one-shot writer drops it for EOF) or handed back
+/// to the caller (the NDJSON channel keeps it alive for later writes) is the
+/// writer's contract, not the outcome's.
+pub(super) enum StdinWriteOutcome {
+    /// Fully written + flushed; the turn proceeds.
     Done,
     /// The write failed; the child is already killed and reaped (a bounded,
     /// best-effort reap per [`kill_and_reap`]), and the OS error rides
@@ -132,6 +137,33 @@ pub(super) enum PromptWriteOutcome {
     /// Cancel landed mid-write; the child was killed (which breaks the pipe
     /// and unblocks the writer) and reaped (bounded, best-effort).
     Cancelled,
+}
+
+/// Join the stdin writer thread under [`KILL_REAP_DEADLINE`] after the child
+/// was killed -- which normally unblocks its blocked write -- and detach with
+/// a warning instead of hanging the turn when the write still does not return
+/// (a grandchild inherited the pipe's read end, the resident-child class
+/// ADR-0108 anticipates). A bounded wait replaces an unbounded one, never a
+/// hung turn (`wait_bounded`'s doctrine, issue #808).
+fn join_writer_bounded_or_detach<T>(writer: std::thread::JoinHandle<T>) {
+    let deadline = Instant::now() + KILL_REAP_DEADLINE;
+    while !writer.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(KILL_REAP_POLL);
+    }
+    if writer.is_finished() {
+        // The joined value (a completed write's result, and the handed-back
+        // stdin) drops here: every caller is on the cancel path, where the
+        // child is already dead and the channel with it.
+        let _ = writer.join();
+    } else {
+        // Detached, like the reader thread: the writer owns only the line
+        // String and the stdin handle, both bounded (the handle drops with
+        // the JoinHandle at return).
+        log::warn!(
+            target: "toptopduck::acp",
+            "stdin writer unjoinable after cancel (a grandchild holds the pipe?); detaching"
+        );
+    }
 }
 
 /// Write `prompt` + a trailing newline to the child's stdin on a dedicated
@@ -153,7 +185,7 @@ pub(super) fn write_prompt_with_cancel(
     prompt: String,
     cancel: &crate::cancel::CancelToken,
     child: &mut Child,
-) -> PromptWriteOutcome {
+) -> StdinWriteOutcome {
     let writer = std::thread::spawn(move || {
         let mut stdin = stdin;
         let result = stdin
@@ -165,50 +197,99 @@ pub(super) fn write_prompt_with_cancel(
     loop {
         if cancel.is_requested() {
             kill_and_reap(child);
-            // Killing the child closes the pipe's read end, so the blocked
-            // write returns and the writer joins here -- unless a grandchild
-            // inherited that read end (the resident-child class ADR-0108
-            // anticipates) or the kill itself failed, in which case a plain
-            // `join()` would hang the turn exactly like the unbounded write
-            // did. The bounded wait below detaches instead (`wait_bounded`'s
-            // doctrine: a bounded wait replaces an unbounded one, never a
-            // hung turn).
-            let deadline = Instant::now() + KILL_REAP_DEADLINE;
-            while !writer.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(KILL_REAP_POLL);
-            }
-            if writer.is_finished() {
-                let _ = writer.join();
-            } else {
-                // Detached, like the reader thread: the writer owns only the
-                // prompt String and the stdin handle, both bounded.
-                log::warn!(
-                    target: "toptopduck::acp",
-                    "stdin prompt writer unjoinable after cancel (a grandchild holds the pipe?); detaching"
-                );
-                drop(writer);
-            }
-            return PromptWriteOutcome::Cancelled;
+            join_writer_bounded_or_detach(writer);
+            return StdinWriteOutcome::Cancelled;
         }
         if writer.is_finished() {
             return match writer.join() {
-                Ok(Ok(())) => PromptWriteOutcome::Done,
+                Ok(Ok(())) => StdinWriteOutcome::Done,
                 // The CLI died mid-write: the drivers' original
                 // reap-then-Transient shape.
                 Ok(Err(e)) => {
                     log::warn!(target: "toptopduck::acp", "stdin prompt write failed: {e}");
                     kill_and_reap(child);
-                    PromptWriteOutcome::Failed(e)
+                    StdinWriteOutcome::Failed(e)
                 }
                 Err(_) => {
                     kill_and_reap(child);
-                    PromptWriteOutcome::Failed(std::io::Error::other(
-                        "stdin writer thread panicked",
-                    ))
+                    StdinWriteOutcome::Failed(std::io::Error::other("stdin writer thread panicked"))
                 }
             };
         }
         std::thread::sleep(PUMP_POLL_INTERVAL);
+    }
+}
+
+/// Write one pre-serialized NDJSON line to the child's stdin on a dedicated
+/// writer thread while polling cancel at the pump's cadence (issue #813).
+///
+/// The ACP-channel sibling of [`write_prompt_with_cancel`] for the
+/// long-lived stdin the NDJSON round-trips keep using after this write: on
+/// `Done`/`Failed` the stdin handle is handed back to the caller (the
+/// handshake, `session/prompt`, and the pump's mid-turn writes all ride the
+/// same pipe), where the one-shot writers close it for EOF. Only the cancel
+/// path may lose the handle -- the child is dead there, so the channel is
+/// dead by construction and the caller never writes again. Unlike the
+/// one-shot writer, completion outranks a pending cancel (the completion
+/// channel is checked first): the line may be exactly the `session/cancel`
+/// notification whose cooperative response the pump means to drain, and a
+/// completed write must not be killed out from under it. The completion
+/// channel also means a fast write costs no poll-interval latency -- the
+/// turn path writes several lines per turn, where the one-shot writer's
+/// up-to-one-interval cost was once per turn.
+pub(super) fn write_line_with_cancel(
+    stdin: ChildStdin,
+    line: String,
+    cancel: &crate::cancel::CancelToken,
+    child: &mut Child,
+) -> (StdinWriteOutcome, Option<ChildStdin>) {
+    // The write's completion signal: the watch loop wakes the moment the
+    // write finishes instead of at the next poll tick.
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let writer = std::thread::spawn(move || {
+        let mut stdin = stdin;
+        let result = stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush());
+        let _ = done_tx.send(());
+        (result, stdin)
+    });
+    loop {
+        match done_rx.recv_timeout(PUMP_POLL_INTERVAL) {
+            // `Ok` is the send; `Disconnected` without one is a writer that
+            // panicked before sending. Both mean the thread is finishing:
+            // the join takes the result and the handed-back stdin.
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return match writer.join() {
+                    Ok((Ok(()), stdin)) => (StdinWriteOutcome::Done, Some(stdin)),
+                    // The CLI died mid-write: the engine's
+                    // kill-on-every-settle makes the internal reap
+                    // idempotent there.
+                    Ok((Err(e), stdin)) => {
+                        log::warn!(target: "toptopduck::acp", "stdin line write failed: {e}");
+                        kill_and_reap(child);
+                        (StdinWriteOutcome::Failed(e), Some(stdin))
+                    }
+                    Err(_) => {
+                        kill_and_reap(child);
+                        (
+                            StdinWriteOutcome::Failed(std::io::Error::other(
+                                "stdin writer thread panicked",
+                            )),
+                            None,
+                        )
+                    }
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.is_requested() {
+                    kill_and_reap(child);
+                    join_writer_bounded_or_detach(writer);
+                    return (StdinWriteOutcome::Cancelled, None);
+                }
+                // Still writing, cancel not fired: keep watching.
+            }
+        }
     }
 }
 
