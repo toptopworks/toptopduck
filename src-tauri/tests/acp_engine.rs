@@ -649,11 +649,13 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
         "blocked prompt write + cancel -> Cancelled: {:?}",
         outcome.termination
     );
-    // Same window pin as the #808 peers: catch a slow-but-correct resolution
-    // (cancel poll + kill + reap), not the outright miss.
+    // 5s, not the #808 peers' 3s: the cancel path stacks kill_and_reap's 2s
+    // deadline plus the join ladder's 2s, so correct code can take ~4s under
+    // load (observed 4.19s red on a clean tree at 3s); the fixture's 30s
+    // hold still fails loudly on an outright miss.
     let elapsed = start.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_secs(3),
+        elapsed < std::time::Duration::from_secs(5),
         "took {elapsed:?} -- the cancel never broke the blocked prompt write"
     );
 }
@@ -681,17 +683,25 @@ fn cli_death_during_stdin_write_settles_transient() {
     let start = std::time::Instant::now();
     let outcome = eng.run(&big, &fake_cli(), &approval, &sink, |_| {});
     match &outcome.termination {
-        Termination::Transient(msg) => assert!(
-            msg.contains("session/prompt: broken pipe before send"),
-            "expected the broken-pipe prompt send to ride the Transient: {msg}"
-        ),
+        Termination::Transient(msg) => {
+            assert!(
+                msg.contains("session/prompt: broken pipe before send"),
+                "expected the broken-pipe prompt send to ride the Transient: {msg}"
+            );
+            // The ca64bc7 rider: the io detail rides along after the frozen
+            // prefix -- pin the suffix so the detail cannot silently vanish.
+            assert!(
+                msg.len() > "session/prompt: broken pipe before send".len(),
+                "expected the io detail to ride along: {msg}"
+            );
+        }
         other => panic!("blocked prompt write + CLI death -> Transient: {other:?}"),
     }
     // The fixture's own death breaks the pipe: no cancel thread, no 30s hold
-    // on this path.
+    // on this path; 5s as above -- the reap can still eat its 2s deadline.
     let elapsed = start.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_secs(3),
+        elapsed < std::time::Duration::from_secs(5),
         "took {elapsed:?} -- the CLI death did not break the blocked prompt write"
     );
 }

@@ -355,7 +355,7 @@ impl AcpEngine {
         match io.write_json_with_cancel(&prompt, &self.cancel, &mut child) {
             super::process::StdinWriteOutcome::Done => {}
             // The dead-channel send keeps its pre-#813 message, now with the
-            // OS detail riding along (the sibling drivers' #808 shape).
+            // io detail riding along (the sibling drivers' #808 shape).
             super::process::StdinWriteOutcome::Failed(e) => {
                 let outcome = self.outcome(
                     Termination::Transient(format!("session/prompt: broken pipe before send: {e}")),

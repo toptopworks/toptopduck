@@ -153,14 +153,16 @@ fn join_writer_bounded_or_detach<T>(writer: std::thread::JoinHandle<T>) {
         std::thread::sleep(KILL_REAP_POLL);
     }
     if writer.is_finished() {
-        // The joined value (a completed write's result, and the handed-back
-        // stdin) drops here: every caller is on the cancel path, where the
-        // child is already dead and the channel with it.
+        // The joined value (whatever the writer returned -- a write result,
+        // plus the handed-back stdin on the NDJSON path) drops here: every
+        // caller is on the cancel path, where the child is already dead and
+        // the channel with it.
         let _ = writer.join();
     } else {
         // Detached, like the reader thread: the writer owns only the line
-        // String and the stdin handle, both bounded (the handle drops with
-        // the JoinHandle at return).
+        // String and the stdin handle, both bounded (the thread's captures
+        // drop whenever the writer thread itself finishes -- possibly only
+        // at process exit, harmless here since the child is already dead).
         log::warn!(
             target: "toptopduck::acp",
             "stdin writer unjoinable after cancel (a grandchild holds the pipe?); detaching"
@@ -229,9 +231,11 @@ pub(super) fn write_prompt_with_cancel(
 /// long-lived stdin the NDJSON round-trips keep using after this write: on
 /// `Done`/`Failed` the stdin handle is handed back to the caller (the
 /// handshake, `session/prompt`, and the pump's mid-turn writes all ride the
-/// same pipe), where the one-shot writers close it for EOF. Only the cancel
-/// path may lose the handle -- the child is dead there, so the channel is
-/// dead by construction and the caller never writes again. Unlike the
+/// same pipe), where the one-shot writers close it for EOF. Only a settle
+/// that kills the child -- the cancel path, or a writer panic -- may lose
+/// the handle; the channel is dead by construction, and any later write
+/// attempt is caught by the channel's own fail-fast gate instead of this
+/// writer. Unlike the
 /// one-shot writer, completion outranks a pending cancel (the completion
 /// channel is checked first): the line may be exactly the `session/cancel`
 /// notification whose cooperative response the pump means to drain, and a

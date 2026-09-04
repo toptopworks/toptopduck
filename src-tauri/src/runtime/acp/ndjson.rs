@@ -53,9 +53,9 @@ pub(super) enum RoundtripError<A> {
 /// EOF closes the channel (tx dropped) so the pump's recv returns
 /// Disconnected -- every caller treats that as the child dying.
 pub(super) struct NdjsonIo {
-    /// `None` once a cancelled write detached its writer (the child was
-    /// killed, so the channel is dead); every later write fails fast
-    /// instead of blocking on a gone pipe.
+    /// `None` once a cancelled or panicked write detached its writer (the
+    /// child was killed, so the channel is dead); every later write fails
+    /// fast instead of blocking on a gone pipe.
     stdin: Option<ChildStdin>,
     rx: mpsc::Receiver<String>,
 }
@@ -93,12 +93,6 @@ impl NdjsonIo {
         stdin.flush()
     }
 
-    /// Serialize + write one JSON message as a single NDJSON line through the
-    /// cancel-aware bounded writer (issue #813): a child that stalls before
-    /// draining stdin cannot wedge the turn's oversized `session/prompt` or
-    /// the pump's mid-turn responses, and the handed-back stdin keeps the
-    /// channel alive for the later writes the round-trip protocol needs.
-    /// Outcome semantics mirror the stream drivers' #808 shape.
     /// Serialize `msg` to one NDJSON line and take the stdin handle for the
     /// bounded writer -- the prelude both cancel-aware entry points below
     /// share. `Err` carries the technical detail (a serialization failure,
@@ -117,6 +111,14 @@ impl NdjsonIo {
         Ok((s, stdin))
     }
 
+    /// Serialize + write one JSON message as a single NDJSON line through the
+    /// cancel-aware bounded writer (issue #813): a child that stalls before
+    /// draining stdin cannot wedge the turn's oversized `session/prompt` or
+    /// the pump's mid-turn responses, and the handed-back stdin keeps the
+    /// channel alive for the later writes the round-trip protocol needs.
+    /// Settle shapes are the #808 `StdinWriteOutcome` set; precedence
+    /// differs -- completion outranks a pending cancel, and `Cancelled`
+    /// detaches the writer so every later write fails fast.
     pub(super) fn write_json_with_cancel<T: serde::Serialize>(
         &mut self,
         msg: &T,
