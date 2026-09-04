@@ -15,13 +15,14 @@
 //!   these);
 //! - detection: the candidate binary names a PATH scan resolves (the composer
 //!   grays out an absent CLI, ADR-0083);
-//! - launch: the argv prefix that puts the CLI into its ACP stdio mode (the
-//!   engine appends nothing -- the prefix IS the full argv the CLI needs to
-//!   speak ACP on stdio; per-CLI session addressing rides the MCP bridge
-//!   descriptor, not the CLI argv).
+//! - launch: the argv prefix that puts the CLI into its protocol mode (the
+//!   engine appends only generic per-turn args derived from the other spec
+//!   fields and the turn input -- selections and bridge config overrides --
+//!   never CLI-specific arguments; per-CLI session addressing rides the MCP
+//!   bridge descriptor, not the CLI argv).
 //!
-//! The argv prefix is the ONE CLI-specific fact the ACP-over-stdio engine
-//! consumes; it is data (a `&'static [&'static str]`), not a code path.
+//! The argv prefix is pure CLI-specific data (a `&'static [&'static str]`),
+//! not a code path.
 
 use std::path::PathBuf;
 
@@ -225,6 +226,17 @@ pub const fn codex() -> AdapterSpec {
             "--ephemeral",
             "--sandbox",
             "read-only",
+            // Issue #811: codex exec's default `model_reasoning_summary=auto`
+            // emits no reasoning item on the wire (verified on codex 0.153.1),
+            // leaving #807's reasoning->thinking fold with nothing to consume.
+            // The summary is a display-surface override, orthogonal to the
+            // thought level (the model-behavior selection that rides
+            // `model_reasoning_effort`), so it rides the argv prefix
+            // unconditionally -- no model / thought-level selection needed.
+            // Same `-c` mechanism as the effort and bridge overrides; the
+            // flags coexist on one spawn.
+            "-c",
+            "model_reasoning_summary=detailed",
         ],
         stream_format: StreamFormat::CodexEventStream,
         // The probe surface is the `app-server` subcommand, NOT the turn's
@@ -988,6 +1000,8 @@ mod tests {
                 "--ephemeral",
                 "--sandbox",
                 "read-only",
+                "-c",
+                "model_reasoning_summary=detailed",
             ]
         );
         assert_eq!(spec.stream_format, StreamFormat::CodexEventStream);

@@ -45,6 +45,19 @@ fn input() -> AcpTurnInput {
     }
 }
 
+/// A collision-free temp path for the fixture's argv trace (the harness runs
+/// tests in parallel).
+fn unique_trace_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "codex-fake-trace-{}.log",
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as u64)
+    ))
+}
+
 /// Process-wide lock so the global `CODEX_FAKE_SCENARIO` env var is not raced
 /// by concurrent tests.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -478,14 +491,7 @@ fn selected_model_and_effort_ride_the_spawn_argv() {
     input.thought_level = Some("high".into());
     // The fixture traces its argv to this file (stdout carries the NDJSON
     // event stream the engine owns).
-    let trace = std::env::temp_dir().join(format!(
-        "codex-fake-trace-{}.log",
-        std::process::id() as u64
-            ^ (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos() as u64)
-    ));
+    let trace = unique_trace_path();
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("CODEX_FAKE_SCENARIO", "text_reply");
     std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
@@ -495,7 +501,7 @@ fn selected_model_and_effort_ride_the_spawn_argv() {
     let argv = std::fs::read_to_string(&trace).unwrap_or_default();
     let _ = std::fs::remove_file(&trace);
     assert!(
-        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --ephemeral --sandbox read-only --model gpt-5.1 -c model_reasoning_effort=high"),
+        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --ephemeral --sandbox read-only -c model_reasoning_summary=detailed --model gpt-5.1 -c model_reasoning_effort=high"),
         "model + effort must ride the spawn argv in the documented order; got: {argv}"
     );
     // Issue #800 (review follow-up): the gateway approval exemption rides
@@ -504,5 +510,31 @@ fn selected_model_and_effort_ride_the_spawn_argv() {
     assert!(
         argv.contains("-c mcp_servers.toptopduck-gateway.default_tools_approval_mode=\"approve\""),
         "the gateway tool-approval exemption must ride the spawn argv; got: {argv}"
+    );
+}
+
+/// Issue #811: the reasoning-summary switch rides the argv PREFIX, not the
+/// selection-driven flags -- it is a display-surface override (feeding #807's
+/// reasoning->thinking fold) orthogonal to the thought level, so it must be
+/// present even when no model / thought level is selected.
+#[test]
+fn summary_switch_rides_spawn_argv_without_selections() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    // input() defaults carry no model / thought-level selection.
+    let trace = unique_trace_path();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CODEX_FAKE_SCENARIO", "text_reply");
+    std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    std::env::remove_var("CODEX_FAKE_TRACE_FILE");
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+    assert!(
+        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --ephemeral --sandbox read-only -c model_reasoning_summary=detailed"),
+        "the summary switch must ride the spawn argv with no selections; got: {argv}"
     );
 }
