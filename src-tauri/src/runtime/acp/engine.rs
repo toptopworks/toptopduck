@@ -1253,6 +1253,15 @@ fn name_summary(title: Option<&str>, id: &str) -> (String, String) {
 // Permission decision (ACP session/request_permission -> gateway policy)
 // ---------------------------------------------------------------------------
 
+/// The gateway tools' namespaced prefix as external CLIs surface them
+/// (`mcp__<GATEWAY_SERVER_NAME>__<tool>`; both claude-code and the ACP
+/// adapters namespace MCP tools this way). A `session/request_permission`
+/// whose tool name carries it is a gateway-bridged call, not a CLI-native
+/// tool, and maps back to the built-in lane (issue #800). Kept a literal
+/// (argv constants cannot concatenate) with a drift-guard test against
+/// [`crate::session::GATEWAY_SERVER_NAME`].
+const GATEWAY_TOOL_PREFIX: &str = "mcp__toptopduck-gateway__";
+
 /// Decide the response to an agent's `session/request_permission` (ADR-0081).
 /// Maps the tool call to a [`ToolKey`], asks the gateway policy
 /// ([`classify`]) whether it is auto-allowed, and selects an allow option if
@@ -1278,11 +1287,22 @@ fn decide_permission(
         .clone()
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| params.tool_call.tool_call_id.clone());
-    // Issue #312: adapter ids are controlled literals (codex / gemini), never
-    // the reserved builtin name — `expect` is safe and keeps the type-level
-    // invariant visible.
-    let key = ToolKey::try_external(adapter.id.as_str(), tool_name)
-        .expect("ACP adapter id is not the reserved builtin name");
+    // Gateway-bridged tool names map back to the built-in lane (issue #800):
+    // the four DuckDB tools classify Allow on the CLI's permission handshake,
+    // mirroring the gateway's own zero-approval rule (ADR-0080 Decision 1)
+    // instead of fail-fast reject. The gateway still enforces its gate at
+    // call time; the CLI's own tools keep the external lane below.
+    let key = match tool_name
+        .strip_prefix(GATEWAY_TOOL_PREFIX)
+        .map(ToolKey::builtin)
+    {
+        Some(key) => key,
+        // Issue #312: adapter ids are controlled literals (codex / gemini), never
+        // the reserved builtin name — `expect` is safe and keeps the type-level
+        // invariant visible.
+        None => ToolKey::try_external(adapter.id.as_str(), tool_name)
+            .expect("ACP adapter id is not the reserved builtin name"),
+    };
     let mode = approval.auth_mode();
     let trust: HashSet<ToolKey> = approval.trust_list().into_iter().collect();
     let allowed = classify(&key, mode, &trust) == Classification::Allow;
@@ -1662,6 +1682,104 @@ mod tests {
             }
             other => panic!("expected Selected reject, got {other:?}"),
         }
+    }
+
+    /// Issue #800: a gateway-bridged tool name (`mcp__<gateway>__<tool>`)
+    /// maps back to the built-in lane, so the four DuckDB tools classify
+    /// Allow even under the default PerCall posture — the CLI-side mirror of
+    /// the gateway's own zero-approval rule (ADR-0080 Decision 1). The
+    /// gateway still enforces its gate at call time.
+    #[test]
+    fn decide_permission_gateway_tool_allows_under_per_call() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                kind: Some(wire::ToolKind::Other),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "allow_once", "gateway tools auto-allow");
+            }
+            other => panic!("expected Selected allow, got {other:?}"),
+        }
+    }
+
+    /// Only the gateway server's prefix maps to the built-in lane: a tool on
+    /// any other MCP server name stays fail-fast (ADR-0081 zero regression).
+    #[test]
+    fn decide_permission_foreign_mcp_tool_still_fail_fasts() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__some-other-server__explore".into()),
+                kind: Some(wire::ToolKind::Other),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "reject", "foreign server names stay fail-fast");
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
+    }
+
+    /// The prefix literal tracks the canonical gateway server name (the
+    /// bridge descriptor's name in session/mod.rs) — a rename there must fail
+    /// here instead of silently unmapping the gateway lane.
+    #[test]
+    fn gateway_tool_prefix_tracks_gateway_server_name() {
+        assert_eq!(
+            GATEWAY_TOOL_PREFIX,
+            format!("mcp__{}__", crate::session::GATEWAY_SERVER_NAME)
+        );
     }
 
     /// A cancel in flight short-circuits permission to Cancelled.

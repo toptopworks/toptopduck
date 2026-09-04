@@ -221,6 +221,18 @@ pub(crate) fn build_config_overrides(mcp_servers: &[McpServer]) -> Vec<String> {
                     encode_toml_string(v)
                 ));
             }
+            // Server-level tool-approval posture (issue #800): codex exec's
+            // approval gate auto-rejects annotation-less MCP tools (their
+            // destructive / open-world hints default to needing approval) —
+            // `user cancelled MCP tool call` before the call reaches the
+            // gateway. `approve` exempts this server's tools only; the shell
+            // approval policy and the read-only sandbox posture (ADR-0094)
+            // are untouched.
+            flags.push("-c".to_string());
+            flags.push(format!(
+                "mcp_servers.{name}.default_tools_approval_mode={}",
+                encode_toml_string("approve")
+            ));
         }
     }
     flags
@@ -751,6 +763,15 @@ mod tests {
         assert!(flags
             .iter()
             .any(|f| f == "mcp_servers.toptopduck-gateway.env.TOPTOPDUCK_GATEWAY_TOKEN=\"abc\""));
+        // Issue #800: the server-level tool-approval posture rides with the
+        // descriptor so codex exec's approval gate cannot auto-reject the
+        // gateway tools before the call reaches the gateway.
+        assert!(
+            flags
+                .iter()
+                .any(|f| f
+                    == "mcp_servers.toptopduck-gateway.default_tools_approval_mode=\"approve\"")
+        );
         // No args override when args is empty.
         assert!(!flags.iter().any(|f| f.contains(".args=")));
     }

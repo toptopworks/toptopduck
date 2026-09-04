@@ -2491,8 +2491,11 @@ const ENV_PORT: &str = "TOPTOPDUCK_GATEWAY_PORT";
 /// The bridge's token env var name (mirrors the bridge binary).
 const ENV_TOKEN: &str = "TOPTOPDUCK_GATEWAY_TOKEN";
 /// The MCP server name advertised in the bridge descriptor (the CLI sees this
-/// as the MCP server's `name`; cosmetic, pinned for trace clarity).
-const GATEWAY_SERVER_NAME: &str = "toptopduck-gateway";
+/// as the MCP server's `name`). Load-bearing beyond trace clarity: the
+/// claude-code adapter's `--allowedTools` value and the ACP engine's gateway
+/// tool-name prefix both derive from it (issue #800) — literal copies guarded
+/// by tests.
+pub(crate) const GATEWAY_SERVER_NAME: &str = "toptopduck-gateway";
 
 /// A no-op [`ApprovalSink`] for the [`Session::ask`] facade (tests and other
 /// callers outside the command boundary). Built-in tools classify Allow at the
