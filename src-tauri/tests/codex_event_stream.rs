@@ -45,8 +45,8 @@ fn input() -> AcpTurnInput {
     }
 }
 
-/// A collision-free temp path for the fixture's argv trace (the harness runs
-/// tests in parallel).
+/// A practically collision-free temp path (pid + nanosecond salt) for the
+/// fixture's argv trace (the harness runs tests in parallel).
 fn unique_trace_path() -> PathBuf {
     std::env::temp_dir().join(format!(
         "codex-fake-trace-{}.log",

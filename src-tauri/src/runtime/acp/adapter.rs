@@ -17,9 +17,10 @@
 //!   grays out an absent CLI, ADR-0083);
 //! - launch: the argv prefix that puts the CLI into its protocol mode (the
 //!   engine appends only generic per-turn args derived from the other spec
-//!   fields and the turn input -- selections and bridge config overrides --
-//!   never CLI-specific arguments; per-CLI session addressing rides the MCP
-//!   bridge descriptor, not the CLI argv).
+//!   fields and the turn input -- selections and bridge config overrides;
+//!   it never contributes a CLI-specific argument itself, every
+//!   CLI-specific fact arrives as spec data; per-CLI session addressing
+//!   rides the MCP bridge descriptor, not the CLI argv).
 //!
 //! The argv prefix is pure CLI-specific data (a `&'static [&'static str]`),
 //! not a code path.
@@ -132,7 +133,8 @@ pub struct AdapterSpec {
     /// full CLI-specific invocation into protocol mode; the engine appends
     /// only generic per-turn args derived from the other spec fields and the
     /// turn input (non-ACP model/effort flags, bridge config overrides) --
-    /// never CLI-specific arguments.
+    /// it never contributes a CLI-specific argument itself; every
+    /// CLI-specific fact arrives as spec data.
     pub argv: &'static [&'static str],
     /// The argv prefix the diagnostic probe uses to spawn this CLI (ADR-0096).
     /// `None` on ACP adapters -- the probe reuses [`Self::argv`] (the same
