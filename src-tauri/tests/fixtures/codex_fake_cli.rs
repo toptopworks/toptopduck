@@ -78,7 +78,8 @@ fn main() {
     let mut out = std::io::stdout();
     match scenario.as_str() {
         // The faithful measured sequence (issue #804's capture, minus the
-        // command): thread.started / reasoning are ignored shapes, the
+        // command): thread.started stays an ignored shape, the reasoning
+        // item folds into the round's thinking (issue #807), the
         // agent_message text rides the terminal.
         "text_reply" => {
             emit(
