@@ -83,7 +83,9 @@ pub(crate) enum CodexEvent {
         /// Call id (for trace row pairing).
         call_id: String,
         /// The invoked tool's name, verbatim from the wire — the identity
-        /// the gateway's own dispatch row carries. The settle-time dedup
+        /// the gateway's dispatch row carries for every class but
+        /// external dispatches, which it records under the resolved
+        /// namespaced handle (ADR-0105). The settle-time dedup
         /// (`merge_outcomes`) pairs the two: builtin names drop via the
         /// builtin arm, everything else via per-name quota or the
         /// `mcp_invoke` counting pool (issue #820).

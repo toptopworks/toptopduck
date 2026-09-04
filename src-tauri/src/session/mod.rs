@@ -2323,9 +2323,10 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// paths, issue #820). The gateway record wins (it ran the call, so its
 /// success flag + excerpt are the truth); an engine echo drops one per
 /// gateway row it can account for, in one of two pairings:
-/// - by name: meta / skill / CLI-registration calls are recorded under the
-///   tool's own name, so a same-named echo pairs directly, one per row
-///   under that name (issue #673's registration case is now this arm --
+/// - by name: meta catalog / skill / CLI-registration calls are recorded
+///   under the tool's own name, so a same-named echo pairs directly,
+///   one per row under that name (issue #673's registration case is
+///   now this arm --
 ///   registrations no longer get a special-cased vocabulary);
 /// - by the `mcp_invoke` pool: an external dispatch is recorded under the
 ///   RESOLVED namespaced handle (the fall-through renames before
@@ -2864,7 +2865,7 @@ mod tests {
     /// the gateway has nothing for (bash / edit / etc., which never touch
     /// the gateway) is the runtime's own work and stays.
     #[test]
-    fn merge_outcomes_acp_non_builtin_appended() {
+    fn merge_outcomes_per_name_echo_drops_while_unknown_name_stays() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "mcp_search_tools", true)]);
         let acp = acp_outcome(vec![
             trace_entry("a1", "mcp_search_tools", false),
@@ -2936,6 +2937,45 @@ mod tests {
         );
     }
 
+    /// The pool counts rows, not names: two dispatches to the SAME handle
+    /// (two same-named namespaced rows -- the common repeat-call shape)
+    /// cover two `mcp_invoke` echoes; a distinct-handle pool would leave
+    /// the second echo alive as a ghost double row.
+    #[test]
+    fn merge_outcomes_invoke_pool_counts_repeat_rows_under_one_handle() {
+        let gateway = gateway_outcome(vec![
+            trace_entry("g1", "mcp__one__tool", true),
+            trace_entry("g2", "mcp__one__tool", true),
+        ]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "mcp_invoke", true),
+            trace_entry("a2", "mcp_invoke", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(
+            merged.trace.len(),
+            1,
+            "both echoes drop; the two gateway rows are the records"
+        );
+        assert_eq!(merged.trace[0].calls.len(), 2);
+    }
+
+    /// The pool is fed by namespaced rows ONLY: a turn whose gateway trace
+    /// holds none (meta-only here) has an empty pool, so an `mcp_invoke`
+    /// echo with nothing to consume survives -- never silently swallowed.
+    #[test]
+    fn merge_outcomes_invoke_pool_empty_without_namespaced_rows() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "mcp_search_tools", true)]);
+        let acp = acp_outcome(vec![trace_entry("a1", "mcp_invoke", true)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 2);
+        assert_eq!(merged.trace[0].calls[0].name, "mcp_search_tools");
+        assert_eq!(
+            merged.trace[1].calls[0].tool_use_id, "a1",
+            "the echo with no pool to consume stays (keep + warn)"
+        );
+    }
+
     /// The pool and the per-name arm never cross-consume (issue #820): a
     /// namespaced-NAMED engine echo is the direct-send form -- the gateway
     /// has no row under that name, so it stays (per-name miss); it neither
@@ -2957,9 +2997,11 @@ mod tests {
         assert_eq!(merged.trace[1].calls[0].tool_use_id, "a1");
     }
 
-    /// The meta trio + skill tool calls pair BY NAME (issue #820 per-class
-    /// pin): the gateway records those dispatches under the tool's own
-    /// name (unlike the external fall-through, which renames), so each
+    /// The meta catalog pair + skill tool calls pair BY NAME (issue #820
+    /// per-class pin): the gateway records those dispatches under the
+    /// tool's own name (unlike the external fall-through, which renames
+    /// -- the third meta tool, `mcp_invoke`, takes the pool arm instead,
+    /// so it is deliberately absent from this fixture), so each
     /// same-named engine echo drops against its gateway row.
     #[test]
     fn merge_outcomes_meta_and_skill_echos_pair_by_name() {
