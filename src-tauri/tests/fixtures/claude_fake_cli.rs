@@ -63,6 +63,8 @@ const SCENARIOS: &[&str] = &[
     "step_cap_overflow",
     "turn_silent",
     "cancel_with_prose",
+    "no_stdin_hold",
+    "die_before_stdin",
     "garbage_lines",
     "line_cap_overlong",
     // Probe surface.
@@ -99,6 +101,22 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn run_turn(scenario: &str) {
+    // Issue #808: a CLI that stalls BEFORE draining stdin: never read, never
+    // emit -- the engine's oversized prompt write blocks in the OS pipe, so
+    // the turn can only resolve via cancel (the codex fixture's convention).
+    // The 30s hold fails loudly if the cancel cannot break the blocked
+    // write.
+    if scenario == "no_stdin_hold" {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+    // The mid-write death leg of the #808 write: a CLI that exits before
+    // draining stdin breaks the oversized prompt write on the pipe, which
+    // settles the turn as a Transient stdin write failure (the codex
+    // fixture's convention).
+    if scenario == "die_before_stdin" {
+        std::process::exit(1);
+    }
     // Drain stdin (the flattened prompt) to EOF -- headless mode reads the
     // prompt from stdin.
     let mut stdin = std::io::stdin();

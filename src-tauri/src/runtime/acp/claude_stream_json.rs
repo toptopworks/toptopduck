@@ -35,7 +35,6 @@
 //! [`StreamFormat`]: super::adapter::StreamFormat
 //! [`ClaudeStreamJson`]: super::adapter::StreamFormat::ClaudeStreamJson
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -369,23 +368,24 @@ pub(super) fn run_claude_stream_json(
     };
 
     // Write the flattened prompt to stdin, then close stdin so claude begins
-    // processing (headless mode reads the prompt from stdin).
-    {
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let prompt = flatten_prompt(&input.prompt_blocks);
-        for chunk in [prompt.as_bytes(), b"\n" as &[u8]] {
-            if let Err(e) = stdin.write_all(chunk) {
-                let result = outcome(
-                    Termination::Transient(format!("stdin write failed: {e}")),
-                    Vec::new(),
-                    None,
-                );
-                super::process::kill_and_reap(&mut child);
-                return result;
-            }
+    // processing (headless mode reads the prompt from stdin). The write
+    // rides the cancel-aware helper (issue #808): a CLI that stalls before
+    // draining stdin cannot wedge the turn before the pump loop's cancel
+    // check becomes reachable.
+    let stdin = child.stdin.take().expect("piped stdin");
+    let prompt = flatten_prompt(&input.prompt_blocks);
+    match super::process::write_prompt_with_cancel(stdin, prompt, &cancel, &mut child) {
+        super::process::PromptWriteOutcome::Done => {}
+        super::process::PromptWriteOutcome::Failed(e) => {
+            return outcome(
+                Termination::Transient(format!("stdin write failed: {e}")),
+                Vec::new(),
+                None,
+            )
         }
-        // Drop stdin explicitly to signal EOF.
-        drop(stdin);
+        super::process::PromptWriteOutcome::Cancelled => {
+            return outcome(Termination::Cancelled, Vec::new(), None)
+        }
     }
 
     let stdout = child.stdout.take().expect("piped stdout");

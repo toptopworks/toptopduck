@@ -9,6 +9,11 @@
 //! shapes, the constants, and the kill-reap logic here prevents drift -- a
 //! change to either lands in one place, not several.
 //!
+//! The stdin prompt writer is shared here too (issue #808): both native
+//! stream drivers feed the flattened prompt through the same cancel-aware
+//! write, so a CLI that stalls before draining stdin cannot wedge the turn
+//! before the pump loop's cancel check becomes reachable.
+//!
 //! The stdout reader thread is shared here too (issues #629/#639/#640): every
 //! adapter surface's reader -- the NDJSON channel and both native stream
 //! drivers -- is the same line-capped, bounded-channel loop, so it lives once.
@@ -16,15 +21,17 @@
 //! #643): the gateway framing and the bridge handshake read untrusted peer
 //! output through the same cap, so the primitive is cross-domain.
 
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Pump poll interval: how long the pump blocks on the stdout-reader channel
-/// between cancel / step-cap checks. Short enough that a cancel surfaces in
-/// well under a second; long enough that an idle turn costs near-zero CPU.
+/// between cancel / step-cap checks (and, since issue #808, how long the
+/// stdin prompt writer waits between cancel checks). Short enough that a
+/// cancel surfaces in well under a second; long enough that an idle turn
+/// costs near-zero CPU.
 pub(super) const PUMP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Upper bound on reaping the CLI child after `Child::kill`. `Child::wait`
@@ -107,6 +114,101 @@ pub(super) fn kill_and_reap(child: &mut Child) {
             Ok(Some(_)) | Err(_) => return,
             Ok(None) => std::thread::sleep(KILL_REAP_POLL),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stdin prompt writer (cancel-aware, issue #808)
+// ---------------------------------------------------------------------------
+
+/// Outcome of feeding the flattened prompt to a turn child's stdin.
+pub(super) enum PromptWriteOutcome {
+    /// Fully written and stdin dropped (EOF signaled); the turn proceeds.
+    Done,
+    /// The write failed; the child is already killed and reaped (a bounded,
+    /// best-effort reap per [`kill_and_reap`]), and the OS error rides
+    /// along for the caller's `Transient` message.
+    Failed(std::io::Error),
+    /// Cancel landed mid-write; the child was killed (which breaks the pipe
+    /// and unblocks the writer) and reaped (bounded, best-effort).
+    Cancelled,
+}
+
+/// Write `prompt` + a trailing newline to the child's stdin on a dedicated
+/// writer thread while polling cancel at the pump's cadence.
+///
+/// The prompt is the schema + skills + history flattening and can exceed the
+/// OS pipe buffer (~64 KiB on Windows); a CLI that stalls before draining
+/// stdin (e.g. wedged in its own MCP init) then blocks the unbounded
+/// `write_all` forever -- and both stream drivers used to run that write
+/// BEFORE the pump loop's cancel check was reachable, so a cancel could not
+/// settle the turn. Killing the child closes the pipe's read end, the
+/// blocked write returns, and the writer joins: the turn settles as
+/// Cancelled instead of hanging. The write itself keeps the drivers'
+/// original shape (`write_all` + newline + explicit EOF drop), so a CLI that
+/// does drain stdin sees no change on the wire (the cost of the watch is up
+/// to one poll interval of added latency before `Done` is detected).
+pub(super) fn write_prompt_with_cancel(
+    stdin: ChildStdin,
+    prompt: String,
+    cancel: &crate::cancel::CancelToken,
+    child: &mut Child,
+) -> PromptWriteOutcome {
+    let writer = std::thread::spawn(move || {
+        let mut stdin = stdin;
+        let result = stdin
+            .write_all(prompt.as_bytes())
+            .and_then(|()| stdin.write_all(b"\n"));
+        drop(stdin); // EOF signal (the drivers' original explicit drop)
+        result
+    });
+    loop {
+        if cancel.is_requested() {
+            kill_and_reap(child);
+            // Killing the child closes the pipe's read end, so the blocked
+            // write returns and the writer joins here -- unless a grandchild
+            // inherited that read end (the resident-child class ADR-0108
+            // anticipates) or the kill itself failed, in which case a plain
+            // `join()` would hang the turn exactly like the unbounded write
+            // did. The bounded wait below detaches instead (`wait_bounded`'s
+            // doctrine: a bounded wait replaces an unbounded one, never a
+            // hung turn).
+            let deadline = Instant::now() + KILL_REAP_DEADLINE;
+            while !writer.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(KILL_REAP_POLL);
+            }
+            if writer.is_finished() {
+                let _ = writer.join();
+            } else {
+                // Detached, like the reader thread: the writer owns only the
+                // prompt String and the stdin handle, both bounded.
+                log::warn!(
+                    target: "toptopduck::acp",
+                    "stdin prompt writer unjoinable after cancel (a grandchild holds the pipe?); detaching"
+                );
+                drop(writer);
+            }
+            return PromptWriteOutcome::Cancelled;
+        }
+        if writer.is_finished() {
+            return match writer.join() {
+                Ok(Ok(())) => PromptWriteOutcome::Done,
+                // The CLI died mid-write: the drivers' original
+                // reap-then-Transient shape.
+                Ok(Err(e)) => {
+                    log::warn!(target: "toptopduck::acp", "stdin prompt write failed: {e}");
+                    kill_and_reap(child);
+                    PromptWriteOutcome::Failed(e)
+                }
+                Err(_) => {
+                    kill_and_reap(child);
+                    PromptWriteOutcome::Failed(std::io::Error::other(
+                        "stdin writer thread panicked",
+                    ))
+                }
+            };
+        }
+        std::thread::sleep(PUMP_POLL_INTERVAL);
     }
 }
 

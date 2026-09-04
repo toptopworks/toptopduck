@@ -19,7 +19,6 @@
 //! [`StreamFormat`]: super::adapter::StreamFormat
 //! [`CodexEventStream`]: super::adapter::StreamFormat::CodexEventStream
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -340,28 +339,24 @@ pub(super) fn run_codex_event_stream(
 
     // Write the flattened prompt to stdin, then close stdin so codex begins
     // processing (exec reads the prompt from stdin when no positional arg is
-    // given).
-    {
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let prompt = flatten_prompt(&input.prompt_blocks);
-        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
-            let result = outcome(
+    // given). The write rides the cancel-aware helper (issue #808): a CLI
+    // that stalls before draining stdin cannot wedge the turn before the
+    // pump loop's cancel check becomes reachable. The two former per-write
+    // failure messages collapse into one (the flush leg only failed on an
+    // already-broken pipe, which the single message now names).
+    let stdin = child.stdin.take().expect("piped stdin");
+    let prompt = flatten_prompt(&input.prompt_blocks);
+    match super::process::write_prompt_with_cancel(stdin, prompt, &cancel, &mut child) {
+        super::process::PromptWriteOutcome::Done => {}
+        super::process::PromptWriteOutcome::Failed(e) => {
+            return outcome(
                 Termination::Transient(format!("stdin write failed: {e}")),
                 Vec::new(),
-            );
-            super::process::kill_and_reap(&mut child);
-            return result;
+            )
         }
-        if let Err(e) = stdin.write_all(b"\n") {
-            let result = outcome(
-                Termination::Transient(format!("stdin flush failed: {e}")),
-                Vec::new(),
-            );
-            super::process::kill_and_reap(&mut child);
-            return result;
+        super::process::PromptWriteOutcome::Cancelled => {
+            return outcome(Termination::Cancelled, Vec::new())
         }
-        // Drop stdin explicitly to signal EOF.
-        drop(stdin);
     }
 
     let stdout = child.stdout.take().expect("piped stdout");

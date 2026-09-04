@@ -386,6 +386,84 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     );
 }
 
+/// Issue #808: a CLI that never drains stdin wedges the unbounded
+/// `write_all` of an oversized prompt (past the ~64-KiB OS pipe buffer)
+/// before the pump loop's cancel check is reachable. The cancel-aware
+/// writer must settle the turn as Cancelled instead of hanging forever.
+#[test]
+fn cancel_during_blocked_stdin_write_settles_the_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    // No wall-clock: the user cancel alone must break the blocked write (the
+    // `user_cancel_mid_prose_keeps_partial_prose_in_trace` peer's rationale);
+    // the fixture's 30s hold fails loudly if the cancel cannot.
+    let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CODEX_FAKE_SCENARIO", "no_stdin_hold");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
+    // in the pipe once the fixture stops reading.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    // The scenario reads no stdin and emits no events, so there is no phase
+    // to latch on; the delay only needs to cover spawn + the first pipe
+    // fill (the claude_stream_json.rs `user_cancel_aborts_the_whole_turn`
+    // peer's 200ms rationale, widened for the bigger write).
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "blocked write + cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Same window pin as the cancel peers: catch a slow-but-correct
+    // resolution (cancel poll + kill + reap), not the outright miss.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the cancel never broke the blocked write"
+    );
+}
+
+/// A CLI that dies before draining stdin breaks the oversized prompt write
+/// mid-pipe: the turn settles as a Transient carrying the stdin write
+/// failure -- the pre-#808-fix behavior's main path, now pinned (the
+/// claude_stream_json.rs peer's rationale).
+#[test]
+fn cli_death_during_stdin_write_settles_transient() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CODEX_FAKE_SCENARIO", "die_before_stdin");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write is
+    // still in the pipe when the fixture exits -- either the write is
+    // already blocked, or it fails on the broken pipe outright; both land
+    // on the same Failed arm.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    match &outcome.termination {
+        Termination::Transient(msg) => assert!(
+            msg.contains("stdin write failed"),
+            "expected the stdin write failure to ride the Transient: {msg}"
+        ),
+        other => panic!("blocked write + CLI death -> Transient: {other:?}"),
+    }
+    // The child's own death breaks the pipe: no cancel thread, no 30s hold
+    // on this path.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the CLI death did not break the blocked write"
+    );
+}
+
 /// ADR-0095: a selected model + thought level ride the spawn argv as
 /// `--model <id>` + `-c model_reasoning_effort=<level>` (asserted via the
 /// fixture's argv trace -- the spawn shape, not just the pure flag builder).
