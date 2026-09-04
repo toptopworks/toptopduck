@@ -105,7 +105,9 @@ pub(crate) enum CodexEvent {
 /// mismatches produce [`CodexEvent::Other`], never panic.
 ///
 /// The accepted shapes are the ones `codex exec --json` actually emits
-/// (measured on codex 0.147.0, issue #804): dot-typed turn events and
+/// (measured on codex 0.147.0, issue #804; the `mcp_tool_call` item is
+/// protocol-pinned instead — codex 0.153.1, issue #816): dot-typed turn
+/// events and
 /// `item.completed` envelopes whose nested `item.type` discriminates the
 /// payload. `item.started` is the streaming variant of the same items —
 /// its output is not yet aggregated and folding it would double every
@@ -182,11 +184,15 @@ fn parse_item(item: Option<&Value>) -> Option<CodexEvent> {
 
 /// Extract a completed `mcp_tool_call` item into its
 /// [`CodexEvent::McpToolCall`] variant (issue #816). The tool name anchors
-/// the row — a missing one is degenerate and stays unparsed; `id` falls
-/// back empty like the command path. A missing `status` stays success (the
-/// exit-code-absent posture); `"failed"` is the only failure vocabulary.
+/// the row — a missing or empty one is degenerate and stays unparsed (no
+/// identity to anchor the row); `id` falls back empty like the command
+/// path. A missing `status` stays success (the exit-code-absent posture);
+/// `"failed"` is the only failure vocabulary.
 fn extract_mcp_tool_call(item: &Value) -> Option<CodexEvent> {
-    let name = item.get("tool").and_then(|v| v.as_str())?;
+    let name = item
+        .get("tool")
+        .and_then(|v| v.as_str())
+        .filter(|name| !name.is_empty())?;
     let call_id = item
         .get("id")
         .and_then(|v| v.as_str())
@@ -632,13 +638,18 @@ impl JsonPump {
                 let (operation_kind, summary) = mcp_tool_call_display(&name, &arguments);
                 let entry = if failed {
                     // An empty message degrades to the constructor's
-                    // failure-anchor fallback — the anchor is never empty.
+                    // failure-anchor fallback — the anchor is never empty;
+                    // a longer one truncates under the trace-excerpt
+                    // discipline (the bounded-anchor caller contract).
                     TraceEntry::failed(
                         call_id,
                         name.clone(),
                         operation_kind,
                         summary.clone(),
-                        error_message.unwrap_or_default(),
+                        truncate_trace_excerpt(
+                            &error_message.unwrap_or_default(),
+                            TRACE_EXCERPT_MAX,
+                        ),
                     )
                 } else {
                     TraceEntry::succeeded(
@@ -698,10 +709,11 @@ mod tests {
     // --- parse_event --------------------------------------------------------
 
     /// One full turn as the real CLI emits it (codex 0.147.0, captured in
-    /// issue #804; values neutralized). Every turn/command/agent/reasoning
-    /// wire-format pin below traces back to these lines; the
-    /// `mcp_tool_call` shape is protocol-pinned instead (its own fixture,
-    /// issue #816).
+    /// issue #804; values neutralized). Every measured
+    /// turn/command/agent/reasoning wire-format pin below traces back to
+    /// these lines (the `turn.failed` error-field forms are synthetic
+    /// defensive fallbacks); the `mcp_tool_call` shape is protocol-pinned
+    /// instead (its own fixture, issue #816).
     const MEASURED_TURN_NDJSON: &[&str] = &[
         r#"{"type":"thread.started","thread_id":"<uuid>"}"#,
         r#"{"type":"turn.started"}"#,
@@ -877,6 +889,17 @@ mod tests {
         let v: Value = serde_json::json!({
             "type": "item.completed",
             "item": {"id": "item_1", "type": "mcp_tool_call", "status": "completed"}
+        });
+        assert_eq!(parse_event(&v), CodexEvent::Other);
+    }
+
+    /// An empty `tool` is the same degeneration as a missing one: it stays
+    /// Other rather than landing a nameless ghost row.
+    #[test]
+    fn parse_item_completed_mcp_tool_call_with_empty_tool_stays_other() {
+        let v: Value = serde_json::json!({
+            "type": "item.completed",
+            "item": {"id": "item_1", "type": "mcp_tool_call", "tool": "", "status": "completed"}
         });
         assert_eq!(parse_event(&v), CodexEvent::Other);
     }
@@ -1391,6 +1414,96 @@ mod tests {
             TurnPhase::Thinking { attempt } => assert_eq!(*attempt, 2),
             other => panic!("expected the round-2 Thinking wait, got {other:?}"),
         }
+    }
+
+    /// The mcp arm's ADR-0103 order (issue #816), the command arm's
+    /// `live_order` pin mirrored: the round's prose prelude fires BEFORE
+    /// the batch's ToolCallStarted, and consecutive gateway calls share
+    /// one batch round under a single prelude.
+    #[test]
+    fn mcp_tool_call_fold_fires_round_prelude_before_phase_pair() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "let me convert".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::McpToolCall {
+                call_id: "item_1".into(),
+                name: "convert".into(),
+                arguments: r#"{"input":"a.csv"}"#.into(),
+                failed: false,
+                error_message: None,
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::McpToolCall {
+                call_id: "item_2".into(),
+                name: "convert".into(),
+                arguments: String::new(),
+                failed: false,
+                error_message: None,
+            },
+            &mut |p| phases.push(p),
+        );
+        let round_text = phases
+            .iter()
+            .position(|p| matches!(p, TurnPhase::RoundText { .. }))
+            .expect("the round's prose prelude fired");
+        let first_started = phases
+            .iter()
+            .position(|p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "convert"))
+            .expect("the batch's first ToolCallStarted");
+        assert!(round_text < first_started, "the prelude precedes the batch");
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
+                .count(),
+            1,
+            "one prose prelude for the batch"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
+        assert_eq!(rounds.len(), 1, "one batch round");
+        assert_eq!(
+            rounds[0].calls.len(),
+            2,
+            "both gateway calls share the round"
+        );
+    }
+
+    /// The wire's error message truncates under the trace-excerpt
+    /// discipline (issue #816): the failure anchor honors the bounded-
+    /// anchor caller contract like every other producer of a wire-
+    /// controlled excerpt.
+    #[test]
+    fn failed_mcp_tool_call_anchor_truncates_at_trace_excerpt_max() {
+        let mut pump = JsonPump::new(24);
+        pump.fold(
+            CodexEvent::McpToolCall {
+                call_id: "item_1".into(),
+                name: "convert".into(),
+                arguments: String::new(),
+                failed: true,
+                error_message: Some("x".repeat(TRACE_EXCERPT_MAX + 100)),
+            },
+            &mut |_| {},
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
+        let excerpt = &rounds[0].calls[0].result_excerpt;
+        assert_eq!(excerpt.chars().count(), TRACE_EXCERPT_MAX);
+        assert!(
+            excerpt.ends_with('…'),
+            "the cut renders the ellipsis marker"
+        );
     }
 
     /// Prose stays in the round it was emitted in: cross-round fragments do

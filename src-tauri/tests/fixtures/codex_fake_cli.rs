@@ -12,8 +12,10 @@
 //! read stdin until EOF, then emit the scripted NDJSON event stream. Pure
 //! serde_json — no lib import — so the fixture stays self-contained.
 //!
-//! The emitted shapes are the measured codex 0.147.0 wire format (issue #804):
-//! dot-typed turn events plus `item.started` / `item.completed` envelopes.
+//! The emitted shapes are the measured codex 0.147.0 wire format (issue
+//! #804) — the `mcp_tool_call` item shape is protocol-pinned instead (codex
+//! 0.153.1, issue #816) — dot-typed turn events plus `item.started` /
+//! `item.completed` envelopes.
 
 use std::io::{Read, Write};
 
