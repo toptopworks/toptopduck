@@ -354,10 +354,11 @@ impl AcpEngine {
         // the pump's mid-turn writes.
         match io.write_json_with_cancel(&prompt, &self.cancel, &mut child) {
             super::process::StdinWriteOutcome::Done => {}
-            // The dead-channel send keeps its pre-#813 settle verbatim.
-            super::process::StdinWriteOutcome::Failed(_) => {
+            // The dead-channel send keeps its pre-#813 message, now with the
+            // OS detail riding along (the sibling drivers' #808 shape).
+            super::process::StdinWriteOutcome::Failed(e) => {
                 let outcome = self.outcome(
-                    Termination::Transient("session/prompt: broken pipe before send".into()),
+                    Termination::Transient(format!("session/prompt: broken pipe before send: {e}")),
                     Vec::new(),
                     discovered,
                 );
@@ -577,7 +578,7 @@ fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
 /// [`Termination`]. The multiplexing prompt pump below keeps its own line
 /// loop -- it folds `session/update` and services `session/request_permission`
 /// -- and shares the reader channel via [`Self::recv_timeout`] and the writer
-/// via [`Self::write_json`].
+/// via [`Self::write_json_with_cancel`].
 struct AcpIo {
     inner: super::ndjson::NdjsonIo,
 }

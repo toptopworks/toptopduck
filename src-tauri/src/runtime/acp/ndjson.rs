@@ -99,34 +99,44 @@ impl NdjsonIo {
     /// the pump's mid-turn responses, and the handed-back stdin keeps the
     /// channel alive for the later writes the round-trip protocol needs.
     /// Outcome semantics mirror the stream drivers' #808 shape.
+    /// Serialize `msg` to one NDJSON line and take the stdin handle for the
+    /// bounded writer -- the prelude both cancel-aware entry points below
+    /// share. `Err` carries the technical detail (a serialization failure,
+    /// or the detached-writer fail-fast) for the caller's own error
+    /// mapping; the channel state is unchanged on this path.
+    fn line_and_stdin<T: serde::Serialize>(
+        &mut self,
+        msg: &T,
+    ) -> Result<(String, ChildStdin), String> {
+        let mut s = serde_json::to_string(msg).map_err(|e| e.to_string())?;
+        s.push('\n');
+        let stdin = self
+            .stdin
+            .take()
+            .ok_or_else(|| "stdin writer detached after cancel".to_string())?;
+        Ok((s, stdin))
+    }
+
     pub(super) fn write_json_with_cancel<T: serde::Serialize>(
         &mut self,
         msg: &T,
         cancel: &CancelToken,
         child: &mut Child,
     ) -> super::process::StdinWriteOutcome {
-        let mut s = match serde_json::to_string(msg) {
-            Ok(s) => s,
-            Err(e) => {
-                return super::process::StdinWriteOutcome::Failed(std::io::Error::other(
-                    e.to_string(),
-                ))
+        let (line, stdin) = match self.line_and_stdin(msg) {
+            Ok(pair) => pair,
+            Err(detail) => {
+                return super::process::StdinWriteOutcome::Failed(std::io::Error::other(detail))
             }
         };
-        s.push('\n');
-        let Some(stdin) = self.stdin.take() else {
-            return super::process::StdinWriteOutcome::Failed(std::io::Error::other(
-                "stdin writer detached after cancel",
-            ));
-        };
-        let (outcome, stdin) = super::process::write_line_with_cancel(stdin, s, cancel, child);
+        let (outcome, stdin) = super::process::write_line_with_cancel(stdin, line, cancel, child);
         self.stdin = stdin;
         outcome
     }
 
     /// One receive step for multiplexing loops (the turn pump), which own
     /// their own line loop and share the reader channel (+ reader thread)
-    /// via this and the writer via `write_json`.
+    /// via this and the writer via the cancel-aware bounded writes.
     pub(super) fn recv_timeout(&self, timeout: Duration) -> Result<String, mpsc::RecvTimeoutError> {
         self.rx.recv_timeout(timeout)
     }
@@ -226,15 +236,10 @@ impl NdjsonIo {
         cancel: &CancelToken,
         child: &mut Child,
     ) -> Result<(), RoundtripError<Cancelled>> {
-        let mut msg =
-            serde_json::to_string(req).map_err(|e| RoundtripError::Serialize(e.to_string()))?;
-        msg.push('\n');
-        let Some(stdin) = self.stdin.take() else {
-            return Err(RoundtripError::Write(
-                "stdin writer detached after cancel".into(),
-            ));
-        };
-        let (outcome, stdin) = super::process::write_line_with_cancel(stdin, msg, cancel, child);
+        // Both prelude failures map to Write: `map_roundtrip_termination`
+        // folds Serialize and Write onto the same Transient anyway.
+        let (line, stdin) = self.line_and_stdin(req).map_err(RoundtripError::Write)?;
+        let (outcome, stdin) = super::process::write_line_with_cancel(stdin, line, cancel, child);
         self.stdin = stdin;
         match outcome {
             super::process::StdinWriteOutcome::Done => Ok(()),

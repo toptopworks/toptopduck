@@ -130,9 +130,11 @@ pub(super) fn kill_and_reap(child: &mut Child) {
 pub(super) enum StdinWriteOutcome {
     /// Fully written + flushed; the turn proceeds.
     Done,
-    /// The write failed; the child is already killed and reaped (a bounded,
-    /// best-effort reap per [`kill_and_reap`]), and the OS error rides
-    /// along for the caller's `Transient` message.
+    /// The write failed. Either the writer killed + reaped the child (a
+    /// bounded, best-effort reap per [`kill_and_reap`]) or the send never
+    /// reached the writer at all (a serialization failure with the child
+    /// still alive) -- callers settle with a kill either way. The OS error
+    /// rides along for the caller's `Transient` message.
     Failed(std::io::Error),
     /// Cancel landed mid-write; the child was killed (which breaks the pipe
     /// and unblocks the writer) and reaped (bounded, best-effort).
