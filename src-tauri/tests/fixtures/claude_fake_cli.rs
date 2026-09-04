@@ -64,6 +64,7 @@ const SCENARIOS: &[&str] = &[
     "turn_silent",
     "cancel_with_prose",
     "no_stdin_hold",
+    "die_before_stdin",
     "garbage_lines",
     "line_cap_overlong",
     // Probe surface.
@@ -108,6 +109,13 @@ fn run_turn(scenario: &str) {
     if scenario == "no_stdin_hold" {
         std::thread::sleep(std::time::Duration::from_secs(30));
         return;
+    }
+    // The mid-write death leg of the #808 write: a CLI that exits before
+    // draining stdin breaks the oversized prompt write on the pipe, which
+    // settles the turn as a Transient stdin write failure (the codex
+    // fixture's convention).
+    if scenario == "die_before_stdin" {
+        std::process::exit(1);
     }
     // Drain stdin (the flattened prompt) to EOF -- headless mode reads the
     // prompt from stdin.

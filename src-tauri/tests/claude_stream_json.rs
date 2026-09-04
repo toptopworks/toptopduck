@@ -461,6 +461,41 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
     );
 }
 
+/// A CLI that dies before draining stdin breaks the oversized prompt write
+/// mid-pipe: the turn settles as a Transient carrying the stdin write
+/// failure -- the pre-#808-fix behavior's main path, now pinned (the
+/// codex_event_stream.rs peer's rationale).
+#[test]
+fn cli_death_during_stdin_write_settles_transient() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "die_before_stdin");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write is
+    // still in the pipe when the fixture exits -- either the write is
+    // already blocked, or it fails on the broken pipe outright; both land
+    // on the same Failed arm.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    match &outcome.termination {
+        Termination::Transient(msg) => assert!(
+            msg.contains("stdin write failed"),
+            "expected the stdin write failure to ride the Transient: {msg}"
+        ),
+        other => panic!("blocked write + CLI death -> Transient: {other:?}"),
+    }
+    // The child's own death breaks the pipe: no cancel thread, no 30s hold
+    // on this path.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the CLI death did not break the blocked write"
+    );
+}
+
 /// Issue #628: a user cancel mid-answer keeps the partial prose on the tail
 /// round -- the Cancelled termination carries no text for the prose to ride,
 /// so the trace is its only home.

@@ -79,6 +79,14 @@ fn main() {
         return;
     }
 
+    // The mid-write death leg of the #808 write: a CLI that exits before
+    // draining stdin (e.g. a startup config rejection) breaks the oversized
+    // prompt write on the pipe, which settles the turn as a Transient stdin
+    // write failure.
+    if scenario == "die_before_stdin" {
+        std::process::exit(1);
+    }
+
     // Drain stdin (the flattened prompt) to EOF — codex reads the prompt from
     // stdin when no positional arg is given.
     let mut stdin = std::io::stdin();

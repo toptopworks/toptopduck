@@ -125,11 +125,12 @@ pub(super) fn kill_and_reap(child: &mut Child) {
 pub(super) enum PromptWriteOutcome {
     /// Fully written and stdin dropped (EOF signaled); the turn proceeds.
     Done,
-    /// The write failed; the child is already killed and reaped, and the
-    /// OS error rides along for the caller's `Transient` message.
+    /// The write failed; the child is already killed and reaped (a bounded,
+    /// best-effort reap per [`kill_and_reap`]), and the OS error rides
+    /// along for the caller's `Transient` message.
     Failed(std::io::Error),
     /// Cancel landed mid-write; the child was killed (which breaks the pipe
-    /// and unblocks the writer) and reaped.
+    /// and unblocks the writer) and reaped (bounded, best-effort).
     Cancelled,
 }
 
@@ -145,7 +146,8 @@ pub(super) enum PromptWriteOutcome {
 /// blocked write returns, and the writer joins: the turn settles as
 /// Cancelled instead of hanging. The write itself keeps the drivers'
 /// original shape (`write_all` + newline + explicit EOF drop), so a CLI that
-/// does drain stdin sees no change.
+/// does drain stdin sees no change on the wire (the cost of the watch is up
+/// to one poll interval of added latency before `Done` is detected).
 pub(super) fn write_prompt_with_cancel(
     stdin: ChildStdin,
     prompt: String,
@@ -163,9 +165,29 @@ pub(super) fn write_prompt_with_cancel(
     loop {
         if cancel.is_requested() {
             kill_and_reap(child);
-            // The pipe's read end died with the child, so the blocked write
-            // returns promptly and the writer joins here.
-            let _ = writer.join();
+            // Killing the child closes the pipe's read end, so the blocked
+            // write returns and the writer joins here -- unless a grandchild
+            // inherited that read end (the resident-child class ADR-0108
+            // anticipates) or the kill itself failed, in which case a plain
+            // `join()` would hang the turn exactly like the unbounded write
+            // did. The bounded wait below detaches instead (`wait_bounded`'s
+            // doctrine: a bounded wait replaces an unbounded one, never a
+            // hung turn).
+            let deadline = Instant::now() + KILL_REAP_DEADLINE;
+            while !writer.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(KILL_REAP_POLL);
+            }
+            if writer.is_finished() {
+                let _ = writer.join();
+            } else {
+                // Detached, like the reader thread: the writer owns only the
+                // prompt String and the stdin handle, both bounded.
+                log::warn!(
+                    target: "toptopduck::acp",
+                    "stdin prompt writer unjoinable after cancel (a grandchild holds the pipe?); detaching"
+                );
+                drop(writer);
+            }
             return PromptWriteOutcome::Cancelled;
         }
         if writer.is_finished() {
@@ -174,6 +196,7 @@ pub(super) fn write_prompt_with_cancel(
                 // The CLI died mid-write: the drivers' original
                 // reap-then-Transient shape.
                 Ok(Err(e)) => {
+                    log::warn!(target: "toptopduck::acp", "stdin prompt write failed: {e}");
                     kill_and_reap(child);
                     PromptWriteOutcome::Failed(e)
                 }
