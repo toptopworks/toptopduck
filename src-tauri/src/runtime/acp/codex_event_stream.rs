@@ -102,7 +102,27 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
             error: extract_error_detail(value)
                 .unwrap_or_else(|| "turn aborted (no error detail)".to_string()),
         },
-        "item.completed" => parse_item(value.get("item")).unwrap_or(CodexEvent::Other),
+        "item.completed" => {
+            // None = an item type the parser does not recognize, or a
+            // recognized one with a degenerate payload (an empty
+            // reasoning text, a missing agent_message text). Wire drift
+            // lands here, so the drop stays observable at debug level;
+            // the known-legitimate ignored kinds (thread.started,
+            // item.started) never reach this arm.
+            let event = parse_item(value.get("item"));
+            if event.is_none() {
+                log::debug!(
+                    target: "toptopduck::acp",
+                    "unrecognized or degenerate item.completed (item type: {}), staying Other",
+                    value
+                        .get("item")
+                        .and_then(|item| item.get("type"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("<missing>")
+                );
+            }
+            event.unwrap_or(CodexEvent::Other)
+        }
         _ => CodexEvent::Other,
     }
 }
@@ -730,8 +750,9 @@ mod tests {
         );
     }
 
-    /// An empty reasoning text is defensive Other -- the pump would
-    /// otherwise fold an empty thinking block.
+    /// An empty reasoning text is defensive Other -- the fold would
+    /// otherwise open a ghost round and fire a phantom Thinking pointer
+    /// (the AgentMessage guard's same case).
     #[test]
     fn parse_reasoning_empty_text_is_other() {
         let v: Value = serde_json::json!({
@@ -1516,6 +1537,28 @@ mod tests {
             thinking.text, "thinking...",
             "the started variant contributes nothing"
         );
+    }
+
+    /// Two reasoning items landing in the same call-less stretch share
+    /// the round and concatenate verbatim, separator-less -- the
+    /// whole-block join convention the agent_message path and the
+    /// yoagent fold also use. The wire's two-item-per-round shape is
+    /// unmeasured (the capture carries one), so this pins today's
+    /// behavior, not an observed shape.
+    #[test]
+    fn two_reasoning_items_in_one_round_concatenate_verbatim() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        for text in ["block one", "block two"] {
+            pump.fold(CodexEvent::Reasoning { text: text.into() }, &mut |p| {
+                phases.push(p)
+            });
+        }
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
+        assert_eq!(rounds.len(), 1, "no call separates the two items");
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert_eq!(thinking.text, "block oneblock two");
+        assert_eq!(thinking.duration_ms, 0);
     }
 
     // --- pump fold: exit_code mapping (issue #804) ---------------------------

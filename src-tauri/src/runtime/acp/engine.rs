@@ -903,7 +903,7 @@ impl RoundTracker {
     /// [`freeze_trailing_thinking`]'s `unwrap_or(0)` lands the duration at
     /// zero by construction (issue #807) -- pinned like the yoagent path's
     /// `thinking_trace`. `push_thought` is wrong here: its clock would
-    /// measure a fabricated reasoning-arrival-to-first-call window.
+    /// measure a fabricated reasoning-arrival-to-freeze window.
     pub(super) fn push_thought_pinned(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
         let round = self.open_round(on_phase);
         push_capped(&mut round.thinking_buf, text);
