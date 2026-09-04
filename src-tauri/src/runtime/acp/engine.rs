@@ -1254,11 +1254,12 @@ fn name_summary(title: Option<&str>, id: &str) -> (String, String) {
 // ---------------------------------------------------------------------------
 
 /// The gateway tools' namespaced prefix as external CLIs surface them
-/// (`mcp__<GATEWAY_SERVER_NAME>__<tool>`; both claude-code and the ACP
-/// adapters namespace MCP tools this way). A `session/request_permission`
-/// whose tool name carries it is a gateway-bridged call, not a CLI-native
-/// tool, and maps back to the built-in lane (issue #800). Kept a literal
-/// (argv constants cannot concatenate) with a drift-guard test against
+/// (`mcp__<GATEWAY_SERVER_NAME>__<tool>`). The claude-code half is measured
+/// (issue #800's real-machine denial); the ACP adapters' request_permission
+/// title shape is expected to match but is pending the post-merge
+/// real-machine AC — a miss degrades to the external fail-fast lane (warned
+/// in `decide_permission`), never an over-allow. Kept a literal (argv
+/// constants cannot concatenate) with a drift-guard test against
 /// [`crate::session::GATEWAY_SERVER_NAME`].
 const GATEWAY_TOOL_PREFIX: &str = "mcp__toptopduck-gateway__";
 
@@ -1287,21 +1288,45 @@ fn decide_permission(
         .clone()
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| params.tool_call.tool_call_id.clone());
-    // Gateway-bridged tool names map back to the built-in lane (issue #800):
-    // the four DuckDB tools classify Allow on the CLI's permission handshake,
-    // mirroring the gateway's own zero-approval rule (ADR-0080 Decision 1)
-    // instead of fail-fast reject. The gateway still enforces its gate at
-    // call time; the CLI's own tools keep the external lane below.
+    // Gateway-bridged tool names map back to the built-in lane (issue #800).
+    // The lane is server-scoped, not a tool enumeration: any name carrying
+    // the prefix classifies Allow on the CLI's permission handshake
+    // (`is_builtin` checks the server, never the tool). On today's bridge
+    // surface that is the four DuckDB tools (the primary case, the
+    // ADR-0080 Decision 1 zero-approval mirror) plus the CLI registrations /
+    // meta / skill tools the gateway also advertises under the same server
+    // name — those still meet the gateway's own gate at call time. The
+    // gateway enforces its gate at call time; the CLI's own tools keep the
+    // external lane below.
     let key = match tool_name
         .strip_prefix(GATEWAY_TOOL_PREFIX)
         .map(ToolKey::builtin)
     {
         Some(key) => key,
-        // Issue #312: adapter ids are controlled literals (codex / gemini), never
-        // the reserved builtin name — `expect` is safe and keeps the type-level
-        // invariant visible.
-        None => ToolKey::try_external(adapter.id.as_str(), tool_name)
-            .expect("ACP adapter id is not the reserved builtin name"),
+        None => {
+            // Never silent (the #543 precedent): a name that carries the
+            // gateway server name but missed the exact prefix is prefix
+            // drift or a CLI namespace variance — the #800 symptom
+            // returning. Fail-fast below is the safe direction; the warn
+            // keeps the degradation observable (the in-band reject is
+            // otherwise indistinguishable from a genuine foreign tool).
+            if tool_name.contains(crate::session::GATEWAY_SERVER_NAME) {
+                log::warn!(
+                    target: "toptopduck::acp",
+                    "gateway-shaped permission request '{}' missed the gateway \
+                     tool prefix; failing fast (prefix drift or CLI namespace \
+                     variance)",
+                    tool_name
+                );
+            }
+            // Issue #312: adapter ids are controlled literals (codex /
+            // gemini), never the reserved builtin name — `expect` is safe
+            // and keeps the type-level invariant visible. (`tool_name` is
+            // cloned so the pre-mapping name stays available for the card
+            // body below.)
+            ToolKey::try_external(adapter.id.as_str(), tool_name.clone())
+                .expect("ACP adapter id is not the reserved builtin name")
+        }
     };
     let mode = approval.auth_mode();
     let trust: HashSet<ToolKey> = approval.trust_list().into_iter().collect();
@@ -1315,12 +1340,15 @@ fn decide_permission(
     let body = crate::approval::ApprovalRequestBody {
         request_id: params.tool_call.tool_call_id.clone(),
         server: key.server.clone(),
-        tool: key.tool.clone(),
+        // The card's tool/summary use the PRE-mapping `tool_name` — the
+        // same source as the `ToolCallStarted` phase event (`name_summary`)
+        // — so the frontend's call-row merge predicate (`a.tool ===
+        // call.name && a.summary === call.summary`, useTurnFlow) keeps
+        // matching gateway calls; the stripped `key` remains the policy
+        // identity (server stays "builtin").
+        tool: tool_name.clone(),
         operation_kind,
-        // Reuse `key.tool` (= tool_name with empty-title filter applied) so
-        // the summary and tool field stay consistent and we avoid recomputing
-        // the title-fallback expression (review M3).
-        summary: crate::approval::truncate_summary(&key.tool, crate::approval::SUMMARY_MAX_CHARS),
+        summary: crate::approval::truncate_summary(&tool_name, crate::approval::SUMMARY_MAX_CHARS),
         // ACP permission requests carry no file-delivery values (issue #672
         // is the registered-CLI card's channel); the field rides empty.
         file_attachments: Vec::new(),
@@ -1685,10 +1713,14 @@ mod tests {
     }
 
     /// Issue #800: a gateway-bridged tool name (`mcp__<gateway>__<tool>`)
-    /// maps back to the built-in lane, so the four DuckDB tools classify
-    /// Allow even under the default PerCall posture — the CLI-side mirror of
-    /// the gateway's own zero-approval rule (ADR-0080 Decision 1). The
-    /// gateway still enforces its gate at call time.
+    /// maps back to the built-in lane, classifying Allow even under the
+    /// default PerCall posture. The lane is server-scoped, not a tool
+    /// enumeration — the four DuckDB tools are the primary case (the
+    /// CLI-side mirror of ADR-0080 Decision 1), and any non-builtin bridge
+    /// tool meeting the same mapping still answers to the gateway's own
+    /// gate at call time. The card body keeps the PRE-mapping name so the
+    /// frontend's call-row merge predicate (`a.tool === call.name`) still
+    /// matches (review follow-up).
     #[test]
     fn decide_permission_gateway_tool_allows_under_per_call() {
         use crate::approval::ApprovalState;
@@ -1714,19 +1746,28 @@ mod tests {
                 },
             ],
         };
-        let outcome = decide_permission(
-            &adapter,
-            &params,
-            &approval,
-            &NullAcpSink,
-            &CancelToken::new(),
-        );
+        let sink = RecordingAcpSink::new();
+        let outcome = decide_permission(&adapter, &params, &approval, &sink, &CancelToken::new());
         match outcome {
             RequestPermissionOutcome::Selected { option_id } => {
                 assert_eq!(option_id, "allow_once", "gateway tools auto-allow");
             }
             other => panic!("expected Selected allow, got {other:?}"),
         }
+        // The card keeps the full namespaced title (the phase event's
+        // `name_summary` source); the stripped key is the policy identity
+        // only.
+        let body = sink
+            .last_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("card emitted");
+        assert_eq!(body.tool, "mcp__toptopduck-gateway__explore");
+        assert_eq!(
+            body.server, "builtin",
+            "the policy identity is the builtin lane"
+        );
     }
 
     /// Only the gateway server's prefix maps to the built-in lane: a tool on
@@ -1766,6 +1807,51 @@ mod tests {
         match outcome {
             RequestPermissionOutcome::Selected { option_id } => {
                 assert_eq!(option_id, "reject", "foreign server names stay fail-fast");
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
+    }
+
+    /// Issue #800 (review follow-up): a title that carries the gateway
+    /// server name but misses the exact prefix (a single hyphen for the
+    /// double underscore — the drift shape a CLI namespace variance would
+    /// produce) stays fail-fast, the safe direction, with the miss warned
+    /// rather than silent (see the warn in `decide_permission`).
+    #[test]
+    fn decide_permission_gateway_shaped_miss_stays_fail_fast() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway-explore".into()),
+                kind: Some(wire::ToolKind::Other),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "reject", "a near-miss prefix stays fail-fast");
             }
             other => panic!("expected Selected reject, got {other:?}"),
         }

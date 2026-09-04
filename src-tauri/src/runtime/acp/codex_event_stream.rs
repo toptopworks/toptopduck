@@ -225,14 +225,18 @@ pub(crate) fn build_config_overrides(mcp_servers: &[McpServer]) -> Vec<String> {
             // approval gate auto-rejects annotation-less MCP tools (their
             // destructive / open-world hints default to needing approval) —
             // `user cancelled MCP tool call` before the call reaches the
-            // gateway. `approve` exempts this server's tools only; the shell
-            // approval policy and the read-only sandbox posture (ADR-0094)
-            // are untouched.
-            flags.push("-c".to_string());
-            flags.push(format!(
-                "mcp_servers.{name}.default_tools_approval_mode={}",
-                encode_toml_string("approve")
-            ));
+            // gateway. Gated on the gateway server IDENTITY, not loop
+            // membership: only the bridge ever earns `approve`, so a future
+            // non-gateway Stdio entry in this slice cannot silently inherit
+            // the exemption; the shell approval policy and the read-only
+            // sandbox posture (ADR-0094) are untouched.
+            if name.as_str() == crate::session::GATEWAY_SERVER_NAME {
+                flags.push("-c".to_string());
+                flags.push(format!(
+                    "mcp_servers.{name}.default_tools_approval_mode={}",
+                    encode_toml_string("approve")
+                ));
+            }
         }
     }
     flags
@@ -791,6 +795,12 @@ mod tests {
         assert!(args_flag.is_some());
         assert!(args_flag.unwrap().contains("\"--flag\""));
         assert!(args_flag.unwrap().contains("\"value\""));
+        // Issue #800 (review follow-up): the approve override is gated on
+        // the gateway server identity — a non-gateway Stdio entry never
+        // inherits the exemption.
+        assert!(!flags
+            .iter()
+            .any(|f| f.contains("default_tools_approval_mode")));
     }
 
     /// Parse the RHS of a `-c key=value` override with TOML value semantics,
