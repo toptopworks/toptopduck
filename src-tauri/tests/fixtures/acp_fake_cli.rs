@@ -275,6 +275,26 @@ fn main() {
                         error: None,
                     },
                 );
+                // `no_stdin_hold` (issue #813): the handshake completes, then
+                // the agent stops reading stdin for good (a real CLI wedging
+                // in its own MCP init after a healthy handshake). The 30s
+                // hold keeps the read end alive so the engine's oversized
+                // prompt write blocks in the pipe -- only a cancel-driven
+                // kill may break it (a missed break fails loudly at 30s
+                // instead of hanging CI).
+                if scenario == "no_stdin_hold" {
+                    thread::sleep(std::time::Duration::from_secs(30));
+                    std::process::exit(0);
+                }
+                // `die_before_stdin` (issue #813): the handshake completes,
+                // then the agent dies before draining the prompt -- the
+                // oversized write is either still blocked in the pipe (the
+                // exit closes the read end and unblocks it with a broken
+                // pipe) or fails on the closed pipe outright; both land on
+                // the same write-failure settle.
+                if scenario == "die_before_stdin" {
+                    std::process::exit(0);
+                }
             }
             Some("session/prompt") => {
                 play_scenario(&scenario, &mut out, &id, &v, &mut reader, &mut cancel_seen);

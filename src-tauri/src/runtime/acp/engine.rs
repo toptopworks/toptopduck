@@ -249,7 +249,7 @@ impl AcpEngine {
 
         // Handshake: initialize -> session/new. A failure here is a transient
         // turn failure (the CLI is not an ACP agent / crashed).
-        let hs = match handshake(&mut io, &self.cancel, input, &self.adapter) {
+        let hs = match handshake(&mut io, &mut child, &self.cancel, input, &self.adapter) {
             Ok(hs) => hs,
             Err(term) => {
                 let outcome = self.outcome(term, Vec::new(), None);
@@ -298,7 +298,11 @@ impl AcpEngine {
                     value: value.clone(),
                 },
             );
-            match io.request_roundtrip::<SetConfigOptionParams, Value>(&self.cancel, req) {
+            match io.request_roundtrip::<SetConfigOptionParams, Value>(
+                &mut child,
+                &self.cancel,
+                req,
+            ) {
                 Err(term) => {
                     let outcome = self.outcome(term, Vec::new(), discovered);
                     child.kill_and_wait();
@@ -343,14 +347,29 @@ impl AcpEngine {
                 blocks: input.prompt_blocks.clone(),
             },
         );
-        if io.write_json(&prompt).is_err() {
-            let outcome = self.outcome(
-                Termination::Transient("session/prompt: broken pipe before send".into()),
-                Vec::new(),
-                discovered,
-            );
-            child.kill_and_wait();
-            return outcome;
+        // Issue #813: the prompt is the whole windowed context (often past
+        // the OS pipe buffer), so the send rides the cancel-aware bounded
+        // writer -- a child that stalls before draining stdin cannot wedge
+        // the turn, and the handed-back stdin keeps the channel alive for
+        // the pump's mid-turn writes.
+        match io.write_json_with_cancel(&prompt, &self.cancel, &mut child) {
+            super::process::StdinWriteOutcome::Done => {}
+            // The dead-channel send keeps its pre-#813 message, now with the
+            // io detail riding along (the sibling drivers' #808 shape).
+            super::process::StdinWriteOutcome::Failed(e) => {
+                let outcome = self.outcome(
+                    Termination::Transient(format!("session/prompt: broken pipe before send: {e}")),
+                    Vec::new(),
+                    discovered,
+                );
+                child.kill_and_wait();
+                return outcome;
+            }
+            super::process::StdinWriteOutcome::Cancelled => {
+                let outcome = self.outcome(Termination::Cancelled, Vec::new(), discovered);
+                child.kill_and_wait();
+                return outcome;
+            }
         }
 
         let mut pump = Pump {
@@ -364,6 +383,7 @@ impl AcpEngine {
             &self.cancel,
             &self.adapter,
             &session_id,
+            &mut child,
             &mut pump,
             approval,
             sink,
@@ -466,11 +486,13 @@ fn discovered_config_id<'a>(catalog_id: &'a Option<String>, standard: &'static s
 
 fn handshake(
     io: &mut AcpIo,
+    child: &mut ChildHandle,
     cancel: &CancelToken,
     input: &AcpTurnInput,
     adapter: &AdapterSpec,
 ) -> Result<HandshakeOutcome, Termination> {
     let init = io.request_roundtrip::<InitializeParams, wire::InitializeResult>(
+        child,
         cancel,
         Request::new(
             RequestId::Num(1),
@@ -492,6 +514,7 @@ fn handshake(
         (None, None) => return Err(Termination::Transient("initialize: empty response".into())),
     }
     let new_resp = io.request_roundtrip::<NewSessionParams, wire::NewSessionResult>(
+        child,
         cancel,
         Request::new(
             RequestId::Num(2),
@@ -555,7 +578,7 @@ fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
 /// [`Termination`]. The multiplexing prompt pump below keeps its own line
 /// loop -- it folds `session/update` and services `session/request_permission`
 /// -- and shares the reader channel via [`Self::recv_timeout`] and the writer
-/// via [`Self::write_json`].
+/// via [`Self::write_json_with_cancel`].
 struct AcpIo {
     inner: super::ndjson::NdjsonIo,
 }
@@ -567,10 +590,20 @@ impl AcpIo {
         }
     }
 
-    /// Delegates to [`super::ndjson::NdjsonIo::write_json`] (one NDJSON line +
-    /// flush).
-    fn write_json<T: serde::Serialize>(&mut self, msg: &T) -> Result<(), std::io::Error> {
-        self.inner.write_json(msg)
+    /// Serialize + write one message through the cancel-aware bounded writer
+    /// (issue #813): the `session/prompt` send and the pump's mid-turn
+    /// writes (`session/cancel`, permission responses) all ride it, so a
+    /// stalled child cannot wedge the turn before a cancel check becomes
+    /// reachable. The mid-pump callers keep ignoring the outcome (`let _`):
+    /// a killed child surfaces as EOF / cancel on the next recv.
+    fn write_json_with_cancel<T: serde::Serialize>(
+        &mut self,
+        msg: &T,
+        cancel: &CancelToken,
+        child: &mut ChildHandle,
+    ) -> super::process::StdinWriteOutcome {
+        self.inner
+            .write_json_with_cancel(msg, cancel, &mut child.inner)
     }
 
     /// One receive step for the prompt pump below.
@@ -583,12 +616,13 @@ impl AcpIo {
     /// [`super::ndjson::NdjsonIo::request_roundtrip_cancel`]).
     fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &mut self,
+        child: &mut ChildHandle,
         cancel: &CancelToken,
         req: Request<P>,
     ) -> Result<Response<R>, Termination> {
         let target = serde_json::to_value(&req.id).unwrap_or(Value::Null);
         self.inner
-            .request_roundtrip_cancel(&req, &target, cancel)
+            .request_roundtrip_cancel(&req, &target, cancel, &mut child.inner)
             .map_err(map_roundtrip_termination)
     }
 
@@ -605,6 +639,7 @@ impl AcpIo {
         cancel: &CancelToken,
         adapter: &AdapterSpec,
         session_id: &str,
+        child: &mut ChildHandle,
         pump: &mut Pump,
         approval: &crate::approval::ApprovalState,
         sink: &dyn ApprovalSink,
@@ -616,12 +651,16 @@ impl AcpIo {
             let user_cancelled = cancel.is_requested();
             let step_cap_tripped = pump.tool_call_count > pump.step_cap;
             if (user_cancelled || step_cap_tripped) && pump.cancel_sent_at.is_none() {
-                let _ = self.write_json(&wire::Notification::new(
-                    "session/cancel",
-                    CancelParams {
-                        session_id: session_id.to_string(),
-                    },
-                ));
+                let _ = self.write_json_with_cancel(
+                    &wire::Notification::new(
+                        "session/cancel",
+                        CancelParams {
+                            session_id: session_id.to_string(),
+                        },
+                    ),
+                    cancel,
+                    child,
+                );
                 pump.cancel_sent_at = Some(Instant::now());
             }
             // Grace elapsed after cancel with no response -> give up (the
@@ -667,43 +706,56 @@ impl AcpIo {
                                     // Malformed permission request: refuse with -32602
                                     // so the agent is not left waiting, and no phantom
                                     // decision is recorded against empty ids.
-                                    let _ = self.write_json(&Response::<Value> {
-                                        jsonrpc: "2.0".to_string(),
-                                        id: parse_id(&req_id),
-                                        result: None,
-                                        error: Some(wire::RpcError {
-                                            code: -32602,
-                                            message: "invalid params: session/request_permission"
-                                                .into(),
-                                            data: None,
-                                        }),
-                                    });
+                                    let _ = self.write_json_with_cancel(
+                                        &Response::<Value> {
+                                            jsonrpc: "2.0".to_string(),
+                                            id: parse_id(&req_id),
+                                            result: None,
+                                            error: Some(wire::RpcError {
+                                                code: -32602,
+                                                message:
+                                                    "invalid params: session/request_permission"
+                                                        .into(),
+                                                data: None,
+                                            }),
+                                        },
+                                        cancel,
+                                        child,
+                                    );
                                     continue;
                                 }
                             };
                             let outcome =
                                 decide_permission(adapter, &params, approval, sink, cancel);
-                            let _ = self.write_json(&Response::<RequestPermissionResult> {
-                                jsonrpc: "2.0".to_string(),
-                                id: parse_id(&req_id),
-                                result: Some(RequestPermissionResult { outcome }),
-                                error: None,
-                            });
+                            let _ = self.write_json_with_cancel(
+                                &Response::<RequestPermissionResult> {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: parse_id(&req_id),
+                                    result: Some(RequestPermissionResult { outcome }),
+                                    error: None,
+                                },
+                                cancel,
+                                child,
+                            );
                             continue;
                         }
                         if v.get("id").is_some() {
                             // Unknown agent request -- respond method-not-found
                             // so the agent is not left waiting.
-                            let _ = self.write_json(&Response::<Value> {
-                                jsonrpc: "2.0".to_string(),
-                                id: parse_id(&v["id"]),
-                                result: None,
-                                error: Some(wire::RpcError {
-                                    code: -32601,
-                                    message: "method not found".into(),
-                                    data: None,
-                                }),
-                            });
+                            let _ = self.write_json_with_cancel(
+                                &Response::<Value> {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: parse_id(&v["id"]),
+                                    result: None,
+                                    error: Some(wire::RpcError {
+                                        code: -32601,
+                                        message: "method not found".into(),
+                                        data: None,
+                                    }),
+                                },
+                                cancel,
+                                child,
+                            );
                             continue;
                         }
                         // Notification -- route session/update; ignore others.
