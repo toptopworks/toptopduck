@@ -87,20 +87,36 @@ impl ApprovalSink for NoopSink {
 // ---------------------------------------------------------------------------
 
 /// A clean text reply: agent_message + turn.completed -> Text with the streamed
-/// text; no tool calls -> empty trace.
+/// text. The turn's reasoning item folds into a thinking-only trailing round
+/// (issue #807): the prose rides the terminal text, the thinking stays on the
+/// round with its duration pinned to 0, and the turn-end freeze fires the
+/// live ThinkingCompleted phase.
 #[test]
-fn text_reply_yields_text_outcome_and_no_trace() {
+fn text_reply_folds_reasoning_into_a_thinking_round() {
     let (outcome, phases, _) = run("text_reply", 24);
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
     }
-    assert!(outcome.trace.is_empty(), "no tool calls -> empty trace");
+    assert_eq!(outcome.trace.len(), 1, "the reasoning opens one round");
+    let round = &outcome.trace[0];
+    assert!(round.calls.is_empty(), "no tool calls");
+    assert_eq!(round.text, None, "the prose rides the terminal text");
+    let thinking = round.thinking.as_ref().expect("the reasoning folds");
+    assert_eq!(thinking.text, "thinking...");
+    assert_eq!(thinking.duration_ms, 0, "no fabricated window");
     assert!(
         phases
             .iter()
             .any(|p| matches!(p, TurnPhase::Thinking { attempt: 1 })),
         "a Thinking phase fires before the event pump"
+    );
+    assert!(
+        phases.iter().any(
+            |p| matches!(p, TurnPhase::ThinkingCompleted { duration_ms, text }
+                if *duration_ms == 0 && text == "thinking...")
+        ),
+        "the turn-end freeze fires the live ThinkingCompleted"
     );
 }
 

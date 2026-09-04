@@ -57,6 +57,10 @@ pub(crate) enum CodexEvent {
     /// Agent text fragment — accumulated across the turn (the `text` of an
     /// `agent_message` item).
     AgentMessage { text: String },
+    /// A completed reasoning item (the `text` of a `reasoning` item,
+    /// issue #807) — the turn's thinking text. Never empty: an empty or
+    /// missing text stays [`Self::Other`] at the parse boundary.
+    Reasoning { text: String },
     /// A completed command execution (`command_execution` item). `exit_code`
     /// maps the trace outcome: zero succeeds, non-zero fails; an absent /
     /// null code is an unknown outcome that stays success.
@@ -82,7 +86,8 @@ pub(crate) enum CodexEvent {
 /// payload. `item.started` is the streaming variant of the same items —
 /// its output is not yet aggregated and folding it would double every
 /// row, so it stays [`CodexEvent::Other`] like every other unmeasured
-/// type (`thread.started`, `reasoning` items, ...).
+/// type (`thread.started`, ...); the reasoning item folds only its
+/// completed envelope (issue #807).
 pub(crate) fn parse_event(value: &Value) -> CodexEvent {
     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match event_type {
@@ -102,9 +107,10 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
     }
 }
 
-/// Parse the nested `item` of an `item.completed` envelope. Only the two
-/// item types that drive the turn are recognized: `agent_message` (the
-/// text rides `item.text`) and `command_execution` (issue #804).
+/// Parse the nested `item` of an `item.completed` envelope. Only the item
+/// types that drive the turn are recognized: `agent_message` (the text
+/// rides `item.text`), `reasoning` (non-empty `item.text`, issue #807),
+/// and `command_execution` (issue #804).
 fn parse_item(item: Option<&Value>) -> Option<CodexEvent> {
     let item = item?;
     match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
@@ -115,6 +121,13 @@ fn parse_item(item: Option<&Value>) -> Option<CodexEvent> {
                     text: text.to_string(),
                 })
         }
+        "reasoning" => item
+            .get("text")
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.is_empty())
+            .map(|text| CodexEvent::Reasoning {
+                text: text.to_string(),
+            }),
         "command_execution" => extract_command(item),
         _ => None,
     }
@@ -400,6 +413,12 @@ pub(super) fn run_codex_event_stream(
             .text_or_transient("codex turn ended without a terminal event")
     });
 
+    // Close the trailing round's thought stream before the settle (the
+    // claude path's turn-end freeze, issue #807): `settle_rounds` reads
+    // only frozen thinking, so an unfrozen buffer would silently drop, and
+    // a call-less trailing round holding reasoning must survive the pop.
+    // No pending-row drain here -- command events carry no result frame.
+    pump.tracker.freeze_trailing_thinking(&mut on_phase);
     let rounds = pump.tracker.settle_rounds(&term);
     outcome(term, rounds)
 }
@@ -487,6 +506,13 @@ impl JsonPump {
                 self.tracker.land_call(round, entry);
                 None
             }
+            CodexEvent::Reasoning { text } => {
+                // The parse boundary guarantees a non-empty text, so the
+                // fold needs no empty guard. Duration stays pinned to 0
+                // (push_thought_pinned's no-clock contract, issue #807).
+                self.tracker.push_thought_pinned(&text, on_phase);
+                None
+            }
             CodexEvent::Other => None,
         }
     }
@@ -539,6 +565,20 @@ mod tests {
     fn fixture_event(line: &str) -> CodexEvent {
         let v: Value = serde_json::from_str(line).unwrap();
         parse_event(&v)
+    }
+
+    /// The end-of-turn freeze + settle the driver performs (the claude
+    /// path's settle seam, issue #807): freeze the trailing round's thought
+    /// stream (its ThinkingCompleted renders live), then settle the rounds
+    /// under the turn's termination.
+    fn settle(
+        mut pump: JsonPump,
+        phases: &mut Vec<TurnPhase>,
+        termination: &Termination,
+    ) -> Vec<LoopRound> {
+        pump.tracker
+            .freeze_trailing_thinking(&mut |p| phases.push(p));
+        pump.tracker.settle_rounds(termination)
     }
 
     #[test]
@@ -678,9 +718,53 @@ mod tests {
         assert_eq!(fixture_event(MEASURED_TURN_NDJSON[0]), CodexEvent::Other);
     }
 
+    /// A completed reasoning item folds its text (issue #807): the
+    /// per-round thinking fold's wire source.
     #[test]
-    fn parse_reasoning_item_is_other() {
-        assert_eq!(fixture_event(MEASURED_TURN_NDJSON[2]), CodexEvent::Other);
+    fn parse_reasoning_item() {
+        assert_eq!(
+            fixture_event(MEASURED_TURN_NDJSON[2]),
+            CodexEvent::Reasoning {
+                text: "thinking...".into()
+            }
+        );
+    }
+
+    /// An empty reasoning text is defensive Other -- the pump would
+    /// otherwise fold an empty thinking block.
+    #[test]
+    fn parse_reasoning_empty_text_is_other() {
+        let v: Value = serde_json::json!({
+            "type": "item.completed",
+            "item": {"id": "item_0", "type": "reasoning", "text": ""}
+        });
+        assert_eq!(parse_event(&v), CodexEvent::Other);
+    }
+
+    /// A reasoning item carrying no text field (or a non-string one)
+    /// contributes nothing.
+    #[test]
+    fn parse_reasoning_missing_or_non_string_text_is_other() {
+        for item in [
+            serde_json::json!({"id": "item_0", "type": "reasoning"}),
+            serde_json::json!({"id": "item_0", "type": "reasoning", "text": 42}),
+        ] {
+            let v: Value = serde_json::json!({"type": "item.completed", "item": item});
+            assert_eq!(parse_event(&v), CodexEvent::Other, "shape parsed: {v}");
+        }
+    }
+
+    /// The `item.started` streaming variant of a reasoning item stays Other
+    /// -- the completed envelope is the only folded half, so a wire that
+    /// streams both never double-counts the block (the `command_execution`
+    /// precedent, issue #807's measured-but-unconfirmed case).
+    #[test]
+    fn parse_item_started_reasoning_is_other() {
+        let v: Value = serde_json::json!({
+            "type": "item.started",
+            "item": {"id": "item_0", "type": "reasoning", "text": "thinking..."}
+        });
+        assert_eq!(parse_event(&v), CodexEvent::Other);
     }
 
     #[test]
@@ -1277,6 +1361,163 @@ mod tests {
         );
     }
 
+    // --- pump fold: reasoning thinking fold (issue #807) ---------------------
+
+    /// A reasoning item folds into the round's thinking via the existing
+    /// prelude mechanism: the buffer holds it until the batch's first call
+    /// freezes it as ThinkingCompleted, followed by the round's prose, then
+    /// the batch's call events. Reasoning, prose, and the call batch share
+    /// ONE round (issue #807's attribution ruling).
+    #[test]
+    fn reasoning_folds_into_round_thinking_pinned_zero() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::Reasoning {
+                text: "planning the query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "the reasoning buffers -- no phase fires until the prelude or turn end"
+        );
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "explore SELECT 1".into(),
+                exit_code: None,
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
+        assert_eq!(
+            rounds.len(),
+            1,
+            "reasoning, prose, and the call share one round"
+        );
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert_eq!(thinking.text, "planning the query");
+        assert_eq!(thinking.duration_ms, 0, "no fabricated window");
+        assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
+        assert_eq!(rounds[0].calls.len(), 1);
+        // The prelude's ADR-0103 live order: ThinkingCompleted, then
+        // RoundText, then the batch's ToolCallStarted.
+        assert!(matches!(
+            &phases[0],
+            TurnPhase::ThinkingCompleted { duration_ms, text }
+                if *duration_ms == 0 && text == "planning the query"
+        ));
+        assert!(matches!(
+            &phases[1],
+            TurnPhase::RoundText { text } if text == "let me query"
+        ));
+        assert!(matches!(&phases[2], TurnPhase::ToolCallStarted { .. }));
+    }
+
+    /// Reasoning landing AFTER the last call batch stays visible: the
+    /// trailing round's thinking survives the turn-end freeze whether or
+    /// not closing prose follows, and the freeze fires its live
+    /// ThinkingCompleted (issue #807 acceptance criteria 2).
+    #[test]
+    fn reasoning_after_last_batch_survives_turn_end_freeze() {
+        // Shape A: reasoning -> closing prose. The prose rides the terminal
+        // text; the thinking stays on the round.
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+                exit_code: None,
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::Reasoning {
+                text: "wrapping up".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::AgentMessage {
+                text: "the answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = settle(pump, &mut phases, &Termination::Text("the answer".into()));
+        assert_eq!(rounds.len(), 2);
+        let thinking = rounds[1].thinking.as_ref().expect("trailing thinking");
+        assert_eq!(thinking.text, "wrapping up");
+        assert_eq!(thinking.duration_ms, 0);
+        assert_eq!(
+            rounds[1].text, None,
+            "the closing prose rides the terminal text"
+        );
+        assert!(
+            phases.iter().any(|p| matches!(p,
+                TurnPhase::ThinkingCompleted { duration_ms: 0, text } if text == "wrapping up")),
+            "the turn-end freeze fires its ThinkingCompleted"
+        );
+
+        // Shape B: reasoning-only trailing round -- no prose follows.
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::CommandExecution {
+                call_id: "call_1".into(),
+                command: "ls".into(),
+                exit_code: None,
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            CodexEvent::Reasoning {
+                text: "done thinking".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
+        assert_eq!(
+            rounds.len(),
+            2,
+            "the reasoning-only trailing round is not popped"
+        );
+        let thinking = rounds[1].thinking.as_ref().expect("trailing thinking");
+        assert_eq!(thinking.text, "done thinking");
+        assert_eq!(rounds[1].text, None);
+    }
+
+    /// A wire that streams BOTH the item.started and item.completed
+    /// reasoning envelopes folds the text once: the started variant parses
+    /// to Other at the boundary (issue #807 acceptance criteria 6).
+    #[test]
+    fn reasoning_started_variant_never_doubles() {
+        let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
+        pump.fold(
+            fixture_event(
+                r#"{"type":"item.started","item":{"id":"item_0","type":"reasoning","text":"thinking..."}}"#,
+            ),
+            &mut |p| phases.push(p),
+        );
+        pump.fold(fixture_event(MEASURED_TURN_NDJSON[2]), &mut |p| {
+            phases.push(p)
+        });
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert_eq!(
+            thinking.text, "thinking...",
+            "the started variant contributes nothing"
+        );
+    }
+
     // --- pump fold: exit_code mapping (issue #804) ---------------------------
 
     /// A non-zero exit code lands a failed trace row whose failure anchor
@@ -1323,15 +1564,17 @@ mod tests {
 
     /// The measured turn drives the pump to a normal Text termination: the
     /// agent_message lands the terminal text, the command lands exactly one
-    /// trace row (the streaming `item.started` variant never folds), and
+    /// trace row (the streaming `item.started` variant never folds), the
+    /// reasoning folds into the round's thinking (issue #807), and
     /// `turn.completed` settles the turn before any stdout-close fallback
     /// could fire (issue #804 acceptance criteria 1-4).
     #[test]
     fn measured_turn_sequence_settles_as_text() {
         let mut pump = JsonPump::new(24);
+        let mut phases = Vec::new();
         let mut termination = None;
         for line in MEASURED_TURN_NDJSON {
-            if let Some(term) = pump.fold(fixture_event(line), &mut |_| {}) {
+            if let Some(term) = pump.fold(fixture_event(line), &mut |p| phases.push(p)) {
                 termination = Some(term);
                 break;
             }
@@ -1341,9 +1584,7 @@ mod tests {
             Some(Termination::Text("the answer".into())),
             "turn.completed settles the turn; the stdout-close fallback never fires"
         );
-        let rounds = pump
-            .tracker
-            .settle_rounds(&Termination::Text("the answer".into()));
+        let rounds = settle(pump, &mut phases, &Termination::Text("the answer".into()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(
             rounds[0].calls.len(),
@@ -1354,5 +1595,11 @@ mod tests {
         assert_eq!(call.tool_use_id, "item_1");
         assert_eq!(call.name, "<command>");
         assert!(call.success, "exit_code 0 lands a succeeded row");
+        let thinking = rounds[0]
+            .thinking
+            .as_ref()
+            .expect("measured reasoning folds");
+        assert_eq!(thinking.text, "thinking...");
+        assert_eq!(thinking.duration_ms, 0);
     }
 }

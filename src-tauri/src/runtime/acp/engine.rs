@@ -897,6 +897,18 @@ impl RoundTracker {
         push_capped(&mut round.thinking_buf, text);
     }
 
+    /// A reasoning chunk grows the current round's thinking stream WITHOUT
+    /// starting the duration clock: the codex path's completed whole-block
+    /// arrival carries no measurable window, so
+    /// [`freeze_trailing_thinking`]'s `unwrap_or(0)` lands the duration at
+    /// zero by construction (issue #807) -- pinned like the yoagent path's
+    /// `thinking_trace`. `push_thought` is wrong here: its clock would
+    /// measure a fabricated reasoning-arrival-to-first-call window.
+    pub(super) fn push_thought_pinned(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
+        let round = self.open_round(on_phase);
+        push_capped(&mut round.thinking_buf, text);
+    }
+
     /// The round a tool call belongs to (the current one) and its call
     /// seal: the round's FIRST call fires the thinking + prose prelude
     /// before its `ToolCallStarted` event.
@@ -1564,6 +1576,31 @@ mod tests {
         assert_eq!(tracker.text, "short");
         assert_eq!(tracker.rounds[0].text, "short");
         assert_eq!(tracker.rounds[0].thinking_buf, "brief");
+    }
+
+    /// Issue #807: the pinned thought chunk grows the buffer WITHOUT
+    /// starting the duration clock (`push_thought` starts it -- using that
+    /// for a completed whole-block reasoning arrival would measure a
+    /// fabricated reasoning-arrival-to-freeze window). The unset clock is
+    /// what lands the frozen duration at zero by construction.
+    #[test]
+    fn pinned_thought_never_starts_the_duration_clock() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_thought_pinned("reasoning", &mut on_phase);
+        assert!(
+            tracker.rounds[0].thinking_since.is_none(),
+            "the pinned fold must keep thinking_since unset"
+        );
+        // The end-of-turn freeze + settle the run loop performs.
+        tracker.freeze_trailing_thinking(&mut on_phase);
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert_eq!(thinking.text, "reasoning");
+        assert_eq!(
+            thinking.duration_ms, 0,
+            "zero by construction -- the unset clock, not a measured window"
+        );
     }
 
     /// Issue #628: a Text termination's trailing prose rode the terminal
