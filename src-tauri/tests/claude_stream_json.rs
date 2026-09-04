@@ -417,6 +417,50 @@ fn user_cancel_aborts_the_whole_turn() {
     );
 }
 
+/// Issue #808: a CLI that never drains stdin wedges the unbounded
+/// `write_all` of an oversized prompt (past the ~64-KiB OS pipe buffer)
+/// before the pump loop's cancel check is reachable. The cancel-aware
+/// writer must settle the turn as Cancelled instead of hanging forever (the
+/// codex_event_stream.rs peer's rationale).
+#[test]
+fn cancel_during_blocked_stdin_write_settles_the_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    // No wall-clock: the user cancel alone must break the blocked write; the
+    // fixture's 30s hold fails loudly if the cancel cannot.
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "no_stdin_hold");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
+    // in the pipe once the fixture stops reading.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    // The scenario reads no stdin and emits no events, so there is no phase
+    // to latch on; the delay only needs to cover spawn + the first pipe
+    // fill (`user_cancel_aborts_the_whole_turn` peer's 200ms rationale,
+    // widened for the bigger write). Spawned AFTER the env set (under the
+    // lock) -- begin_turn clears any stale `requested` at turn start.
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "blocked write + cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Same window pin as the cancel peers: catch a slow-but-correct
+    // resolution (cancel poll + kill + reap), not the outright miss.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the cancel never broke the blocked write"
+    );
+}
+
 /// Issue #628: a user cancel mid-answer keeps the partial prose on the tail
 /// round -- the Cancelled termination carries no text for the prose to ride,
 /// so the trace is its only home.

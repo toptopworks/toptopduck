@@ -69,6 +69,16 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     trace_argv(&argv);
 
+    // Issue #808: a CLI that stalls BEFORE draining stdin (e.g. wedged in
+    // its own MCP init): never read, never emit -- the engine's oversized
+    // prompt write blocks in the OS pipe, so the turn can only resolve via
+    // cancel. The 30s hold fails loudly if the cancel cannot break the
+    // blocked write.
+    if scenario == "no_stdin_hold" {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+
     // Drain stdin (the flattened prompt) to EOF — codex reads the prompt from
     // stdin when no positional arg is given.
     let mut stdin = std::io::stdin();
