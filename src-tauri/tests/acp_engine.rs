@@ -1105,6 +1105,8 @@ fn codex_adapter_is_native_exec_codex_event_stream() {
             "--ephemeral",
             "--sandbox",
             "read-only",
+            "-c",
+            "model_reasoning_summary=detailed",
         ]
     );
 }

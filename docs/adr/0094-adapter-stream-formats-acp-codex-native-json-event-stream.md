@@ -4,7 +4,7 @@
 
 1. **流格式成为 AdapterSpec 的数据维度**：新增 `stream_format` 字段（枚举：`Acp` | `JsonEventStream`），引擎按流格式分派到对应解析器。per-format 分派不是 per-CLI 代码——多个 CLI 可共享同一格式，加一个 CLI 不碰引擎，加一种格式才加一个解析器（ADR-0081 零 per-CLI 代码不变量保持）。
 
-2. **codex 适配器改为原生直连，退役 codex-acp 桥接形态**：检测名由 `codex-acp` 改为 `codex`；启动形为 `codex exec --json --skip-git-repo-check --ephemeral --sandbox read-only`，prompt 经 stdin 喂入。codex 无原生 ACP 模式，此前的桥接包依赖（用户须额外安装 `codex-acp`）整体移除——装 codex CLI 即可检测。
+2. **codex 适配器改为原生直连，退役 codex-acp 桥接形态**：检测名由 `codex-acp` 改为 `codex`；启动形为 `codex exec --json --skip-git-repo-check --ephemeral --sandbox read-only`，prompt 经 stdin 喂入（校准：启动形追加恒注入 `-c model_reasoning_summary=detailed`——exec 默认 `auto` 下 wire 不发射 reasoning item，thinking 折叠解析面无料可消费；reasoning summary 属展示面、与 thought level 正交，故随前缀恒注入而非随选择联动，实测 codex 0.153.1）。codex 无原生 ACP 模式，此前的桥接包依赖（用户须额外安装 `codex-acp`）整体移除——装 codex CLI 即可检测。
 
 3. **无状态不变**：不用 `exec resume`、不持 upstream thread；每轮新执行，窗口装配器产出的全量窗口化上下文（schema 前言 + 技能提示 + 历史 + 提问，与 ACP 路径同一装配器）拼为文本喂入 stdin。
 

@@ -621,6 +621,13 @@ fn spawn_argv_carries_selections_mcp_config_and_stateless_flags() {
         argv.contains("--model claude-fake-picked --effort high"),
         "model + effort ride the argv in the documented order; got: {argv}"
     );
+    // Issue #811 (review follow-up): the codex-only reasoning-summary
+    // override must not leak onto the claude spawn via the shared flag
+    // builder.
+    assert!(
+        !argv.contains("model_reasoning_summary"),
+        "codex-only override leaked onto the claude spawn: {argv}"
+    );
     // AC: MCP injection -- inline gateway descriptor + strict.
     assert!(
         argv.contains("--mcp-config {\"mcpServers\":{\"toptopduck-gateway\":{"),
