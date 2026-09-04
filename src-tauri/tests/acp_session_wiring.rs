@@ -206,7 +206,7 @@ fn external_cli_tool_call_routes_through_the_gateway() {
     // One bridge call -> one persisted row: the fixture emits the ACP
     // notification (`gw_cli_1`) for the same call the gateway served (`id=3`),
     // and the merge de-duplicates them at the wiring level -- a wiring
-    // regression (an empty slice at the merge call site) would persist two
+    // regression in the merge's echo accounting would persist two
     // rows for one call and fail this count.
     let recipe = session.build_recipe();
     let last_turn = recipe

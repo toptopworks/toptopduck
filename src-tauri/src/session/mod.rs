@@ -1702,7 +1702,7 @@ impl Session {
         if let Some(discovered) = acp_outcome.discovered_runtime.clone() {
             self.set_last_discovered_runtime(discovered);
         }
-        let mut merged = merge_outcomes(gateway_outcome, acp_outcome, inputs.cli_tools);
+        let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);
         (turn_outcome_from_loop(merged), trace)
     }
@@ -2316,65 +2316,94 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// ADR-0078).
 ///
 /// The trace is de-duplicated across the two sources: a gateway-served tool
-/// (one of the built-in DuckDB set, or an enabled CLI registration -- issue
-/// #673) appears in BOTH -- the gateway's `tools/call` dispatch record
-/// (authoritative, ADR-0076 audit) and the CLI's `session/update` tool-call
-/// notification. The gateway record wins for those (it ran the call, so its
-/// success flag + excerpt are the truth), one ACP duplicate dropped per
-/// gateway row; the ACP pump's non-gateway entries (the CLI's own built-ins
-/// -- bash / edit / etc., which never touch the gateway) are appended. A
-/// registration-named ACP row with no gateway counterpart is the CLI
-/// calling its own same-named tool and stays -- registration validation
-/// cannot see the external runtime's namespace, so a name match alone is
-/// not proof the gateway served the call. Promotions are gateway-only (the ACP engine leaves
+/// appears in BOTH -- the gateway's `tools/call` dispatch record
+/// (authoritative, ADR-0076 audit) and the engine's own tool-call
+/// notification (the ACP `session/update`, codex `mcp_tool_call`, claude
+/// `tool_use` echo -- one merge point, one dedup semantics for all three
+/// paths, issue #820). The gateway record wins (it ran the call, so its
+/// success flag + excerpt are the truth); an engine echo drops one per
+/// gateway row it can account for, in one of two pairings:
+/// - by name: meta catalog / skill / CLI-registration calls are recorded
+///   under the tool's own name, so a same-named echo pairs directly,
+///   one per row under that name (issue #673's registration case is
+///   now this arm --
+///   registrations no longer get a special-cased vocabulary);
+/// - by the `mcp_invoke` pool: an external dispatch is recorded under the
+///   RESOLVED namespaced handle (the fall-through renames before
+///   recording, ADR-0105), so the `mcp_invoke` echo pairs against the
+///   turn's namespaced-row count instead.
+///
+/// An engine row the gateway cannot account for is the runtime's own work
+/// (bash / edit / etc. never touch the gateway) and stays; a same-named row
+/// past the gateway's count stays too, with a warn -- a name collision is
+/// a suspicion, not proof, and the audit surface never silently
+/// under-reports. Promotions are gateway-only (the ACP engine leaves
 /// them empty by design, slice 9a); termination is ACP-only
 /// (the gateway serves tools, it does not produce a turn termination).
 ///
-/// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may prefix MCP tool names
-/// (e.g. `mcp__<server>__explore`) in its `session/update` notifications, in
-/// which case the `builtin_metadata` filter would let a gateway-routed call
-/// through as "non-gateway" and double it. The slice 9c integration test
-/// drives a fake CLI that emits unprefixed names; real-CLI naming is verified
-/// in the manual E2E checklist, and a normalization layer lands as a
-/// follow-up if the E2E shows a prefix.
-fn merge_outcomes(
-    gateway: GatewayOutcome,
-    mut acp: LoopOutcome,
-    cli_tools: &[crate::cli_tools::config::CliToolConfig],
-) -> LoopOutcome {
+/// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may re-name MCP
+/// tool calls (e.g. prefixing `mcp__<server>__`) in its `session/update`
+/// notifications, in which case the by-name pairing would miss and the echo
+/// survives as a double row. The slice 9c integration test drives a fake
+/// CLI that emits the gateway's names; real-CLI naming is verified in the
+/// manual E2E checklist, and a normalization layer lands as a follow-up if
+/// the E2E shows a rename.
+fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
     acp.promotions = gateway.promotions;
     // ADR-0103 (issues #608 + #611): the gateway's flat rows form a LEADING
     // round (it serves tools; it offers no prose/thinking slots), and the
-    // CLI's per-round grouping survives the merge -- each ACP round keeps
+    // engine's per-round grouping survives the merge -- each ACP round keeps
     // its thinking + prose + calls. The gateway-served names drop from the
-    // ACP rounds' calls (the gateway's own rows are the truth for those),
+    // engine rounds' calls (the gateway's own rows are the truth for those),
     // and a round the dedup leaves empty (no calls, no prose, no thinking)
     // drops -- empty stays empty. Row order keeps the gateway's rows first,
     // the same order the pre-grouping flat merge kept.
     // Per-name served counts from the gateway's own rows: the dedup below
-    // drops at most as many ACP rows as the gateway actually recorded for
-    // each name. A registration name colliding with one of the external
-    // CLI's OWN tools (registration validation cannot see the runtime's
-    // namespace) must not erase the CLI's own call rows from the trace.
+    // drops at most as many engine rows as the gateway actually recorded for
+    // each name. A gateway-served name colliding with one of the external
+    // runtime's OWN tools must not erase the runtime's own call rows from
+    // the trace.
     let mut gateway_served: HashMap<String, usize> = HashMap::new();
     for entry in &gateway.trace {
         *gateway_served.entry(entry.name.clone()).or_default() += 1;
     }
+    // The external-dispatch pool (issue #820): the gateway's fall-through
+    // resolves an `mcp_invoke` call to its namespaced handle BEFORE
+    // recording the authoritative row (ADR-0105), so an `mcp_invoke` echo
+    // can never pair by name -- it consumes one count from the turn's
+    // namespaced-row total instead. Every namespaced row counts regardless
+    // of result: a denied call is still a real dispatch the gateway
+    // recorded (ADR-0085).
+    let mut invoke_pool: usize = gateway
+        .trace
+        .iter()
+        .filter(|entry| crate::mcp::aggregator::is_namespaced(&entry.name))
+        .count();
     let mut rounds = LoopRound::flat_wrap(gateway.trace);
     for mut round in std::mem::take(&mut acp.trace) {
-        // A name the gateway SERVES is the gateway's to report: a built-in
-        // name (issue #299 slice 9c -- the external CLI routes those
-        // through the bridge, so a same-named ACP row is the bridge's
-        // echo), or a CLI registration with an unclaimed gateway row
-        // (issue #673) -- dropped one per gateway row. A registration
-        // name with NO gateway counterpart is the external CLI calling
-        // its own same-named tool: the row is real work, so it stays
-        // (with a warn -- the audit surface never silently under-reports).
+        // A row the gateway can account for is the gateway's to report: a
+        // built-in name (issue #299 slice 9c -- the external runtime routes
+        // those through the bridge, so a same-named engine row is the
+        // bridge's echo), an `mcp_invoke` echo (one pool count), or a
+        // same-named row with quota left (one per gateway row). A name the
+        // gateway has NO row under is the runtime's own work: the row is
+        // real, so it stays; past the count it stays with a warn (the
+        // audit surface never silently under-reports).
         round.calls.retain(|entry| {
             if builtin_metadata(&entry.name).is_some() {
                 return false;
             }
-            if !cli_tools.iter().any(|t| t.name == entry.name) {
+            if entry.name == crate::mcp::meta_tools::META_INVOKE {
+                if invoke_pool > 0 {
+                    invoke_pool -= 1;
+                    return false;
+                }
+                log::warn!(
+                    target: "toptopduck::session",
+                    "engine `mcp_invoke` row past the gateway's namespaced-row \
+                     count this turn; keeping the row (likely an external-runtime \
+                     tool of the same name)"
+                );
                 return true;
             }
             match gateway_served.get_mut(entry.name.as_str()) {
@@ -2382,15 +2411,17 @@ fn merge_outcomes(
                     *left -= 1;
                     false
                 }
-                _ => {
+                Some(_) => {
                     log::warn!(
-                        "ACP tool-call row `{}` matches a CLI registration the \
-                         gateway did not serve this turn; keeping the CLI's own \
-                         row (likely an external-runtime tool of the same name)",
+                        target: "toptopduck::session",
+                        "engine tool-call row `{}` past the gateway's recorded count \
+                         for the name; keeping the row (likely an external-runtime \
+                         tool of the same name)",
                         entry.name
                     );
                     true
                 }
+                None => true,
             }
         });
         let emptied = round.calls.is_empty() && round.thinking.is_none() && round.text.is_none();
@@ -2752,7 +2783,7 @@ mod tests {
     fn merge_outcomes_gateway_builtin_wins_over_acp_duplicate() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "explore", false)]);
-        let merged = merge_outcomes(gateway, acp, &[]);
+        let merged = merge_outcomes(gateway, acp);
         assert_eq!(merged.trace.len(), 1, "the ACP duplicate is dropped");
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
         assert!(
@@ -2761,35 +2792,18 @@ mod tests {
         );
     }
 
-    /// A minimal enabled registration for the merge tests -- the shape is
-    /// inert here (the merge matches on names only), like the gateway unit
-    /// tests' `cli_fixture`.
-    fn cli_registration(name: &str) -> crate::cli_tools::config::CliToolConfig {
-        crate::cli_tools::config::CliToolConfig {
-            name: name.into(),
-            description: "convert".into(),
-            executable: "/no/such/exe".into(),
-            argv_template: Vec::new(),
-            params: Vec::new(),
-            env: Default::default(),
-            enabled: true,
-            source: crate::cli_tools::config::CliToolSource::User,
-            baseline: None,
-        }
-    }
-
     /// Issue #673: a registered CLI tool name is gateway-served too, so the
     /// same one-call-one-row rule holds -- the gateway's dispatch record
-    /// wins and the ACP notification for the identical call drops (the
-    /// registration is never a builtin name, so this arm is disjoint from
-    /// the builtin dedup above).
+    /// wins and the engine notification for the identical call drops.
+    /// Registrations pair through the unified per-name quota (issue #820):
+    /// no special-cased vocabulary, the same arm every gateway-served name
+    /// takes.
     #[test]
     fn merge_outcomes_gateway_cli_registration_wins_over_acp_duplicate() {
-        let registration = cli_registration("doc-convert");
         let gateway = gateway_outcome(vec![trace_entry("g1", "doc-convert", false)]);
         let acp = acp_outcome(vec![trace_entry("a1", "doc-convert", true)]);
-        let merged = merge_outcomes(gateway, acp, &[registration]);
-        assert_eq!(merged.trace.len(), 1, "the ACP duplicate is dropped");
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 1, "the engine duplicate is dropped");
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
         assert!(
             !merged.trace[0].calls[0].success,
@@ -2797,29 +2811,27 @@ mod tests {
         );
     }
 
-    /// Issue #673 review: a registration name the gateway did NOT serve --
-    /// the external CLI calling its own same-named tool (registration
-    /// validation cannot see the runtime's namespace, so the collision is
-    /// legal config) -- keeps its ACP row: a name match alone is not proof
-    /// the gateway served the call, and the audit surface never drops real
-    /// work on one.
+    /// Issue #673 review: a registration-named row the gateway did NOT
+    /// serve -- the external runtime calling its own same-named tool
+    /// (registration validation cannot see the runtime's namespace, so the
+    /// collision is legal config) -- keeps its engine row: a name with no
+    /// gateway counterpart is the runtime's own work, and the audit surface
+    /// never drops real work on a name match.
     #[test]
     fn merge_outcomes_keeps_acp_row_when_no_gateway_counterpart_exists() {
-        let registration = cli_registration("bash");
         let gateway = gateway_outcome(Vec::new());
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
-        let merged = merge_outcomes(gateway, acp, &[registration]);
-        assert_eq!(merged.trace.len(), 1, "the CLI's own row survives");
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 1, "the runtime's own row survives");
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "a1");
     }
 
-    /// The CLI-registration dedup is count-aware: two bridge calls to one
-    /// registration drop exactly two ACP duplicates (one per gateway row),
-    /// and a third same-named ACP row the gateway cannot account for
-    /// survives -- the rule consumes quota, it does not erase a name.
+    /// The per-name dedup is count-aware: two gateway rows under one name
+    /// drop exactly two same-named engine rows (one per gateway row), and a
+    /// third the gateway cannot account for survives with the collision
+    /// warn -- the rule consumes quota, it does not erase a name.
     #[test]
-    fn merge_outcomes_cli_dedup_consumes_one_quota_per_gateway_row() {
-        let registration = cli_registration("doc-convert");
+    fn merge_outcomes_dedup_consumes_one_quota_per_gateway_row() {
         let gateway = gateway_outcome(vec![
             trace_entry("g1", "doc-convert", true),
             trace_entry("g2", "doc-convert", false),
@@ -2829,30 +2841,43 @@ mod tests {
             trace_entry("a2", "doc-convert", true),
             trace_entry("a3", "doc-convert", true),
         ]);
-        let merged = merge_outcomes(gateway, acp, &[registration]);
-        // The gateway's flat round keeps both bridge rows; the ACP round
-        // keeps the one unaccounted row (its thinking/text absent, so the
-        // round survives on the call alone).
-        assert_eq!(merged.trace.len(), 2, "gateway round + surviving ACP round");
+        let merged = merge_outcomes(gateway, acp);
+        // The gateway's flat round keeps both dispatch rows; the engine
+        // round keeps the one unaccounted row (its thinking/text absent, so
+        // the round survives on the call alone).
+        assert_eq!(
+            merged.trace.len(),
+            2,
+            "gateway round + surviving engine round"
+        );
         assert_eq!(merged.trace[0].calls.len(), 2);
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
         assert_eq!(merged.trace[0].calls[1].tool_use_id, "g2");
         assert_eq!(
             merged.trace[1].calls[0].tool_use_id, "a3",
-            "the row past the gateway's count is the CLI's own"
+            "the row past the gateway's count is the runtime's own"
         );
     }
 
-    /// The CLI's own non-builtin tool calls (bash / edit / etc., which never
-    /// touch the gateway) ride the ACP pump and are appended to the merged
-    /// trace when the gateway has nothing for them.
+    /// The non-builtin engine rows are the dedup's both-ways guardrail
+    /// (issue #820 rewrite of the original append-only pin): a same-named
+    /// row drops against the gateway's authoritative record, while a name
+    /// the gateway has nothing for (bash / edit / etc., which never touch
+    /// the gateway) is the runtime's own work and stays.
     #[test]
-    fn merge_outcomes_acp_non_builtin_appended() {
-        let gateway = gateway_outcome(Vec::new());
-        let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
-        let merged = merge_outcomes(gateway, acp, &[]);
-        assert_eq!(merged.trace.len(), 1);
-        assert_eq!(merged.trace[0].calls[0].name, "bash");
+    fn merge_outcomes_per_name_echo_drops_while_unknown_name_stays() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "mcp_search_tools", true)]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "mcp_search_tools", false),
+            trace_entry("a2", "bash", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp);
+        // The gateway round keeps its authoritative row; the engine round
+        // keeps only the runtime's own call.
+        assert_eq!(merged.trace.len(), 2);
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
+        assert_eq!(merged.trace[1].calls[0].tool_use_id, "a2");
+        assert_eq!(merged.trace[1].calls[0].name, "bash");
     }
 
     /// A mixed turn: the gateway routed an `explore` (builtin) AND the CLI
@@ -2863,10 +2888,152 @@ mod tests {
     fn merge_outcomes_gateway_builtin_plus_acp_non_builtin() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
-        let merged = merge_outcomes(gateway, acp, &[]);
+        let merged = merge_outcomes(gateway, acp);
         assert_eq!(merged.trace.len(), 2, "gateway leading round + CLI round");
         assert_eq!(merged.trace[0].calls[0].name, "explore");
         assert_eq!(merged.trace[1].calls[0].name, "bash");
+    }
+
+    /// The external-dispatch dedup (issue #820): an `mcp_invoke` engine echo
+    /// cannot pair by name -- the gateway's fall-through records the row
+    /// under the RESOLVED namespaced handle (ADR-0105; no `mcp_invoke`
+    /// gateway row ever exists), so the echo instead consumes one count
+    /// from the turn's namespaced-row pool. One dispatch, one surviving
+    /// row: the gateway's authoritative record.
+    #[test]
+    fn merge_outcomes_mcp_invoke_echo_consumes_the_namespaced_pool() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "mcp__slug__tool", true)]);
+        let acp = acp_outcome(vec![trace_entry("a1", "mcp_invoke", true)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(
+            merged.trace.len(),
+            1,
+            "the echo drops; the gateway row is the one record"
+        );
+        assert_eq!(merged.trace[0].calls[0].name, "mcp__slug__tool");
+    }
+
+    /// The pool pairs by COUNT, not handle: two dispatches to different
+    /// backends (two namespaced rows, one denied -- a denied call is still
+    /// a real dispatch the gateway recorded) cover two `mcp_invoke` echoes,
+    /// and a third echo past the pool survives -- never silently dropped.
+    #[test]
+    fn merge_outcomes_invoke_pool_counts_rows_not_handles() {
+        let gateway = gateway_outcome(vec![
+            trace_entry("g1", "mcp__one__tool", true),
+            trace_entry("g2", "mcp__other__tool", false),
+        ]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "mcp_invoke", true),
+            trace_entry("a2", "mcp_invoke", true),
+            trace_entry("a3", "mcp_invoke", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 2, "gateway round + the past-pool echo");
+        assert_eq!(merged.trace[0].calls.len(), 2);
+        assert_eq!(
+            merged.trace[1].calls[0].tool_use_id, "a3",
+            "the echo past the pool is the runtime's own work"
+        );
+    }
+
+    /// The pool counts rows, not names: two dispatches to the SAME handle
+    /// (two same-named namespaced rows -- the common repeat-call shape)
+    /// cover two `mcp_invoke` echoes; a distinct-handle pool would leave
+    /// the second echo alive as a ghost double row.
+    #[test]
+    fn merge_outcomes_invoke_pool_counts_repeat_rows_under_one_handle() {
+        let gateway = gateway_outcome(vec![
+            trace_entry("g1", "mcp__one__tool", true),
+            trace_entry("g2", "mcp__one__tool", true),
+        ]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "mcp_invoke", true),
+            trace_entry("a2", "mcp_invoke", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(
+            merged.trace.len(),
+            1,
+            "both echoes drop; the two gateway rows are the records"
+        );
+        assert_eq!(merged.trace[0].calls.len(), 2);
+    }
+
+    /// The pool is fed by namespaced rows ONLY: a turn whose gateway trace
+    /// holds none (meta-only here) has an empty pool, so an `mcp_invoke`
+    /// echo with nothing to consume survives -- never silently swallowed.
+    #[test]
+    fn merge_outcomes_invoke_pool_empty_without_namespaced_rows() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "mcp_search_tools", true)]);
+        let acp = acp_outcome(vec![trace_entry("a1", "mcp_invoke", true)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 2);
+        assert_eq!(merged.trace[0].calls[0].name, "mcp_search_tools");
+        assert_eq!(
+            merged.trace[1].calls[0].tool_use_id, "a1",
+            "the echo with no pool to consume stays (keep + warn)"
+        );
+    }
+
+    /// The pool and the per-name arm never cross-consume (issue #820): a
+    /// namespaced-NAMED engine echo is the direct-send form -- the gateway
+    /// has no row under that name, so it stays (per-name miss); it neither
+    /// eats nor feeds the `mcp_invoke` pool, whose one count still covers
+    /// the `mcp_invoke` echo.
+    #[test]
+    fn merge_outcomes_namespaced_echo_neither_eats_nor_feeds_the_pool() {
+        let gateway = gateway_outcome(vec![trace_entry("g1", "mcp__one__tool", true)]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "mcp__other__tool", true),
+            trace_entry("a2", "mcp_invoke", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp);
+        // The gateway round keeps its row; the engine round keeps only the
+        // per-name miss (a cross-consuming pool would leave a2 alive too).
+        assert_eq!(merged.trace.len(), 2);
+        assert_eq!(merged.trace[0].calls[0].name, "mcp__one__tool");
+        assert_eq!(merged.trace[1].calls.len(), 1);
+        assert_eq!(merged.trace[1].calls[0].tool_use_id, "a1");
+    }
+
+    /// The meta catalog pair + skill tool calls pair BY NAME (issue #820
+    /// per-class pin): the gateway records those dispatches under the
+    /// tool's own name (unlike the external fall-through, which renames
+    /// -- the third meta tool, `mcp_invoke`, takes the pool arm instead,
+    /// so it is deliberately absent from this fixture), so each
+    /// same-named engine echo drops against its gateway row.
+    #[test]
+    fn merge_outcomes_meta_and_skill_echos_pair_by_name() {
+        let names = [
+            "mcp_search_tools",
+            "mcp_list_servers",
+            "activate_skill",
+            "read_skill_file",
+        ];
+        let gateway = gateway_outcome(
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| trace_entry(&format!("g{i}"), n, true))
+                .collect(),
+        );
+        let acp = acp_outcome(
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| trace_entry(&format!("a{i}"), n, true))
+                .collect(),
+        );
+        let merged = merge_outcomes(gateway, acp);
+        // All four echoes drop: the gateway's flat round is the only
+        // survivor, carrying every authoritative row.
+        assert_eq!(merged.trace.len(), 1);
+        assert_eq!(merged.trace[0].calls.len(), 4);
+        assert!(merged.trace[0]
+            .calls
+            .iter()
+            .all(|c| c.tool_use_id.starts_with('g')));
     }
 
     /// The CLI's per-round grouping survives the merge (issue #611): each
@@ -2897,7 +3064,7 @@ mod tests {
                 },
             ],
         };
-        let merged = merge_outcomes(gateway, acp, &[]);
+        let merged = merge_outcomes(gateway, acp);
         assert_eq!(merged.trace.len(), 2, "leading round + the one ACP round");
         let leading = &merged.trace[0];
         assert!(leading.thinking.is_none() && leading.text.is_none());
@@ -2923,7 +3090,7 @@ mod tests {
             promotions: Vec::new(),
             trace: Vec::new(),
         };
-        let merged = merge_outcomes(gateway, acp, &[]);
+        let merged = merge_outcomes(gateway, acp);
         assert_eq!(merged.termination, Termination::Text("done".into()));
     }
 
@@ -2936,7 +3103,7 @@ mod tests {
     fn merge_outcomes_promotions_single_source_gateway() {
         let gateway = gateway_outcome(Vec::new());
         let acp = acp_outcome(Vec::new());
-        let merged = merge_outcomes(gateway, acp, &[]);
+        let merged = merge_outcomes(gateway, acp);
         assert!(merged.promotions.is_empty());
     }
 

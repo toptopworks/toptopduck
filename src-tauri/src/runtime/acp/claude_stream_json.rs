@@ -27,8 +27,9 @@
 //! gateway-routed: the driver emits the live phases but NO engine-side trace
 //! row -- the gateway is authoritative for its own calls (ADR-0085 single
 //! enforcement point; [`crate::session::merge_outcomes`] keeps the gateway
-//! row and would drop a same-named engine row only for builtins, so the
-//! driver never emits one). An unprefixed `tool_use` (a native tool that
+//! row and drops an engine echo it can account for, whether builtin,
+//! per-name quota, or the `mcp_invoke` pool (issue #820), so the driver
+//! never emits one). An unprefixed `tool_use` (a native tool that
 //! slipped past the deny list upstream) rides the engine trace like the
 //! codex path's native events.
 //!

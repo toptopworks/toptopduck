@@ -180,11 +180,12 @@ fn failed_command_lands_failed_trace_row() {
 /// Gateway-served MCP tool calls render live (issue #816): each completed
 /// `mcp_tool_call` item fires its phase pair at the same point (the
 /// `command_execution` shape) and lands one trace row on the round. The
-/// row's name is the wire's `tool` verbatim — the same identity the
-/// gateway's own dispatch row carries, so the settle-time dedup
-/// (`merge_outcomes`) can pair and drop the engine's echo for builtin and
-/// CLI-registration names (a namespaced external name's echo survives the
-/// merge today, issue #820).
+/// row's name is the wire's `tool` verbatim — the identity the gateway's
+/// dispatch row carries for every class but external dispatches, which
+/// it records under the resolved handle — so the settle-time dedup
+/// (`merge_outcomes`) drops the echo whenever the gateway can account
+/// for the call: builtin names, per-name quota, or the `mcp_invoke`
+/// pool (issue #820).
 #[test]
 fn mcp_tool_call_renders_live_and_lands_trace_rows() {
     let (outcome, phases, _) = run("mcp_tool_call", 24);
