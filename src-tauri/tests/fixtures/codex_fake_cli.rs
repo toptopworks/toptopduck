@@ -12,8 +12,10 @@
 //! read stdin until EOF, then emit the scripted NDJSON event stream. Pure
 //! serde_json — no lib import — so the fixture stays self-contained.
 //!
-//! The emitted shapes are the measured codex 0.147.0 wire format (issue #804):
-//! dot-typed turn events plus `item.started` / `item.completed` envelopes.
+//! The emitted shapes are the measured codex 0.147.0 wire format (issue
+//! #804) — the `mcp_tool_call` item shape is protocol-pinned instead (codex
+//! 0.153.1, issue #816) — dot-typed turn events plus `item.started` /
+//! `item.completed` envelopes.
 
 use std::io::{Read, Write};
 
@@ -39,6 +41,34 @@ fn command_execution(id: &str, command: &str) -> serde_json::Value {
             "status": "completed"
         }
     })
+}
+
+/// An `item.completed` envelope wrapping an `mcp_tool_call` item: a
+/// gateway-served tool call on the codex line (issue #816). The field shape
+/// is the codex 0.153.1 protocol definition (`McpToolCallItem` in
+/// codex-rs/protocol + the TS SDK items): `id` / `server` / `tool` /
+/// `arguments` / `status` (`completed` | `failed`) / optional
+/// `error.message`. Pinned from the protocol source, not a capture — the
+/// real-CLI capture is pending.
+fn mcp_tool_call(
+    id: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+    status: &str,
+    error: Option<&str>,
+) -> serde_json::Value {
+    let mut item = serde_json::json!({
+        "id": id,
+        "type": "mcp_tool_call",
+        "server": "toptopduck-gateway",
+        "tool": tool,
+        "arguments": arguments,
+        "status": status,
+    });
+    if let Some(error) = error {
+        item["error"] = serde_json::json!({"message": error});
+    }
+    item
 }
 
 /// Append the spawn-argv trace line to the file named by
@@ -144,6 +174,60 @@ fn main() {
                 &mut out,
                 &serde_json::json!({"type": "turn.failed", "error": "rate limited"}),
             );
+        }
+        // Gateway-served MCP tool calls (issue #816): two completed
+        // `mcp_tool_call` items — a registered-CLI-shaped bare name and a
+        // namespaced external name — then the answer. Each must render live
+        // (a phase pair per call) and land one trace row on the round.
+        "mcp_tool_call" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_1",
+                        "convert",
+                        serde_json::json!({"input": "a.csv"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_2",
+                        "mcp__duckdb__query_snapshot",
+                        serde_json::json!({"sql": "SELECT 1"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_3", "converted 2 rows"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        // A failed gateway call (status "failed" + error.message): the row
+        // lands failed with the wire's error message as the anchor (issue
+        // #816).
+        "mcp_tool_call_failed" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_1",
+                        "convert",
+                        serde_json::json!({"input": "b.csv"}),
+                        "failed",
+                        Some("converter crashed")
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_2", "the call failed"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
         }
         // A failed command (non-zero exit) plus the answer text: the row
         // lands failed with the exit code as the failure anchor (issue #804).

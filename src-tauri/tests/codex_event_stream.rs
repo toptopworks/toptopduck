@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState};
+use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, OperationKind};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
 use toptopduck_lib::runtime::acp::adapter::codex;
@@ -175,6 +175,90 @@ fn failed_command_lands_failed_trace_row() {
     let entry = &outcome.trace[0].calls[0];
     assert!(!entry.success, "the non-zero exit fails the row");
     assert_eq!(entry.result_excerpt, "command exited with code 1");
+}
+
+/// Gateway-served MCP tool calls render live (issue #816): each completed
+/// `mcp_tool_call` item fires its phase pair at the same point (the
+/// `command_execution` shape) and lands one trace row on the round. The
+/// row's name is the wire's `tool` verbatim — the same identity the
+/// gateway's own dispatch row carries, so the settle-time dedup
+/// (`merge_outcomes`) can pair and drop the engine's echo for builtin and
+/// CLI-registration names (a namespaced external name's echo survives the
+/// merge today, issue #820).
+#[test]
+fn mcp_tool_call_renders_live_and_lands_trace_rows() {
+    let (outcome, phases, _) = run("mcp_tool_call", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "converted 2 rows"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "both calls share one batch round");
+    let calls = &outcome.trace[0].calls;
+    assert_eq!(calls.len(), 2, "one row per gateway call");
+    // A registered-CLI-shaped bare name: the Execute badge (the gateway's
+    // CLI-arm classification), the wire argument JSON as the digest.
+    assert_eq!(calls[0].name, "convert");
+    assert_eq!(calls[0].tool_use_id, "item_1");
+    assert!(calls[0].success);
+    assert_eq!(calls[0].operation_kind, OperationKind::Execute);
+    assert_eq!(calls[0].summary, r#"{"input":"a.csv"}"#);
+    // A namespaced external name keeps the Network badge (the gateway's
+    // external-arm classification).
+    assert_eq!(calls[1].name, "mcp__duckdb__query_snapshot");
+    assert_eq!(calls[1].operation_kind, OperationKind::Network);
+    // Live: the Started/Completed pair fires per call, Started naming the
+    // wire tool with the same badge the row carries.
+    assert!(phases.iter().any(
+        |p| matches!(p, TurnPhase::ToolCallStarted { name, operation_kind: OperationKind::Execute, .. }
+            if name == "convert")
+    ));
+    assert!(phases.iter().any(
+        |p| matches!(p, TurnPhase::ToolCallStarted { name, operation_kind: OperationKind::Network, .. }
+            if name == "mcp__duckdb__query_snapshot")
+    ));
+    assert_eq!(
+        phases
+            .iter()
+            .filter(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success))
+            .count(),
+        2,
+        "both live rows complete successfully"
+    );
+}
+
+/// A failed gateway call (status "failed" + error.message) lands a failed
+/// row anchored on the wire's error message (issue #816) — the failure
+/// anchor the cross-turn retrospection surface renders.
+#[test]
+fn failed_mcp_tool_call_lands_failed_row_with_error_anchor() {
+    let (outcome, phases, _) = run("mcp_tool_call_failed", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the call failed"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    let calls = &outcome.trace[0].calls;
+    assert_eq!(calls.len(), 1);
+    assert!(!calls[0].success);
+    assert_eq!(calls[0].result_excerpt, "converter crashed");
+    assert!(phases
+        .iter()
+        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if !e.success)));
+}
+
+/// A gateway call counts toward the step cap exactly like a command
+/// execution (issue #816): with cap 0, the first `mcp_tool_call` trips it.
+#[test]
+fn mcp_tool_call_counts_toward_step_cap() {
+    let (outcome, _, elapsed) = run("mcp_tool_call", 0);
+    match outcome.termination {
+        Termination::StepCap(n) => assert_eq!(n, 0),
+        other => panic!("expected StepCap, got {other:?}"),
+    }
+    // The step-cap path resolves well under the 5s wall-clock watchdog.
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- resolved via the wall-clock watchdog, not the step-cap path"
+    );
 }
 
 /// A multi-round trajectory (issue #613): each batch round settles with its
