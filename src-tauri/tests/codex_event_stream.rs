@@ -21,7 +21,8 @@ use toptopduck_lib::model::TurnPhase;
 use toptopduck_lib::runtime::acp::adapter::codex;
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
-use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination};
+use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination, TraceEntry};
+use toptopduck_lib::session::{merge_outcomes, GatewayOutcome};
 
 /// Resolve the codex fake-CLI binary path.
 fn fake_cli() -> PathBuf {
@@ -224,6 +225,70 @@ fn mcp_tool_call_renders_live_and_lands_trace_rows() {
             .count(),
         2,
         "both live rows complete successfully"
+    );
+}
+
+/// Issue #817's end-to-end pin for the codex path (retiring #820's tail H):
+/// the fake CLI drives a full turn with thinking + prose + two
+/// gateway-served `mcp_tool_call`s across two batch rounds; the engine rows
+/// are the anchors, and the settle merge replaces them IN PLACE with the
+/// gateway's authoritative rows — the settled trace keeps each round's
+/// thinking -> prose -> calls order, no leading all-gateway round exists,
+/// and exactly one row survives per dispatch.
+#[test]
+fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
+    let (outcome, _, _) = run("mcp_tool_call_rounds", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // The gateway's authoritative rows: one per dispatch, the same names
+    // the engine echoed (a CLI registration + a direct-send namespaced
+    // call), carrying the gateway's ids.
+    let gateway_row = |id: &str, name: &str| TraceEntry {
+        tool_use_id: id.into(),
+        name: name.into(),
+        operation_kind: OperationKind::Execute,
+        summary: format!("{name} gateway summary"),
+        success: true,
+        result_excerpt: String::new(),
+    };
+    let gateway = GatewayOutcome {
+        trace: vec![
+            gateway_row("gw_1", "convert"),
+            gateway_row("gw_2", "mcp__duckdb__query_snapshot"),
+        ],
+        promotions: Vec::new(),
+    };
+    let merged = merge_outcomes(gateway, outcome);
+    assert_eq!(
+        merged.trace.len(),
+        2,
+        "two rounds, no residual: {:#?}",
+        merged.trace
+    );
+    let r1 = &merged.trace[0];
+    assert_eq!(
+        r1.thinking.as_ref().expect("round thinking survives").text,
+        "plan the calls"
+    );
+    assert_eq!(r1.text.as_deref(), Some("checking the table"));
+    assert_eq!(r1.calls.len(), 1, "one row per dispatch");
+    assert_eq!(
+        r1.calls[0].tool_use_id, "gw_1",
+        "the gateway row replaces the echo at its slot"
+    );
+    assert_eq!(r1.calls[0].summary, "convert gateway summary");
+    let r2 = &merged.trace[1];
+    assert_eq!(r2.text.as_deref(), Some("verifying the count"));
+    assert_eq!(r2.calls.len(), 1, "one row per dispatch");
+    assert_eq!(r2.calls[0].tool_use_id, "gw_2");
+    assert!(
+        merged
+            .trace
+            .iter()
+            .all(|r| r.thinking.is_some() || r.text.is_some()),
+        "no flat all-gateway round survives the merge"
     );
 }
 

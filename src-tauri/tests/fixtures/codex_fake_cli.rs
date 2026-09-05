@@ -262,6 +262,50 @@ fn main() {
             emit(&mut out, &agent_message("item_5", "the answer is 42"));
             emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
         }
+        // Gateway-served MCP calls interleaved with thinking + prose across
+        // two batch rounds (issue #817): the settle merge's in-place
+        // replacement keeps each round's thinking -> prose -> calls order —
+        // the end-to-end pin for the codex path (the engine rows are the
+        // anchors the gateway's authoritative rows replace).
+        "mcp_tool_call_rounds" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": {"id": "item_0", "type": "reasoning", "text": "plan the calls"}
+                }),
+            );
+            emit(&mut out, &agent_message("item_1", "checking the table"));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_2",
+                        "convert",
+                        serde_json::json!({"input": "a.csv"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_3", "verifying the count"));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_4",
+                        "mcp__duckdb__query_snapshot",
+                        serde_json::json!({"sql": "SELECT 1"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_5", "the answer is 42"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
         "step_cap_overflow" => {
             // Emit more command_execution items than the step cap (tests pass
             // cap=3); the engine kills the child once tool_call_count exceeds

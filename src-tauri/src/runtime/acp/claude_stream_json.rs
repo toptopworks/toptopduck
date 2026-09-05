@@ -503,9 +503,6 @@ struct PendingClaudeCall {
     tool_use_id: String,
     /// The display name: the gateway prefix stripped when gateway-routed.
     name: String,
-    /// Gateway-routed calls emit phases only -- the gateway owns their trace
-    /// rows (ADR-0085); engine-side rows would duplicate them.
-    gateway_routed: bool,
     operation_kind: OperationKind,
     summary: String,
 }
@@ -565,7 +562,6 @@ impl ClaudePump {
                     .gateway_prefixes
                     .iter()
                     .find_map(|prefix| name.strip_prefix(prefix));
-                let gateway_routed = stripped.is_some();
                 let bare = stripped.unwrap_or(name.as_str());
                 let (_, operation_kind, summary) = classify_call(&ToolUse {
                     id: id.clone(),
@@ -582,7 +578,6 @@ impl ClaudePump {
                     round,
                     tool_use_id: id,
                     name: bare.to_string(),
-                    gateway_routed,
                     operation_kind,
                     summary,
                 });
@@ -667,9 +662,11 @@ impl ClaudePump {
             ),
         };
         on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-        if !row.gateway_routed {
-            self.tracker.land_call(row.round, entry);
-        }
+        // Gateway-routed rows land too (issue #817): the engine row is the
+        // in-place-replacement anchor the settle merge pairs the gateway's
+        // authoritative record against -- the paired row keeps only its
+        // position, every field comes from the gateway (ADR-0085).
+        self.tracker.land_call(row.round, entry);
     }
 
     /// Close every still-open row at turn end -- honestly: the turn ended
@@ -1287,11 +1284,13 @@ mod tests {
         );
     }
 
-    /// A gateway-routed tool_use + tool_result emits phases but NO engine
-    /// trace row (the gateway owns those rows; emitting one would duplicate
-    /// it in the merged trace).
+    /// A gateway-routed tool_use + tool_result emits phases AND lands an
+    /// engine trace row (issue #817): the row is the in-place-replacement
+    /// anchor the settle merge pairs the gateway's authoritative record
+    /// against, so the gateway's values land inside the round the call ran
+    /// in -- no leading all-gateway round.
     #[test]
-    fn gateway_routed_tool_call_emits_phases_without_trace_row() {
+    fn gateway_routed_tool_call_lands_row_and_emits_phases() {
         let mut pump = pump_with_bridge();
         let mut phases = Vec::new();
         let end = pump.fold(
@@ -1315,11 +1314,11 @@ mod tests {
         let rounds = pump
             .tracker
             .settle_rounds(&Termination::Text(String::new()));
-        // No engine-side row (the gateway owns it). The call-less shell the
-        // seal leaves behind drops at the wiring merge, like every runtime
-        // path's empty round.
         assert_eq!(rounds.len(), 1);
-        assert!(rounds[0].calls.is_empty(), "the gateway owns the trace row");
+        // The engine row lands in the round (the merge's replacement
+        // anchor), under the BARE name the gateway records.
+        assert_eq!(rounds[0].calls.len(), 1, "the anchor row lands");
+        assert_eq!(rounds[0].calls[0].name, "explore");
         // The phases name the BARE tool (the merged gateway row's name).
         match &phases[0] {
             TurnPhase::ToolCallStarted { name, .. } => assert_eq!(name, "explore"),
