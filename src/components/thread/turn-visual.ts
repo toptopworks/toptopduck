@@ -40,6 +40,15 @@ export const HOVER_REVEAL_CLASS =
 export const CODE_BLOCK_REVEAL_CLASS =
   "opacity-0 transition-opacity duration-150 group-hover/code-block:opacity-100 group-focus-within/code-block:opacity-100 [@media(hover:none)]:opacity-100";
 
+// The summary row's fold-chevron reveal (issue #826): the same
+// choreography as HOVER_REVEAL_CLASS, keyed on the row's own named group
+// so only the hovered/focused row reveals its chevron (a bare
+// group-hover: would fire for the whole turn). The expanded posture pins
+// the chevron visible -- callers append opacity-100, which tailwind-merge
+// resolves over the rest-state opacity-0.
+export const SUMMARY_ROW_REVEAL_CLASS =
+  "opacity-0 transition-opacity duration-150 group-hover/summary-row:opacity-100 group-focus-within/summary-row:opacity-100 [@media(hover:none)]:opacity-100";
+
 // The reference name of a Materialized turn's primary result (ADR-0084): the
 // promotion chain's tail -- the result the turn's answer references. The stale
 // ghost and the result link both key on the primary; antecedent promotions

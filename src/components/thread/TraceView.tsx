@@ -4,6 +4,7 @@ import { Check, Loader2, ShieldQuestion, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TraceList } from "./TraceList";
+import { TraceSummaryFold } from "./TraceSummaryFold";
 import type { LiveRoundRow } from "../../session/useTurnFlow";
 import type { OperationKind, ApprovalResponse } from "../../types/approval";
 import type { TraceEntry } from "../../types/thread";
@@ -49,7 +50,7 @@ function OperationBadge({ kind }: { kind: OperationKind }) {
   // carries the good/bad signal (a colored badge per kind would compete with
   // the outcome encoding, ADR-0047).
   return (
-    <Badge variant="outline" className="op-badge shrink-0 px-1 py-0 text-[0.68rem] font-normal">
+    <Badge variant="outline" className="op-badge shrink-0 px-1 py-0 text-xs font-normal">
       {operationLabel(intl, kind)}
     </Badge>
   );
@@ -106,16 +107,22 @@ function TraceRow({
         <SuccessGlyph success={entry.success} />
       </span>
       <div className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5 min-w-0">
-          <span className="trace-name font-medium shrink-0">{entry.name}</span>
-          <OperationBadge kind={entry.operation_kind} />
-          {afterName}
-          <span className="trace-summary min-w-0 flex-1 truncate font-mono text-[0.72rem] text-muted-foreground">
-            {entry.summary}
-          </span>
-        </span>
+        {/* Inline fold recovery (issue #826): the truncated line grows an
+         * expand block under the row on chevron click; the failure excerpt
+         * stays the cross-turn retrospection anchor below it. */}
+        <TraceSummaryFold
+          summary={entry.summary}
+          summaryClassName="trace-summary"
+          head={(
+            <>
+              <span className="trace-name font-medium shrink-0">{entry.name}</span>
+              <OperationBadge kind={entry.operation_kind} />
+              {afterName}
+            </>
+          )}
+        />
         {!entry.success && entry.result_excerpt !== "" && (
-          <span className="trace-excerpt block whitespace-pre-wrap break-words text-[0.72rem] text-destructive">
+          <span className="trace-excerpt block whitespace-pre-wrap break-words text-xs text-destructive">
             {entry.result_excerpt}
           </span>
         )}
@@ -188,17 +195,20 @@ export function LiveRow({
     const fileValues = row.approval.fileAttachments ?? [];
     return (
       <li className="approval-card rounded-md border border-border bg-accent/40 p-1.5 my-0.5 text-xs">
-        <span className="flex items-center gap-1.5 min-w-0">
-          <ShieldQuestion
-            aria-hidden="true"
-            className="w-3.5 h-3.5 shrink-0 text-muted-foreground"
-          />
-          <span className="approval-tool font-medium shrink-0">{row.name}</span>
-          <OperationBadge kind={row.operationKind} />
-          <span className="approval-summary min-w-0 flex-1 truncate font-mono text-[0.72rem] text-muted-foreground">
-            {row.summary}
-          </span>
-        </span>
+        <TraceSummaryFold
+          summary={row.summary}
+          summaryClassName="approval-summary"
+          head={(
+            <>
+              <ShieldQuestion
+                aria-hidden="true"
+                className="w-3.5 h-3.5 shrink-0 text-muted-foreground"
+              />
+              <span className="approval-tool font-medium shrink-0">{row.name}</span>
+              <OperationBadge kind={row.operationKind} />
+            </>
+          )}
+        />
         <span className="mt-1.5 flex items-center gap-1.5">
           <Button
             type="button"
@@ -226,7 +236,7 @@ export function LiveRow({
           >
             <FormattedMessage id="thread.approval.deny" defaultMessage="Deny" />
           </Button>
-          <span className="approval-pending-hint ml-auto text-[0.68rem] text-muted-foreground">
+          <span className="approval-pending-hint ml-auto text-xs text-muted-foreground">
             <FormattedMessage
               id="thread.approval.pending"
               defaultMessage="Awaiting approval"
@@ -237,7 +247,7 @@ export function LiveRow({
           <>
             <button
               type="button"
-              className="approval-files-toggle mt-1 text-[0.68rem] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+              className="approval-files-toggle mt-1 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
               aria-expanded={filesOpen}
               onClick={() => setFilesOpen((open) => !open)}
             >
@@ -257,10 +267,10 @@ export function LiveRow({
             {filesOpen &&
               fileValues.map((file) => (
                 <span key={file.param} className="approval-file mt-1 block">
-                  <span className="approval-file-param font-mono text-[0.68rem] text-muted-foreground">
+                  <span className="approval-file-param font-mono text-xs text-muted-foreground">
                     {file.param}
                   </span>
-                  <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-[0.68rem] whitespace-pre-wrap break-all">
+                  <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
                     {file.content}
                   </pre>
                 </span>
@@ -278,21 +288,29 @@ export function LiveRow({
     resolvedResponse !== null ? (
       <Badge
         variant={resolvedResponse === "deny" ? "destructive" : "secondary"}
-        className="approval-resolved shrink-0 px-1 py-0 text-[0.68rem] font-normal"
+        className="approval-resolved shrink-0 px-1 py-0 text-xs font-normal"
       >
         {resolvedLabel(intl, resolvedResponse)}
       </Badge>
     ) : null;
   if (row.running || row.success === null) {
     return (
-      <li className="trace-row live-running flex items-center gap-1.5 py-0.5 text-xs">
-        <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin text-muted-foreground" />
-        <span className="trace-name font-medium shrink-0">{row.name}</span>
-        <OperationBadge kind={row.operationKind} />
-        {resolvedBadge}
-        <span className="trace-summary min-w-0 flex-1 truncate font-mono text-[0.72rem] text-muted-foreground">
-          {row.summary}
-        </span>
+      <li className="trace-row live-running py-0.5 text-xs">
+        <TraceSummaryFold
+          summary={row.summary}
+          summaryClassName="trace-summary"
+          head={(
+            <>
+              <Loader2
+                aria-hidden="true"
+                className="w-3.5 h-3.5 shrink-0 animate-spin text-muted-foreground"
+              />
+              <span className="trace-name font-medium shrink-0">{row.name}</span>
+              <OperationBadge kind={row.operationKind} />
+              {resolvedBadge}
+            </>
+          )}
+        />
       </li>
     );
   }

@@ -328,6 +328,11 @@ pub const SUMMARY_MAX_CHARS: usize = 512;
 /// ellipsis. When `max_chars < 3` the function degrades to a plain truncate
 /// (no ellipsis). Truncation is at `char` boundaries (UTF-8 safe), not
 /// grapheme-cluster boundaries (good enough for a card-body preview).
+/// Note: the trace side truncates with the single ellipsis character
+/// (`util::truncate_chars_with_ellipsis`, which also backs the persisted
+/// trace cap) while this broadcast-side helper appends ASCII dots -- a
+/// recorded surface difference (issue #826 review); both mark every cut
+/// visibly, and converging the glyphs changes user-visible rendering.
 pub fn truncate_summary(summary: &str, max_chars: usize) -> String {
     // Early-exit overflow check: scan at most `max_chars + 1` chars rather
     // than the full input — the summary may be an unbounded bridge payload
