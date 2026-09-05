@@ -184,6 +184,56 @@ describe("useTurnFlow", () => {
     });
   });
 
+  describe("live runtime attribution (issue #818)", () => {
+    it("carries the ask-time choice on the live turn once the read resolves", async () => {
+      const { deps } = setup();
+      vi.mocked(getSessionRuntime).mockResolvedValue({
+        kind: "external",
+        data: "claude-code",
+      });
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}), // stays in flight
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      // The initial live commit precedes the read (the bubble mounts at
+      // submit); the mapped choice arrives with it -- the same value the
+      // optimistic append stamps, one source for both marker sites.
+      await waitFor(() =>
+        expect(result.current.liveTurn?.runtime).toEqual({
+          kind: "external",
+          data: { adapter_id: "claude-code" },
+        }),
+      );
+      // Phase evolution spreads the previous state, so the attribution
+      // survives every subsequent progress event.
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.liveTurn?.runtime).toEqual({
+        kind: "external",
+        data: { adapter_id: "claude-code" },
+      });
+    });
+
+    it("stays undefined when the read fails (no marker, matching the append)", async () => {
+      const { deps } = setup();
+      // The API resolves SessionRuntimeChoice; undefined only ever comes
+      // from the failure catch -- the read's own degrade path.
+      vi.mocked(getSessionRuntime).mockRejectedValue(new Error("ipc down"));
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      await act(async () => {}); // flush the read's resolution microtasks
+      expect(result.current.liveTurn?.runtime).toBeUndefined();
+    });
+  });
+
   describe("in-flight live trace (ADR-0078, issue #297)", () => {
     it("renders null before any ask and mounts the live card on ask start", async () => {
       const { deps } = setup();
@@ -888,7 +938,7 @@ describe("useTurnFlow", () => {
       });
 
       // The ask still succeeds; only the attribution is absent -- the
-      // unrecorded-turn degradation, rendered badgeless until reopened.
+      // unrecorded-turn degradation, rendered markerless until reopened.
       const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
       const first = thread?.[0];
       expect(first?.entry).toBe("Turn");

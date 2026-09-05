@@ -531,8 +531,6 @@
   "thread.preview.empty": "无数据行",
   "thread.preview.footer": "首 {shown} 行，共 {total} 行",
   "thread.resultLink": "结果：{name}",
-  "thread.runtime.builtIn": "内置",
-  "thread.runtime.externalUnrecorded": "外部（未记录）",
   "thread.fold.activateSkills": "激活 {count} 个技能",
   "thread.fold.addSources": "加载了 {count} 个数据源",
   "thread.fold.deleteSources": "删除了 {count} 个数据源",

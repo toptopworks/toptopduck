@@ -531,8 +531,6 @@
   "thread.preview.empty": "No rows",
   "thread.preview.footer": "First {shown} of {total} rows",
   "thread.resultLink": "Result: {name}",
-  "thread.runtime.builtIn": "Built-in",
-  "thread.runtime.externalUnrecorded": "External (not recorded)",
   "thread.fold.activateSkills": "Activated {count, plural, one {# skill} other {# skills}}",
   "thread.fold.addSources": "Loaded {count, plural, one {# dataset} other {# datasets}}",
   "thread.fold.deleteSources": "Deleted {count, plural, one {# dataset} other {# datasets}}",

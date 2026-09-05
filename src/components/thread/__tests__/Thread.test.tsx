@@ -2885,9 +2885,9 @@ describe("Thread", () => {
     });
   });
 
-  describe("runtime attribution segments (ADR-0101)", () => {
+  describe("runtime attribution markers (issue #818, per-turn)", () => {
     // A textual record with an explicit runtime attribution -- the minimal
-    // TurnRecord shape the badge logic reads.
+    // TurnRecord shape the marker logic reads.
     function runtimeTurn(runtime: TurnRecord["provenance"]["runtime"]): TurnRecord {
       return {
         question: "问",
@@ -2900,7 +2900,7 @@ describe("Thread", () => {
       };
     }
 
-    it("renders one badge per attribution change in a mixed thread (segment-start quieting)", () => {
+    it("marks every external turn in a mixed thread; built-in turns stay unmarked", () => {
       renderThread(
         <Thread
           entries={[
@@ -2917,13 +2917,13 @@ describe("Thread", () => {
           onSelectResult={() => {}}
         />,
       );
-      // The built-in segment announces once (its first turn), the external
-      // segment once -- continuation turns stay quiet.
-      expect(screen.getAllByText("内置")).toHaveLength(1);
-      expect(screen.getAllByText("gemini-cli")).toHaveLength(1);
+      // Per-turn attribution: both external turns carry the marker (an
+      // unmarked stretch reads as the default runtime), never the built-in.
+      expect(screen.getAllByText("gemini-cli")).toHaveLength(2);
+      expect(screen.queryByText("内置")).not.toBeInTheDocument();
     });
 
-    it("renders no badges at all for a purely built-in thread (the gate)", () => {
+    it("renders no markers at all for a purely built-in thread", () => {
       renderThread(
         <Thread
           entries={[turnEntry(runtimeTurn({ kind: "built_in" }))]}
@@ -2934,42 +2934,20 @@ describe("Thread", () => {
       expect(screen.queryByText("内置")).not.toBeInTheDocument();
     });
 
-    it("degrades a pre-attribution external turn to the honest not-recorded note", () => {
-      renderThread(
+    it("stays silent for a pre-attribution external turn (no not-recorded fallback)", () => {
+      const { container } = renderThread(
         <Thread
           entries={[turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: null } }))]}
           selectedResult={null}
           onSelectResult={() => {}}
         />,
       );
-      expect(screen.getByText("外部（未记录）")).toBeInTheDocument();
-      expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
+      // Count elements, not text: a regression rendering a marker with an
+      // empty label would evade every queryByText.
+      expect(container.querySelectorAll(".runtime-attribution")).toHaveLength(0);
     });
 
-    it("stays silent on an unrecorded stretch but re-announces the next segment", () => {
-      renderThread(
-        <Thread
-          entries={[
-            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex" } })),
-            // Optimistic / pre-extension row: no runtime field.
-            turnEntry(runtimeTurn(undefined)),
-            turnEntry(runtimeTurn({ kind: "built_in" })),
-          ]}
-          selectedResult={null}
-          onSelectResult={() => {}}
-        />,
-      );
-      expect(screen.getByText("codex")).toBeInTheDocument();
-      expect(screen.getByText("内置")).toBeInTheDocument();
-    });
-
-    it("re-announces the same runtime when an unrecorded stretch breaks the segment", () => {
-      // Discriminating companion to the test above: codex -> unrecorded ->
-      // built-in passes whether or not the unrecorded row updates the
-      // segment key (built-in differs from both predecessors anyway). This
-      // codex -> unrecorded -> codex thread pins the break -- the trailing
-      // codex stretch re-announces; a regression that stops updating the
-      // key on unrecorded rows would collapse it to a single badge.
+    it("keeps an unrecorded stretch silent without silencing its neighbors", () => {
       renderThread(
         <Thread
           entries={[
@@ -2982,6 +2960,8 @@ describe("Thread", () => {
           onSelectResult={() => {}}
         />,
       );
+      // The unrecorded middle renders nothing, but per-turn attribution
+      // needs no segment bookkeeping to keep the neighbors marked.
       expect(screen.getAllByText("codex")).toHaveLength(2);
     });
   });

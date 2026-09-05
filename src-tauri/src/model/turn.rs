@@ -267,13 +267,13 @@ pub struct SkillProvenance {
 /// Which runtime drove one turn (ADR-0101): the app's built-in loop, or an
 /// external CLI adapter named by its stable id. This is the wire half of the
 /// persisted pair ([`crate::persistence::recipe::RuntimeKind`] +
-/// `adapter_id`): the thread renders it as a per-segment attribution badge;
-/// the LLM window never reads it (ADR-0101 Decision 3 -- the successor
-/// runtime needs no knowledge of its predecessor).
+/// `adapter_id`): the thread renders it as a per-turn attribution marker
+/// (issue #818); the LLM window never reads it (ADR-0101 Decision 3 --
+/// the successor runtime needs no knowledge of its predecessor).
 ///
 /// An `External` turn with `adapter_id: None` is a pre-extension recording
-/// (serde default on the persisted side, no migration) -- rendered as the
-/// honest "External (unrecorded)" degradation, never a fabricated id.
+/// (serde default on the persisted side, no migration) -- rendered
+/// silently: no marker, never a fabricated id (issue #818).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum TurnRuntime {

@@ -489,65 +489,16 @@ export function lifecycleRunMarks(
   return marks;
 }
 
-// ADR-0101: the segment key of a runtime attribution. Adjacent turns
-// sharing a key form one runtime segment; the thread renders the badge only
-// at a segment's first turn (the "segment-start quieting" rule -- a mixed
-// thread stays readable without repeating the marker on every row). Three
-// key families: the built-in loop, one per named external adapter, and the
-// unrecorded forms -- "external-unrecorded" (an external turn persisted before the
-// adapter id existed, rendered as the honest "not recorded" note) and
-// "unrecorded" (no attribution at all, the optimistic append / pre-extension
-// recording -- never rendered, but it still breaks the segment so the next
-// recorded runtime re-announces itself).
-function runtimeAttributionKey(runtime: TurnRuntime | null): string {
-  if (!runtime) return "unrecorded";
-  if (runtime.kind === "built_in") return "built-in";
-  return runtime.data.adapter_id == null
-    ? "external-unrecorded"
-    : `external:${runtime.data.adapter_id}`;
-}
-
-// ADR-0101: which thread entries open a runtime segment and carry its badge.
-// The gate: badges appear only when the thread holds at least one external
-// turn -- a purely built-in thread carries no information (the default
-// runtime), and ADR-0101 Decision 4 keeps attribution a "useful when needed"
-// affordance, not an always-on label. Behind the gate, every attribution
-// CHANGE re-announces (built-in segments included -- in a mixed thread the
-// reader must be able to tell who ran which stretch); an unrecorded stretch
-// stays silent (no fabrication) but still breaks the segment.
-export function runtimeSegmentBadges(
-  entries: readonly ThreadEntry[],
-): Array<TurnRuntime | null> {
-  // One walk of the `provenance.runtime` chain per entry (issue #596): the
-  // extracted value feeds the has-external gate, the key derivation, and
-  // the badge push alike. `undefined` marks a non-Turn entry -- transparent
-  // to segments, no key walk; null marks an unrecorded turn -- no badge,
-  // but it still breaks the segment.
-  const runtimes: Array<TurnRuntime | null | undefined> = entries.map((e) =>
-    e.entry === "Turn" ? (e.data.provenance.runtime ?? null) : undefined,
-  );
-  if (!runtimes.some((r) => r?.kind === "external")) {
-    return entries.map(() => null);
-  }
-  const out: Array<TurnRuntime | null> = [];
-  let prevKey: string | null = null;
-  for (const runtime of runtimes) {
-    if (runtime === undefined) {
-      out.push(null);
-      continue;
-    }
-    const key = runtimeAttributionKey(runtime);
-    // Value guard: `runtime != null` is the `key !== "unrecorded"` half it
-    // replaces (that key derives from exactly the null case), so the old
-    // `?? null` push fallback was unreachable.
-    if (runtime != null && key !== prevKey) {
-      out.push(runtime);
-    } else {
-      out.push(null);
-    }
-    prevKey = key;
-  }
-  return out;
+// Issue #818: the per-turn runtime attribution gate. The marker opens every
+// turn whose provenance names an external adapter; the built-in default and
+// both unrecorded shapes -- no provenance at all (a failed ask-time read, an
+// old IPC peer) and an external turn persisted before adapter ids existed --
+// stay silent: an attribution is only worth rendering when it can name who
+// ran the turn, and in a mixed thread an unmarked stretch reads as the
+// default runtime. Returns the adapter id to display, null for no marker.
+export function runtimeMarkerName(runtime: TurnRuntime | undefined): string | null {
+  if (runtime?.kind !== "external") return null;
+  return runtime.data.adapter_id;
 }
 
 // D5 / issue #722 placement: an actor=Agent skill event happened INSIDE the
