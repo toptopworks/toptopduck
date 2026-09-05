@@ -641,11 +641,11 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // choiceToTurnRuntime). A switch CAN still land in the read-to-dispatch
       // gap (set_session_runtime is lock-light and never blocks on a turn):
       // the backend would then run the new runtime while this stamp holds
-      // the old one -- a one-turn badge lag that heals on reopen, accepted
+      // the old one -- a one-turn marker lag that heals on reopen, accepted
       // over the settle-time read whose window is the turn's whole duration.
-      // A failed read degrades honestly (undefined -> no runtime -> no badge
+      // A failed read degrades honestly (undefined -> no runtime -> no marker
       // until reopen) with the diagnostic preserved in the log (ADR-0029 --
-      // otherwise a "badge missing" report could not distinguish a failed
+      // otherwise a "marker missing" report could not distinguish a failed
       // read from a stamp that never happened); the ask itself never depends
       // on it.
       const runtimeRead = getSessionRuntime(sessionId).catch((e: unknown) => {
@@ -655,15 +655,22 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // Issue #818: the live marker rides the same read the optimistic
       // stamp consumes -- when the choice lands, the live turn carries it
       // (the read resolves in milliseconds; the bubble mounts first, the
-      // marker appears with the next commit). A settled turn (null live
-      // state) or a failed read skips the update: the marker simply never
-      // shows, the same silent degrade as the append's omitted runtime. An
-      // unmapped choice throws here AND again at the stamp below -- this
-      // site degrades only the cosmetic marker with a log line (ADR-0029);
-      // the stamp's loud failure is the designed one.
+      // marker appears with the next commit). The update skips when the
+      // read failed, when no live turn is running, or when the live turn
+      // is a LATER one (an ask-failure re-ask inside the read window -- the
+      // askedAt match keys the guard to THIS turn, so a late read can
+      // never stamp a successor's live card): the live marker simply never
+      // shows, the same silent degrade as the append's omitted runtime.
+      // One exception is read-past-settle: a read landing only after a
+      // very fast settle skips here (no live turn) yet still stamps the
+      // append below, so the settled card adds the marker at the swap --
+      // #620's no-insert claim covers the paths where the live side had
+      // it. An unmapped choice throws here AND again at the stamp below --
+      // this site degrades only the cosmetic marker with a log line
+      // (ADR-0029); the stamp's loud failure is the designed one.
       void runtimeRead
         .then((choice) => {
-          if (choice === undefined || liveRef.current === null) return;
+          if (choice === undefined || liveRef.current?.askedAt !== askedAt) return;
           commitLive({ ...liveRef.current, runtime: choiceToTurnRuntime(choice) });
         })
         .catch((e: unknown) => {
@@ -725,7 +732,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
           // hashes (the backend records them in record_turn). Issue #725: the
           // runtime half IS stamped, from the ask-time choice read above; an
           // unknown choice omits it (the unrecorded-turn degradation -- no
-          // badge, rendered after reopen).
+          // marker, rendered after reopen).
           data: {
             question,
             outcome,

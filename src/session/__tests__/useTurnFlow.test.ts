@@ -938,7 +938,7 @@ describe("useTurnFlow", () => {
       });
 
       // The ask still succeeds; only the attribution is absent -- the
-      // unrecorded-turn degradation, rendered badgeless until reopened.
+      // unrecorded-turn degradation, rendered markerless until reopened.
       const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
       const first = thread?.[0];
       expect(first?.entry).toBe("Turn");

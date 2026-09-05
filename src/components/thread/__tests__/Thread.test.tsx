@@ -2935,15 +2935,16 @@ describe("Thread", () => {
     });
 
     it("stays silent for a pre-attribution external turn (no not-recorded fallback)", () => {
-      renderThread(
+      const { container } = renderThread(
         <Thread
           entries={[turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: null } }))]}
           selectedResult={null}
           onSelectResult={() => {}}
         />,
       );
-      expect(screen.queryByText("外部（未记录）")).not.toBeInTheDocument();
-      expect(screen.queryByText("gemini-cli")).not.toBeInTheDocument();
+      // Count elements, not text: a regression rendering a marker with an
+      // empty label would evade every queryByText.
+      expect(container.querySelectorAll(".runtime-attribution")).toHaveLength(0);
     });
 
     it("keeps an unrecorded stretch silent without silencing its neighbors", () => {

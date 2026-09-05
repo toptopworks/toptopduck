@@ -179,12 +179,11 @@ describe("lifecycleRunMarks (absorbed-activation contract)", () => {
   });
 });
 
-// The ADR-0101 segment gate, pinned at the pure seam: which entries open a
-// runtime segment and carry its badge. The optimistic append stamps the
-// ask-time runtime choice (issue #725), but the choice-unknown degradation
-// and a crashed pre-read both still mint unrecorded turns -- so the
-// "unrecorded turn inside an external thread" shape is a live state, pinned
-// here alongside the gate it must break.
+// The per-turn attribution gate (issue #818), pinned at the pure seam:
+// which runtimes earn a marker. The optimistic append stamps the ask-time
+// runtime choice (issue #725), but the choice-unknown degradation and a
+// crashed pre-read both still mint unrecorded turns -- every silent shape
+// is a live state, pinned here alongside the naming rule.
 
 describe("runtimeMarkerName (issue #818 per-turn attribution gate)", () => {
   const external = (adapterId: string | null): TurnRuntime => ({

@@ -1,8 +1,9 @@
 // Issue #818: the live side of the runtime attribution marker -- the same
-// first-child position the settled TurnCard renders, so the settle swap
-// neither inserts nor moves the element (#620). The runtime riding LiveTurn
-// is the ask-time choice (it may be absent until the read lands); when it
-// lands is useTurnFlow's contract, pinned in its own tests.
+// first-child position the settled TurnCard renders, so a marker present
+// on the live side is re-hosted in place at the settle swap (#620; a read
+// landing only after the settle lets the settled card add it). The runtime
+// riding LiveTurn is the ask-time choice (it may be absent until the read
+// lands); when it lands is useTurnFlow's contract, pinned in its own tests.
 
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
@@ -10,14 +11,16 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { LiveTurnExchange } from "../LiveTurnExchange";
+import type { ReactNode } from "react";
 import type { LiveTurn } from "../../../session/useTurnFlow";
 
-function renderExchange(liveTurn: LiveTurn) {
+function renderExchange(liveTurn: LiveTurn, agentHead?: ReactNode) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
         <LiveTurnExchange
           liveTurn={liveTurn}
+          agentHead={agentHead}
           mentionedDataset={null}
           onRespondApproval={() => {}}
           onThinkingExpandedChange={() => {}}
@@ -46,6 +49,18 @@ describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
     // swap re-hosts the marker without moving it (#620).
     expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
     expect(stream?.firstElementChild).toHaveTextContent("claude-code");
+  });
+
+  it("keeps the marker ahead of the agent-activation head (adjudication 4)", () => {
+    const { container } = renderExchange(
+      liveTurnWith({ kind: "external", data: { adapter_id: "claude-code" } }),
+      <span data-agent-head>act</span>,
+    );
+    const stream = container.querySelector(".assistant-stream");
+    // Mirrors the settled TurnCard's pin: attribution first, then the
+    // activations the actor triggered.
+    expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
+    expect(stream?.firstElementChild?.nextElementSibling).toHaveAttribute("data-agent-head");
   });
 
   it("renders no marker before the ask-time read lands (runtime absent)", () => {

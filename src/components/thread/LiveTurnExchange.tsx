@@ -2,8 +2,9 @@
 // rendered at the thread's tail while a turn runs -- the user bubble mounts
 // the moment the user submits (asked_at is the client's submit stamp; the
 // question is final at submit, so the copy affordance is honest), over a
-// streaming assistant side: the header's dataset chip (issue #620), then
-// per-round thinking folds + connective prose + tool rows (approval cards in
+// streaming assistant side: the runtime attribution marker (issue #818),
+// then the header's dataset chip (issue #620), then per-round thinking
+// folds + connective prose + tool rows (approval cards in
 // flow, ADR-0083 -- the card chrome lives in LiveRow, semantics unchanged
 // from the retired progressive card).
 //
@@ -119,8 +120,10 @@ export function LiveTurnExchange({
       <UserBubble question={liveTurn.question} askedAt={liveTurn.askedAt} isStale={false} />
       <div className="assistant-stream mt-1 flex flex-col items-start">
         {/* Issue #818: the runtime attribution opens the stream in the same
-            first-child slot the settled TurnCard renders -- the settle swap
-            re-hosts the marker without moving it (#620). */}
+            first-child slot the settled TurnCard renders -- a marker the
+            live side has is re-hosted in place at the settle swap (#620);
+            a read landing only after the settle lets the settled card add
+            it. */}
         {runtimeName !== null && <RuntimeAttributionMarker adapterId={runtimeName} />}
         {/* D5 / issue #722: agent activations open the stream, the same
             slot (and order) the settled TurnCard's agentHead occupies, so

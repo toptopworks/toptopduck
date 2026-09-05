@@ -139,7 +139,8 @@ export interface TraceEntry {
 // (adjacently-tagged kind + data, snake_case -- the same tagging scheme as
 // SessionRuntimeChoice; the external payload differs: the adapter-id object
 // with null for pre-id turns, vs the choice's bare adapter string). The
-// thread renders it as a per-segment attribution badge; the LLM window
+// thread renders it as a per-turn attribution marker (issue #818 -- only
+// an external turn with a non-null adapter id renders); the LLM window
 // never reads it (ADR-0101 Decision 3).
 export type TurnRuntime =
   | { kind: "built_in" }
@@ -155,8 +156,8 @@ export type TurnRuntime =
 // skill changed after a recorded turn, plus the turn's executing runtime.
 // Mirrors the Rust crate::model::TurnProvenance; `runtime` is omitted when
 // absent (the optimistic append, or a pre-extension IPC peer) -- rendered
-// without a badge, distinct from external-with-null-id ("recorded, adapter
-// unknown").
+// with no marker, silent exactly like external-with-null-id (the two
+// shapes differ in data only, issue #818).
 export interface TurnProvenance {
   skills: SkillProvenance[];
   runtime?: TurnRuntime;

@@ -12,17 +12,19 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
+import type { ReactNode } from "react";
 import type { TurnRecord } from "../../../types/thread";
 
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
 // shared fixture convention, and the marker's label is the raw adapter id
 // (layer-4 content, untranslated) so the assertions hold under any locale.
-function renderCard(record: TurnRecord) {
+function renderCard(record: TurnRecord, agentHead?: ReactNode) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
         <TurnCard
           record={record}
+          agentHead={agentHead}
           selectedResult={null}
           onSelectResult={() => {}}
           staleAnchor={undefined}
@@ -61,6 +63,29 @@ describe("TurnCard runtime attribution marker (issue #818)", () => {
     // the actor did -- activations, annotations, rounds.
     expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
     expect(stream?.firstElementChild).toHaveTextContent("claude-code");
+  });
+
+  it("keeps the marker ahead of the agent-activation head (adjudication 4)", () => {
+    const { container } = renderCard(
+      recordWith({ kind: "external", data: { adapter_id: "claude-code" } }),
+      <span data-agent-head>act</span>,
+    );
+    const stream = container.querySelector(".assistant-stream");
+    // The full position contract the header claims: attribution first,
+    // then the activations the actor triggered.
+    expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
+    expect(stream?.firstElementChild?.nextElementSibling).toHaveAttribute("data-agent-head");
+  });
+
+  it("keeps the marker on a Failed turn, in the muted caption family", () => {
+    const record: TurnRecord = {
+      ...recordWith({ kind: "external", data: { adapter_id: "claude-code" } }),
+      outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } },
+    };
+    const { container } = renderCard(record);
+    const marker = container.querySelector(".runtime-attribution");
+    expect(marker).not.toBeNull();
+    expect(marker).toHaveClass("text-muted-foreground");
   });
 
   it("renders no marker for the built-in default", () => {
