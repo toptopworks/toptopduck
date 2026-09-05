@@ -59,10 +59,33 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     // guard inside the component's own suite (the cross-component pins in
     // Thread.test select through TurnCard's container).
     const prose = proseOf(renderProse("正文"));
-    expect(prose.className.split(/\s+/)).toContain("text-sm");
+    const classes = prose.className.split(/\s+/);
+    expect(classes).toContain("text-sm");
+    // Body line-height floats at 1.75 -- a deliberate step above the
+    // body-md token's 1.5, which CJK discourse reads as cramped once
+    // answers run long (issue #828). The negative guard keeps the compact
+    // chrome override from sneaking back alongside it.
+    expect(classes).toContain("leading-[1.75]");
+    expect(classes).not.toContain("leading-snug");
   });
 
   describe("structure", () => {
+    it("leaves block-level children bare so the root's space-y owns block spacing", () => {
+      // Tailwind v4's space-y selector sits inside :where() (zero
+      // specificity), so a child's own m-0 (0,1,0) always outranks it -- m-0
+      // on the mapped blocks killed the root's 16px inter-block rhythm
+      // entirely (paragraphs and headings rendered flush on real hardware).
+      // The map carries no margin classes; the preflight reset already
+      // zeroes the nested contexts the root's space-y never reaches (issue
+      // #828).
+      const ui = renderProse("# 标题\n\n段落一\n\n> 引用\n\n- 列表项");
+      expect(proseOf(ui).className.split(/\s+/)).toContain("space-y-4");
+      for (const tag of ["h1", "p", "blockquote", "ul"]) {
+        const classes = (ui.container.querySelector(tag)?.className ?? "").split(/\s+/);
+        expect(classes).not.toContain("m-0");
+      }
+    });
+
     it("compresses the heading ladder: 17px h1 stepping down, h4+ at body size with weight only", () => {
       const { container } = renderProse(
         "# 一级\n## 二级\n### 三级\n#### 四级\n##### 五级\n###### 六级",

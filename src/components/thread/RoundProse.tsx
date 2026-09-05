@@ -151,22 +151,26 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
 }
 
 // Module-level constant: see the streaming contract in the file header.
+// Block-level maps carry no margin classes: the root's space-y-4 owns the
+// inter-block rhythm, and Tailwind v4's space-y selector sits inside
+// :where() (zero specificity) -- any m-0 here would outrank it and flatten
+// the rhythm back to flush blocks.
 const MARKDOWN_COMPONENTS: Components = {
   // The chat-stream heading ladder: full-size document headings would shout
   // over the discourse in the 320px rail, so markdown headings compress -- h1
   // lands at 17px and each level steps down 1px; h4 and below stay at body
   // size and only gain weight. Weight caps at 600 (DESIGN.md forbids 700).
-  h1: ({ children }) => <h1 className="m-0 text-[1.0625rem] font-semibold">{children}</h1>,
-  h2: ({ children }) => <h2 className="m-0 text-base font-semibold">{children}</h2>,
-  h3: ({ children }) => <h3 className="m-0 text-[0.9375rem] font-semibold">{children}</h3>,
-  h4: ({ children }) => <h4 className="m-0 text-sm font-semibold">{children}</h4>,
-  h5: ({ children }) => <h5 className="m-0 text-sm font-semibold">{children}</h5>,
-  h6: ({ children }) => <h6 className="m-0 text-sm font-semibold">{children}</h6>,
-  p: ({ children }) => <p className="m-0">{children}</p>,
-  ul: ({ children }) => <ul className="m-0 list-disc space-y-1 pl-5">{children}</ul>,
-  ol: ({ children }) => <ol className="m-0 list-decimal space-y-1 pl-5">{children}</ol>,
+  h1: ({ children }) => <h1 className="text-[1.0625rem] font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="text-base font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-[0.9375rem] font-semibold">{children}</h3>,
+  h4: ({ children }) => <h4 className="text-sm font-semibold">{children}</h4>,
+  h5: ({ children }) => <h5 className="text-sm font-semibold">{children}</h5>,
+  h6: ({ children }) => <h6 className="text-sm font-semibold">{children}</h6>,
+  p: ({ children }) => <p>{children}</p>,
+  ul: ({ children }) => <ul className="list-disc space-y-1 pl-5">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5">{children}</ol>,
   blockquote: ({ children }) => (
-    <blockquote className="m-0 border-l border-border pl-3 text-muted-foreground">
+    <blockquote className="border-l border-border pl-3 text-muted-foreground">
       {children}
     </blockquote>
   ),
@@ -197,7 +201,7 @@ const MARKDOWN_COMPONENTS: Components = {
     </th>
   ),
   td: ({ children }) => <td className="border-b border-border px-2 py-1 align-top">{children}</td>,
-  hr: () => <hr className="m-0 border-0 border-t border-border" />,
+  hr: () => <hr className="border-0 border-t border-border" />,
 };
 
 export const RoundProse = memo(function RoundProse({ text }: { text: string }) {
@@ -205,7 +209,7 @@ export const RoundProse = memo(function RoundProse({ text }: { text: string }) {
     // round-text is a cross-module stability hook: this suite's own pins plus
     // TurnCard/Thread's composition selectors (`.turn-outcome.textual
     // .round-text`) query through it.
-    <div className="round-text m-0 mt-0.5 space-y-2 text-sm leading-snug text-foreground break-words">
+    <div className="round-text m-0 mt-0.5 space-y-4 text-sm leading-[1.75] text-foreground break-words">
       <Markdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
         {text}
       </Markdown>
