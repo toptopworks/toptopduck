@@ -102,7 +102,33 @@ export function outcomeVisual(
         // A materialized round = teal --primary (ADR-0047 A hue).
         tone: "text-primary",
       };
-    case "Textual":
+    case "Textual": {
+      // Exhaustiveness guard: a future TextKind member must add a branch
+      // here -- the outer switch's never-check cannot see the nested union,
+      // and a ternary fallthrough would mislabel the new kind as refused in
+      // the glyph's aria-label.
+      let label: string;
+      switch (outcome.data.text_kind) {
+        case "Agent":
+          label = intl.formatMessage({ id: "thread.outcome.agent", defaultMessage: "Answered" });
+          break;
+        case "Clarify":
+          label = intl.formatMessage({
+            id: "thread.outcome.clarify",
+            defaultMessage: "Needs clarification",
+          });
+          break;
+        case "Refuse":
+          label = intl.formatMessage({
+            id: "thread.outcome.refused",
+            defaultMessage: "Cannot fulfill",
+          });
+          break;
+        default: {
+          const unhandled: never = outcome.data.text_kind;
+          throw new Error(`unhandled textual kind: ${JSON.stringify(unhandled)}`);
+        }
+      }
       return {
         // ADR-0050 specifies `MessageSquareQuestion` for outcome B, but that
         // glyph is not exported by the currently pinned lucide-react; using
@@ -116,22 +142,9 @@ export function outcomeVisual(
         // B is intentionally neutral (ADR-0047 B!=C; an honest answer /
         // refuse / clarify must NOT read as failure, so no warm tint).
         tone: "text-muted-foreground",
-        label:
-          outcome.data.text_kind === "Agent"
-            ? intl.formatMessage({
-                id: "thread.outcome.agent",
-                defaultMessage: "Answered",
-              })
-            : outcome.data.text_kind === "Clarify"
-              ? intl.formatMessage({
-                  id: "thread.outcome.clarify",
-                  defaultMessage: "Needs clarification",
-                })
-              : intl.formatMessage({
-                  id: "thread.outcome.refused",
-                  defaultMessage: "Cannot fulfill",
-                }),
+        label,
       };
+    }
     case "Failed":
       return {
         Icon: TriangleAlert,

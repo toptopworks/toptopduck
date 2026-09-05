@@ -310,11 +310,16 @@ function TraceRoundBlock({
 // text is layer-3 LLM content (ADR-0052) and passes through the {text}
 // placeholder untranslated; only the "Assumption:" prefix is chrome. Extracted
 // so the rendering isn't duplicated across the two outcomes that carry it.
+// mt-0.5 mirrors the prose root's offset so the note keeps the same gap
+// below whatever precedes it -- the RoundProse block on Textual (issue
+// #827) and the inline link/chip row inside the Materialized <p>; the
+// offset is new with #827 on both faces (the note previously carried no
+// margin).
 function AssumptionNote({ assumption }: { assumption: string | null }) {
   const intl = useIntl();
   if (!assumption) return null;
   return (
-    <span className="assumption block text-xs italic text-muted-foreground">
+    <span className="assumption mt-0.5 block text-xs italic text-muted-foreground">
       {intl.formatMessage(
         { id: "thread.assumption", defaultMessage: "Assumption: {text}" },
         { text: assumption },
@@ -457,31 +462,49 @@ function TurnBody({
       // The Agent kind (the tool-calling contract's terminal text, ADR-0077)
       // renders as a plain answer -- the body IS the reply, so no kind badge.
       // The legacy Clarify / Refuse kinds keep their action-signaling badge.
-      const badge =
-        text_kind === "Clarify" ? (
-          <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />
-        ) : text_kind === "Refuse" ? (
-          <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
-        ) : null;
-      // The body rides the conversation tier (text-sm, matching UserBubble's
-      // question and RoundProse -- the reply is discourse, not chrome).
+      // Exhaustiveness guard: a future TextKind member must add a branch
+      // here -- the outer switch's never-check cannot see the nested union,
+      // and a ternary fallthrough would silently render a new kind badgeless.
+      let badge: ReactNode = null;
+      switch (text_kind) {
+        case "Clarify":
+          badge = <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />;
+          break;
+        case "Refuse":
+          badge = <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />;
+          break;
+        case "Agent":
+          break;
+        default: {
+          const unhandled: never = text_kind;
+          throw new Error(`unhandled textual kind: ${JSON.stringify(unhandled)}`);
+        }
+      }
+      // The reply renders through the shared RoundProse markdown pipeline
+      // (issue #827): the terminal answer is the longest markdown carrier,
+      // and every kind -- Agent, Clarify, Refuse -- rides the same path with
+      // no fork. <div>, not <p>: the prose renders block-level markdown
+      // (headings, code fences, tables) that cannot legally nest in a <p>
+      // (the Failed card's precedent). The container carries no tier or
+      // spacing of its own: the badge row keeps the caption tier, RoundProse
+      // brings the conversation tier, and the rows pace themselves -- the
+      // prose root's mt-0.5 and the note's mt-0.5 (container space-y-* would
+      // be inert here: Tailwind v4's space-y emits zero-specificity
+      // :where(& > :not(:last-child)) margins, which lose to the badge's and
+      // the prose root's m-0 on non-last rows while the note rides the
+      // selector's last-child exemption -- only a future non-last child
+      // without its own m-0 would take the space-y margin).
       return (
-        <p
-          className={cn(
-            "turn-outcome textual mt-1 text-sm leading-snug",
-            text_kind.toLowerCase(),
-          )}
-        >
+        <div className={cn("turn-outcome textual mt-1", text_kind.toLowerCase())}>
           {badge && (
-            // The kind badge is chrome, not discourse: it keeps the caption
-            // tier instead of inheriting the body's conversation tier.
-            <span className="textual-kind inline-block mr-1 text-xs text-muted-foreground">
-              {badge}
-            </span>
+            // The kind badge is chrome, not discourse: it stands on its own
+            // caption row ahead of the prose, keeping the caption tier
+            // instead of riding the conversation tier.
+            <p className="textual-kind m-0 text-xs text-muted-foreground">{badge}</p>
           )}
-          <span className="textual-body text-foreground">{body}</span>
+          <RoundProse text={body} />
           <AssumptionNote assumption={assumption} />
-        </p>
+        </div>
       );
     }
     case "Failed": {
