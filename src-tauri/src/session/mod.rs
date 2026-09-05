@@ -17,7 +17,7 @@ pub mod source_lifecycle;
 pub(crate) mod turn_dispatch;
 pub mod yoagent;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,14 +48,17 @@ use crate::provider::{Provider, UnwiredProvider};
 use crate::runtime::acp::adapter::{detect_adapter, AdapterSpec};
 use crate::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use crate::runtime::acp::wire::McpServer;
-use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx, GatewayOutcome};
-use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination};
+use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx};
+// Re-exported with `merge_outcomes`: the pub merge point takes it, so its
+// parameter type rides the same public path (the gateway module itself is
+// crate-private).
+pub use crate::runtime::gateway::server::GatewayOutcome;
+use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination, TraceEntry};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
 use crate::session::skills::SkillActivationCtx;
 use crate::session_store::ClosingFlag;
 use crate::skills::prompt::is_activated;
 use crate::skills::SkillPromptFragment;
-use crate::tools::definitions::builtin_metadata;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 use crate::SessionId;
@@ -2315,30 +2318,37 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// outcome into one [`LoopOutcome`] (issue #299 slice 9c, ADR-0085 +
 /// ADR-0078).
 ///
-/// The trace is de-duplicated across the two sources: a gateway-served tool
-/// appears in BOTH -- the gateway's `tools/call` dispatch record
-/// (authoritative, ADR-0076 audit) and the engine's own tool-call
-/// notification (the ACP `session/update`, codex `mcp_tool_call`, claude
-/// `tool_use` echo -- one merge point, one dedup semantics for all three
-/// paths, issue #820). The gateway record wins (it ran the call, so its
-/// success flag + excerpt are the truth); an engine echo drops one per
-/// gateway row it can account for, in one of two pairings:
-/// - by name: meta catalog / skill / CLI-registration calls are recorded
-///   under the tool's own name, so a same-named echo pairs directly,
-///   one per row under that name (issue #673's registration case is
-///   now this arm --
-///   registrations no longer get a special-cased vocabulary);
+/// A gateway-served tool appears in BOTH sources -- the gateway's
+/// `tools/call` dispatch record (authoritative, ADR-0076 audit) and the
+/// engine's own tool-call notification (the ACP `session/update`, codex
+/// `mcp_tool_call`, claude `tool_use` echo -- one merge point, one pairing
+/// semantics for all three paths, issue #820). The gateway record wins by
+/// REPLACING the echo IN ITS ROUND (issue #817): the paired engine row
+/// keeps only its position, every field comes from the gateway row (it ran
+/// the call, so its success flag + excerpt are the truth), and the settled
+/// read order inside each round stays thinking -> prose -> calls. The
+/// pairing is one of two arms:
+/// - by name: meta catalog / skill / CLI-registration / built-in calls are
+///   recorded under the tool's own name, so a same-named echo pairs
+///   directly, one per row under that name (issue #673's registration
+///   case is now this arm -- registrations no longer get a special-cased
+///   vocabulary; built-ins pair through it too, issue #817 retired the
+///   unconditional arm);
 /// - by the `mcp_invoke` pool: an external dispatch is recorded under the
 ///   RESOLVED namespaced handle (the fall-through renames before
 ///   recording, ADR-0105), so the `mcp_invoke` echo pairs against the
-///   turn's namespaced-row count instead.
+///   turn's namespaced-row total instead. Both arms consume their rows
+///   FIFO in gateway trace order.
 ///
-/// An engine row the gateway cannot account for is the runtime's own work
-/// (bash / edit / etc. never touch the gateway) and stays; a same-named row
+/// An engine row the gateway cannot account for stays silently -- the
+/// runtime's own work (bash / edit / etc. never touch the gateway), or
+/// wire drift for a built-in the gateway under-recorded; a same-named row
 /// past the gateway's count stays too, with a warn -- a name collision is
 /// a suspicion, not proof, and the audit surface never silently
-/// under-reports. Promotions are gateway-only (the ACP engine leaves
-/// them empty by design, slice 9a); termination is ACP-only
+/// under-reports. A gateway row no echo consumed (wire drift, a CLI that
+/// never reports its calls) trails the engine rounds as one flat residual
+/// round -- never swallowed. Promotions are gateway-only (the ACP engine
+/// leaves them empty by design, slice 9a); termination is ACP-only
 /// (the gateway serves tools, it does not produce a turn termination).
 ///
 /// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may re-name MCP
@@ -2348,89 +2358,112 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
 /// CLI that emits the gateway's names; real-CLI naming is verified in the
 /// manual E2E checklist, and a normalization layer lands as a follow-up if
 /// the E2E shows a rename.
-fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
+pub fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
     acp.promotions = gateway.promotions;
-    // ADR-0103 (issues #608 + #611): the gateway's flat rows form a LEADING
-    // round (it serves tools; it offers no prose/thinking slots), and the
-    // engine's per-round grouping survives the merge -- each ACP round keeps
-    // its thinking + prose + calls. The gateway-served names drop from the
-    // engine rounds' calls (the gateway's own rows are the truth for those),
-    // and a round the dedup leaves empty (no calls, no prose, no thinking)
-    // drops -- empty stays empty. Row order keeps the gateway's rows first,
-    // the same order the pre-grouping flat merge kept.
-    // Per-name served counts from the gateway's own rows: the dedup below
-    // drops at most as many engine rows as the gateway actually recorded for
-    // each name. A gateway-served name colliding with one of the external
-    // runtime's OWN tools must not erase the runtime's own call rows from
-    // the trace.
-    let mut gateway_served: HashMap<String, usize> = HashMap::new();
-    for entry in &gateway.trace {
-        *gateway_served.entry(entry.name.clone()).or_default() += 1;
-    }
-    // The external-dispatch pool (issue #820): the gateway's fall-through
-    // resolves an `mcp_invoke` call to its namespaced handle BEFORE
-    // recording the authoritative row (ADR-0105), so an `mcp_invoke` echo
-    // can never pair by name -- it consumes one count from the turn's
-    // namespaced-row total instead. Every namespaced row counts regardless
+    // ADR-0103 (issues #608 + #611, calibrated by #817): the gateway's
+    // authoritative rows replace the engine's echo rows IN PLACE -- a paired
+    // engine row keeps only its position inside its round, every field comes
+    // from the gateway row (whole-row replacement), so the settled read
+    // order inside each round is thinking -> prose -> calls. There is no
+    // leading all-gateway round. A gateway row with no engine counterpart
+    // (wire drift, a CLI that never reports its calls) is never swallowed:
+    // the unconsumed rows trail the engine rounds as one flat fallback
+    // round -- the audit surface never under-reports.
+    // Pairing (issue #820's unified vocabulary): every gateway row queues
+    // under its own name, consumed FIFO in trace order -- built-in names
+    // pair through the same per-name quota as every gateway-served name, no
+    // unconditional arm. An `mcp_invoke` echo cannot pair by name (the
+    // gateway's fall-through records the row under the RESOLVED namespaced
+    // handle, ADR-0105), so it instead consumes the turn's namespaced-row
+    // pool in the same FIFO order. Every namespaced row counts regardless
     // of result: a denied call is still a real dispatch the gateway
-    // recorded (ADR-0085).
-    let mut invoke_pool: usize = gateway
-        .trace
-        .iter()
-        .filter(|entry| crate::mcp::aggregator::is_namespaced(&entry.name))
-        .count();
-    let mut rounds = LoopRound::flat_wrap(gateway.trace);
+    // recorded (ADR-0085). An echo whose arm has nothing left keeps the
+    // engine row with a warn; a name the gateway has NO row under stays
+    // silently -- the runtime's own work for a native tool name, wire
+    // drift for a built-in the gateway under-recorded.
+    let mut by_name: HashMap<String, VecDeque<usize>> = HashMap::new();
+    let mut invoke_pool: VecDeque<usize> = VecDeque::new();
+    for (index, entry) in gateway.trace.iter().enumerate() {
+        if crate::mcp::aggregator::is_namespaced(&entry.name) {
+            invoke_pool.push_back(index);
+        }
+        by_name
+            .entry(entry.name.clone())
+            .or_default()
+            .push_back(index);
+    }
+    let mut slots: Vec<Option<TraceEntry>> = gateway.trace.into_iter().map(Some).collect();
+    let mut rounds = Vec::new();
     for mut round in std::mem::take(&mut acp.trace) {
-        // A row the gateway can account for is the gateway's to report: a
-        // built-in name (issue #299 slice 9c -- the external runtime routes
-        // those through the bridge, so a same-named engine row is the
-        // bridge's echo), an `mcp_invoke` echo (one pool count), or a
-        // same-named row with quota left (one per gateway row). A name the
-        // gateway has NO row under is the runtime's own work: the row is
-        // real, so it stays; past the count it stays with a warn (the
-        // audit surface never silently under-reports).
-        round.calls.retain(|entry| {
-            if builtin_metadata(&entry.name).is_some() {
-                return false;
-            }
-            if entry.name == crate::mcp::meta_tools::META_INVOKE {
-                if invoke_pool > 0 {
-                    invoke_pool -= 1;
-                    return false;
+        // A row the gateway can account for is the gateway's to report: an
+        // `mcp_invoke` echo takes one pool row, a same-named row takes the
+        // name's next queued row. A name the gateway has NO row under stays
+        // silently -- the runtime's own work for a native tool name, wire
+        // drift for a built-in the gateway under-recorded; either way the
+        // row is real, so it stays, and past the queued rows it stays with
+        // a warn (the audit surface never silently under-reports).
+        round.calls = round
+            .calls
+            .into_iter()
+            .map(|entry| {
+                if entry.name == crate::mcp::meta_tools::META_INVOKE {
+                    return match take_next_queued(&mut slots, &mut invoke_pool) {
+                        Some(gateway_row) => gateway_row,
+                        None => {
+                            log::warn!(
+                                target: "toptopduck::session",
+                                "engine `mcp_invoke` row past the gateway's namespaced-row \
+                                 count this turn; keeping the row (likely an external-runtime \
+                                 tool of the same name)"
+                            );
+                            entry
+                        }
+                    };
                 }
-                log::warn!(
-                    target: "toptopduck::session",
-                    "engine `mcp_invoke` row past the gateway's namespaced-row \
-                     count this turn; keeping the row (likely an external-runtime \
-                     tool of the same name)"
-                );
-                return true;
-            }
-            match gateway_served.get_mut(entry.name.as_str()) {
-                Some(left) if *left > 0 => {
-                    *left -= 1;
-                    false
+                match by_name.get_mut(entry.name.as_str()) {
+                    Some(queue) => match take_next_queued(&mut slots, queue) {
+                        Some(gateway_row) => gateway_row,
+                        None => {
+                            log::warn!(
+                                target: "toptopduck::session",
+                                "engine tool-call row `{}` past the gateway's recorded count \
+                                 for the name; keeping the row (likely an external-runtime \
+                                 tool of the same name)",
+                                entry.name
+                            );
+                            entry
+                        }
+                    },
+                    None => entry,
                 }
-                Some(_) => {
-                    log::warn!(
-                        target: "toptopduck::session",
-                        "engine tool-call row `{}` past the gateway's recorded count \
-                         for the name; keeping the row (likely an external-runtime \
-                         tool of the same name)",
-                        entry.name
-                    );
-                    true
-                }
-                None => true,
-            }
-        });
+            })
+            .collect();
         let emptied = round.calls.is_empty() && round.thinking.is_none() && round.text.is_none();
         if !emptied {
             rounds.push(round);
         }
     }
+    rounds.extend(LoopRound::flat_wrap(slots.into_iter().flatten().collect()));
     acp.trace = rounds;
     acp
+}
+
+/// Take the next live gateway row a pairing queue can supply, skipping
+/// indexes the sibling arm already consumed: every namespaced row seats in
+/// BOTH the by-name map and the invoke pool, and the slots are the
+/// single-consumption arbiter between the arms. A popped index whose slot
+/// is empty means the other arm took that row, not that the gateway
+/// under-recorded, so the queue advances past it instead of warning.
+fn take_next_queued(
+    slots: &mut [Option<TraceEntry>],
+    queue: &mut VecDeque<usize>,
+) -> Option<TraceEntry> {
+    while let Some(index) = queue.pop_front() {
+        if let Some(gateway_row) = slots[index].take() {
+            return Some(gateway_row);
+        }
+    }
+    None
 }
 
 /// Current Unix epoch time in milliseconds (ADR-0103, issue #608): the
@@ -2744,8 +2777,10 @@ mod tests {
 
     // --- merge_outcomes (issue #299 slice 9c, ADR-0085 trace merge) -------
 
-    /// Build a trace entry with default fields (the merge tests vary only
-    /// `name` + `success`; the rest are inert for the dedup contract).
+    /// Build a trace entry with default fields (the merge tests vary
+    /// `name` + `success` -- the pairing keys; the in-place tests override
+    /// the display fields after construction to pin the whole-row
+    /// replacement, issue #817).
     fn trace_entry(id: &str, name: &str, success: bool) -> TraceEntry {
         TraceEntry {
             tool_use_id: id.into(),
@@ -2778,13 +2813,17 @@ mod tests {
     /// A gateway-routed builtin (`explore`) appears in BOTH sources when the
     /// CLI forwards its own tool-call notification; the gateway record wins
     /// (it ran the SQL, so its `success` flag + excerpt are authoritative),
-    /// and the ACP duplicate is dropped.
+    /// and the ACP duplicate is replaced in place (issue #817).
     #[test]
     fn merge_outcomes_gateway_builtin_wins_over_acp_duplicate() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "explore", false)]);
         let merged = merge_outcomes(gateway, acp);
-        assert_eq!(merged.trace.len(), 1, "the ACP duplicate is dropped");
+        assert_eq!(
+            merged.trace.len(),
+            1,
+            "the ACP duplicate is replaced in place"
+        );
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
         assert!(
             merged.trace[0].calls[0].success,
@@ -2794,7 +2833,8 @@ mod tests {
 
     /// Issue #673: a registered CLI tool name is gateway-served too, so the
     /// same one-call-one-row rule holds -- the gateway's dispatch record
-    /// wins and the engine notification for the identical call drops.
+    /// wins and the engine notification for the identical call is replaced
+    /// in place.
     /// Registrations pair through the unified per-name quota (issue #820):
     /// no special-cased vocabulary, the same arm every gateway-served name
     /// takes.
@@ -2803,7 +2843,11 @@ mod tests {
         let gateway = gateway_outcome(vec![trace_entry("g1", "doc-convert", false)]);
         let acp = acp_outcome(vec![trace_entry("a1", "doc-convert", true)]);
         let merged = merge_outcomes(gateway, acp);
-        assert_eq!(merged.trace.len(), 1, "the engine duplicate is dropped");
+        assert_eq!(
+            merged.trace.len(),
+            1,
+            "the engine duplicate is replaced in place"
+        );
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
         assert!(
             !merged.trace[0].calls[0].success,
@@ -2826,10 +2870,11 @@ mod tests {
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "a1");
     }
 
-    /// The per-name dedup is count-aware: two gateway rows under one name
-    /// drop exactly two same-named engine rows (one per gateway row), and a
-    /// third the gateway cannot account for survives with the collision
-    /// warn -- the rule consumes quota, it does not erase a name.
+    /// The per-name pairing is count-aware: two gateway rows under one name
+    /// replace exactly two same-named engine rows at their slots (one per
+    /// gateway row), and a third the gateway cannot account for survives
+    /// with the collision warn -- the rule consumes quota, it does not erase
+    /// a name.
     #[test]
     fn merge_outcomes_dedup_consumes_one_quota_per_gateway_row() {
         let gateway = gateway_outcome(vec![
@@ -2842,64 +2887,65 @@ mod tests {
             trace_entry("a3", "doc-convert", true),
         ]);
         let merged = merge_outcomes(gateway, acp);
-        // The gateway's flat round keeps both dispatch rows; the engine
-        // round keeps the one unaccounted row (its thinking/text absent, so
-        // the round survives on the call alone).
-        assert_eq!(
-            merged.trace.len(),
-            2,
-            "gateway round + surviving engine round"
-        );
-        assert_eq!(merged.trace[0].calls.len(), 2);
+        // One engine round, no residual: the two paired echoes carry the
+        // gateway's rows at their slots, the third (past the gateway's
+        // count) survives as the runtime's own.
+        assert_eq!(merged.trace.len(), 1, "one engine round, no residual");
+        assert_eq!(merged.trace[0].calls.len(), 3);
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
         assert_eq!(merged.trace[0].calls[1].tool_use_id, "g2");
         assert_eq!(
-            merged.trace[1].calls[0].tool_use_id, "a3",
+            merged.trace[0].calls[2].tool_use_id, "a3",
             "the row past the gateway's count is the runtime's own"
         );
     }
 
-    /// The non-builtin engine rows are the dedup's both-ways guardrail
+    /// The non-builtin engine rows are the pairing's both-ways guardrail
     /// (issue #820 rewrite of the original append-only pin): a same-named
-    /// row drops against the gateway's authoritative record, while a name
-    /// the gateway has nothing for (bash / edit / etc., which never touch
-    /// the gateway) is the runtime's own work and stays.
+    /// row is replaced by the gateway's authoritative record at its slot,
+    /// while a name the gateway has nothing for (bash / edit / etc., which
+    /// never touch the gateway) is the runtime's own work and stays.
     #[test]
-    fn merge_outcomes_per_name_echo_drops_while_unknown_name_stays() {
+    fn merge_outcomes_per_name_echo_replaces_while_unknown_name_stays() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "mcp_search_tools", true)]);
         let acp = acp_outcome(vec![
             trace_entry("a1", "mcp_search_tools", false),
             trace_entry("a2", "bash", true),
         ]);
         let merged = merge_outcomes(gateway, acp);
-        // The gateway round keeps its authoritative row; the engine round
-        // keeps only the runtime's own call.
-        assert_eq!(merged.trace.len(), 2);
+        // One engine round, no residual: the paired echo carries the
+        // gateway's row at its slot, the runtime's own call keeps its own.
+        assert_eq!(merged.trace.len(), 1);
+        assert_eq!(merged.trace[0].calls.len(), 2);
         assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
-        assert_eq!(merged.trace[1].calls[0].tool_use_id, "a2");
-        assert_eq!(merged.trace[1].calls[0].name, "bash");
+        assert_eq!(merged.trace[0].calls[1].tool_use_id, "a2");
+        assert_eq!(merged.trace[0].calls[1].name, "bash");
     }
 
     /// A mixed turn: the gateway routed an `explore` (builtin) AND the CLI
-    /// ran its own `bash` (non-builtin). The gateway's rows lead as their
-    /// own round and the CLI's rounds follow -- gateway-first order, round
-    /// grouping intact.
+    /// ran its own `bash` (non-builtin). The CLI's rounds come first; the
+    /// gateway row the engine never echoed trails as the flat residual
+    /// round -- never swallowed, never promoted above the engine's rounds.
     #[test]
     fn merge_outcomes_gateway_builtin_plus_acp_non_builtin() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
         let merged = merge_outcomes(gateway, acp);
-        assert_eq!(merged.trace.len(), 2, "gateway leading round + CLI round");
-        assert_eq!(merged.trace[0].calls[0].name, "explore");
-        assert_eq!(merged.trace[1].calls[0].name, "bash");
+        assert_eq!(
+            merged.trace.len(),
+            2,
+            "CLI round + the trailing residual round"
+        );
+        assert_eq!(merged.trace[0].calls[0].name, "bash");
+        assert_eq!(merged.trace[1].calls[0].name, "explore");
     }
 
     /// The external-dispatch dedup (issue #820): an `mcp_invoke` engine echo
     /// cannot pair by name -- the gateway's fall-through records the row
     /// under the RESOLVED namespaced handle (ADR-0105; no `mcp_invoke`
-    /// gateway row ever exists), so the echo instead consumes one count
-    /// from the turn's namespaced-row pool. One dispatch, one surviving
-    /// row: the gateway's authoritative record.
+    /// gateway row ever exists), so the echo instead consumes the pool's
+    /// next row FIFO. One dispatch, one surviving row: the gateway's
+    /// authoritative record, seated at the echo's slot.
     #[test]
     fn merge_outcomes_mcp_invoke_echo_consumes_the_namespaced_pool() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "mcp__slug__tool", true)]);
@@ -2908,7 +2954,7 @@ mod tests {
         assert_eq!(
             merged.trace.len(),
             1,
-            "the echo drops; the gateway row is the one record"
+            "the echo is replaced; the gateway row is the one record"
         );
         assert_eq!(merged.trace[0].calls[0].name, "mcp__slug__tool");
     }
@@ -2929,10 +2975,15 @@ mod tests {
             trace_entry("a3", "mcp_invoke", true),
         ]);
         let merged = merge_outcomes(gateway, acp);
-        assert_eq!(merged.trace.len(), 2, "gateway round + the past-pool echo");
-        assert_eq!(merged.trace[0].calls.len(), 2);
+        // One engine round, no residual: the two paired echoes carry the
+        // gateway's rows at their slots, the third (past the pool) survives
+        // as the runtime's own.
+        assert_eq!(merged.trace.len(), 1, "one engine round, no residual");
+        assert_eq!(merged.trace[0].calls.len(), 3);
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "g1");
+        assert_eq!(merged.trace[0].calls[1].tool_use_id, "g2");
         assert_eq!(
-            merged.trace[1].calls[0].tool_use_id, "a3",
+            merged.trace[0].calls[2].tool_use_id, "a3",
             "the echo past the pool is the runtime's own work"
         );
     }
@@ -2955,7 +3006,7 @@ mod tests {
         assert_eq!(
             merged.trace.len(),
             1,
-            "both echoes drop; the two gateway rows are the records"
+            "both echoes are replaced; the two gateway rows are the records"
         );
         assert_eq!(merged.trace[0].calls.len(), 2);
     }
@@ -2968,12 +3019,14 @@ mod tests {
         let gateway = gateway_outcome(vec![trace_entry("g1", "mcp_search_tools", true)]);
         let acp = acp_outcome(vec![trace_entry("a1", "mcp_invoke", true)]);
         let merged = merge_outcomes(gateway, acp);
+        // The engine round comes first (its echo stays, keep + warn); the
+        // gateway's unpaired meta row trails as the residual.
         assert_eq!(merged.trace.len(), 2);
-        assert_eq!(merged.trace[0].calls[0].name, "mcp_search_tools");
         assert_eq!(
-            merged.trace[1].calls[0].tool_use_id, "a1",
+            merged.trace[0].calls[0].tool_use_id, "a1",
             "the echo with no pool to consume stays (keep + warn)"
         );
+        assert_eq!(merged.trace[1].calls[0].name, "mcp_search_tools");
     }
 
     /// The pool and the per-name arm never cross-consume (issue #820): a
@@ -2989,12 +3042,13 @@ mod tests {
             trace_entry("a2", "mcp_invoke", true),
         ]);
         let merged = merge_outcomes(gateway, acp);
-        // The gateway round keeps its row; the engine round keeps only the
-        // per-name miss (a cross-consuming pool would leave a2 alive too).
-        assert_eq!(merged.trace.len(), 2);
-        assert_eq!(merged.trace[0].calls[0].name, "mcp__one__tool");
-        assert_eq!(merged.trace[1].calls.len(), 1);
-        assert_eq!(merged.trace[1].calls[0].tool_use_id, "a1");
+        // One engine round, no residual: the per-name miss keeps its engine
+        // row, and the `mcp_invoke` echo carries the gateway's row at its
+        // slot (a cross-consuming pool would leave the echo alive too).
+        assert_eq!(merged.trace.len(), 1);
+        assert_eq!(merged.trace[0].calls.len(), 2);
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "a1");
+        assert_eq!(merged.trace[0].calls[1].tool_use_id, "g1");
     }
 
     /// The meta catalog pair + skill tool calls pair BY NAME (issue #820
@@ -3002,7 +3056,7 @@ mod tests {
     /// tool's own name (unlike the external fall-through, which renames
     /// -- the third meta tool, `mcp_invoke`, takes the pool arm instead,
     /// so it is deliberately absent from this fixture), so each
-    /// same-named engine echo drops against its gateway row.
+    /// same-named engine echo is replaced by its gateway row at its slot.
     #[test]
     fn merge_outcomes_meta_and_skill_echos_pair_by_name() {
         let names = [
@@ -3026,8 +3080,8 @@ mod tests {
                 .collect(),
         );
         let merged = merge_outcomes(gateway, acp);
-        // All four echoes drop: the gateway's flat round is the only
-        // survivor, carrying every authoritative row.
+        // One round survives: the engine round carrying the gateway's
+        // four authoritative rows at the echo slots.
         assert_eq!(merged.trace.len(), 1);
         assert_eq!(merged.trace[0].calls.len(), 4);
         assert!(merged.trace[0]
@@ -3037,8 +3091,10 @@ mod tests {
     }
 
     /// The CLI's per-round grouping survives the merge (issue #611): each
-    /// ACP round keeps its thinking + prose + calls, the gateway's rows form
-    /// the leading round, and a round the gateway dedup leaves empty drops.
+    /// ACP round keeps its thinking + prose + calls, a paired row is
+    /// replaced INSIDE its round (no leading all-gateway round), and a round
+    /// whose only call paired keeps the round alive -- the replacement
+    /// occupies the slot, so a round never vanishes because of the merge.
     #[test]
     fn merge_outcomes_preserves_acp_round_prose_and_thinking() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);
@@ -3055,8 +3111,9 @@ mod tests {
                     text: Some("checking first".into()),
                     calls: vec![trace_entry("a1", "bash", true)],
                 },
-                // Dedup empties this round (its only call is a gateway
-                // builtin duplicate) -- it must drop, not ghost.
+                // This round's only call pairs with the gateway's builtin
+                // row -- the replacement occupies the slot, so the round
+                // survives instead of vanishing.
                 LoopRound {
                     thinking: None,
                     text: None,
@@ -3065,17 +3122,20 @@ mod tests {
             ],
         };
         let merged = merge_outcomes(gateway, acp);
-        assert_eq!(merged.trace.len(), 2, "leading round + the one ACP round");
-        let leading = &merged.trace[0];
-        assert!(leading.thinking.is_none() && leading.text.is_none());
-        assert_eq!(leading.calls[0].tool_use_id, "g1");
-        let r1 = &merged.trace[1];
+        assert_eq!(merged.trace.len(), 2, "both ACP rounds survive");
+        let r1 = &merged.trace[0];
         assert_eq!(
             r1.thinking.as_ref().expect("round thinking survives").text,
             "weighing"
         );
         assert_eq!(r1.text.as_deref(), Some("checking first"));
         assert_eq!(r1.calls[0].tool_use_id, "a1");
+        let r2 = &merged.trace[1];
+        assert!(r2.thinking.is_none() && r2.text.is_none());
+        assert_eq!(
+            r2.calls[0].tool_use_id, "g1",
+            "the paired row carries the gateway's record at the echo's slot"
+        );
     }
 
     /// Termination is ACP-only (the gateway serves tools, it does not
@@ -3105,6 +3165,197 @@ mod tests {
         let acp = acp_outcome(Vec::new());
         let merged = merge_outcomes(gateway, acp);
         assert!(merged.promotions.is_empty());
+    }
+
+    /// Issue #817 in-place replacement: a paired engine row keeps only its
+    /// POSITION -- every field comes from the gateway's authoritative row
+    /// (whole-row replacement, no per-field picking), so the settled read
+    /// order inside the round is thinking -> prose -> calls with the
+    /// gateway's values substituted at the echo's slot. No leading
+    /// all-gateway round exists.
+    #[test]
+    fn merge_outcomes_replaces_paired_engine_rows_in_place() {
+        let mut gateway_row = trace_entry("g1", "explore", false);
+        gateway_row.operation_kind = OperationKind::Execute;
+        gateway_row.summary = "gateway summary".into();
+        gateway_row.result_excerpt = "gateway excerpt".into();
+        let gateway = gateway_outcome(vec![gateway_row]);
+        let acp = LoopOutcome {
+            termination: Termination::Text("acp reply".into()),
+            promotions: Vec::new(),
+            discovered_runtime: None,
+            trace: vec![LoopRound {
+                thinking: Some(ThinkingTrace {
+                    duration_ms: 90,
+                    text: "weighing".into(),
+                }),
+                text: Some("checking first".into()),
+                calls: vec![
+                    trace_entry("a1", "explore", true),
+                    trace_entry("a2", "bash", true),
+                ],
+            }],
+        };
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(
+            merged.trace.len(),
+            1,
+            "no leading round; the engine round is the trace"
+        );
+        let round = &merged.trace[0];
+        assert_eq!(
+            round.thinking.as_ref().expect("thinking stays").text,
+            "weighing"
+        );
+        assert_eq!(round.text.as_deref(), Some("checking first"));
+        assert_eq!(round.calls.len(), 2, "positions survive, rows are replaced");
+        let replaced = &round.calls[0];
+        assert_eq!(replaced.tool_use_id, "g1");
+        assert_eq!(replaced.name, "explore");
+        assert_eq!(replaced.operation_kind, OperationKind::Execute);
+        assert_eq!(replaced.summary, "gateway summary");
+        assert!(!replaced.success, "the gateway success flag wins");
+        assert_eq!(replaced.result_excerpt, "gateway excerpt");
+        assert_eq!(
+            round.calls[1].tool_use_id, "a2",
+            "the unpaired row keeps its slot"
+        );
+    }
+
+    /// Issue #817 residual tail: gateway rows with no engine counterpart
+    /// (wire drift, a CLI that never reports its calls) are never swallowed
+    /// -- they trail the engine rounds as one flat fallback round, so the
+    /// audit surface never under-reports. The engine rounds come FIRST.
+    #[test]
+    fn merge_outcomes_residual_gateway_rows_trail_as_flat_round() {
+        let gateway = gateway_outcome(vec![
+            trace_entry("g1", "explore", true),
+            trace_entry("g2", "mcp__slug__tool", false),
+        ]);
+        let acp = acp_outcome(vec![trace_entry("a1", "bash", true)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(
+            merged.trace.len(),
+            2,
+            "engine round first, residual round trails"
+        );
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "a1");
+        let residual = &merged.trace[1];
+        assert!(
+            residual.thinking.is_none() && residual.text.is_none(),
+            "the residual round is flat"
+        );
+        assert_eq!(residual.calls.len(), 2);
+        assert_eq!(
+            residual.calls[0].tool_use_id, "g1",
+            "gateway row order preserved"
+        );
+        assert_eq!(residual.calls[1].tool_use_id, "g2");
+    }
+
+    /// Issue #817 FIFO pairing: same-named gateway rows pair with same-named
+    /// echoes in arrival order (gateway rows by trace order, echoes by
+    /// in-round order), and the residual is whichever gateway row FIFO left
+    /// unconsumed -- the LAST one in trace order.
+    #[test]
+    fn merge_outcomes_fifo_pairs_same_name_by_arrival() {
+        let mut g1 = trace_entry("g1", "doc-convert", true);
+        g1.result_excerpt = "first dispatch".into();
+        let mut g2 = trace_entry("g2", "doc-convert", true);
+        g2.result_excerpt = "second dispatch".into();
+        let mut g3 = trace_entry("g3", "doc-convert", true);
+        g3.result_excerpt = "third dispatch".into();
+        let gateway = gateway_outcome(vec![g1, g2, g3]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "doc-convert", true),
+            trace_entry("a2", "doc-convert", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 2, "engine round + the FIFO residual");
+        let round = &merged.trace[0];
+        assert_eq!(
+            round.calls[0].tool_use_id, "g1",
+            "first echo pairs the first gateway row"
+        );
+        assert_eq!(
+            round.calls[1].tool_use_id, "g2",
+            "second echo pairs the second"
+        );
+        assert_eq!(
+            merged.trace[1].calls[0].tool_use_id, "g3",
+            "the residual is the LAST unconsumed gateway row"
+        );
+    }
+
+    /// Issue #817 builtin quota (retires #820's tail C): a built-in echo
+    /// pairs through the SAME per-name quota as every gateway-served name --
+    /// no unconditional arm. When the gateway under-records the dispatch
+    /// (wire drift: the engine saw a call the gateway never wrote a row
+    /// for), the engine row stays instead of being silently dropped: the
+    /// audit surface never under-reports.
+    #[test]
+    fn merge_outcomes_builtin_quota_keeps_engine_row_when_gateway_under_recorded() {
+        let gateway = gateway_outcome(Vec::new());
+        let acp = acp_outcome(vec![trace_entry("a1", "explore", true)]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(
+            merged.trace.len(),
+            1,
+            "the engine row survives the under-recorded builtin"
+        );
+        assert_eq!(merged.trace[0].calls[0].tool_use_id, "a1");
+        assert_eq!(merged.trace[0].calls[0].name, "explore");
+    }
+
+    /// The contention pin (issue #817 review, Important 4): a namespaced
+    /// gateway row seats in BOTH the by-name map and the invoke pool, and
+    /// the slots are the single-consumption arbiter. A turn that echoes
+    /// the handle directly AND dispatches via `mcp_invoke` must still
+    /// consume each row exactly once -- the pool skips the index the
+    /// by-name arm already took, so neither dispatch double-renders and
+    /// no residual trails.
+    #[test]
+    fn merge_outcomes_same_handle_mixed_arms_pair_once() {
+        let gateway = gateway_outcome(vec![
+            trace_entry("g1", "mcp__duckdb__query_snapshot", true),
+            trace_entry("g2", "mcp__duckdb__query_snapshot", false),
+        ]);
+        let acp = acp_outcome(vec![
+            trace_entry("a1", "mcp__duckdb__query_snapshot", true),
+            trace_entry("a2", "mcp_invoke", true),
+        ]);
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 1, "one engine round, no residual");
+        assert_eq!(merged.trace[0].calls.len(), 2, "one row per dispatch");
+        assert_eq!(
+            merged.trace[0].calls[0].tool_use_id, "g1",
+            "the direct echo pairs the first row"
+        );
+        assert_eq!(
+            merged.trace[0].calls[1].tool_use_id, "g2",
+            "the invoke echo skips the stale index and pairs the second"
+        );
+    }
+
+    /// The emptied-round guard: a round the pump itself left hollow (no
+    /// thinking, no prose, no calls) drops at the merge -- empty stays
+    /// empty, and the in-place replacement never empties or resurrects a
+    /// round (the rewrite orphaned this branch's pin; restored here).
+    #[test]
+    fn merge_outcomes_drops_hollow_engine_rounds() {
+        let gateway = gateway_outcome(Vec::new());
+        let acp = LoopOutcome {
+            termination: Termination::Text("acp reply".into()),
+            promotions: Vec::new(),
+            discovered_runtime: None,
+            trace: vec![LoopRound {
+                thinking: None,
+                text: None,
+                calls: Vec::new(),
+            }],
+        };
+        let merged = merge_outcomes(gateway, acp);
+        assert_eq!(merged.trace.len(), 0, "a hollow round drops");
     }
 
     /// Issue #432 AC#1: `tool_output/` is eagerly created at session

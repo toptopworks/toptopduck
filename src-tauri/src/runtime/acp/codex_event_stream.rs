@@ -85,10 +85,11 @@ pub(crate) enum CodexEvent {
         /// The invoked tool's name, verbatim from the wire — the identity
         /// the gateway's dispatch row carries for every class but
         /// external dispatches, which it records under the resolved
-        /// namespaced handle (ADR-0105). The settle-time dedup
-        /// (`merge_outcomes`) pairs the two: builtin names drop via the
-        /// builtin arm, everything else via per-name quota or the
-        /// `mcp_invoke` counting pool (issue #820).
+        /// namespaced handle (ADR-0105). The settle-time merge
+        /// (`merge_outcomes`) pairs the two: every gateway row queues
+        /// under its own name (built-ins included) and a paired echo is
+        /// replaced in place; an `mcp_invoke` echo instead consumes the
+        /// turn's namespaced-row pool FIFO (issues #820 + #817).
         name: String,
         /// The wire's `arguments`, compact-serialized.
         arguments: String,
@@ -633,9 +634,10 @@ impl JsonPump {
                 self.tool_call_count += 1;
                 // The badge + digest replay the gateway's dispatch row
                 // where the stream layer can (issue #816). The settle-time
-                // dedup (`merge_outcomes`) drops this echo whenever the
-                // gateway can account for the call: builtin names,
-                // per-name quota, or the `mcp_invoke` pool (issue #820).
+                // merge (`merge_outcomes`) replaces this echo in place with
+                // the gateway's authoritative row whenever the gateway can
+                // account for the call: per-name quota (built-ins included)
+                // or the `mcp_invoke` pool (issues #820 + #817).
                 let (operation_kind, summary) = mcp_tool_call_display(&name, &arguments);
                 let entry = if failed {
                     // An empty message degrades to the constructor's

@@ -4,7 +4,7 @@
 //! against the claude fake-CLI fixture (`claude-fake-cli`, declared as a
 //! `[[bin]]`) across every observable pump branch: clean text reply,
 //! headless thinking-block rounds (issue #612), a gateway-routed tool
-//! trajectory (phases + the prose round, no engine call rows), a
+//! trajectory (phases + the prose round + the landed anchor row), a
 //! native tool slipping past the deny list (engine trace row), hook-frame
 //! tolerance, result-frame errors, the max-turns cap mapping, crash /
 //! empty-stdout fallbacks, step-cap overflow, and the spawn argv injection
@@ -122,9 +122,10 @@ fn text_reply_yields_text_outcome_and_init_model() {
 }
 
 /// A gateway-routed tool call: the engine emits the Started/Completed phase
-/// pair naming the BARE tool, and the trace keeps the round's prose but no
-/// engine-side call rows -- the gateway owns those rows (ADR-0085; the
-/// merged trace would drop a duplicate, so the driver never emits one).
+/// pair naming the BARE tool, and the round keeps its prose with the engine
+/// row landed under the bare name (issue #817) -- the row is the anchor the
+/// settle merge replaces with the gateway's authoritative record in place,
+/// so no leading all-gateway round exists after the merge.
 #[test]
 fn gateway_tool_call_emits_phases_keeps_prose_round() {
     let (outcome, phases, _) = run("tool_call", 24);
@@ -132,9 +133,9 @@ fn gateway_tool_call_emits_phases_keeps_prose_round() {
         Termination::Text(t) => assert_eq!(t, "found 3 rows"),
         other => panic!("expected Text, got {other:?}"),
     }
-    // The round keeps its prose (ADR-0103, issue #612) but no engine-side
-    // call rows -- the gateway owns those (ADR-0085; the merged trace would
-    // drop a duplicate, so the driver never emits one).
+    // The round keeps its prose (ADR-0103, issue #612) AND lands the engine
+    // row under the bare name -- the in-place-replacement anchor (issue
+    // #817; the merge swaps in the gateway's values at this slot).
     assert_eq!(
         outcome.trace.len(),
         1,
@@ -142,10 +143,8 @@ fn gateway_tool_call_emits_phases_keeps_prose_round() {
         outcome.trace
     );
     assert_eq!(outcome.trace[0].text.as_deref(), Some("querying"));
-    assert!(
-        outcome.trace[0].calls.is_empty(),
-        "gateway-routed calls own their trace rows"
-    );
+    assert_eq!(outcome.trace[0].calls.len(), 1, "the anchor row lands");
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
     assert!(
         phases
             .iter()
@@ -179,7 +178,12 @@ fn thinking_blocks_ride_rounds_end_to_end() {
         "round 1's thinking froze at the batch prelude"
     );
     assert_eq!(r1.text.as_deref(), Some("querying"));
-    assert!(r1.calls.is_empty(), "gateway-routed calls own their rows");
+    assert_eq!(
+        r1.calls.len(),
+        1,
+        "the gateway call's anchor row lands in its round (issue #817)"
+    );
+    assert_eq!(r1.calls[0].name, "explore");
     let r2 = &outcome.trace[1];
     assert_eq!(
         r2.thinking.as_ref().map(|t| t.text.as_str()),

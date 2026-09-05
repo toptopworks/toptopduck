@@ -24,12 +24,13 @@
 //! `--disallowedTools` deny list + headless auto-refusal (ADR-0097 Decision
 //! 3); the ONLY tool plane is the gateway bridge. A `tool_use` whose name
 //! carries an injected server's `mcp__<server>__` prefix is therefore
-//! gateway-routed: the driver emits the live phases but NO engine-side trace
-//! row -- the gateway is authoritative for its own calls (ADR-0085 single
-//! enforcement point; [`crate::session::merge_outcomes`] keeps the gateway
-//! row and drops an engine echo it can account for, whether builtin,
-//! per-name quota, or the `mcp_invoke` pool (issue #820), so the driver
-//! never emits one). An unprefixed `tool_use` (a native tool that
+//! gateway-routed: the driver emits the live phases AND lands an engine-side
+//! trace row under the bare name -- the row is the in-place-replacement
+//! anchor the settle merge pairs the gateway's authoritative record against
+//! (ADR-0085 single enforcement point; [`crate::session::merge_outcomes`]
+//! replaces a paired echo with the gateway row -- per-name quota with
+//! built-ins included, or the `mcp_invoke` pool (issues #820 + #817)). An
+//! unprefixed `tool_use` (a native tool that
 //! slipped past the deny list upstream) rides the engine trace like the
 //! codex path's native events.
 //!
@@ -503,9 +504,6 @@ struct PendingClaudeCall {
     tool_use_id: String,
     /// The display name: the gateway prefix stripped when gateway-routed.
     name: String,
-    /// Gateway-routed calls emit phases only -- the gateway owns their trace
-    /// rows (ADR-0085); engine-side rows would duplicate them.
-    gateway_routed: bool,
     operation_kind: OperationKind,
     summary: String,
 }
@@ -523,7 +521,8 @@ struct ClaudePump {
     current_model: Option<String>,
     pending: Vec<PendingClaudeCall>,
     /// The injected MCP servers' claude-side name prefixes
-    /// (`mcp__<server>__`), deciding gateway-routed vs native `tool_use`.
+    /// (`mcp__<server>__`); a matching prefix strips to the bare display
+    /// name the gateway records its row under (issue #817).
     gateway_prefixes: Vec<String>,
 }
 
@@ -556,17 +555,14 @@ impl ClaudePump {
                 // The batch boundary: the round's prelude (frozen thinking,
                 // prose) fires once, before this call's Started event.
                 let round = self.tracker.call_round(on_phase);
-                // One prefix scan settles both facts (strip_prefix(p)
-                // .is_some() <=> starts_with(p)): whether the call is
-                // gateway-routed, and the bare display name (the merged
-                // trace's gateway rows carry the bare name; the live phases
-                // must read the same).
-                let stripped = self
+                // The bare display name: a matching gateway prefix strips
+                // (the merged trace's gateway rows carry the bare name; the
+                // live phases must read the same).
+                let bare = self
                     .gateway_prefixes
                     .iter()
-                    .find_map(|prefix| name.strip_prefix(prefix));
-                let gateway_routed = stripped.is_some();
-                let bare = stripped.unwrap_or(name.as_str());
+                    .find_map(|prefix| name.strip_prefix(prefix))
+                    .unwrap_or(name.as_str());
                 let (_, operation_kind, summary) = classify_call(&ToolUse {
                     id: id.clone(),
                     name: bare.to_string(),
@@ -582,7 +578,6 @@ impl ClaudePump {
                     round,
                     tool_use_id: id,
                     name: bare.to_string(),
-                    gateway_routed,
                     operation_kind,
                     summary,
                 });
@@ -631,8 +626,9 @@ impl ClaudePump {
         }
     }
 
-    /// Finalize one settled tool row: phases always land; trace rows only
-    /// for non-gateway calls (the gateway owns its own).
+    /// Finalize one settled tool row: the phases and the trace row always
+    /// land -- the row is the settle merge's in-place-replacement anchor
+    /// (issue #817, ADR-0085).
     fn finalize_row(
         &mut self,
         row: PendingClaudeCall,
@@ -667,9 +663,11 @@ impl ClaudePump {
             ),
         };
         on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-        if !row.gateway_routed {
-            self.tracker.land_call(row.round, entry);
-        }
+        // Gateway-routed rows land too (issue #817): the engine row is the
+        // in-place-replacement anchor the settle merge pairs the gateway's
+        // authoritative record against -- the paired row keeps only its
+        // position, every field comes from the gateway (ADR-0085).
+        self.tracker.land_call(row.round, entry);
     }
 
     /// Close every still-open row at turn end -- honestly: the turn ended
@@ -695,9 +693,10 @@ fn outcome(
         promotions: Vec::new(),
         // ADR-0103 (issue #612): rounds grouped at the assistant-frame
         // tool-call batch. A turn with no events settles to an empty list
-        // (no ghost round); a gateway-routed-only round keeps its call-less
-        // shell here -- a bare shell (no prose, no thinking) drops at the
-        // wiring merge's empty-round pass; one that carried prose survives.
+        // (no ghost round); every open round lands its call rows (issue
+        // #817 anchors included), so no gateway-routed shell arrives
+        // call-less -- the wiring merge's empty-round pass only ever drops
+        // a round the pump itself left hollow.
         trace: rounds,
         discovered_runtime: discovered,
     }
@@ -1287,11 +1286,13 @@ mod tests {
         );
     }
 
-    /// A gateway-routed tool_use + tool_result emits phases but NO engine
-    /// trace row (the gateway owns those rows; emitting one would duplicate
-    /// it in the merged trace).
+    /// A gateway-routed tool_use + tool_result emits phases AND lands an
+    /// engine trace row (issue #817): the row is the in-place-replacement
+    /// anchor the settle merge pairs the gateway's authoritative record
+    /// against, so the gateway's values land inside the round the call ran
+    /// in -- no leading all-gateway round.
     #[test]
-    fn gateway_routed_tool_call_emits_phases_without_trace_row() {
+    fn gateway_routed_tool_call_lands_row_and_emits_phases() {
         let mut pump = pump_with_bridge();
         let mut phases = Vec::new();
         let end = pump.fold(
@@ -1315,11 +1316,11 @@ mod tests {
         let rounds = pump
             .tracker
             .settle_rounds(&Termination::Text(String::new()));
-        // No engine-side row (the gateway owns it). The call-less shell the
-        // seal leaves behind drops at the wiring merge, like every runtime
-        // path's empty round.
         assert_eq!(rounds.len(), 1);
-        assert!(rounds[0].calls.is_empty(), "the gateway owns the trace row");
+        // The engine row lands in the round (the merge's replacement
+        // anchor), under the BARE name the gateway records.
+        assert_eq!(rounds[0].calls.len(), 1, "the anchor row lands");
+        assert_eq!(rounds[0].calls[0].name, "explore");
         // The phases name the BARE tool (the merged gateway row's name).
         match &phases[0] {
             TurnPhase::ToolCallStarted { name, .. } => assert_eq!(name, "explore"),

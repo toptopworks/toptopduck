@@ -24,7 +24,7 @@ thread 表现层把轮次账本渲染为 chat 消息流：一轮 = 右对齐用�
 
 ## Consequences
 
-- **校准 ADR-0078**（回指）：trace 持久化形态由扁平改为按轮分组，含连接话语与 thinking 子结构。
+- **校准 ADR-0078**（回指）：trace 持久化形态由扁平改为按轮分组，含连接话语与 thinking 子结构；结算合并时网关权威行就地替换所属轮内的回声行、无锚点残余尾随兜底（合并规则见 ADR-0085）。
 - **退役 ADR-0054**：问话全文换行，单行尾截断 + tooltip 姿态退出。
 - **持久化增列**：`TurnRecord` 加可选 `asked_at` / `settled_at`；老轮 honest degrade 不显示。
 - **thinking 接通边界**：内置 anthropic 协议随 posture thought-level 启用 extended thinking（ADR-0095/0100），openai 协议 honest degrade；claude-code 解析器补 thinking 块事件（ADR-0097）；codex 不承诺（ADR-0094）。thinking 原文 persist 不设上限；无数据源 / 老轮不渲染折叠。
