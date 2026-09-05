@@ -1,8 +1,9 @@
 // The round's connective prose paragraph (ADR-0103): always expanded -- prose
 // is the conversational discourse, folding it would hide the narrative.
-// Shared by the settled round block (TurnCard) and the live round block
-// (LiveTurnExchange, issue #610) so the settle swap renders the identical
-// markup instead of a copy kept in sync by discipline.
+// Shared by the settled round block (TurnCard), the live round block
+// (LiveTurnExchange, issue #610), and the Textual outcome's terminal answer
+// (TurnCard, issue #827) so the settle swap renders the identical markup and
+// the answer rides the same pipeline as the prose.
 //
 // Rendered as markdown (issue #746): agent answers carry headings, lists,
 // code fences, tables, and inline emphasis. react-markdown renders to React
@@ -100,11 +101,14 @@ function CodeBlock({ node }: { node?: HastElement }) {
 // http(s) links open in the OS default browser through the opener plugin --
 // the WebView has no navigation handler for plain anchors (the same channel
 // ProviderKeyField's get-key link uses). Every other shape -- mailto:,
-// relative refs, or what the default urlTransform stripped to empty
-// (javascript:, file:, ...) -- degrades to plain text instead of a dead
-// link. An opener rejection surfaces as a caption-sized live note beside
-// the link (role=status so screen readers announce it): the click already
-// swallowed the default navigation, so silence would read as a dead button.
+// relative refs -- degrades to plain text with the surviving href beside
+// the label, so the target never vanishes from the visible surface (a
+// [email us](mailto:...) answer stays contentful); what the default
+// urlTransform stripped to empty (javascript:, file:, ...) keeps only its
+// label text. An opener rejection surfaces as a caption-sized live note
+// beside the link (role=status so screen readers announce it): the click
+// already swallowed the default navigation, so silence would read as a
+// dead button.
 function ProseLink({ href, children }: { href?: string; children?: ReactNode }) {
   const intl = useIntl();
   const [failed, setFailed] = useState(false);
@@ -140,6 +144,9 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
       </>
     );
   }
+  if (typeof href === "string" && href !== "") {
+    return <span>{children} ({href})</span>;
+  }
   return <span>{children}</span>;
 }
 
@@ -170,8 +177,15 @@ const MARKDOWN_COMPONENTS: Components = {
   a: ProseLink,
   // Remote images never load (the CSP allows only self/data/blob/asset), so a
   // default img would render as a broken placeholder -- the alt text carries
-  // the content the way every other degraded shape here does.
-  img: ({ alt }) => (alt ? <span>{alt}</span> : null),
+  // the content with the untransformed URL beside it, so where the image
+  // lives never vanishes from the visible surface; an empty alt degrades to
+  // the bare URL rather than to nothing (an image-led answer stays visible).
+  img: ({ alt, src }) => {
+    if (typeof src !== "string" || src === "") {
+      return alt ? <span>{alt}</span> : null;
+    }
+    return <span>{alt ? `${alt} (${src})` : src}</span>;
+  },
   table: ({ children }) => (
     <div className="overflow-x-auto rounded-md border border-border">
       <table className="w-full border-collapse [&_tr:last-child>td]:border-b-0">{children}</table>
@@ -188,6 +202,9 @@ const MARKDOWN_COMPONENTS: Components = {
 
 export const RoundProse = memo(function RoundProse({ text }: { text: string }) {
   return (
+    // round-text is a cross-module stability hook: this suite's own pins plus
+    // TurnCard/Thread's composition selectors (`.turn-outcome.textual
+    // .round-text`) query through it.
     <div className="round-text m-0 mt-0.5 space-y-2 text-sm leading-snug text-foreground break-words">
       <Markdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
         {text}

@@ -196,7 +196,7 @@ describe("Thread", () => {
     expect(screen.getByText("已取消")).toBeInTheDocument();
   });
 
-  it("renders an Agent textual turn as a plain answer with no action badge", () => {
+  it("renders an Agent textual turn as a bare reply with no action badge", () => {
     // ADR-0077: the tool-calling contract's terminal text rides TextKind::Agent
     // -- the body IS the reply, so the turn renders without the clarify /
     // refuse action badge; the kind still reads off the outcome icon's
@@ -218,7 +218,8 @@ describe("Thread", () => {
       />,
     );
 
-    // The body renders as a plain answer, labeled by its verbatim question.
+    // The body renders as the direct reply (through the RoundProse pipeline
+    // since issue #827), labeled by its verbatim question.
     expect(screen.getByText("总共有多少客户")).toBeInTheDocument();
     expect(screen.getByText("共 128 位客户。")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "已回答" })).toBeInTheDocument();
@@ -1618,6 +1619,23 @@ describe("Thread", () => {
       expect(screen.getByRole("tooltip").textContent).toBe("已复制");
       fireEvent.click(screen.getByRole("button", { name: "复制回复" }));
       await waitFor(() => expect(writeText).toHaveBeenCalledWith("答复正文"));
+    });
+
+    it("copies the reply's markdown source verbatim, never the rendered text", async () => {
+      // Since issue #827 the DOM text and the source diverge (a heading
+      // renders without its hash); the copy affordance must keep returning
+      // the source string, so a DOM-derived refactor cannot silently strip
+      // markdown from every copied reply.
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+      const body = "# 结论\n\n```sql\nSELECT 1\n```";
+      renderChat(
+        chatRecord({
+          outcome: { kind: "Textual", data: { text_kind: "Agent", body, assumption: null } },
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "复制回复" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(body));
     });
 
     it("reverts the copied ack after the hold and re-arms it on a repeat copy", async () => {

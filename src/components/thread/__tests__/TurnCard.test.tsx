@@ -13,7 +13,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
 import type { ReactNode } from "react";
-import type { TurnRecord } from "../../../types/thread";
+import type { TextKind, TurnRecord } from "../../../types/thread";
 
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
 // shared fixture convention, and the marker's label is the raw adapter id
@@ -123,7 +123,7 @@ describe("TurnCard trace round width cap (issue #826)", () => {
 
 describe("TurnCard textual outcome markdown (issue #827)", () => {
   function textualRecord(
-    text_kind: "Agent" | "Clarify" | "Refuse",
+    text_kind: TextKind,
     body: string,
     assumption: string | null = null,
   ): TurnRecord {
@@ -156,24 +156,40 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
     expect(badge?.tagName).toBe("P");
     expect(badge).toHaveClass("text-xs");
     const prose = outcome?.querySelector(".round-text") ?? null;
-    expect(prose?.contains(badge ?? document.createElement("span"))).toBe(false);
+    expect(prose?.contains(badge)).toBe(false);
   });
 
-  it("routes all three kinds through the same prose path with the note after it", () => {
-    for (const text_kind of ["Agent", "Clarify", "Refuse"] as const) {
-      const { container, unmount } = renderCard(
-        textualRecord(text_kind, "同一正文", "把 id 当主键"),
-      );
-      const prose = container.querySelector(".turn-outcome.textual .round-text");
+  it.each(["Agent", "Clarify", "Refuse"] as const)(
+    "routes the %s kind through the same prose path with the note after it",
+    (text_kind) => {
+      const { container } = renderCard(textualRecord(text_kind, "同一正文", "把 id 当主键"));
+      const outcome = container.querySelector(".turn-outcome.textual");
+      // The lowercase kind rides the container as a hook class for every
+      // kind, not just the one Thread.test happens to select on (.clarify).
+      expect(outcome, `kind=${text_kind}`).toHaveClass(text_kind.toLowerCase());
+      const prose = outcome?.querySelector(".round-text") ?? null;
       expect(prose, `kind=${text_kind}`).not.toBeNull();
       // The assumption side note trails the prose as a sibling, not a child.
       const note = container.querySelector(".assumption");
       // Guard first: a silently-unrendered note would otherwise satisfy both
       // sibling assertions vacuously (null contains nothing, null === null).
       expect(note).not.toBeNull();
-      expect(prose?.contains(note as Element)).toBe(false);
+      expect(prose?.contains(note)).toBe(false);
       expect(prose?.nextElementSibling).toBe(note);
-      unmount();
-    }
+    },
+  );
+
+  it("pins the outcome container's tag and the rows' self-pacing classes", () => {
+    // jsdom cannot see margins, so the spacing contract rides class pins
+    // (the #826 max-w-full precedent): the container's div tag (block-level
+    // markdown cannot nest in a <p>) with its mt-1 offset, the badge row's
+    // m-0 (half the space-y argument -- the browser's default <p> margin
+    // would double-space the caption row), and the note's mt-0.5.
+    const { container } = renderCard(textualRecord("Clarify", "正文", "假设"));
+    const outcome = container.querySelector(".turn-outcome.textual");
+    expect(outcome?.tagName).toBe("DIV");
+    expect(outcome).toHaveClass("mt-1");
+    expect(outcome?.querySelector(".textual-kind")).toHaveClass("m-0");
+    expect(container.querySelector(".assumption")).toHaveClass("mt-0.5");
   });
 });

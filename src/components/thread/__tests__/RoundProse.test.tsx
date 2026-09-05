@@ -52,6 +52,16 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     expect(p.tagName).toBe("P");
   });
 
+  it("carries the conversation tier on its own root", () => {
+    // The .round-text root is where the conversation tier (text-sm, matching
+    // the user bubble's question) lives for all three consumers -- live
+    // rounds, settled rounds, and the textual outcome; this is the only
+    // guard inside the component's own suite (the cross-component pins in
+    // Thread.test select through TurnCard's container).
+    const prose = proseOf(renderProse("正文"));
+    expect(prose.className.split(/\s+/)).toContain("text-sm");
+  });
+
   describe("structure", () => {
     it("compresses the heading ladder: 17px h1 stepping down, h4+ at body size with weight only", () => {
       const { container } = renderProse(
@@ -171,11 +181,23 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(prose.textContent).toContain("<i>斜注</i>");
     });
 
-    it("degrades images to their alt text, never an img element", () => {
+    it("degrades images to alt text plus the URL, never an img element", () => {
       const view = renderProse("前 ![标志图](https://example.com/i.png) 后");
       const prose = proseOf(view);
       expect(prose.querySelector("img")).toBeNull();
-      expect(screen.getByText("标志图")).toBeInTheDocument();
+      // The CSP blocks the fetch, but where the image lives is the one
+      // recoverable fact -- it stays on the visible surface beside the alt.
+      expect(screen.getByText("标志图 (https://example.com/i.png)")).toBeInTheDocument();
+    });
+
+    it("degrades an empty-alt image to the bare URL, never to nothing", () => {
+      const view = renderProse("前 ![](https://example.com/a.png) 后");
+      const prose = proseOf(view);
+      expect(prose.querySelector("img")).toBeNull();
+      // An image-led answer must not render as an answered turn with
+      // nothing on screen (issue #827): no alt still shows the URL.
+      expect(screen.getByText("https://example.com/a.png")).toBeInTheDocument();
+      expect(prose.textContent).not.toBe("");
     });
   });
 
@@ -199,24 +221,28 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(vi.mocked(openUrl)).toHaveBeenCalledWith("http://example.com/legacy");
     });
 
-    it("degrades mailto links to plain text", () => {
+    it("degrades mailto links to plain text that keeps the address", () => {
       const { container } = renderProse("[邮件](mailto:dev@example.com)");
       expect(container.querySelector("a")).toBeNull();
-      expect(screen.getByText("邮件")).toBeInTheDocument();
+      // The urlTransform preserves mailto:, so the target reaches the
+      // component -- it rides beside the label instead of vanishing.
+      expect(screen.getByText("邮件 (mailto:dev@example.com)")).toBeInTheDocument();
       expect(vi.mocked(openUrl)).not.toHaveBeenCalled();
     });
 
-    it("degrades file links to plain text", () => {
+    it("degrades file links to plain text without the target", () => {
       const { container } = renderProse("[本地](file:///C:/data/x.csv)");
       expect(container.querySelector("a")).toBeNull();
+      // file: is outside the default urlTransform's allowlist, so the href
+      // is stripped before the component sees it -- only the label remains.
       expect(screen.getByText("本地")).toBeInTheDocument();
       expect(vi.mocked(openUrl)).not.toHaveBeenCalled();
     });
 
-    it("degrades relative links to plain text", () => {
+    it("degrades relative links to plain text that keeps the reference", () => {
       const { container } = renderProse("[相对](docs/x.md)");
       expect(container.querySelector("a")).toBeNull();
-      expect(screen.getByText("相对")).toBeInTheDocument();
+      expect(screen.getByText("相对 (docs/x.md)")).toBeInTheDocument();
     });
 
     it("autolinks a bare https URL through the opener", () => {
@@ -225,11 +251,14 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(vi.mocked(openUrl)).toHaveBeenCalledWith("https://example.com/docs");
     });
 
-    it("autolinks a bare www host as http and degrades a bare email", () => {
+    it("autolinks a bare www host as http and degrades a bare email with its target", () => {
       renderProse("www.example.com 与 a@b.example.com");
       fireEvent.click(screen.getByRole("link", { name: "www.example.com" }));
       expect(vi.mocked(openUrl)).toHaveBeenCalledWith("http://www.example.com");
-      expect(screen.getByText("a@b.example.com").closest("a")).toBeNull();
+      // GFM autolinks the bare email to mailto:, which the fallback keeps
+      // beside the label so the address reads as a link target, not plain
+      // text that lost something.
+      expect(screen.getByText("a@b.example.com (mailto:a@b.example.com)").closest("a")).toBeNull();
     });
 
     it("passes an uppercase-scheme https link through the gate as written", () => {
