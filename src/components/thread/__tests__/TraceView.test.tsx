@@ -40,8 +40,8 @@ function rowWith(over: Partial<LiveRoundRow> = {}): LiveRoundRow {
   };
 }
 
-// The summary in rowWith's default shape: long enough to ellipsize in a real
-// rail, and the same string anchors the fold-recovery assertions.
+// The summary in rowWith's default shape: a realistic argv-shaped summary;
+// the same string anchors the fold-recovery assertions.
 const SUMMARY = "/bin/py cli-code-runner-code-tu_7.tmp";
 
 // Fold recovery (issue #826): the WHOLE line is the click target -- one
@@ -75,6 +75,10 @@ describe("LiveRow summary fold recovery (issue #826)", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     // Rest posture: the chevron hides until the row is hovered / focused.
     expect(toggle).toHaveClass("opacity-0", "group-hover/summary-row:opacity-100");
+    // The reveal keys on the row's own named group: pin the marker half of
+    // the pairing too, so a rename of the group cannot silently kill the
+    // reveal while the toggle-side class assertion stays green.
+    expect(toggle.parentElement).toHaveClass("group/summary-row");
     // The whole line is the click target, not just the chevron: clicking
     // the summary text toggles too.
     fireEvent.click(screen.getByText(SUMMARY));
@@ -83,7 +87,7 @@ describe("LiveRow summary fold recovery (issue #826)", () => {
     const block = foldBlock(container);
     expect(block).not.toBeNull();
     expect(block?.textContent).toBe(SUMMARY);
-    expect(block).toHaveClass("whitespace-pre-wrap", "max-h-48");
+    expect(block).toHaveClass("whitespace-pre-wrap", "max-h-48", "font-mono");
     fireEvent.click(toggle);
     expect(foldBlock(container)).toBeNull();
   });
@@ -103,11 +107,43 @@ describe("LiveRow summary fold recovery (issue #826)", () => {
     fireEvent.click(summaryFoldToggle(container));
     expect(foldBlock(container)?.textContent).toBe(SUMMARY);
   });
+});
 
+describe("LiveRow caption tokens (issue #826)", () => {
   it("sizes the summary and badge chrome at the caption token", () => {
     renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
     expect(screen.getByText(SUMMARY)).toHaveClass("text-xs");
     expect(screen.getByText("execute")).toHaveClass("text-xs");
+  });
+
+  it("sizes the sibling chrome at the caption token too", () => {
+    // The retirement covers the whole sub-caption family, not just the
+    // decision's named faces: the failure excerpt (settled row) and the
+    // resolved-deny badge (running row under a resolved card) ride text-xs
+    // as well.
+    const failed = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: false,
+          resultExcerpt: "boom",
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(failed.container.querySelector(".trace-excerpt")).toHaveClass("text-xs");
+    const resolved = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: { requestId: "req-1", response: "deny", fileAttachments: [] },
+          running: false,
+          success: null,
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(resolved.container.querySelector(".approval-resolved")).toHaveClass("text-xs");
   });
 });
 

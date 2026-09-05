@@ -326,7 +326,7 @@ impl TurnProvenance {
 /// aligned with `approval::SUMMARY_MAX_CHARS` (issue #826): the rail row's
 /// fold recovers a meaningful head of a long SQL/args digest while the
 /// persisted trace stays bounded.
-pub(crate) const TRACE_SUMMARY_MAX: usize = 512;
+const TRACE_SUMMARY_MAX: usize = 512;
 
 /// Synthesize the single-call execution trace for a Materialized turn's SQL
 /// (ADR-0078). v1-era turns ran exactly one productive SQL under the single-SQL

@@ -36,6 +36,10 @@ pub(crate) const DEFAULT_WALL_CLOCK: Duration = Duration::from_secs(120);
 /// the loop needs to keep for the collapsible trace. Shared across runtimes --
 /// the ACP gateway reuses it so a trace row renders identically regardless of
 /// which runtime produced it (ADR-0085 cross-runtime trace contract).
+/// Deliberately NOT aligned with the 512 recovery caps (issue #826): the ACP
+/// stream arms also cap their live summaries here, so an external-runtime
+/// trace row's fold recovers a 240-char head while a built-in row recovers
+/// 512 -- an arm asymmetry, recorded rather than converged.
 pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 
 /// Why the loop terminated (ADR-0081). Maps onto the four-way `TurnOutcome`

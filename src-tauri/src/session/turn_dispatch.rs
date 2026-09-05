@@ -602,13 +602,16 @@ fn shape_external_outcome(
 /// through to the external arm (the gateway surfaces the approval card for it).
 /// Hard cap on the external-call argument preview inside the approval
 /// summary (issue #661; cap added by the #663 review). Aligned with the
-/// trace-summary cap at 512 (issue #826) so the external digest previews the
-/// same head a built-in summary recovers in the row fold; the frame pushes
-/// the built string past the card-body budget
-/// ([`crate::approval::SUMMARY_MAX_CHARS`]), and the emit-side
-/// `truncate_summary` backstop re-trims it -- a realistic payload still
-/// previews its head instead of degrading to a bare JSON fragment the
-/// approver cannot read.
+/// trace-summary cap at 512 (issue #826); the constructed frame-inclusive
+/// string is re-trimmed to the card-body budget at the construction site
+/// ([`crate::approval::SUMMARY_MAX_CHARS`]) so the card, the started event,
+/// and the trace entry carry one string and the frontend's exact-match
+/// merge holds (an emit-side-only re-trim would fork the channels) -- the
+/// fold then recovers the head the card previews, a frame-width fewer
+/// payload chars than a built-in summary's 512. The registered-CLI argv
+/// summary shares this cap framelessly -- it lands inside the budget
+/// directly, no re-trim. A realistic payload still previews its head
+/// instead of degrading to a bare JSON fragment the approver cannot read.
 const ARGS_PREVIEW_MAX_CHARS: usize = 512;
 
 /// The approval-gateway classification for a registered CLI tool call
@@ -760,11 +763,20 @@ pub(crate) fn classify_call(call: &ToolUse) -> (ToolKey, OperationKind, String) 
             // digest, and a handle-only card makes the user blind-sign
             // whatever the external server is about to receive. The input is
             // compact-JSON'd under the argument-preview cap (issue #663
-            // review); the emit-side `truncate_summary` cap backstops the IPC
-            // broadcast.
-            let summary = format!(
-                "external tool `{other}` with {}",
-                crate::approval::truncate_summary(&call.input.to_string(), ARGS_PREVIEW_MAX_CHARS)
+            // review), then the whole framed string is re-trimmed to the
+            // card-body budget HERE -- one string feeds the card, the started
+            // event, and the trace entry, so the frontend's exact-match merge
+            // holds (an emit-side-only re-trim would re-trim just the
+            // broadcast channel and fork the two).
+            let summary = crate::approval::truncate_summary(
+                &format!(
+                    "external tool `{other}` with {}",
+                    crate::approval::truncate_summary(
+                        &call.input.to_string(),
+                        ARGS_PREVIEW_MAX_CHARS,
+                    ),
+                ),
+                crate::approval::SUMMARY_MAX_CHARS,
             );
             (key, OperationKind::Network, summary)
         }
@@ -1164,23 +1176,29 @@ mod tests {
         assert_eq!(key, ToolKey::external("unknown", "stray_tool"));
     }
 
-    /// Issue #826: the external-call argument preview shares the 512 bound
-    /// with the trace-summary cap, so the row fold recovers the same head a
-    /// built-in summary does. The boundary is pinned with literals so an
-    /// accidental revert fails here; the frame-inclusive card summary's
-    /// re-trim is pinned on the approval side (its own budget tests).
+    /// Issue #826: the external-call summary shares the 512 bound with the
+    /// trace-summary cap, and the constructed frame-inclusive string is
+    /// re-trimmed at the construction site so the card, the started event,
+    /// and the trace entry carry ONE string -- the frontend merges the card
+    /// to its call by exact string match, so a broadcast-only re-trim would
+    /// fork the channels. Pinned with literals so an accidental revert of
+    /// either cap or of the construction-site re-trim fails here: the framed
+    /// summary comes back at exactly 512 chars, frame intact, cut with the
+    /// approval ellipsis.
     #[test]
-    fn classify_call_caps_the_external_argument_preview_at_512() {
+    fn classify_call_caps_the_external_summary_at_the_card_budget() {
         let tool = ToolUse {
             id: "tu_1".into(),
             name: "mcp__github__search".into(),
             input: serde_json::json!({ "q": "z".repeat(600) }),
         };
         let (_, _, summary) = classify_call(&tool);
-        let prefix = "external tool `mcp__github__search` with ";
-        let preview = summary.strip_prefix(prefix).expect("framed summary");
-        assert_eq!(preview.chars().count(), 512);
-        assert!(preview.ends_with("..."), "cut with the approval ellipsis");
+        assert!(
+            summary.starts_with("external tool `mcp__github__search` with "),
+            "frame survives the construction-site trim"
+        );
+        assert_eq!(summary.chars().count(), 512);
+        assert!(summary.ends_with("..."), "cut with the approval ellipsis");
     }
 
     /// The ADR-0078 (issue #297) event stream: a dispatch emits the

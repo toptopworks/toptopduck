@@ -8,20 +8,32 @@
 // the row is hovered or focused (keyboard parity), pinned visible while
 // expanded. Shared by the three summary sites (the settled trace row, the
 // live running row, and the approval card) so the recovery interaction
-// has one shape everywhere; the per-site line head (success glyph /
-// spinner / shield, tool name, badges) rides the `head` slot.
+// has one shape everywhere; the per-site line head (spinner / shield,
+// tool name, badges) rides the `head` slot -- the settled site keeps its
+// success glyph OUTSIDE the fold as the sibling column anchoring the
+// two-line row, so that glyph column sits outside the click target while
+// the live spinner / shield sit inside it.
 //
 // The chevron is a real button (the keyboard path; aria-expanded names
 // the posture) whose click bubbles to the line's onClick -- one handler,
-// one toggle. The affordance rides every row unconditionally -- no
+// one toggle. Its 16px box is intentionally tight: the whole line is the
+// pointer path, the button is the keyboard / focus path. The affordance
+// rides every row unconditionally -- no
 // render-time truncation gate (jsdom cannot measure, and a short summary
 // expanding is harmless); the expanded state is session-ephemeral, the
-// stepsExpanded tier: the settle swap collapses it and a reload loses it.
+// stepsExpanded tier: the settle swap collapses it and a reload loses it
+// (an approval-to-running branch switch reconciles this same component
+// in place and KEEPS the fold open -- the one unlocked in-between).
 
 import { useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SUMMARY_ROW_REVEAL_CLASS } from "./turn-visual";
+
+/** The hook class anchoring the truncated summary span (test / selector
+ *  anchor) -- a literal union so a typo'd class fails at the call site,
+ *  not as a selector miss (FoldToggle's FoldHookClass precedent). */
+type SummaryHookClass = "trace-summary" | "approval-summary";
 
 export function TraceSummaryFold({
   summary,
@@ -29,11 +41,11 @@ export function TraceSummaryFold({
   head = null,
 }: {
   summary: string;
-  /** The hook class for the truncated summary span (trace-summary /
-   *  approval-summary) -- the visual utilities live here, shared. */
-  summaryClassName: string;
-  /** The site-specific line head (status glyph / spinner / shield, tool
-   *  name, badges) rendered inside the line before the summary. */
+  /** The hook class for the truncated summary span -- the visual
+   *  utilities live here, shared. */
+  summaryClassName: SummaryHookClass;
+  /** The site-specific line head (spinner / shield, tool name, badges)
+   *  rendered inside the line before the summary. */
   head?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
