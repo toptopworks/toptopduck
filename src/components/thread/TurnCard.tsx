@@ -310,11 +310,13 @@ function TraceRoundBlock({
 // text is layer-3 LLM content (ADR-0052) and passes through the {text}
 // placeholder untranslated; only the "Assumption:" prefix is chrome. Extracted
 // so the rendering isn't duplicated across the two outcomes that carry it.
+// mt-0.5 mirrors the prose root's offset so the note paces itself wherever it
+// trails a block (Textual, issue #827) as it does inside the Materialized <p>.
 function AssumptionNote({ assumption }: { assumption: string | null }) {
   const intl = useIntl();
   if (!assumption) return null;
   return (
-    <span className="assumption block text-xs italic text-muted-foreground">
+    <span className="assumption mt-0.5 block text-xs italic text-muted-foreground">
       {intl.formatMessage(
         { id: "thread.assumption", defaultMessage: "Assumption: {text}" },
         { text: assumption },
@@ -463,25 +465,28 @@ function TurnBody({
         ) : text_kind === "Refuse" ? (
           <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />
         ) : null;
-      // The body rides the conversation tier (text-sm, matching UserBubble's
-      // question and RoundProse -- the reply is discourse, not chrome).
+      // The reply renders through the shared RoundProse markdown pipeline
+      // (issue #827): the terminal answer is the longest markdown carrier,
+      // and every kind -- Agent, Clarify, Refuse -- rides the same path with
+      // no fork. <div>, not <p>: the prose renders block-level markdown
+      // (headings, code fences, tables) that cannot legally nest in a <p>
+      // (the Failed card's precedent). The container carries no tier or
+      // spacing of its own: the badge row keeps the caption tier, RoundProse
+      // brings the conversation tier, and the rows pace themselves -- the
+      // prose root's mt-0.5 and the note's mt-0.5 (space-y-* on the
+      // container would be inert here: Tailwind v4's zero-specificity
+      // :where() spacing loses to every child's m-0).
       return (
-        <p
-          className={cn(
-            "turn-outcome textual mt-1 text-sm leading-snug",
-            text_kind.toLowerCase(),
-          )}
-        >
+        <div className={cn("turn-outcome textual mt-1", text_kind.toLowerCase())}>
           {badge && (
-            // The kind badge is chrome, not discourse: it keeps the caption
-            // tier instead of inheriting the body's conversation tier.
-            <span className="textual-kind inline-block mr-1 text-xs text-muted-foreground">
-              {badge}
-            </span>
+            // The kind badge is chrome, not discourse: it stands on its own
+            // caption row ahead of the prose, keeping the caption tier
+            // instead of riding the conversation tier.
+            <p className="textual-kind m-0 text-xs text-muted-foreground">{badge}</p>
           )}
-          <span className="textual-body text-foreground">{body}</span>
+          <RoundProse text={body} />
           <AssumptionNote assumption={assumption} />
-        </p>
+        </div>
       );
     }
     case "Failed": {

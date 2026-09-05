@@ -120,3 +120,60 @@ describe("TurnCard trace round width cap (issue #826)", () => {
     expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
   });
 });
+
+describe("TurnCard textual outcome markdown (issue #827)", () => {
+  function textualRecord(
+    text_kind: "Agent" | "Clarify" | "Refuse",
+    body: string,
+    assumption: string | null = null,
+  ): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: { kind: "Textual", data: { text_kind, body, assumption } },
+    };
+  }
+
+  it("renders the terminal reply through the shared RoundProse pipeline", () => {
+    // The Agent kind's terminal text (ADR-0077) is the longest markdown
+    // carrier -- headings, code fences -- and now rides the same pipeline
+    // the round prose uses instead of a plain text span.
+    const { container } = renderCard(
+      textualRecord("Agent", "# 结论\n\n```sql\nSELECT 1\n```"),
+    );
+    const prose = container.querySelector(".turn-outcome.textual .round-text");
+    expect(prose).not.toBeNull();
+    expect(prose?.querySelector("h1")).toHaveTextContent("结论");
+    expect(prose?.querySelector("pre code")).toHaveTextContent("SELECT 1");
+  });
+
+  it("keeps the Clarify kind badge on its own caption row outside the prose", () => {
+    const { container } = renderCard(textualRecord("Clarify", "按产品名还是客户名？"));
+    const outcome = container.querySelector(".turn-outcome.textual");
+    const badge = outcome?.querySelector(".textual-kind") ?? null;
+    // Chrome, not discourse: the badge is a block-level caption row (a <p>
+    // sibling, issue #727's tier pin lives on) that never nests inside the
+    // markdown pipeline's root.
+    expect(badge?.tagName).toBe("P");
+    expect(badge).toHaveClass("text-xs");
+    const prose = outcome?.querySelector(".round-text") ?? null;
+    expect(prose?.contains(badge ?? document.createElement("span"))).toBe(false);
+  });
+
+  it("routes all three kinds through the same prose path with the note after it", () => {
+    for (const text_kind of ["Agent", "Clarify", "Refuse"] as const) {
+      const { container, unmount } = renderCard(
+        textualRecord(text_kind, "同一正文", "把 id 当主键"),
+      );
+      const prose = container.querySelector(".turn-outcome.textual .round-text");
+      expect(prose, `kind=${text_kind}`).not.toBeNull();
+      // The assumption side note trails the prose as a sibling, not a child.
+      const note = container.querySelector(".assumption");
+      // Guard first: a silently-unrendered note would otherwise satisfy both
+      // sibling assertions vacuously (null contains nothing, null === null).
+      expect(note).not.toBeNull();
+      expect(prose?.contains(note as Element)).toBe(false);
+      expect(prose?.nextElementSibling).toBe(note);
+      unmount();
+    }
+  });
+});

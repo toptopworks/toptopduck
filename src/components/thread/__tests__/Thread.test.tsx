@@ -224,9 +224,10 @@ describe("Thread", () => {
     expect(screen.getByRole("img", { name: "已回答" })).toBeInTheDocument();
     // The reply body rides the conversation tier (text-sm, matching the user
     // bubble's question and RoundProse) -- the answer is discourse, not
-    // chrome.
+    // chrome. Since issue #827 the body renders through RoundProse, so the
+    // tier pin lands on the prose root, not the outcome container.
     expect(
-      container.querySelector(".turn-outcome.textual")?.className.split(/\s+/),
+      container.querySelector(".turn-outcome.textual .round-text")?.className.split(/\s+/),
     ).toContain("text-sm");
     // No action-signaling badge -- neither a clarify nor a refuse.
     expect(screen.queryByText("需要澄清")).not.toBeInTheDocument();
