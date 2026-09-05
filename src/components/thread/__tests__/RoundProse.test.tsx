@@ -52,7 +52,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     expect(p.tagName).toBe("P");
   });
 
-  it("carries the conversation tier on its own root", () => {
+  it("carries the conversation tier and its CJK line-height on its own root", () => {
     // The .round-text root is where the conversation tier (text-sm, matching
     // the user bubble's question) lives for all three consumers -- live
     // rounds, settled rounds, and the textual outcome; this is the only
@@ -63,8 +63,8 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     expect(classes).toContain("text-sm");
     // Body line-height floats at 1.75 -- a deliberate step above the
     // body-md token's 1.5, which CJK discourse reads as cramped once
-    // answers run long (issue #828). The negative guard keeps the compact
-    // chrome override from sneaking back alongside it.
+    // answers run long (issue #828). The negative guard keeps the old
+    // compact leading from sneaking back onto the prose root.
     expect(classes).toContain("leading-[1.75]");
     expect(classes).not.toContain("leading-snug");
   });
@@ -75,14 +75,24 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       // specificity), so a child's own m-0 (0,1,0) always outranks it -- m-0
       // on the mapped blocks killed the root's 16px inter-block rhythm
       // entirely (paragraphs and headings rendered flush on real hardware).
-      // The map carries no margin classes; the preflight reset already
-      // zeroes the nested contexts the root's space-y never reaches (issue
-      // #828).
-      const ui = renderProse("# 标题\n\n段落一\n\n> 引用\n\n- 列表项");
+      // The block-level entries that land directly under the root carry no
+      // margin classes (CodeBlock's inner pre keeps a nested m-0, but it
+      // sits inside the wrapper div, out of the root's reach); the preflight
+      // reset already zeroes the nested contexts the root's space-y never
+      // reaches (issue #828).
+      const ui = renderProse(
+        "# 标题\n## 次级\n### 三级\n#### 四级\n##### 五级\n###### 六级\n\n段落一\n\n> 引用\n\n- 列表项\n\n1. 有序项\n\n---",
+      );
       expect(proseOf(ui).className.split(/\s+/)).toContain("space-y-4");
-      for (const tag of ["h1", "p", "blockquote", "ul"]) {
+      // Every mapped block tag, over every margin class that could flatten
+      // the rhythm: the space-y rule pays out margin-block-end, so m-0,
+      // my-0, and mb-0 all suppress it (mt-0 alone would be inert).
+      const blockTags = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "blockquote", "hr"];
+      for (const tag of blockTags) {
         const classes = (ui.container.querySelector(tag)?.className ?? "").split(/\s+/);
-        expect(classes).not.toContain("m-0");
+        for (const margin of ["m-0", "my-0", "mb-0"]) {
+          expect(classes).not.toContain(margin);
+        }
       }
     });
 

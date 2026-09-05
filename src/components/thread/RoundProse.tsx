@@ -151,10 +151,12 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
 }
 
 // Module-level constant: see the streaming contract in the file header.
-// Block-level maps carry no margin classes: the root's space-y-4 owns the
-// inter-block rhythm, and Tailwind v4's space-y selector sits inside
-// :where() (zero specificity) -- any m-0 here would outrank it and flatten
-// the rhythm back to flush blocks.
+// The block-level entries that land directly under the root carry no margin
+// classes: the root's space-y-4 owns the inter-block rhythm, and Tailwind
+// v4's space-y selector sits inside :where() (zero specificity) -- any
+// m-0 here would outrank it and flatten the rhythm back to flush blocks.
+// (CodeBlock's inner pre keeps a nested m-0, but it sits inside the
+// wrapper div, out of the root's space-y reach.)
 const MARKDOWN_COMPONENTS: Components = {
   // The chat-stream heading ladder: full-size document headings would shout
   // over the discourse in the 320px rail, so markdown headings compress -- h1
@@ -166,6 +168,9 @@ const MARKDOWN_COMPONENTS: Components = {
   h4: ({ children }) => <h4 className="text-sm font-semibold">{children}</h4>,
   h5: ({ children }) => <h5 className="text-sm font-semibold">{children}</h5>,
   h6: ({ children }) => <h6 className="text-sm font-semibold">{children}</h6>,
+  // Bare on purpose: preflight plus the root's rhythm cover the paragraph,
+  // and the explicit entry keeps the no-margin contract over its most
+  // common block.
   p: ({ children }) => <p>{children}</p>,
   ul: ({ children }) => <ul className="list-disc space-y-1 pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5">{children}</ol>,
