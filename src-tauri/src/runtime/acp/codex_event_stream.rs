@@ -633,9 +633,10 @@ impl JsonPump {
                 self.tool_call_count += 1;
                 // The badge + digest replay the gateway's dispatch row
                 // where the stream layer can (issue #816). The settle-time
-                // dedup (`merge_outcomes`) drops this echo whenever the
-                // gateway can account for the call: builtin names,
-                // per-name quota, or the `mcp_invoke` pool (issue #820).
+                // merge (`merge_outcomes`) replaces this echo in place with
+                // the gateway's authoritative row whenever the gateway can
+                // account for the call: per-name quota (built-ins included)
+                // or the `mcp_invoke` pool (issues #820 + #817).
                 let (operation_kind, summary) = mcp_tool_call_display(&name, &arguments);
                 let entry = if failed {
                     // An empty message degrades to the constructor's

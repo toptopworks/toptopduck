@@ -2793,7 +2793,7 @@ mod tests {
     /// A gateway-routed builtin (`explore`) appears in BOTH sources when the
     /// CLI forwards its own tool-call notification; the gateway record wins
     /// (it ran the SQL, so its `success` flag + excerpt are authoritative),
-    /// and the ACP duplicate is dropped.
+    /// and the ACP duplicate is replaced in place (issue #817).
     #[test]
     fn merge_outcomes_gateway_builtin_wins_over_acp_duplicate() {
         let gateway = gateway_outcome(vec![trace_entry("g1", "explore", true)]);

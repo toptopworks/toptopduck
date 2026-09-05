@@ -139,8 +139,9 @@ fn run_turn(scenario: &str) {
             emit(&mut out, &result_success("the answer is 42"));
         }
         "tool_call" => {
-            // A gateway-routed MCP call: the engine emits phases but the
-            // gateway owns the trace row.
+            // A gateway-routed MCP call: the engine emits phases and lands
+            // the anchor row the settle merge replaces with the gateway's
+            // authoritative record in place (issue #817).
             emit(&mut out, &system_init());
             emit(
                 &mut out,
