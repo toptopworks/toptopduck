@@ -128,6 +128,13 @@ export interface LiveTurn {
    *  the grouping exists once instead of twice with a shared-by-comment
    *  invariant. */
   rounds: LiveRound[];
+  /** The ask-time runtime choice mapped onto the thread's attribution
+   *  (issue #818): the live exchange renders the per-turn marker from it,
+   *  the same value the optimistic append stamps -- one source, so the
+   *  settle swap re-hosts an identical marker. Absent until the read
+   *  resolves (the initial live commit precedes it) and on failure -- no
+   *  marker, matching the append's omitted runtime. */
+  runtime?: TurnRuntime;
 }
 
 /** Merge the two live channels into one ordered row list (pure -- unit-tested
@@ -368,6 +375,13 @@ interface LiveState {
   /** Per-round thinking blocks (index = step-1, null when none), from the
    *  ThinkingCompleted events (issues #608/#610). */
   roundThinkings: Array<ThinkingTrace | null>;
+  /** The ask-time runtime choice mapped onto the thread's attribution
+   *  (issue #818): stamped onto the live state when the submit-time read
+   *  resolves, so the live exchange renders the same marker the optimistic
+   *  append stamps. Absent until the read lands and on its failure -- the
+   *  same honest degrade as the append's omitted runtime. Survives phase
+   *  evolution (applyPhase spreads the previous state). */
+  runtime?: TurnRuntime;
 }
 
 /** Mint a call row keyed by arrival order (the trace is append-only within
@@ -590,6 +604,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       askedAt: live.askedAt,
       step: live.step,
       rounds: buildLiveRounds(live, approvals),
+      runtime: live.runtime,
     };
   }, [live, approvals]);
 
@@ -637,6 +652,23 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         log.warn("useTurnFlow", "runtime choice read failed; turn appended without runtime stamp", e);
         return undefined;
       });
+      // Issue #818: the live marker rides the same read the optimistic
+      // stamp consumes -- when the choice lands, the live turn carries it
+      // (the read resolves in milliseconds; the bubble mounts first, the
+      // marker appears with the next commit). A settled turn (null live
+      // state) or a failed read skips the update: the marker simply never
+      // shows, the same silent degrade as the append's omitted runtime. An
+      // unmapped choice throws here AND again at the stamp below -- this
+      // site degrades only the cosmetic marker with a log line (ADR-0029);
+      // the stamp's loud failure is the designed one.
+      void runtimeRead
+        .then((choice) => {
+          if (choice === undefined || liveRef.current === null) return;
+          commitLive({ ...liveRef.current, runtime: choiceToTurnRuntime(choice) });
+        })
+        .catch((e: unknown) => {
+          log.warn("useTurnFlow", "live runtime marker update skipped", e);
+        });
       let outcome;
       // The settled trace, snapshotted in the finally BEFORE the live state
       // folds away (the optimistic append below reads it on the success

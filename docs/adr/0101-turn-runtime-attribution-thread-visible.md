@@ -2,13 +2,13 @@
 
 ## Decision
 
-1. **每轮的执行运行时归属从纯后端审计升级为 thread 呈现**。现状持久化仅记录运行时类别（`BuiltIn` / `External` 二值），适配器身份是本决策新增的持久化字段：provenance 扩展为外部轮次携带适配器 id（serde default 向后兼容，v1 迁移轮次与扩展前存量轮次的适配器 id 缺失，thread 渲染按「外部（未记录）」诚实降级、不臆造）。归属随之加入轮次的 wire 形状。既有「runtime is backend audit only, never crosses to the webview」的边界撤除。
+1. **每轮的执行运行时归属从纯后端审计升级为 thread 呈现**。现状持久化仅记录运行时类别（`BuiltIn` / `External` 二值），适配器身份是本决策新增的持久化字段：provenance 扩展为外部轮次携带适配器 id（serde default 向后兼容，v1 迁移轮次与扩展前存量轮次的适配器 id 缺失，thread 渲染沉默降级（不渲染标记、不臆造））。归属随之加入轮次的 wire 形状。既有「runtime is backend audit only, never crosses to the webview」的边界撤除。
 
 2. **归属是轮次属性，不是生命周期事件**。换运行时不插入新的 timeline 条目类型：源/技能事件标记的是改变工作集 / 提示装配的突变（事件即效果的载体），而运行时是每轮的执行事实——切换动作没有独立的领域效果可供承载，效果就是下一轮由谁执行。
 
 3. **LLM 窗口保持运行时无关**。窗口装配（提问原话 + 答复摘要，ADR-0023/0039）不携带归属：接手执行的运行时无需知道前任是谁，注入只增加 token 开销。
 
-4. **换运行时是必要的可选操作，可见性的标准是「用到时诚实」**。归属呈现的目的是让混合 thread 事后可读，而非常态高频信息；呈现形态（图标、徽章、段首降噪规则）与图标是否采用厂商 logo，均属实现期决定，遵循 DESIGN.md。
+4. **换运行时是必要的可选操作，可见性的标准是「用到时诚实」**。归属呈现的目的是让混合 thread 事后可读：能具名适配器的外部轮次每轮在场（标记频率与降噪相权衡，以安静形态承载），built-in 与无法具名的轮次沉默——无标段读作默认运行时。呈现形态（图标、徽章）与图标是否采用厂商 logo，均属实现期决定，遵循 DESIGN.md。
 
 ## Context
 
@@ -29,7 +29,7 @@
 
 ## Consequences
 
-- provenance schema 扩展：外部轮次携带适配器 id（serde default 向后兼容）；存量 .duck 反序列化为缺失，thread 渲染按「外部（未记录）」诚实降级。
+- provenance schema 扩展：外部轮次携带适配器 id（serde default 向后兼容）；存量 .duck 反序列化为缺失，thread 渲染沉默降级（不渲染标记）。
 - 轮次 wire 形状新增归属字段；前端一旦消费即难回退，实现须一次定型字段形状。
 - turn provenance 定义处的「never crosses to the webview」注释承诺作废，改写为本 ADR 指针，防止实现回退。
 - 与 ADR-0095 Decision 1 的边界：模型 / 思考强度切换维持其「不做特殊标注」——归属只覆盖运行时轴（谁执行该轮）；模型姿势是同一执行者的参数变化，不产生归属语义。

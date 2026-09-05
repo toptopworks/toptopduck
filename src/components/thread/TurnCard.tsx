@@ -24,9 +24,11 @@ import { ThinkingFold } from "./ThinkingFold";
 import { TurnActiveChip } from "./TurnActiveChip";
 import { UserBubble } from "./UserBubble";
 import { StaleChip } from "./StaleChip";
+import { RuntimeAttributionMarker } from "./RuntimeAttributionMarker";
 import {
   HOVER_REVEAL_CLASS,
   outcomeVisual,
+  runtimeMarkerName,
   selectDriftedSkills,
   type DatasetLabel,
 } from "./turn-visual";
@@ -123,6 +125,9 @@ export function TurnCard({
   // IS text: a Textual turn's body. Materialized answers with a result link,
   // Failed/Cancelled with markers -- nothing textual to copy.
   const replyText = record.outcome.kind === "Textual" ? record.outcome.data.body : null;
+  // Issue #818: the per-turn runtime attribution. Only a runtime that can
+  // name its adapter renders (built-in / unrecorded stay silent).
+  const runtimeName = runtimeMarkerName(record.provenance.runtime);
   return (
     <div
       className={cn("turn-card rounded-md py-1.5", isStale && "stale-ghost opacity-50")}
@@ -135,6 +140,10 @@ export function TurnCard({
           weakened && "opacity-60",
         )}
       >
+        {/* Issue #818: the runtime attribution opens the stream -- who
+            answers precedes everything the actor does inside the turn
+            (activations, annotations, rounds). */}
+        {runtimeName !== null && <RuntimeAttributionMarker adapterId={runtimeName} />}
         {/* D5 / issue #722: agent activations owned by this turn open the
             assistant stream -- after the user bubble, before the execution
             they enabled. */}

@@ -4,7 +4,6 @@ import { LifecycleFold, LifecycleFoldMembers } from "./LifecycleFold";
 import { LiveTurnExchange } from "./LiveTurnExchange";
 import { SourceMarker } from "./SourceMarker";
 import { SkillMarker } from "./SkillMarker";
-import { RuntimeAttributionMarker } from "./RuntimeAttributionMarker";
 import { TurnCard } from "./TurnCard";
 import {
   primaryReferenceName,
@@ -13,7 +12,6 @@ import {
   agentActivationOwner,
   lifecycleRunMarks,
   lifecycleVisualRows,
-  runtimeSegmentBadges,
   staleDerivativeCount,
   staleKey,
   type DatasetLabel,
@@ -219,12 +217,6 @@ export function Thread({
     return m;
   }, [staleByReference]);
 
-  // ADR-0101: the per-entry runtime segment badge (null where none opens).
-  // Gated + quieted inside the helper -- a purely built-in thread renders
-  // nothing; a mixed thread announces each attribution change once, at the
-  // segment's first turn.
-  const segmentBadges = useMemo(() => runtimeSegmentBadges(entries), [entries]);
-
   // D5 / issue #722 placement: an agent activation renders at the head of its
   // owning turn's assistant stream (the entry's next Turn), not as a
   // standalone row; while its turn runs it renders at the live exchange's
@@ -388,7 +380,6 @@ export function Thread({
             const i = row.idx;
             const entry = entries[i];
             if (entry.entry !== "Turn") return null;
-            const segmentRuntime = segmentBadges[i];
             const primaryRef = primaryReferenceName(entry.data.outcome);
             const staleAnchor =
               primaryRef === undefined ? undefined : staleByReference.get(primaryRef);
@@ -416,9 +407,6 @@ export function Thread({
                 className="turn-entry"
                 data-outcome={entry.data.outcome.kind.toLowerCase()}
               >
-                {segmentRuntime != null && (
-                  <RuntimeAttributionMarker runtime={segmentRuntime} />
-                )}
                 <TurnCard
                   record={entry.data}
                   selectedResult={selectedResult}
