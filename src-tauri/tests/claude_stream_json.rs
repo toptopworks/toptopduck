@@ -4,7 +4,7 @@
 //! against the claude fake-CLI fixture (`claude-fake-cli`, declared as a
 //! `[[bin]]`) across every observable pump branch: clean text reply,
 //! headless thinking-block rounds (issue #612), a gateway-routed tool
-//! trajectory (phases + the prose round, no engine call rows), a
+//! trajectory (phases + the prose round + the landed anchor row), a
 //! native tool slipping past the deny list (engine trace row), hook-frame
 //! tolerance, result-frame errors, the max-turns cap mapping, crash /
 //! empty-stdout fallbacks, step-cap overflow, and the spawn argv injection

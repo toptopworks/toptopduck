@@ -183,10 +183,11 @@ fn failed_command_lands_failed_trace_row() {
 /// `command_execution` shape) and lands one trace row on the round. The
 /// row's name is the wire's `tool` verbatim — the identity the gateway's
 /// dispatch row carries for every class but external dispatches, which
-/// it records under the resolved handle — so the settle-time dedup
-/// (`merge_outcomes`) drops the echo whenever the gateway can account
-/// for the call: builtin names, per-name quota, or the `mcp_invoke`
-/// pool (issue #820).
+/// it records under the resolved handle — so the settle-time merge
+/// (`merge_outcomes`) replaces the echo in place with the gateway's
+/// authoritative row whenever the gateway can account for the call:
+/// per-name quota (built-ins included) or the `mcp_invoke` pool (issues
+/// #820 + #817).
 #[test]
 fn mcp_tool_call_renders_live_and_lands_trace_rows() {
     let (outcome, phases, _) = run("mcp_tool_call", 24);
@@ -229,12 +230,15 @@ fn mcp_tool_call_renders_live_and_lands_trace_rows() {
 }
 
 /// Issue #817's end-to-end pin for the codex path (retiring #820's tail H):
-/// the fake CLI drives a full turn with thinking + prose + two
-/// gateway-served `mcp_tool_call`s across two batch rounds; the engine rows
-/// are the anchors, and the settle merge replaces them IN PLACE with the
-/// gateway's authoritative rows — the settled trace keeps each round's
-/// thinking -> prose -> calls order, no leading all-gateway round exists,
-/// and exactly one row survives per dispatch.
+/// the fake CLI drives a full turn with thinking + prose + three
+/// gateway-served `mcp_tool_call`s across two batch rounds (a CLI
+/// registration, a direct-send namespaced call, and an `mcp_invoke` meta
+/// dispatch); the engine rows are the anchors, and the settle merge
+/// replaces them IN PLACE with the gateway's authoritative rows — the
+/// settled trace keeps each round's thinking -> prose -> calls order, no
+/// leading all-gateway round exists, exactly one row survives per
+/// dispatch (the invoke echo pairs the pool's next live row), and the one
+/// unechoed gateway row trails as the flat residual.
 #[test]
 fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
     let (outcome, _, _) = run("mcp_tool_call_rounds", 24);
@@ -242,9 +246,10 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
     }
-    // The gateway's authoritative rows: one per dispatch, the same names
-    // the engine echoed (a CLI registration + a direct-send namespaced
-    // call), carrying the gateway's ids.
+    // The gateway's authoritative rows: one per dispatch — the same names
+    // the engine echoed for the registration and the direct-send
+    // namespaced call, the resolved handle for the `mcp_invoke` dispatch,
+    // plus one unechoed builtin row for the residual.
     let gateway_row = |id: &str, name: &str| TraceEntry {
         tool_use_id: id.into(),
         name: name.into(),
@@ -257,14 +262,16 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
         trace: vec![
             gateway_row("gw_1", "convert"),
             gateway_row("gw_2", "mcp__duckdb__query_snapshot"),
+            gateway_row("gw_3", "mcp__duckdb__snapshot_extra"),
+            gateway_row("gw_4", "explore"),
         ],
         promotions: Vec::new(),
     };
     let merged = merge_outcomes(gateway, outcome);
     assert_eq!(
         merged.trace.len(),
-        2,
-        "two rounds, no residual: {:#?}",
+        3,
+        "two engine rounds + the trailing residual: {:#?}",
         merged.trace
     );
     let r1 = &merged.trace[0];
@@ -281,15 +288,21 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
     assert_eq!(r1.calls[0].summary, "convert gateway summary");
     let r2 = &merged.trace[1];
     assert_eq!(r2.text.as_deref(), Some("verifying the count"));
-    assert_eq!(r2.calls.len(), 1, "one row per dispatch");
+    assert_eq!(r2.calls.len(), 2, "one row per dispatch");
     assert_eq!(r2.calls[0].tool_use_id, "gw_2");
-    assert!(
-        merged
-            .trace
-            .iter()
-            .all(|r| r.thinking.is_some() || r.text.is_some()),
-        "no flat all-gateway round survives the merge"
+    assert_eq!(
+        r2.calls[1].tool_use_id, "gw_3",
+        "the invoke echo pairs the pool's next live row (skipping the \
+         index the direct echo consumed)"
     );
+    let residual = &merged.trace[2];
+    assert!(
+        residual.thinking.is_none() && residual.text.is_none(),
+        "the residual round is flat"
+    );
+    assert_eq!(residual.calls.len(), 1);
+    assert_eq!(residual.calls[0].tool_use_id, "gw_4");
+    assert_eq!(residual.calls[0].name, "explore");
 }
 
 /// A failed gateway call (status "failed" + error.message) lands a failed

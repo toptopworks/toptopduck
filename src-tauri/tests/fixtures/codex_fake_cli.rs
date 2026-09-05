@@ -266,7 +266,10 @@ fn main() {
         // two batch rounds (issue #817): the settle merge's in-place
         // replacement keeps each round's thinking -> prose -> calls order —
         // the end-to-end pin for the codex path (the engine rows are the
-        // anchors the gateway's authoritative rows replace).
+        // anchors the gateway's authoritative rows replace). Three dispatch
+        // shapes: a CLI registration, a direct-send namespaced call, and an
+        // `mcp_invoke` meta dispatch whose gateway row records the resolved
+        // handle.
         "mcp_tool_call_rounds" => {
             emit(
                 &mut out,
@@ -303,7 +306,20 @@ fn main() {
                     )
                 }),
             );
-            emit(&mut out, &agent_message("item_5", "the answer is 42"));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_5",
+                        "mcp_invoke",
+                        serde_json::json!({"tool": "mcp__duckdb__snapshot_extra"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_6", "the answer is 42"));
             emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
         }
         "step_cap_overflow" => {

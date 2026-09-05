@@ -24,12 +24,13 @@
 //! `--disallowedTools` deny list + headless auto-refusal (ADR-0097 Decision
 //! 3); the ONLY tool plane is the gateway bridge. A `tool_use` whose name
 //! carries an injected server's `mcp__<server>__` prefix is therefore
-//! gateway-routed: the driver emits the live phases but NO engine-side trace
-//! row -- the gateway is authoritative for its own calls (ADR-0085 single
-//! enforcement point; [`crate::session::merge_outcomes`] keeps the gateway
-//! row and drops an engine echo it can account for, whether builtin,
-//! per-name quota, or the `mcp_invoke` pool (issue #820), so the driver
-//! never emits one). An unprefixed `tool_use` (a native tool that
+//! gateway-routed: the driver emits the live phases AND lands an engine-side
+//! trace row under the bare name -- the row is the in-place-replacement
+//! anchor the settle merge pairs the gateway's authoritative record against
+//! (ADR-0085 single enforcement point; [`crate::session::merge_outcomes`]
+//! replaces a paired echo with the gateway row -- per-name quota with
+//! built-ins included, or the `mcp_invoke` pool (issues #820 + #817)). An
+//! unprefixed `tool_use` (a native tool that
 //! slipped past the deny list upstream) rides the engine trace like the
 //! codex path's native events.
 //!
@@ -520,7 +521,8 @@ struct ClaudePump {
     current_model: Option<String>,
     pending: Vec<PendingClaudeCall>,
     /// The injected MCP servers' claude-side name prefixes
-    /// (`mcp__<server>__`), deciding gateway-routed vs native `tool_use`.
+    /// (`mcp__<server>__`); a matching prefix strips to the bare display
+    /// name the gateway records its row under (issue #817).
     gateway_prefixes: Vec<String>,
 }
 
@@ -553,16 +555,14 @@ impl ClaudePump {
                 // The batch boundary: the round's prelude (frozen thinking,
                 // prose) fires once, before this call's Started event.
                 let round = self.tracker.call_round(on_phase);
-                // One prefix scan settles both facts (strip_prefix(p)
-                // .is_some() <=> starts_with(p)): whether the call is
-                // gateway-routed, and the bare display name (the merged
-                // trace's gateway rows carry the bare name; the live phases
-                // must read the same).
-                let stripped = self
+                // The bare display name: a matching gateway prefix strips
+                // (the merged trace's gateway rows carry the bare name; the
+                // live phases must read the same).
+                let bare = self
                     .gateway_prefixes
                     .iter()
-                    .find_map(|prefix| name.strip_prefix(prefix));
-                let bare = stripped.unwrap_or(name.as_str());
+                    .find_map(|prefix| name.strip_prefix(prefix))
+                    .unwrap_or(name.as_str());
                 let (_, operation_kind, summary) = classify_call(&ToolUse {
                     id: id.clone(),
                     name: bare.to_string(),
@@ -626,8 +626,9 @@ impl ClaudePump {
         }
     }
 
-    /// Finalize one settled tool row: phases always land; trace rows only
-    /// for non-gateway calls (the gateway owns its own).
+    /// Finalize one settled tool row: the phases and the trace row always
+    /// land -- the row is the settle merge's in-place-replacement anchor
+    /// (issue #817, ADR-0085).
     fn finalize_row(
         &mut self,
         row: PendingClaudeCall,
@@ -692,9 +693,10 @@ fn outcome(
         promotions: Vec::new(),
         // ADR-0103 (issue #612): rounds grouped at the assistant-frame
         // tool-call batch. A turn with no events settles to an empty list
-        // (no ghost round); a gateway-routed-only round keeps its call-less
-        // shell here -- a bare shell (no prose, no thinking) drops at the
-        // wiring merge's empty-round pass; one that carried prose survives.
+        // (no ghost round); every open round lands its call rows (issue
+        // #817 anchors included), so no gateway-routed shell arrives
+        // call-less -- the wiring merge's empty-round pass only ever drops
+        // a round the pump itself left hollow.
         trace: rounds,
         discovered_runtime: discovered,
     }
