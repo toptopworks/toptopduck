@@ -80,3 +80,16 @@ describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
     expect(container.querySelector(".runtime-attribution")).toBeNull();
   });
 });
+
+describe("LiveTurnExchange trace round width cap (issue #826)", () => {
+  it("caps the live trace round at the stream width so summaries can truncate", () => {
+    // Same cap as the settled TurnCard round: a non-stretched flex item's
+    // fit-content width floors at min-content, so the cap is what lets a
+    // nowrap summary hit the row's truncate instead of stretching the card.
+    const { container } = renderExchange({
+      ...liveTurnWith(undefined),
+      rounds: [{ text: "流", rows: [] }],
+    });
+    expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
+  });
+});

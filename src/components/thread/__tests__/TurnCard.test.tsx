@@ -105,3 +105,18 @@ describe("TurnCard runtime attribution marker (issue #818)", () => {
     expect(container.querySelector(".runtime-attribution")).toBeNull();
   });
 });
+
+describe("TurnCard trace round width cap (issue #826)", () => {
+  it("caps the trace round at the stream width so summaries can truncate", () => {
+    // A round rides the assistant stream as a non-stretched flex item; the
+    // max-w-full cap keeps a nowrap summary from stretching the round past
+    // the card (the layout breaker -- the row's truncate only engages when
+    // the round stops at the stream width).
+    const record: TurnRecord = {
+      ...recordWith(undefined),
+      trace: [{ text: "答轮", calls: [] }],
+    };
+    const { container } = renderCard(record);
+    expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
+  });
+});

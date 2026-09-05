@@ -322,8 +322,11 @@ impl TurnProvenance {
 /// source for the trace-summary truncation cap: both the migration's synthetic
 /// single-call trace ([`synthetic_materialize_trace`]) and the agent loop's
 /// live call summary (`summarize_field`) reuse it, so a reopened v1 turn and a
-/// fresh live turn persist the same truncation shape.
-pub(crate) const TRACE_SUMMARY_MAX: usize = 120;
+/// fresh live turn persist the same truncation shape. The bound is 512,
+/// aligned with `approval::SUMMARY_MAX_CHARS` (issue #826): the rail row's
+/// fold recovers a meaningful head of a long SQL/args digest while the
+/// persisted trace stays bounded.
+pub(crate) const TRACE_SUMMARY_MAX: usize = 512;
 
 /// Synthesize the single-call execution trace for a Materialized turn's SQL
 /// (ADR-0078). v1-era turns ran exactly one productive SQL under the single-SQL
@@ -1482,11 +1485,18 @@ mod tests {
     #[test]
     fn synthetic_materialize_trace_truncates_a_long_sql_summary() {
         // A trace summary is bounded (ADR-0078) so a huge SQL does not bloat
-        // the persisted trace. A SQL over TRACE_SUMMARY_MAX is cut with an
-        // ellipsis; the helper matches what the live agent loop records.
-        let long_sql = "x".repeat(TRACE_SUMMARY_MAX + 40);
+        // the persisted trace. A SQL over the cap is cut with an ellipsis;
+        // the helper matches what the live agent loop records. The boundary
+        // is pinned with literals (not the constant) so an accidental revert
+        // of the issue #826 raise fails here: 512 chars pass through uncut,
+        // 513 cut back to 512.
+        let fits = "y".repeat(512);
+        let trace = synthetic_materialize_trace(&fits);
+        assert_eq!(trace[0].summary.chars().count(), 512);
+        assert!(!trace[0].summary.ends_with('…'), "uncut at the bound");
+        let long_sql = "x".repeat(513);
         let trace = synthetic_materialize_trace(&long_sql);
-        assert!(trace[0].summary.chars().count() <= TRACE_SUMMARY_MAX);
+        assert_eq!(trace[0].summary.chars().count(), 512);
         assert!(trace[0].summary.ends_with('…'), "cut with ellipsis");
     }
 

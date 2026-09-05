@@ -62,7 +62,11 @@ function LiveRoundBlock({
     return null;
   }
   return (
-    <div className="trace-round">
+    // max-w-full: a non-stretched flex item (the stream's items-start) sizes
+    // its width by fit-content, which floors at min-content -- a nowrap
+    // summary then stretches the round past the card instead of truncating.
+    // The cap hands the overflow back to the row's truncate (issue #826).
+    <div className="trace-round max-w-full">
       {hasThinking && (
         <ThinkingFold thinking={thinking} onExpandedChange={reportThinkingExpanded} />
       )}

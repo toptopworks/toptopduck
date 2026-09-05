@@ -601,13 +601,15 @@ fn shape_external_outcome(
 /// `builtin_tools`, not a parallel edit to this function. An unknown name falls
 /// through to the external arm (the gateway surfaces the approval card for it).
 /// Hard cap on the external-call argument preview inside the approval
-/// summary (issue #661; cap added by the #663 review): sized so the preview
-/// plus its ``external tool `name` with `` frame stays inside the card-body
-/// budget ([`crate::approval::SUMMARY_MAX_CHARS`]) -- deliberately larger
-/// than the 120-char trace cap so a realistic payload previews its head on
-/// the card instead of degrading to a bare JSON fragment the approver cannot
-/// read.
-const ARGS_PREVIEW_MAX_CHARS: usize = 448;
+/// summary (issue #661; cap added by the #663 review). Aligned with the
+/// trace-summary cap at 512 (issue #826) so the external digest previews the
+/// same head a built-in summary recovers in the row fold; the frame pushes
+/// the built string past the card-body budget
+/// ([`crate::approval::SUMMARY_MAX_CHARS`]), and the emit-side
+/// `truncate_summary` backstop re-trims it -- a realistic payload still
+/// previews its head instead of degrading to a bare JSON fragment the
+/// approver cannot read.
+const ARGS_PREVIEW_MAX_CHARS: usize = 512;
 
 /// The approval-gateway classification for a registered CLI tool call
 /// (ADR-0108 Decision 7): the trust key anchors on the registration name
@@ -1160,6 +1162,25 @@ mod tests {
         };
         let (key, _, _) = classify_call(&bare);
         assert_eq!(key, ToolKey::external("unknown", "stray_tool"));
+    }
+
+    /// Issue #826: the external-call argument preview shares the 512 bound
+    /// with the trace-summary cap, so the row fold recovers the same head a
+    /// built-in summary does. The boundary is pinned with literals so an
+    /// accidental revert fails here; the frame-inclusive card summary's
+    /// re-trim is pinned on the approval side (its own budget tests).
+    #[test]
+    fn classify_call_caps_the_external_argument_preview_at_512() {
+        let tool = ToolUse {
+            id: "tu_1".into(),
+            name: "mcp__github__search".into(),
+            input: serde_json::json!({ "q": "z".repeat(600) }),
+        };
+        let (_, _, summary) = classify_call(&tool);
+        let prefix = "external tool `mcp__github__search` with ";
+        let preview = summary.strip_prefix(prefix).expect("framed summary");
+        assert_eq!(preview.chars().count(), 512);
+        assert!(preview.ends_with("..."), "cut with the approval ellipsis");
     }
 
     /// The ADR-0078 (issue #297) event stream: a dispatch emits the
