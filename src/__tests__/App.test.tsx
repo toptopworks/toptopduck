@@ -153,6 +153,7 @@ const HEADER_MGMT_PROPS = {
 function renderPane(
   locale: EffectiveLocale = "zh-CN",
   sessionName = "Test session",
+  isActive = true,
 ): void {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -188,7 +189,7 @@ function renderPane(
     wrap(
       <SessionPane
         sessionId="sess-1"
-        isActive={true}
+        isActive={isActive}
         pendingIngestPaths={[]}
         onIngestConsumed={() => {}}
         pendingQuestion={null}
@@ -595,6 +596,35 @@ describe("App ask flow", () => {
       offset: 0,
       limit: 100,
     });
+  });
+
+  it("keeps the rail's scrollTop untouched while isActive is false through a submit (#829)", async () => {
+    // The pane mounts hidden (the ADR-0051 keep-alive posture): the hook may
+    // schedule frames, but the inactive gate must keep every one from
+    // writing -- display:none collapses the extent to 0, and a write would
+    // land scrollTop 0, corrupting even a paused pane's preserved position.
+    vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+    renderPane("zh-CN", "Test session", false);
+    const rail = document.querySelector<HTMLElement>(".session-rail")!;
+    let writes = 0;
+    Object.defineProperty(rail, "scrollTop", {
+      configurable: true,
+      get: () => 0,
+      set: () => {
+        writes += 1;
+      },
+    });
+
+    await submitQuestion("hidden pane question");
+    // The live bubble has rendered (liveTurn non-null) and a frame window
+    // has passed; the write count must still be zero.
+    await waitFor(() =>
+      expect(within(rail).getByText("hidden pane question")).toBeTruthy(),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(writes).toBe(0);
   });
 
   it("submits a question and shows the materialized result (issue #22)", async () => {

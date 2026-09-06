@@ -159,8 +159,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   );
   // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
   // settled count grows on appends, liveTurn's identity changes per streaming
-  // delta (and its null -> live transition is the submit), and isActive's
-  // false -> true transition is the keep-alive session switch (ADR-0051).
+  // event and per approval-channel update (and its null -> live transition
+  // is the submit), and isActive's false -> true transition is the keep-alive
+  // session switch (ADR-0051).
   // isFollowing has no render consumer yet; the hook exposes it for tests /
   // a future jump-to-latest affordance.
   const { railRef } = useRailFollow({

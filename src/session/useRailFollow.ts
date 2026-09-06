@@ -24,10 +24,13 @@ const RESUME_BAND_PX = 40;
  *    to the bottom per frame -- no per-delta hard scroll.
  *  - Pause: a scroll event landing beyond RESUME_BAND_PX from the bottom.
  *    Programmatic aligns always land AT the bottom, so they never trip it;
- *    a mid-timeline jump (the stale-chip scrollIntoView, Thread.tsx) lands
- *    far past the band and pauses with no special case.
+ *    a mid-timeline jump (the stale-chip scrollIntoView, Thread.tsx --
+ *    smooth, block "center") pauses where its animation first exceeds the
+ *    band, with no special case. A chip in the last turn clamps at maxScroll
+ *    inside the band and never pauses.
  *  - Resume: a scroll event landing back inside the band. The resume itself
- *    does not snap -- the user keeps their position until the next append
+ *    does not snap -- the user keeps their position; a frame queued by an
+ *    append during the pause may still land the align, and the next append
  *    realigns.
  *
  *  Geometry interplay (why the distance math needs no special cases): the
@@ -35,9 +38,12 @@ const RESUME_BAND_PX = 40;
  *  dynamic bottom padding (#836), so scrollHeight - clientHeight - scrollTop
  *  measures the true reading distance without the hook knowing the bar
  *  exists. #839's `scrollbar-gutter: stable both-edges` keeps the scrollbar
- *  appearing/disappearing reflow-free, and fold/unfold changes content height
+ *  appearing/disappearing reflow-free. Unfolds, and any fold that shrinks
+ *  the extent no lower than the current position, change content height
  *  WITHOUT firing scroll events (scrollTop is unchanged), so the machine
- *  never observes the fold at all.
+ *  never sees them; a fold that shrinks past the current position makes the
+ *  browser clamp scrollTop, which fires one scroll event at distance 0 --
+ *  re-entering the follow, which the clamped bottom already is.
  *
  *  Session switch PRESERVES posture (the keep-alive contract, ADR-0051):
  *  open panes stay MOUNTED but display:none when not active, so a switch is
@@ -63,8 +69,10 @@ export function useRailFollow({
    *  the settle swap) -- the align rides the change, so an array identity or
    *  contents are never needed. */
   entryCount: number;
-  /** Signal: the in-flight turn. Identity changes per streaming delta; the
-   *  null -> non-null transition doubles as the submit signal. */
+  /** Signal: the in-flight turn. Identity changes per streaming event AND
+   *  per approval-channel update (the useTurnFlow memo merges both
+   *  channels); the null -> non-null transition doubles as the submit
+   *  signal. */
   liveTurn: LiveTurn | null;
 }): {
   /** Attach to the scroll container (.session-rail). */
@@ -83,9 +91,9 @@ export function useRailFollow({
   const followingRef = useRef(true);
 
   // Latest-value mirror for the same reason (the dep-less sync follows
-  // useRailResize's getMaxWidthRef pattern): the rAF callback outlives
-  // renders and must read the CURRENT activation, not the one from its
-  // creating render.
+  // useRailResize's getMaxWidthRef pattern, src/shell/useRailResize.ts): the
+  // rAF callback outlives renders and must read the CURRENT activation, not
+  // the one from its creating render.
   const activeRef = useRef(active);
   useEffect(() => {
     activeRef.current = active;
@@ -100,23 +108,31 @@ export function useRailFollow({
       rafRef.current = null;
       // Never write while hidden: display:none collapses the extent to 0, so
       // the align would land scrollTop 0 and the switch-back would open at
-      // the top. The activation transition re-arms the align instead.
+      // the top. The activation transition re-arms the align instead. (The
+      // passive activeRef sync can trail a switch commit by a task, so a
+      // frame may still fire reading a stale active -- the write it attempts
+      // is then a platform no-op: the scrollTop setter returns immediately
+      // on an element with no layout box, so the preserved offset is safe.
+      // This gate is the enforcement; the no-op setter is the second line.)
       if (!activeRef.current || !followingRef.current) return;
       const el = railRef.current;
       if (el === null) return;
       el.scrollTop = el.scrollHeight - el.clientHeight;
       // A landed write is the machine re-entering the follow, so the
       // published mirror rides the same callback (a bail-out no-op when
-      // already true). The mirror is ONLY ever touched from event callbacks
-      // (here and the scroll handler) -- never from an effect body.
+      // already true). The published boolean is ONLY ever touched from event
+      // callbacks (here and the scroll handler) -- never from an effect
+      // body; followingRef is the half the submit effect sets directly.
       setIsFollowing(true);
     });
   }, []);
 
   // Activation signal (the session switch, ADR-0051 keep-alive): the pane was
   // mounted-but-hidden and is now the visible layer. Posture is PRESERVED --
-  // the keep-alive contract is "restored unchanged", so this only schedules:
-  // the callback's followingRef gate lets a following pane catch up on what
+  // the keep-alive posture is restored as it was (ADR-0051: the pane stays
+  // mounted and its state is not rebuilt; the phrasing is repo vocabulary
+  // from the settings-overlay comment), so this only schedules: the
+  // callback's followingRef gate lets a following pane catch up on what
   // streamed while hidden and leaves a paused pane's reading position alone.
   // Fresh opens mount active with following ON, which is the initial land.
   useEffect(() => {
@@ -124,9 +140,11 @@ export function useRailFollow({
     scheduleAlign();
   }, [active, scheduleAlign]);
 
-  // Submit signal: force-follow. Runs BEFORE the append effect's pass on the
-  // same render, so a submit from a paused rail re-arms the follow the same
-  // frame the live bubble mounts; the mirror publishes one frame later, when
+  // Submit signal: force-follow. The re-arm is the ref WRITE -- the queued
+  // frame's gate reads followingRef at fire time, after every effect of the
+  // commit has synchronously run, so this effect's position relative to the
+  // append effect below is not load-bearing (both queue into the same
+  // coalesced frame either way). The mirror publishes one frame later, when
   // the forced align lands.
   const liveActive = liveTurn !== null;
   useEffect(() => {
@@ -135,9 +153,12 @@ export function useRailFollow({
     scheduleAlign();
   }, [liveActive, scheduleAlign]);
 
-  // Append signal. Also fires on mount (the initial land for a session
-  // switch / cold start), and on the settle swap (live -> null + count+1
-  // arrive in one render, and the posture is still following).
+  // Append signal. Also fires on mount (the initial land for a fresh open /
+  // close-then-reopen), and across the settle swap: live -> null lands first
+  // (the ask handler's finally) and count+1 follows a render later (the
+  // optimistic append runs after awaiting the runtime read) -- the rAF
+  // coalescing absorbs the pair into one write, and the posture stays
+  // following throughout.
   useEffect(() => {
     scheduleAlign();
   }, [entryCount, liveTurn, scheduleAlign]);
@@ -161,12 +182,21 @@ export function useRailFollow({
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // A pending frame must not fire after unmount (a session switch remounts
-  // the pane; the stale callback would write to the retired element's ref --
-  // harmless for a detached node, but canceling keeps the frame count honest).
+  // A pending frame must not outlive the pane: unmounting (a pane close, or
+  // the session ErrorBoundary's key bump remounting -- a session switch never
+  // unmounts, ADR-0051 keep-alive) cancels it. Clearing the handle matters
+  // as much as the cancel: the StrictMode remount cycle runs effect ->
+  // cleanup -> effect, and a canceled-but-set handle would absorb every
+  // future scheduleAlign at the guard (useRailResize's cleanup resets for
+  // the same reason). React already nulls railRef.current during the unmount
+  // commit, so an uncanceled stale callback would bail at the el guard
+  // anyway; the cancel is frame-count hygiene.
   useEffect(
     () => () => {
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
     },
     [],
   );

@@ -1,4 +1,5 @@
 import { act, render, screen } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveTurn } from "../useTurnFlow";
 import { useRailFollow } from "../useRailFollow";
@@ -112,9 +113,9 @@ function followingText(): string {
 }
 
 describe("useRailFollow", () => {
-  // --- Mount: session switch lands at the bottom -------------------------
+  // --- Mount: a fresh open lands at the bottom ----------------------------
 
-  it("lands at the bottom and starts following on mount (session switch)", () => {
+  it("lands at the bottom and starts following on mount (fresh open / close-then-reopen)", () => {
     const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
     const rig = rigRail(getByTestId("rail") as HTMLElement);
     flushFrame();
@@ -179,6 +180,26 @@ describe("useRailFollow", () => {
     // Nothing left pending: an idle frame writes nothing.
     flushFrame();
     expect(rig.hookWrites()).toBe(2);
+  });
+
+  it("re-aligns across the settle swap (live -> null and count+1 land in separate renders)", () => {
+    // The settle arrives as two renders (live -> null in the ask handler's
+    // finally, count+1 a render later after the runtime-read await); the
+    // posture stays following and the coalescing lands one write for the
+    // pair.
+    const { getByTestId, rerender } = render(
+      <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rig = rigRail(getByTestId("rail") as HTMLElement);
+    flushFrame();
+    const writes = rig.hookWrites();
+
+    rig.geo.scrollHeight = 1200;
+    rerender(<Host active={true} entryCount={3} liveTurn={null} />); // live settles
+    rerender(<Host active={true} entryCount={4} liveTurn={null} />); // optimistic append
+    flushFrame();
+    expect(rig.scrollTop()).toBe(900);
+    expect(rig.hookWrites()).toBe(writes + 1); // ONE coalesced write for the pair
   });
 
   // --- Pause: user scrolls beyond the band --------------------------------
@@ -261,6 +282,21 @@ describe("useRailFollow", () => {
     expect(rig.scrollTop()).toBe(900); // the next append lands on the bottom
   });
 
+  it("holds following at the band edge (distance exactly the band stays following)", () => {
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+
+    // scrollTop 660 is distance exactly 40: the band is inclusive ("landing
+    // beyond it pauses"), so the posture stays following.
+    rig.userScrollTo(660);
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("true");
+  });
+
   it("does not pause inside the band (a sub-threshold wiggle stays following)", () => {
     const { getByTestId, rerender } = render(
       <Host active={true} entryCount={3} liveTurn={null} />,
@@ -330,15 +366,19 @@ describe("useRailFollow", () => {
     // Switching back to an already-open session fires no remount -- the
     // active option's false -> true transition IS the switch signal, and a
     // pane still in the follow posture reads the CURRENT extent (everything
-    // streamed while hidden) on its catch-up align.
+    // streamed while hidden) on its catch-up align. Both renders share one
+    // liveTurn identity, so the activation effect is the ONLY scheduler of
+    // the catch-up (a fresh identity would trip the append effect too and
+    // the test would pass even with the activation effect deleted).
+    const lt = makeLiveTurn();
     const { getByTestId, rerender } = render(
-      <Host active={false} entryCount={3} liveTurn={makeLiveTurn()} />,
+      <Host active={false} entryCount={3} liveTurn={lt} />,
     );
     const rig = rigRail(getByTestId("rail") as HTMLElement);
     flushFrame();
 
     rig.geo.scrollHeight = 1200; // content streamed while hidden
-    rerender(<Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />);
+    rerender(<Host active={true} entryCount={3} liveTurn={lt} />);
     flushFrame();
     // maxScroll = 1200 - 300 = 900: the follow catch-up lands on the LATEST.
     expect(rig.scrollTop()).toBe(900);
@@ -346,7 +386,7 @@ describe("useRailFollow", () => {
   });
 
   it("keeps a paused pane's reading position across the keep-alive switch (restored unchanged)", () => {
-    // The keep-alive contract (ADR-0051) is "restored unchanged": a pane the
+    // The keep-alive posture is restored as it was (ADR-0051): a pane the
     // user deliberately scrolled up in must NOT be dragged to the bottom on
     // switch-back -- activation schedules, and the callback's posture gate
     // leaves a paused pane's scrollTop alone.
@@ -372,5 +412,33 @@ describe("useRailFollow", () => {
     expect(rig.scrollTop()).toBe(400); // reading position preserved
     expect(rig.hookWrites()).toBe(1); // the mount land -- nothing since
     expect(followingText()).toBe("false");
+  });
+
+  // --- StrictMode: the remount cycle must re-arm ---------------------------
+
+  it("survives the StrictMode remount cycle (the cleanup clears the pending-frame handle)", () => {
+    // StrictMode runs effect -> cleanup -> effect on mount. The cleanup must
+    // cancel AND clear rafRef: a canceled-but-set handle absorbs every
+    // future scheduleAlign at the guard, disarming the whole machine for the
+    // component's life (useRailResize's cleanup resets for the same reason).
+    const { getByTestId, rerender } = render(
+      <StrictMode>
+        <Host active={true} entryCount={3} liveTurn={null} />
+      </StrictMode>,
+    );
+    const rig = rigRail(getByTestId("rail") as HTMLElement);
+    flushFrame();
+    expect(rig.hookWrites()).toBe(1); // the remounted machine still lands
+    expect(rig.scrollTop()).toBe(700);
+
+    // And it keeps following afterwards -- no phantom pending frame.
+    rig.geo.scrollHeight = 1200;
+    rerender(
+      <StrictMode>
+        <Host active={true} entryCount={4} liveTurn={null} />
+      </StrictMode>,
+    );
+    flushFrame();
+    expect(rig.scrollTop()).toBe(900);
   });
 });
