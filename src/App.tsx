@@ -1142,6 +1142,16 @@ export default function App() {
                       </label>
                     )}
                     <div className="shell-bar-track">
+                      {/* Issue #836: opaque backdrop over the conversation
+                          column so scrolling content never peeks around the
+                          floating card. Rendered in the bottom posture only
+                          (the centered track is not the mirrored grid -- a
+                          stray grid child would stretch the cold-start
+                          slot). styles.css reserves one gutter at the
+                          column's right edge for the rail's scrollbar. */}
+                      {!isColdStart && (
+                        <div className="shell-bar-backdrop" aria-hidden="true" />
+                      )}
                       <QuestionBar
                         onSubmit={handleShellSubmit}
                         onCancel={handleShellCancel}

@@ -422,14 +422,17 @@
  * element's own box, so only an inset anchor can pin the midline in pure
  * CSS — and the flex-grow pair it replaces was layout-bound too.
  *
- * The overlay paints NOTHING of its own (issue #836): the strip carries no
- * background, so the rail's scrollbar runs visibly down to the window's
- * bottom edge past the bar. Opacity lives on the surfaces that need it --
- * the bar card (bg-card) over the conversation column and the track's
- * ::before card fill over the workspace column. The rail's side gutters
- * are padding (content never renders there), and the card's
- * reading-column formula leaves the scrollbar column inside the
- * transparent gutter band.
+ * The strip paints an opaque backdrop but leaves the scrollbar a
+ * passthrough (issue #836): .shell-bar-backdrop fills the conversation
+ * column one --rail-gutter short of its right edge, so scrolling content
+ * never peeks around the floating card, while the rail's scrollbar column
+ * (scrollbar + border, well inside one gutter) stays visible down to the
+ * window's bottom edge. The workspace column stays covered by the track's
+ * ::before card fill. The slot itself is pointer-events:none in the bottom
+ * posture, so hits over the reserved band fall through to the rail's
+ * native scrollbar (draggable again); the card, the backdrop, and the
+ * ::before re-enable pointer-events, keeping the strip's wheel forwarding
+ * and blocking clicks on the content hidden behind them.
  *
  * Bottom width tracking (ADR-0090 calibration, ADR-0092): the
  * .shell-bar-track mirrors the pane's 4-track .session-body grid so the bar
@@ -465,6 +468,24 @@
 .shell-bar-slot.bottom {
   bottom: 0;
   transform: translateY(0);
+  /* pointer-events:none (see the section comment): the strip's boxes must
+   * not shield the rail's scrollbar column; the interactive surfaces below
+   * re-enable it. */
+  pointer-events: none;
+}
+/* Opaque backdrop over the conversation column (App renders it as the
+ * track's first child, so it paints below the bar card; bottom posture
+ * only). Stops one --rail-gutter short of the column's right edge -- that
+ * reserved band holds the rail's scrollbar plus its border, which stays
+ * visible and, via the slot's pointer-events:none, draggable.
+ * pointer-events:auto keeps wheel events bubbling to the slot's forwarder
+ * and blocks clicks on the thread content sliding behind. */
+.shell-bar-slot.bottom .shell-bar-backdrop {
+  grid-row: 1;
+  grid-column: 2;
+  margin-right: var(--rail-gutter);
+  background: var(--background);
+  pointer-events: auto;
 }
 .shell-bar-slot.bottom .shell-bar-track {
   width: 100%;
@@ -484,6 +505,10 @@
   grid-row: 1;
   grid-column: 3;
   background: var(--card);
+  /* Re-enable hits on the workspace fill (the slot is pointer-events:none):
+   * wheel bubbles to the slot's forwarder and clicks cannot land on the
+   * workspace content hidden behind the fill. */
+  pointer-events: auto;
 }
 /* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar's
  * track spans the same full-width conversation column. Both selectors
@@ -503,7 +528,14 @@
 }
 .shell-bar-slot.bottom .question-bar {
   grid-column: 2;
+  /* Explicit row: with the backdrop also placed in col 2, auto-placement
+   * would push the card to a second row and collapse row 1 (and the
+   * ::before fill with it) to zero height. All three strip items share
+   * this row; the card sizes it. */
+  grid-row: 1;
   min-width: 0;
+  /* Re-enable hits on the card itself (the slot is pointer-events:none). */
+  pointer-events: auto;
   /* The old .session-questionbar padding, moved onto the bar inside the
    * conversation-width track: --rail-gutter matches the rail's horizontal
    * padding so the bar's edges align with the rail's text column. The

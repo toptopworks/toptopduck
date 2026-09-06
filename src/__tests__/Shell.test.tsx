@@ -1738,6 +1738,26 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
+  it("shields the strip behind the bar and keeps the scrollbar band open (issue #836)", async () => {
+    // Two halves of the overlay's interaction model, pinned at the DOM
+    // level (jsdom has no hit-testing): (a) an opaque backdrop rides the
+    // track's conversation column so scrolling content never peeks around
+    // the floating card -- it must be the track's FIRST child, because
+    // paint order is what keeps it below the bar card without z-index
+    // gymnastics; (b) it exists only in the bottom posture -- the centered
+    // track is not the mirrored grid, and a stray grid child would stretch
+    // the cold-start slot. The styles reserve one gutter at the column's
+    // right edge for the rail's scrollbar (visible + draggable via the
+    // slot's pointer-events:none) -- CSS-only, unpinnable here.
+    render(<App />);
+    expect(document.querySelector(".shell-bar-backdrop")).toBeNull();
+    await openSession();
+    const backdrop = document.querySelector(".shell-bar-backdrop")!;
+    expect(backdrop).toBeInTheDocument();
+    expect(backdrop.getAttribute("aria-hidden")).toBe("true");
+    expect(document.querySelector(".shell-bar-track")!.firstElementChild).toBe(backdrop);
+  });
+
   it("publishes the bar's live height as --shell-bar-h on the main area (issue #836)", () => {
     // The bar overlays the main area, so the rail's bottom padding must
     // follow the bar's live height (a growing draft, the picker opening)
