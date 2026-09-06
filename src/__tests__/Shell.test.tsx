@@ -1654,6 +1654,26 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
+  it("hides the rail scrollbar visually for the fold slide window (issue #833)", async () => {
+    // The 280ms grid slide reflows the thread while the composer bar's
+    // auto-height settles behind it, so the rail's content can graze the
+    // viewport mid-slide and the classic scrollbar flashes in and out.
+    // The pane carries .workspace-animating for exactly that window; the
+    // CSS hides the rail scrollbar visually (wheel scrolling keeps
+    // working). The class must be absent at rest and present through both
+    // toggle directions.
+    render(<App />);
+    await openSession();
+    const pane = document.querySelector(".session-pane")!;
+    expect(pane.classList.contains("workspace-animating")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
+    expect(pane.classList.contains("workspace-animating")).toBe(true);
+    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    expect(pane.classList.contains("workspace-animating")).toBe(true);
+    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
+  });
+
   it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {
     render(<App />);
     await openSession();

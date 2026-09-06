@@ -538,6 +538,18 @@
   grid-template-columns: var(--track-grid-collapsed);
 }
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
+/* Fold/unfold slide (issue #833): during the 280ms grid transition the
+   thread reflows while the shell-level bar's auto-height settles a frame or
+   two behind, so the rail's content can graze the viewport by a pixel or
+   two mid-slide -- the classic scrollbar flashes in for those frames and
+   vanishes once the bar settles (narrow panes have the least headroom).
+   SessionPane toggles .workspace-animating for exactly the slide window;
+   scrollbar-width only hides the bar visually (wheel scrolling keeps
+   working -- no dead zone), and at rest the scrollbar (re)appears once,
+   stable. */
+.shell .session-pane.workspace-animating .session-rail {
+  scrollbar-width: none;
+}
 .shell .session-pane.workspace-collapsed .session-workspace {
   opacity: 0;
 }
