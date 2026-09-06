@@ -774,11 +774,16 @@ export default function App() {
   // publishes it as --shell-bar-h on the main area (styles.css turns it
   // into the rail's padding-bottom). A height change (a growing draft, the
   // picker opening) only grows or shrinks that padding -- content above
-  // never reflows, so scrollTop is undisturbed. A posture flip briefly
-  // leaves the stale centered height in the var — always the taller value,
-  // so the one frame the observer needs to catch up is conservative. The
-  // slot never unmounts (ADR-0092 single instance), so one mount-scoped
-  // observer covers every posture.
+  // never reflows, so the scroll position holds (a shrink while parked at
+  // max scroll clamps by the same delta, a visual no-op that keeps the
+  // view pinned to the tail). A centered-to-bottom flip briefly leaves
+  // the stale centered height in the var -- the taller of the two, so the
+  // frame the observer needs to catch up is conservative. (The reverse
+  // flip leaves the shorter bottom height; harmless, because closing the
+  // last session unmounts its layer in the same commit, so no rail
+  // consumes the var during the glide.) The slot never unmounts
+  // (ADR-0092 single instance), so one mount-scoped observer covers every
+  // posture.
   const shellBarSlotRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const slot = shellBarSlotRef.current;
@@ -799,10 +804,13 @@ export default function App() {
     const scrollbarW = probe.offsetWidth - probe.clientWidth;
     probe.remove();
     area.style.setProperty("--rail-sb-w", `${scrollbarW}px`);
+    if (typeof ResizeObserver === "undefined") return; // jsdom (test-setup stubs it)
     const ro = new ResizeObserver((entries) => {
       const box = entries[0]?.borderBoxSize?.[0];
       const height = box ? box.blockSize : (entries[0]?.contentRect.height ?? 0);
-      area.style.setProperty("--shell-bar-h", `${height}px`);
+      // A hidden slot (settings-mode's display:none) reports 0 -- keep the
+      // last real height so the rail's bound never collapses.
+      if (height > 0) area.style.setProperty("--shell-bar-h", `${height}px`);
     });
     ro.observe(slot);
     return () => ro.disconnect();
@@ -1160,10 +1168,11 @@ export default function App() {
                       {/* Issue #836: opaque backdrop over the conversation
                           column so scrolling content never peeks around the
                           floating card. Rendered in the bottom posture only
-                          (the centered track is not the mirrored grid -- a
-                          stray grid child would stretch the cold-start
-                          slot). styles.css reserves one gutter at the
-                          column's right edge for the rail's scrollbar. */}
+                          -- every backdrop rule is bottom-scoped, so
+                          rendering it in cold start would be dead markup.
+                          styles.css reserves the rail's scrollbar band
+                          (measured scrollbar width plus the 1px column
+                          border) at the column's right edge. */}
                       {!isColdStart && (
                         <div className="shell-bar-backdrop" aria-hidden="true" />
                       )}

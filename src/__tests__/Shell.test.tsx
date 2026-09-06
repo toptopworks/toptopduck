@@ -1742,13 +1742,15 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // Two halves of the overlay's interaction model, pinned at the DOM
     // level (jsdom has no hit-testing): (a) an opaque backdrop rides the
     // track's conversation column so scrolling content never peeks around
-    // the floating card -- it must be the track's FIRST child, because
-    // paint order is what keeps it below the bar card without z-index
-    // gymnastics; (b) it exists only in the bottom posture -- the centered
-    // track is not the mirrored grid, and a stray grid child would stretch
-    // the cold-start slot. The styles reserve one gutter at the column's
-    // right edge for the rail's scrollbar (visible + draggable via the
-    // slot's pointer-events:none) -- CSS-only, unpinnable here.
+    // the floating card -- it must be the track's FIRST child. That slot
+    // is convention; the layering itself comes from the bar card's
+    // position:relative, which paints above in-flow siblings regardless
+    // of DOM order; (b) it exists only in the bottom posture -- every
+    // backdrop rule is bottom-scoped, so rendering it in cold start would
+    // be dead markup. The styles reserve the rail's scrollbar band
+    // (measured scrollbar width plus the 1px column border) at the
+    // column's right edge (visible + draggable via the slot's
+    // pointer-events:none) -- CSS-only, unpinnable here.
     render(<App />);
     expect(document.querySelector(".shell-bar-backdrop")).toBeNull();
     await openSession();
@@ -1773,60 +1775,68 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       disconnected: boolean;
     };
     const instances: ObserverSpy[] = [];
-    const PrevRO = globalThis.ResizeObserver;
-    globalThis.ResizeObserver = class {
-      cb: ResizeObserverCallback;
-      targets: Element[] = [];
-      disconnected = false;
-      constructor(cb: ResizeObserverCallback) {
-        this.cb = cb;
-        instances.push(this);
-      }
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        cb: ResizeObserverCallback;
+        targets: Element[] = [];
+        disconnected = false;
+        constructor(cb: ResizeObserverCallback) {
+          this.cb = cb;
+          instances.push(this);
+        }
 
-      observe(target: Element) {
-        this.targets.push(target);
-      }
+        observe(target: Element) {
+          this.targets.push(target);
+        }
 
-      unobserve() {}
-      disconnect() {
-        this.disconnected = true;
-      }
-    } as unknown as typeof ResizeObserver;
+        unobserve() {}
+        disconnect() {
+          this.disconnected = true;
+        }
+      },
+    );
     const { unmount } = render(<App />);
-    try {
-      // The observed element is the slot itself: the card, its margins,
-      // and the centered greeting all contribute to its height. Other
-      // observers exist (useRailResize), so filter by target.
-      const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
-      const observers = instances.filter((i) => i.targets.includes(slot));
-      expect(observers).toHaveLength(1);
-      const area = document.querySelector<HTMLElement>(".main-area")!;
-      // borderBoxSize is the primary read (the border-box height is what
-      // the rail must clear); contentRect.height is the legacy fallback.
-      act(() => {
-        observers[0].cb(
-          [{ target: slot, borderBoxSize: [{ blockSize: 157 }] } as unknown as ResizeObserverEntry],
-          observers[0] as unknown as ResizeObserver,
-        );
-      });
-      expect(area.style.getPropertyValue("--shell-bar-h")).toBe("157px");
-      act(() => {
-        observers[0].cb(
-          [{ target: slot, contentRect: { height: 121 } } as unknown as ResizeObserverEntry],
-          observers[0] as unknown as ResizeObserver,
-        );
-      });
-      expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
-      // The same effect also measures the platform scrollbar width once
-      // (hidden scrollable probe) and publishes it as --rail-sb-w -- the
-      // backdrop's notch width so the strip covers everything except the
-      // scrollbar itself. jsdom has no layout, so the probe reads 0.
-      expect(area.style.getPropertyValue("--rail-sb-w")).toBe("0px");
-      unmount();
-      expect(observers[0].disconnected).toBe(true);
-    } finally {
-      globalThis.ResizeObserver = PrevRO;
-    }
+    // The observed element is the slot itself: the card, its margins,
+    // and the centered greeting all contribute to its height. Other
+    // observers exist (useRailResize), so filter by target.
+    const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
+    const observers = instances.filter((i) => i.targets.includes(slot));
+    expect(observers).toHaveLength(1);
+    const area = document.querySelector<HTMLElement>(".main-area")!;
+    // borderBoxSize is the primary read (the border-box height is what
+    // the rail must clear); contentRect.height is the legacy fallback.
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, borderBoxSize: [{ blockSize: 157 }] } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("157px");
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, contentRect: { height: 121 } } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+    // A hidden slot (settings-mode's display:none) reports height 0 --
+    // the publish must keep the last real height instead of collapsing
+    // the rail's bound.
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, borderBoxSize: [{ blockSize: 0 }] } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+    // The same effect also measures the platform scrollbar width once
+    // (hidden scrollable probe) and publishes it as --rail-sb-w -- the
+    // backdrop's notch width so the strip covers everything except the
+    // scrollbar itself. jsdom has no layout, so the probe reads 0.
+    expect(area.style.getPropertyValue("--rail-sb-w")).toBe("0px");
+    unmount();
+    expect(observers[0].disconnected).toBe(true);
   });
 
   it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {

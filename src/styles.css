@@ -474,9 +474,11 @@
    * re-enable it. */
   pointer-events: none;
 }
-/* Opaque backdrop over the conversation column (App renders it as the
- * track's first child, so it paints below the bar card; bottom posture
- * only). Stops at the rail's scrollbar -- --rail-sb-w is measured once at
+/* Opaque backdrop over the conversation column (bottom posture only). App
+ * renders it as the track's first child -- convention, not the layering
+ * mechanism: the bar card is position:relative, and a positioned box paints
+ * above in-flow siblings regardless of DOM order. Stops at the rail's
+ * scrollbar -- --rail-sb-w is measured once at
  * startup (App.tsx), the +1px is the rail's column border -- so the only
  * uncovered band is the scrollbar itself, visible and, via the slot's
  * pointer-events:none, draggable. Content that overflows the reading
@@ -498,13 +500,13 @@
   grid-template-columns: var(--track-grid);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Extend the workspace card background through the shell-bar area so the
-   workspace column visually reaches the viewport bottom (ADR-0092: the bar
-   is a shell-level overlay above the pane host, issue #836 — without this
-   the card background stops at the pane-host boundary). The ::before fills
-   the workspace grid track (col 3) with the same --card token; it collapses
-   to 0fr when the workspace is folded, so no rule is needed for
-   ws-collapsed. */
+/* Cover the strip over the workspace column so the workspace card visually
+   reaches the viewport bottom (ADR-0092: the bar is a shell-level overlay
+   above the pane host, issue #836). The ::before fills the workspace grid
+   track (col 3) with the same --card token: without it, that part of the
+   strip would be a transparent hole -- the workspace content scrolling
+   behind it would show through and take clicks. It collapses to 0fr when
+   the workspace is folded, so no rule is needed for ws-collapsed. */
 .shell-bar-slot.bottom .shell-bar-track::before {
   content: "";
   grid-row: 1;
