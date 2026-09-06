@@ -148,11 +148,18 @@
    * measure to within the retired era's 1px border (744px vs the old 743px
    * -- the rail's border-right occupied 1px inside the capped track, which
    * also left the old text 1px shy of the bar card). --rail-gutter is the
-   * single source for the rail's horizontal padding, the bar's gutter
-   * inset, and this cap, so the three cannot drift apart. Shared with the
+   * single source for the bar's gutter inset and this cap; the rail's
+   * horizontal padding starts from it and relaxes by up to
+   * --rail-col-relax (see the .session-rail rule). Shared with the
    * bar mirror so the two columns never drift. */
   --rail-gutter: 1.75rem;
   --reading-column-cap: calc(800px - 2 * var(--rail-gutter));
+  /* Reading-column edge relax (issue #839): how far the rail's horizontal
+   * padding may shrink below --rail-gutter per side, pulling the reading
+   * column's edges toward the bar card's. Clamped to the measured
+   * scrollbar width when applied, so overlay environments relax nothing
+   * and keep column and card flush. */
+  --rail-col-relax: 10px;
   /* Session header height (issue #782): single 40px source shared by
    * .session-header (height/min-height) and .rail-resize-handle (top) so the
    * drag line stops exactly at the header's bottom edge — ADR-0092 lifted
@@ -461,7 +468,12 @@
   bottom: 50%;
   transform: translateY(50%);
   gap: 1rem;
-  padding: 2rem;
+  /* Issue #839: horizontal insets mirror the rail's gutter, so the
+     cold-start card sits the same distance from the flanks as the
+     bottom-state bar -- and, below the track's cap, comes out the same
+     width. The vertical rhythm stays 2rem. */
+  padding-block: 2rem;
+  padding-inline: var(--rail-gutter);
 }
 .shell-bar-slot.centered .shell-bar-track {
   width: min(100%, 720px);
@@ -520,14 +532,18 @@
 /* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar's
  * track spans the same full-width conversation column. Both selectors
  * reference the shared custom properties on .shell so the two surfaces never
- * drift. The bar card carries the reading-column width unconditionally:
- * width follows min(cap, track - 2 * gutter) -- the same formula the rail's
- * wrapper computes -- with margin-inline: auto centering it, so the card
- * edges track the thread's text column at every width. Below the cap the
- * formula degenerates to exactly the gutter inset (the auto margins split
- * the leftover 2 * gutter), so the expanded rect is unchanged and nothing
- * jumps when the fold starts; keeping the width unscoped also makes the
- * card ride the fold AND unfold slides without its own transition (a
+ * drift. The bar card carries the reading-column inset unconditionally:
+ * width follows min(cap, track - 2 * gutter) with margin-inline: auto
+ * centering it, so the card rides the track's centerline -- the reading
+ * column's axis -- at every width. Under classic scrollbars the card runs
+ * (scrollbar width minus the rail's padding relax) wider per side than
+ * the column; overlay scrollbars reserve and relax nothing, and the two
+ * converge. Below the cap the width consumes exactly the gutter inset
+ * per side (the auto margins resolve to zero; above the cap they split
+ * the leftover), so nothing jumps when the fold starts; keeping the
+ * width
+ * unscoped also makes the card ride the fold AND unfold slides without
+ * its own transition (a
  * fold-scoped rule would drop the cap at unfold start and snap one frame
  * on panes wider than the cap). */
 .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
@@ -545,9 +561,12 @@
   pointer-events: auto;
   /* The old .session-questionbar padding, moved onto the bar inside the
    * conversation-width track: --rail-gutter matches the rail's horizontal
-   * padding so the bar's edges align with the rail's text column. The
-   * side insets come from the centered width formula below, which
-   * degenerates to the gutter inset in the expanded state. */
+   * padding, so the bar sits a gutter off the flanks while sharing the
+   * reading column's axis (both center on the track; under classic
+   * scrollbars the card runs scrollbar-width-minus-relax wider per side
+   * than the column). The side insets come from the centered width
+   * formula below,
+   * which degenerates to the gutter inset in the expanded state. */
   margin-block: 0.5rem 1rem;
   margin-inline: auto;
   width: min(var(--reading-column-cap), calc(100% - 2 * var(--rail-gutter)));
@@ -733,9 +752,27 @@
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  /* Issue #839: reserve the scrollbar gutter on BOTH inline edges so the
+     content box stays symmetric and the centered reading column holds the
+     track's centerline (the axis the bar card centers on) with or without
+     a scrollbar. `stable` keeps the reservation permanent, so the scrollbar
+     appearing costs no reflow -- the text measure and the column's axis
+     hold while the thread grows past the overflow threshold. The bar
+     card centers on the same centerline, so the two axes stay locked;
+     overlay scrollbars reserve nothing and the property is a no-op
+     there. */
+  scrollbar-gutter: stable both-edges;
   border-right: 1px solid var(--border);
   background: var(--background);
-  padding: 0.5rem var(--rail-gutter);
+  /* Issue #839: the horizontal padding relaxes up to the measured scrollbar
+     width (--rail-col-relax cap) below the gutter, so the reading column's
+     edges sit close to the bar card's -- under classic scrollbars the card
+     ends a few pixels wider per side; overlay scrollbars clamp the relax
+     to zero and the two stay flush. The bar's own gutter inset is
+     untouched. */
+  padding-block: 0.5rem;
+  padding-inline:
+    calc(var(--rail-gutter) - min(var(--rail-sb-w, 0px), var(--rail-col-relax)));
   /* Issue #836: the bar overlays the strip at the rail's bottom, so the
      scroll container's usable height must end ABOVE the overlay: the
      dynamic bottom padding follows the slot's measured height (--shell-bar-h,
@@ -761,9 +798,14 @@
    state (scrollbar at the window edge); this wrapper centers the thread
    content and caps it at --reading-column-cap so the text measure carries
    over from the retired centered-track era (within the retired era's 1px
-   border). Inert in the expanded state -- the rail's 600px drag ceiling
-   keeps the expanded content (544px max) well under the 744px cap, so the
-   unscoped max-width never binds there -- and continuous through the fold
+   border). The centering is axis-true because the rail's scrollbar-gutter
+   reserves both edges symmetrically (issue #839): the column lands on the
+   track's centerline -- the bar card's axis -- whether or not the scrollbar
+   is showing, and the reservation is stable, so crossing the overflow
+   threshold costs no reflow. Inert in the expanded state -- the rail's 600px
+   drag ceiling keeps the expanded content (533px max with 15px-classic
+   scrollbars, padding relaxed) well under the 744px cap, so the unscoped
+   max-width never binds there -- and continuous through the fold
    slide in both directions: min(cap, the rail's content width) rides the
    track without its own transition (a fold-scoped cap would drop at unfold
    start and snap one frame on panes wider than the cap). */
