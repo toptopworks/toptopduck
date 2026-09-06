@@ -1644,6 +1644,90 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(Array.from(rail.children)).toHaveLength(1);
   });
 
+  it("forwards wheel over the bar strip to the active pane's rail (issue #834)", async () => {
+    // ADR-0092 lifted the QuestionBar to the shell level, outside the rail's
+    // scroll container: a wheel over the bar has no scrollable ancestor and
+    // dies (delta 0 live-verified; the caret rests there exactly while
+    // reading the latest content, which reads as "cannot scroll further").
+    // The slot forwards deltaY to the ACTIVE pane's rail -- scrollBy clamps
+    // at the edges natively (edge wheel is a no-op -- platform behavior,
+    // not pinned here; jsdom cannot scroll), and the rail's own wheel path
+    // never enters the slot handler (flex-sibling subtrees).
+    // jsdom has no layout engine, so the pin stubs scrollBy on the live rail
+    // elements and asserts the forwarded (0, deltaY) pairs, not a scrollTop
+    // change.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
+    render(<App />);
+    // Cold start: no pane layer exists yet (pinned), so the forward is a
+    // structural no-op -- the centered bar has nothing to scroll.
+    expect(document.querySelectorAll(".session-rail")).toHaveLength(0);
+    fireEvent.wheel(document.querySelector<HTMLElement>(".shell-bar-slot")!, { deltaY: 100 });
+    await openSession();
+    // A second session via the bar-submit path: sess-1 keeps its keep-alive
+    // layer (hidden), sess-2 becomes active -- the forward must track
+    // .active, not pane order.
+    await openSession();
+    const layers = document.querySelectorAll(".session-pane-layer");
+    expect(layers).toHaveLength(2);
+    expect(layers[1].classList.contains("active")).toBe(true);
+    const hiddenScrollBy = vi.fn();
+    const activeScrollBy = vi.fn();
+    layers[0].querySelector<HTMLElement>(".session-rail")!.scrollBy = hiddenScrollBy;
+    layers[1].querySelector<HTMLElement>(".session-rail")!.scrollBy = activeScrollBy;
+    const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
+    // Both directions forward.
+    fireEvent.wheel(slot, { deltaY: 240 });
+    fireEvent.wheel(slot, { deltaY: -120 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(1, 0, 240);
+    expect(activeScrollBy).toHaveBeenNthCalledWith(2, 0, -120);
+    expect(hiddenScrollBy).not.toHaveBeenCalled();
+    // Zoom gestures stay with the browser -- no forward.
+    fireEvent.wheel(slot, { deltaY: 60, ctrlKey: true });
+    expect(activeScrollBy).toHaveBeenCalledTimes(2);
+    // Line-mode deltas normalize to pixels (3 lines x 16px) so the bar
+    // never crawls against the rail's native path.
+    fireEvent.wheel(slot, { deltaY: 3, deltaMode: 1 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(3, 0, 48);
+    // A rail-originated wheel never routes through the slot handler.
+    fireEvent.wheel(layers[1].querySelector<HTMLElement>(".session-rail")!, { deltaY: 300 });
+    expect(activeScrollBy).toHaveBeenCalledTimes(3);
+    // A wheel on a scrollable inside the bar scrolls that element natively;
+    // the forward must not double-scroll the rail behind it. The jsdom
+    // textarea does not overflow, so the same wheel still forwards -- only
+    // the overflow stub flips it to scroll-itself-only.
+    const input = screen.getByLabelText("提问");
+    fireEvent.wheel(input, { deltaY: 90 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(4, 0, 90);
+    input.style.overflowY = "auto";
+    Object.defineProperty(input, "scrollHeight", { value: 300 });
+    Object.defineProperty(input, "clientHeight", { value: 100 });
+    // scrollTop sits at 0 -- the textarea can still consume the tick, so
+    // the guard holds and the rail does not scroll behind.
+    fireEvent.wheel(input, { deltaY: 240 });
+    expect(activeScrollBy).toHaveBeenCalledTimes(4);
+    // At the bottom edge the textarea cannot consume; with no scrollable
+    // ancestor the delta has nowhere native to go, so it chains to the
+    // rail -- the manual form of native scroll chaining.
+    Object.defineProperty(input, "scrollTop", { value: 200, configurable: true });
+    fireEvent.wheel(input, { deltaY: 240 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(5, 0, 240);
+    // The top edge mirrors it for the negative direction.
+    Object.defineProperty(input, "scrollTop", { value: 0, configurable: true });
+    fireEvent.wheel(input, { deltaY: -80 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(6, 0, -80);
+    // Active-vs-order disambiguation: re-activate the first session via its
+    // sidebar entry (keep-alive keeps both layers mounted; no refetch), and
+    // the forward must move to layers[0]'s rail -- a last-or-index lookup
+    // would hit the hidden pane's rail instead.
+    fireEvent.click(document.querySelectorAll(".session-entry-main")[0]);
+    expect(layers[0].classList.contains("active")).toBe(true);
+    fireEvent.wheel(slot, { deltaY: 150 });
+    expect(hiddenScrollBy).toHaveBeenNthCalledWith(1, 0, 150);
+    expect(activeScrollBy).toHaveBeenCalledTimes(6);
+  });
+
   it("opens / closes the workspace via the header toggle (manual fold)", async () => {
     render(<App />);
     await openSession();
