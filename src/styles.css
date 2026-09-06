@@ -361,28 +361,26 @@
 
 /* --- Row 3 (cols 2+): main area (ADR-0092) --------------------------------
  * ADR-0092: the main area replaces the old .session-pane-host grid cell. It
- * is a flex column containing the session-pane-host (flex:1) + the shell-level
- * bar slot (flex-shrink:0). In cold-start mode the bar is centered and the
- * pane host collapses.
+ * holds the session-pane-host (flex:1, always full height) with the
+ * shell-level bar slot as an absolute overlay (issue #836): the rail scroll
+ * container extends to the window's bottom edge so its scrollbar reaches
+ * the app's bottom, and the thread tail scrolls out of view behind the
+ * bar -- the rail compensates with a bottom padding sized from the slot's
+ * measured height (--shell-bar-h, written by App.tsx's ResizeObserver).
  *
  * The session-pane-host is a positioning context for the keep-alive layer
  * stack: every open session renders a .session-pane-layer absolutely filling
  * it; non-active layers are display:none (mounted but not laid out --
- * ADR-0051 keep-alive, no refetch on switch). */
+ * ADR-0051 keep-alive, no refetch on switch). In cold-start mode no layer
+ * is active, so the host renders as an invisible full-height block under
+ * the centered bar. */
 .main-area { grid-column: 2; grid-row: 3; display: flex; flex-direction: column; overflow: hidden; position: relative; z-index: 11; }
 .session-pane-host {
   flex: 1;
   min-height: 0;
   position: relative;
   overflow: hidden;
-  /* Paired with the bar slot's flex-grow transition below: on first submit /
-   * "+" navigation the host grows 0 -> 1 while the slot shrinks 1 -> 0,
-   * gliding the bar between centered and bottom (ADR-0092 Decision 1). */
-  transition: flex-grow 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Cold-start mode: no active session, so the pane host has no visible layers.
- * Collapse it so the centered bar fills the space. */
-.cold-start-mode .session-pane-host { flex: 0; }
 .session-pane-layer { position: absolute; inset: 0; }
 .session-pane-layer.hidden { display: none; }
 /* Resume progress strip (ADR-0034; absent unless a resume runs). An overlay
@@ -411,9 +409,31 @@
  * The QuestionBar lives at the shell level as a single instance. Two
  * positions driven by activeSessionId: centered (cold start) or bottom
  * (active session). The same DOM node persists across transitions — CSS
- * handles the repositioning, no React unmount/remount. Both postures are a
- * flex column with the content centered; flex-grow interpolates between them
- * (transition above + below), so the bar glides centered <-> bottom.
+ * handles the repositioning, no React unmount/remount. The slot is an
+ * absolute overlay on the main area (issue #836), so it shrink-wraps its
+ * content height and interpolates BETWEEN two anchor pairs instead of
+ * through flex-grow: centered sits at bottom:50% + translateY(50%) (the
+ * slot's box centers on the main area's midline), bottom at bottom:0 +
+ * translateY(0). Each property interpolates on the same curve, so the
+ * composed trajectory stays exactly linear — the same glide the old
+ * flex-grow pair produced, without resizing the pane host mid-flight (the
+ * rail keeps a constant height through the slide). The bottom anchor is
+ * layout-bound by necessity: translate percentages resolve against the
+ * element's own box, so only an inset anchor can pin the midline in pure
+ * CSS — and the flex-grow pair it replaces was layout-bound too.
+ *
+ * The strip paints an opaque backdrop but leaves the scrollbar a
+ * passthrough (issue #836): .shell-bar-backdrop fills the conversation
+ * column up to the rail's scrollbar (--rail-sb-w, measured once at
+ * startup), so scrolling content -- including content that overflows the
+ * reading column into the rail's padding -- never peeks around the
+ * floating card, while the scrollbar itself stays visible down to the
+ * window's bottom edge. The workspace column stays covered by the track's
+ * ::before card fill. The slot itself is pointer-events:none in the bottom
+ * posture, so hits over the reserved band fall through to the rail's
+ * native scrollbar (draggable again); the card, the backdrop, and the
+ * ::before re-enable pointer-events, keeping the strip's wheel forwarding
+ * and blocking clicks on the content hidden behind them.
  *
  * Bottom width tracking (ADR-0090 calibration, ADR-0092): the
  * .shell-bar-track mirrors the pane's 4-track .session-body grid so the bar
@@ -424,20 +444,22 @@
  * grid-template-columns transition matches the pane's so the bar follows the
  * fold animation + rail drag.
  *
- * Centered: fills the remaining main area height, centers the greeting +
- * bar vertically and horizontally. The track caps the bar at a readable
- * width (no conversation column exists in cold start — session header /
- * rail / workspace are all hidden). */
+ * Centered: shrink-wrapped at the main area's midline, holding the greeting
+ * + bar. The track caps the bar at a readable width (no conversation column
+ * exists in cold start — session header / rail / workspace are all hidden). */
 .shell-bar-slot {
-  flex-shrink: 0;
+  position: absolute;
+  left: 0;
+  right: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  transition: flex-grow 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: bottom 280ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 .shell-bar-slot.centered {
-  flex-grow: 1;
+  bottom: 50%;
+  transform: translateY(50%);
   gap: 1rem;
   padding: 2rem;
 }
@@ -445,8 +467,32 @@
   width: min(100%, 720px);
 }
 .shell-bar-slot.bottom {
-  flex-grow: 0;
+  bottom: 0;
+  transform: translateY(0);
+  /* pointer-events:none (see the section comment): the strip's boxes must
+   * not shield the rail's scrollbar column; the interactive surfaces below
+   * re-enable it. */
+  pointer-events: none;
+}
+/* Opaque backdrop over the conversation column (bottom posture only). App
+ * renders it as the track's first child -- convention, not the layering
+ * mechanism: the bar card is position:relative, and a positioned box paints
+ * above in-flow siblings regardless of DOM order. Stops at the rail's
+ * scrollbar -- --rail-sb-w is measured once at
+ * startup (App.tsx), the +1px is the rail's column border -- so the only
+ * uncovered band is the scrollbar itself, visible and, via the slot's
+ * pointer-events:none, draggable. Content that overflows the reading
+ * column paints across the rail's padding up to its clip edge; stopping a
+ * full gutter short (the earlier form) left that overflow peeking through
+ * the padding part of the notch. pointer-events:auto keeps wheel events
+ * bubbling to the slot's forwarder and blocks clicks on the thread
+ * content sliding behind. */
+.shell-bar-slot.bottom .shell-bar-backdrop {
+  grid-row: 1;
+  grid-column: 2;
+  margin-right: calc(var(--rail-sb-w, 0px) + 1px);
   background: var(--background);
+  pointer-events: auto;
 }
 .shell-bar-slot.bottom .shell-bar-track {
   width: 100%;
@@ -454,17 +500,22 @@
   grid-template-columns: var(--track-grid);
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* Extend the workspace card background through the shell-bar area so the
-   workspace column visually reaches the viewport bottom (ADR-0092: the bar
-   sits at the shell level below the pane host — without this the card
-   background stops at the pane-host boundary). The ::before fills the
-   workspace grid track (col 3) with the same --card token; it collapses to
-   0fr when the workspace is folded, so no rule is needed for ws-collapsed. */
+/* Cover the strip over the workspace column so the workspace card visually
+   reaches the viewport bottom (ADR-0092: the bar is a shell-level overlay
+   above the pane host, issue #836). The ::before fills the workspace grid
+   track (col 3) with the same --card token: without it, that part of the
+   strip would be a transparent hole -- the workspace content scrolling
+   behind it would show through and take clicks. It collapses to 0fr when
+   the workspace is folded, so no rule is needed for ws-collapsed. */
 .shell-bar-slot.bottom .shell-bar-track::before {
   content: "";
   grid-row: 1;
   grid-column: 3;
   background: var(--card);
+  /* Re-enable hits on the workspace fill (the slot is pointer-events:none):
+   * wheel bubbles to the slot's forwarder and clicks cannot land on the
+   * workspace content hidden behind the fill. */
+  pointer-events: auto;
 }
 /* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar's
  * track spans the same full-width conversation column. Both selectors
@@ -484,7 +535,14 @@
 }
 .shell-bar-slot.bottom .question-bar {
   grid-column: 2;
+  /* Explicit row: with the backdrop also placed in col 2, auto-placement
+   * would push the card to a second row and collapse row 1 (and the
+   * ::before fill with it) to zero height. All three strip items share
+   * this row; the card sizes it. */
+  grid-row: 1;
   min-width: 0;
+  /* Re-enable hits on the card itself (the slot is pointer-events:none). */
+  pointer-events: auto;
   /* The old .session-questionbar padding, moved onto the bar inside the
    * conversation-width track: --rail-gutter matches the rail's horizontal
    * padding so the bar's edges align with the rail's text column. The
@@ -508,9 +566,9 @@
  * would shift the body out of its positional 1fr row whenever the banner
  * mounts. The session-body is the 4-track
  * grid carrying the conversation column + the workspace. ADR-0092: the
- * QuestionBar moved to the shell level — it is a flex sibling BELOW the pane
- * host in .main-area, so the pane fills its full height and the two regions
- * never overlap (no compensation padding needed).
+ * QuestionBar moved to the shell level — it overlays the pane host from
+ * .main-area (issue #836), so the pane keeps its full height behind the
+ * bar and the rail's bottom padding compensates (--shell-bar-h).
  *
  * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
  * while the panel is folded away (cold-start default, session-ephemeral) --
@@ -538,18 +596,6 @@
   grid-template-columns: var(--track-grid-collapsed);
 }
 .shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
-/* Fold/unfold slide (issue #833): during the 280ms grid transition the
-   thread reflows while the shell-level bar's auto-height settles a frame or
-   two behind, so the rail's content can graze the viewport by a pixel or
-   two mid-slide -- the classic scrollbar flashes in for those frames and
-   vanishes once the bar settles (narrow panes have the least headroom).
-   SessionPane toggles .workspace-animating for exactly the slide window;
-   scrollbar-width only hides the bar visually (wheel scrolling keeps
-   working -- no dead zone), and at rest the scrollbar (re)appears once,
-   stable. */
-.shell .session-pane.workspace-animating .session-rail {
-  scrollbar-width: none;
-}
 .shell .session-pane.workspace-collapsed .session-workspace {
   opacity: 0;
 }
@@ -690,6 +736,15 @@
   border-right: 1px solid var(--border);
   background: var(--background);
   padding: 0.5rem var(--rail-gutter);
+  /* Issue #836: the bar overlays the strip at the rail's bottom, so the
+     scroll container's usable height must end ABOVE the overlay: the
+     dynamic bottom padding follows the slot's measured height (--shell-bar-h,
+     published by App.tsx's ResizeObserver on .main-area) plus the resting
+     0.5rem, keeping the last element fully readable above the bar at
+     maxScroll while the tail passes behind it. The calc rides this rule's
+     existing padding transition, so a height change eases the bound over
+     200ms rather than jumping. */
+  padding-bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
   transition: opacity 200ms ease,
     padding 200ms ease,
     border-right-width 200ms ease,

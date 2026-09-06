@@ -1738,24 +1738,105 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
-  it("hides the rail scrollbar visually for the fold slide window (issue #833)", async () => {
-    // The 280ms grid slide reflows the thread while the composer bar's
-    // auto-height settles behind it, so the rail's content can graze the
-    // viewport mid-slide and the classic scrollbar flashes in and out.
-    // The pane carries .workspace-animating for exactly that window; the
-    // CSS hides the rail scrollbar visually (wheel scrolling keeps
-    // working). The class must be absent at rest and present through both
-    // toggle directions.
+  it("shields the strip behind the bar and keeps the scrollbar band open (issue #836)", async () => {
+    // Two halves of the overlay's interaction model, pinned at the DOM
+    // level (jsdom has no hit-testing): (a) an opaque backdrop rides the
+    // track's conversation column so scrolling content never peeks around
+    // the floating card -- it must be the track's FIRST child. That slot
+    // is convention; the layering itself comes from the bar card's
+    // position:relative, which paints above in-flow siblings regardless
+    // of DOM order; (b) it exists only in the bottom posture -- every
+    // backdrop rule is bottom-scoped, so rendering it in cold start would
+    // be dead markup. The styles reserve the rail's scrollbar band
+    // (measured scrollbar width plus the 1px column border) at the
+    // column's right edge (visible + draggable via the slot's
+    // pointer-events:none) -- CSS-only, unpinnable here.
     render(<App />);
+    expect(document.querySelector(".shell-bar-backdrop")).toBeNull();
     await openSession();
-    const pane = document.querySelector(".session-pane")!;
-    expect(pane.classList.contains("workspace-animating")).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
-    expect(pane.classList.contains("workspace-animating")).toBe(true);
-    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
-    expect(pane.classList.contains("workspace-animating")).toBe(true);
-    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
+    const backdrop = document.querySelector(".shell-bar-backdrop")!;
+    expect(backdrop).toBeInTheDocument();
+    expect(backdrop.getAttribute("aria-hidden")).toBe("true");
+    expect(document.querySelector(".shell-bar-track")!.firstElementChild).toBe(backdrop);
+  });
+
+  it("publishes the bar's live height as --shell-bar-h on the main area (issue #836)", () => {
+    // The bar overlays the main area, so the rail's bottom padding must
+    // follow the bar's live height (a growing draft, the picker opening)
+    // to keep the thread's tail readable above it. App wires a
+    // ResizeObserver on the slot that publishes the border-box height as
+    // --shell-bar-h on .main-area; styles.css turns it into the rail's
+    // padding-bottom. jsdom's global stub (test-setup) never fires, so
+    // this spy class replaces it for the render and hands the test the
+    // live callback.
+    type ObserverSpy = {
+      cb: ResizeObserverCallback;
+      targets: Element[];
+      disconnected: boolean;
+    };
+    const instances: ObserverSpy[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        cb: ResizeObserverCallback;
+        targets: Element[] = [];
+        disconnected = false;
+        constructor(cb: ResizeObserverCallback) {
+          this.cb = cb;
+          instances.push(this);
+        }
+
+        observe(target: Element) {
+          this.targets.push(target);
+        }
+
+        unobserve() {}
+        disconnect() {
+          this.disconnected = true;
+        }
+      },
+    );
+    const { unmount } = render(<App />);
+    // The observed element is the slot itself: the card, its margins,
+    // and the centered greeting all contribute to its height. Other
+    // observers exist (useRailResize), so filter by target.
+    const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
+    const observers = instances.filter((i) => i.targets.includes(slot));
+    expect(observers).toHaveLength(1);
+    const area = document.querySelector<HTMLElement>(".main-area")!;
+    // borderBoxSize is the primary read (the border-box height is what
+    // the rail must clear); contentRect.height is the legacy fallback.
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, borderBoxSize: [{ blockSize: 157 }] } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("157px");
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, contentRect: { height: 121 } } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+    // A hidden slot (settings-mode's display:none) reports height 0 --
+    // the publish must keep the last real height instead of collapsing
+    // the rail's bound.
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, borderBoxSize: [{ blockSize: 0 }] } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+    // The same effect also measures the platform scrollbar width once
+    // (hidden scrollable probe) and publishes it as --rail-sb-w -- the
+    // backdrop's notch width so the strip covers everything except the
+    // scrollbar itself. jsdom has no layout, so the probe reads 0.
+    expect(area.style.getPropertyValue("--rail-sb-w")).toBe("0px");
+    unmount();
+    expect(observers[0].disconnected).toBe(true);
   });
 
   it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {

@@ -123,10 +123,6 @@ const NO_APPROVALS: ApprovalEntry[] = [];
 // The workspace tab order (ADR-0045): result first, working set second.
 // Module-level so the APG keyboard handler can index/wrap it (issue #760).
 const WORKSPACE_TABS = ["result", "workingSet"] as const;
-/** Matches the 280ms grid-template-columns fold transition on .session-body
- * and .shell-bar-track in styles.css -- the window during which the rail's
- * scrollbar is visually suppressed (see the workspace-animating rule). */
-const WORKSPACE_FOLD_SLIDE_MS = 280;
 type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
 export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
@@ -393,32 +389,11 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // not a member access like s.pendingActiveDelete.
   const pendingActiveDelete = s.pendingActiveDelete;
 
-  // Issue #833: during the 280ms fold/unfold slide the thread reflows while
-  // the shell-level bar's auto-height settles a frame or two behind, so the
-  // rail's content can graze the viewport by a pixel or two mid-slide -- the
-  // classic scrollbar flashes in for those frames and vanishes once the bar
-  // settles (narrow panes have the least headroom). workspace-animating
-  // rides the slide and styles.css hides the rail's scrollbar visually for
-  // exactly that window (scrollbar-width only hides the bar -- wheel
-  // scrolling keeps working, so no dead zone); at rest the scrollbar
-  // (re)appears once, stable. Fires on every fold-state change: the header
-  // toggle and the one-shot first-Materialized expansion both land here.
-  const [isFoldAnimating, setIsFoldAnimating] = useState(false);
-  const prevWorkspaceCollapsed = useRef(s.workspaceCollapsed);
-  useEffect(() => {
-    if (prevWorkspaceCollapsed.current === s.workspaceCollapsed) return;
-    prevWorkspaceCollapsed.current = s.workspaceCollapsed;
-    setIsFoldAnimating(true);
-    const timer = window.setTimeout(() => setIsFoldAnimating(false), WORKSPACE_FOLD_SLIDE_MS);
-    return () => window.clearTimeout(timer);
-  }, [s.workspaceCollapsed]);
-
   return (
     <div
       className={cn(
         "session-pane",
         s.workspaceCollapsed && "workspace-collapsed",
-        isFoldAnimating && "workspace-animating",
       )}
     >
       {/* Session header (row 1): session name + management menu + workspace
@@ -502,8 +477,10 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
       {/* session-body: grid container for the conversation column + workspace
           so both collapses animate via grid-template-columns (interpolatable).
           ADR-0092: the QuestionBar no longer lives inside session-conversation
-          — it is a shell-level sibling below the pane host, so the session-body
-          fills the pane's full height and never overlaps the bar. */}
+          — it is a shell-level overlay above the pane host (issue #836), so
+          the session-body fills the pane's full height and the rail's tail
+          scrolls behind the bar (the rail's dynamic bottom padding keeps the
+          last element readable above it). */}
       <div className="session-body">
         <div className="session-conversation">
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
