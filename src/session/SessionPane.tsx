@@ -6,6 +6,7 @@ import { log } from "../lib/log";
 import { listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
+import { useRailFollow } from "./useRailFollow";
 import { useSessionState } from "./useSessionState";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
@@ -46,6 +47,12 @@ import { sessionKeys, skillKeys } from "./queryKeys";
 
 interface SessionPaneProps {
   sessionId: string;
+  /** ADR-0051 keep-alive: whether THIS pane's layer is the active/visible one
+   *  (App's session-pane-layer stack keeps open panes mounted but
+   *  display:none when inactive). The follow hook keys its posture-preserving
+   *  session-switch re-alignment on the false -> true transition and never
+   *  writes scroll geometry while hidden. */
+  isActive: boolean;
   /** Pending data-file paths routed to this session's ingest (ADR-0061,
    *  #81 A1; issue #205; #500). Set by a cold-start drop (one path, ingested
    *  once on mount), a drop onto an already-active session (ingested when the
@@ -125,7 +132,7 @@ const NO_APPROVALS: ApprovalEntry[] = [];
 const WORKSPACE_TABS = ["result", "workingSet"] as const;
 type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
-export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -150,6 +157,17 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
     handleApprovalsSettled,
     onFirstTurnSettled,
   );
+  // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
+  // settled count grows on appends, liveTurn's identity changes per streaming
+  // delta (and its null -> live transition is the submit), and isActive's
+  // false -> true transition is the keep-alive session switch (ADR-0051).
+  // isFollowing has no render consumer yet; the hook exposes it for tests /
+  // a future jump-to-latest affordance.
+  const { railRef } = useRailFollow({
+    active: isActive,
+    entryCount: s.thread.length,
+    liveTurn: s.liveTurn,
+  });
   const intl = useIntl();
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
@@ -484,7 +502,11 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
       <div className="session-body">
         <div className="session-conversation">
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
+          {/* Issue #829: the rail ref feeds useRailFollow's stick-to-bottom
+              machine; the section itself is unconditional within the pane, so
+              the hook's mount-time listener attach sees its whole life. */}
           <section
+            ref={railRef}
             className="session-rail"
             aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
           >

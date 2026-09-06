@@ -188,6 +188,7 @@ function renderPane(
     wrap(
       <SessionPane
         sessionId="sess-1"
+        isActive={true}
         pendingIngestPaths={[]}
         onIngestConsumed={() => {}}
         pendingQuestion={null}
@@ -1397,6 +1398,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     const pane = (
       <SessionPane
         sessionId="sess-1"
+        isActive={true}
         pendingIngestPaths={payload.pendingIngestPaths ?? []}
         onIngestConsumed={onIngestConsumed}
         pendingQuestion={payload.pendingQuestion ?? null}
@@ -1428,6 +1430,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
       const nextPane = (
         <SessionPane
           sessionId="sess-1"
+          isActive={true}
           pendingIngestPaths={next.pendingIngestPaths ?? []}
           onIngestConsumed={onIngestConsumed}
           pendingQuestion={next.pendingQuestion ?? null}

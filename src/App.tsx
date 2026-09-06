@@ -1043,6 +1043,7 @@ export default function App() {
                           <SessionPane
                             key={s.sid}
                             sessionId={s.sid}
+                            isActive={s.sid === activeSessionId}
                             pendingIngestPaths={s.pendingIngestPaths}
                             onIngestConsumed={() => clearPendingIngest(s.sid)}
                             pendingQuestion={s.pendingQuestion}
