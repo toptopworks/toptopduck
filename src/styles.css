@@ -151,7 +151,7 @@
    * single source for the bar's gutter inset and this cap; the rail's
    * horizontal padding starts from it and relaxes by up to
    * --rail-col-relax (see the .session-rail rule). Shared with the
-   * bar mirror so the two columns never drift. */
+   * bar mirror so the two columns keep one source and one axis. */
   --rail-gutter: 1.75rem;
   --reading-column-cap: calc(800px - 2 * var(--rail-gutter));
   /* Reading-column edge relax (issue #839): how far the rail's horizontal
@@ -468,10 +468,10 @@
   bottom: 50%;
   transform: translateY(50%);
   gap: 1rem;
-  /* Issue #839: horizontal insets mirror the rail's gutter, so the
-     cold-start card sits the same distance from the flanks as the
-     bottom-state bar -- and, below the track's cap, comes out the same
-     width. The vertical rhythm stays 2rem. */
+  /* Issue #839: horizontal insets mirror the rail's gutter, so -- below
+     the track's cap -- the cold-start card sits the same distance from
+     the flanks as the bottom-state bar and comes out the same width.
+     The vertical rhythm stays 2rem. */
   padding-block: 2rem;
   padding-inline: var(--rail-gutter);
 }
@@ -537,15 +537,15 @@
  * centering it, so the card rides the track's centerline -- the reading
  * column's axis -- at every width. Under classic scrollbars the card runs
  * (scrollbar width minus the rail's padding relax) wider per side than
- * the column; overlay scrollbars reserve and relax nothing, and the two
- * converge. Below the cap the width consumes exactly the gutter inset
- * per side (the auto margins resolve to zero; above the cap they split
- * the leftover), so nothing jumps when the fold starts; keeping the
- * width
- * unscoped also makes the card ride the fold AND unfold slides without
- * its own transition (a
- * fold-scoped rule would drop the cap at unfold start and snap one frame
- * on panes wider than the cap). */
+ * the column while the width formula is uncapped; overlay scrollbars
+ * reserve and relax nothing, and once the cap binds, card and column
+ * meet at 744px and sit flush. Below the cap the width consumes exactly
+ * the gutter inset per side (the auto margins resolve to zero; above
+ * the cap they split the leftover), so nothing jumps when the fold
+ * starts; keeping the width unscoped also makes the card ride the fold
+ * AND unfold slides without its own transition (a fold-scoped rule
+ * would drop the cap at unfold start and snap one frame on panes wider
+ * than the cap). */
 .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
   grid-template-columns: var(--track-grid-collapsed);
 }
@@ -560,13 +560,12 @@
   /* Re-enable hits on the card itself (the slot is pointer-events:none). */
   pointer-events: auto;
   /* The old .session-questionbar padding, moved onto the bar inside the
-   * conversation-width track: --rail-gutter matches the rail's horizontal
-   * padding, so the bar sits a gutter off the flanks while sharing the
-   * reading column's axis (both center on the track; under classic
-   * scrollbars the card runs scrollbar-width-minus-relax wider per side
-   * than the column). The side insets come from the centered width
-   * formula below,
-   * which degenerates to the gutter inset in the expanded state. */
+   * conversation-width track: --rail-gutter anchors the rail's horizontal
+   * padding (which relaxes below it under classic scrollbars), so the
+   * bar sits a gutter off the flanks while sharing the reading column's
+   * axis -- both center on the track. The side insets come from the
+   * centered width formula below, which degenerates to the gutter inset
+   * in the expanded state. */
   margin-block: 0.5rem 1rem;
   margin-inline: auto;
   width: min(var(--reading-column-cap), calc(100% - 2 * var(--rail-gutter)));
@@ -767,9 +766,9 @@
   /* Issue #839: the horizontal padding relaxes up to the measured scrollbar
      width (--rail-col-relax cap) below the gutter, so the reading column's
      edges sit close to the bar card's -- under classic scrollbars the card
-     ends a few pixels wider per side; overlay scrollbars clamp the relax
-     to zero and the two stay flush. The bar's own gutter inset is
-     untouched. */
+     ends a few pixels wider per side while the widths are uncapped;
+     overlay scrollbars clamp the relax to zero, and above the cap the two
+     meet at 744px either way. The bar's own gutter inset is untouched. */
   padding-block: 0.5rem;
   padding-inline:
     calc(var(--rail-gutter) - min(var(--rail-sb-w, 0px), var(--rail-col-relax)));
