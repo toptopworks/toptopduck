@@ -53,3 +53,4 @@ ADR-0087 把 DuckDB 从唯一引擎降为默认工具——一个会话可能全
 - **校准 ADR-0051**：keep-alive 保留不变；bar 的 per-session state（`loading` / `phase` / 输入草稿 `value`）从 `SessionPane` 内 `useState` 上提到 shell 层按 `activeSessionId` 路由。
 - **留实现期**：问候语文案（i18n key）、CSS transition 时序、draft state 的具体 state shape、composer 控件 draft 模式的 popover 行为细节、`SessionPane` 重构后 `handleAsk` / `handleCancel` 的回调上提路径。
 - **被 ADR-0098 校准**：Decision 4 的分流结构不变，零档案合法化使「built-in 选中但无 profile → Settings」分支从不可达变为可表示；Decision 6 的冷启动 pending 运行时初始值从 `RUNTIME_CHOICE_DEFAULT` 常量改为默认运行时的解析结果。见 ADR-0098。
+- **校准（bar overlay 化）**：bar 的布局语义从「与 pane host 相邻的布局条带」改为「浮于主区域之上的 absolute 浮层」——rail 滚动容器全高延伸至窗口底缘（滚动条贴 app 底缘），thread 尾部内容从 bar 背后滚过，rail 底部以 bar 实测高度（ResizeObserver 发布 `--shell-bar-h` 于 `.main-area`）的动态 padding 保滚到底时末元素完整可见。Decision 1 的转场机制相应精确化：双锚点插值（centered 态 `bottom:50%` + `translateY(50%)` ↔ bottom 态 `bottom:0` + `translateY(0)`，280ms 同曲线，轨迹精确线性），pane host 高度在滑轨中恒定，`.cold-start-mode .session-pane-host { flex: 0 }` 退役。

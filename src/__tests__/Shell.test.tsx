@@ -1738,24 +1738,70 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
-  it("hides the rail scrollbar visually for the fold slide window (issue #833)", async () => {
-    // The 280ms grid slide reflows the thread while the composer bar's
-    // auto-height settles behind it, so the rail's content can graze the
-    // viewport mid-slide and the classic scrollbar flashes in and out.
-    // The pane carries .workspace-animating for exactly that window; the
-    // CSS hides the rail scrollbar visually (wheel scrolling keeps
-    // working). The class must be absent at rest and present through both
-    // toggle directions.
-    render(<App />);
-    await openSession();
-    const pane = document.querySelector(".session-pane")!;
-    expect(pane.classList.contains("workspace-animating")).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
-    expect(pane.classList.contains("workspace-animating")).toBe(true);
-    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
-    expect(pane.classList.contains("workspace-animating")).toBe(true);
-    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
+  it("publishes the bar's live height as --shell-bar-h on the main area (issue #836)", () => {
+    // The bar overlays the main area, so the rail's bottom padding must
+    // follow the bar's live height (a growing draft, the picker opening)
+    // to keep the thread's tail readable above it. App wires a
+    // ResizeObserver on the slot that publishes the border-box height as
+    // --shell-bar-h on .main-area; styles.css turns it into the rail's
+    // padding-bottom. jsdom's global stub (test-setup) never fires, so
+    // this spy class replaces it for the render and hands the test the
+    // live callback.
+    type ObserverSpy = {
+      cb: ResizeObserverCallback;
+      targets: Element[];
+      disconnected: boolean;
+    };
+    const instances: ObserverSpy[] = [];
+    const PrevRO = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      cb: ResizeObserverCallback;
+      targets: Element[] = [];
+      disconnected = false;
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+        instances.push(this);
+      }
+
+      observe(target: Element) {
+        this.targets.push(target);
+      }
+
+      unobserve() {}
+      disconnect() {
+        this.disconnected = true;
+      }
+    } as unknown as typeof ResizeObserver;
+    const { unmount } = render(<App />);
+    try {
+      // The observed element is the slot itself: the card, its margins,
+      // and the centered greeting all contribute to its height. Other
+      // observers exist (useRailResize), so filter by target.
+      const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
+      const observers = instances.filter((i) => i.targets.includes(slot));
+      expect(observers).toHaveLength(1);
+      const area = document.querySelector<HTMLElement>(".main-area")!;
+      // borderBoxSize is the primary read (the border-box height is what
+      // the rail must clear); contentRect.height is the legacy fallback.
+      act(() => {
+        observers[0].cb(
+          [{ target: slot, borderBoxSize: [{ blockSize: 157 }] } as unknown as ResizeObserverEntry],
+          observers[0] as unknown as ResizeObserver,
+        );
+      });
+      expect(area.style.getPropertyValue("--shell-bar-h")).toBe("157px");
+      act(() => {
+        observers[0].cb(
+          [{ target: slot, contentRect: { height: 121 } } as unknown as ResizeObserverEntry],
+          observers[0] as unknown as ResizeObserver,
+        );
+      });
+      expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+      unmount();
+      expect(observers[0].disconnected).toBe(true);
+    } finally {
+      globalThis.ResizeObserver = PrevRO;
+    }
   });
 
   it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {
