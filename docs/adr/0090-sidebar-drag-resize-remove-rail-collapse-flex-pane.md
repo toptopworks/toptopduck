@@ -46,3 +46,4 @@ Rail 可调宽的前提也已成熟：本 ADR Considered options 原否决 rail 
 - **Rail resize handle 在 workspace 折叠时隐藏**：折叠态 4-track grid 以居中为目的重布局，列边界不再映射该变量，handle display:none。
 - **MIN_WIDTH 双层保护 QuestionBar toolbar**：conversation 列 CSS min-width + resize hook JS clamp 双层保护，防止拖窄至 submit 按钮（固定尺寸不收缩）被 auth chip（文本不换行）+ provider / context trigger（固定方形）挤出可见区。
 - **被 ADR-0092 校准**：本 ADR Decision 3「QuestionBar 始终在 conversation 列内」精确化为「有活跃会话时在 conversation 列内，无活跃会话时居中于主区域（session header / rail / workspace 全隐藏，无 conversation 列）」。bar 上提 shell 级，宽度仍跟踪 conversation 列。见 ADR-0092。
+- **被 ADR-0083 校准（折叠几何）**：本 ADR 多处以「workspace 折叠时 conversation 居中」（spacer track 支持居中 / 居中上限 / 以居中为目的重布局）描述 4-track grid 的目的——该几何已退役：折叠态 conversation 轨占满 pane 全宽（rail 为全宽滚动容器，滚动条贴窗口右缘），居中改由 rail 内内容 wrapper（`.rail-reading-column`）与 bar 卡自身的限宽公式承担（见 ADR-0083 折叠几何校准条）。4-track 结构与全 fr / minmax 可插值性不变。

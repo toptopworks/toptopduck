@@ -447,7 +447,7 @@ When the workspace folds, the conversation column promotes to primary surface �
 
 ### Grid
 - Shell: `grid-template-columns: 220px 1fr` (sidebar + main block).
-- Session pane: 4-track conversation grid — `0fr minmax(0, var(--rail-width)) 1fr 0fr` (spacer / conversation rail / workspace / spacer); the workspace-folded form `0fr minmax(0, 100%) 0fr 0fr` gives the conversation track the full width, with the reading measure capped by the `.rail-reading-column` content wrapper. The shell-level question bar mirrors the same tracks so the bar sits under the conversation column (ADR-0092).
+- Session pane: 4-track conversation grid — `0fr minmax(0, var(--rail-width)) 1fr 0fr` (spacer / conversation rail / workspace / spacer); the workspace-folded form `0fr minmax(0, 100%) 0fr 0fr` gives the conversation track the full width, with the reading measure capped by the `.rail-reading-column` content wrapper. The shell-level question bar mirrors the same tracks so the bar sits under the conversation column; in the folded form the bar card itself carries the reading-column width (`--reading-column-cap` plus centered margins) to stay under the conversation text column (ADR-0092).
 - Settings overlay: `grid-template-columns: 220px 1fr` (nav + content) — matches the sidebar width so the left boundary stays fixed when switching views.
 
 ### Whitespace Philosophy

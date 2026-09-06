@@ -484,7 +484,7 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
             {/* Issue #833: the rail is the full-width scroll container while the
                 workspace is folded; this wrapper is the centered reading
                 column that caps the thread's measure (.rail-reading-column in
-                styles.css, capped under .workspace-collapsed). */}
+                styles.css, capped at --reading-column-cap). */}
             <div className="rail-reading-column">
               <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
                 <Thread

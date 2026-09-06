@@ -28,8 +28,9 @@ export interface ComposerSessionFields {
   handleIngestFiles: (paths: string[]) => void;
   /** The session pane's workspace fold (ADR-0083). Bar-shaping, not
    *  turn-flow: the shell-level bar slot mirrors the pane's conversation-column
-   *  geometry (rail width when the workspace is open, the centered 800px fold
-   *  track when collapsed), so the bar width tracks the conversation column
+   *  geometry (rail width when the workspace is open, the full-width fold
+   *  track when collapsed -- the bar card itself carries the centered
+   *  reading-column width), so the bar width tracks the conversation column
    *  (ADR-0090 calibration, ADR-0092). */
   workspaceCollapsed: boolean;
 }
