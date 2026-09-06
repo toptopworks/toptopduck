@@ -784,6 +784,21 @@ export default function App() {
     const slot = shellBarSlotRef.current;
     const area = mainAreaRef.current;
     if (!slot || !area) return;
+    // The rail's scrollbar column must stay uncovered (that is the point of
+    // the overlay), but thread content that overflows its reading column
+    // horizontally paints across the rail's padding up to the clip edge --
+    // so the strip's backdrop must stop at the scrollbar itself, not a full
+    // gutter short of it. Scrollbar width is constant for the app's
+    // lifetime; measure it once with a hidden scrollable probe (overlay
+    // scrollbars measure 0, which is exactly right: the notch then
+    // collapses to the 1px column border).
+    const probe = document.createElement("div");
+    probe.style.cssText =
+      "position:absolute;visibility:hidden;overflow:scroll;width:50px;height:50px";
+    document.body.appendChild(probe);
+    const scrollbarW = probe.offsetWidth - probe.clientWidth;
+    probe.remove();
+    area.style.setProperty("--rail-sb-w", `${scrollbarW}px`);
     const ro = new ResizeObserver((entries) => {
       const box = entries[0]?.borderBoxSize?.[0];
       const height = box ? box.blockSize : (entries[0]?.contentRect.height ?? 0);

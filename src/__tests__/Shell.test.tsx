@@ -1817,6 +1817,11 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         );
       });
       expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+      // The same effect also measures the platform scrollbar width once
+      // (hidden scrollable probe) and publishes it as --rail-sb-w -- the
+      // backdrop's notch width so the strip covers everything except the
+      // scrollbar itself. jsdom has no layout, so the probe reads 0.
+      expect(area.style.getPropertyValue("--rail-sb-w")).toBe("0px");
       unmount();
       expect(observers[0].disconnected).toBe(true);
     } finally {

@@ -424,9 +424,10 @@
  *
  * The strip paints an opaque backdrop but leaves the scrollbar a
  * passthrough (issue #836): .shell-bar-backdrop fills the conversation
- * column one --rail-gutter short of its right edge, so scrolling content
- * never peeks around the floating card, while the rail's scrollbar column
- * (scrollbar + border, well inside one gutter) stays visible down to the
+ * column up to the rail's scrollbar (--rail-sb-w, measured once at
+ * startup), so scrolling content -- including content that overflows the
+ * reading column into the rail's padding -- never peeks around the
+ * floating card, while the scrollbar itself stays visible down to the
  * window's bottom edge. The workspace column stays covered by the track's
  * ::before card fill. The slot itself is pointer-events:none in the bottom
  * posture, so hits over the reserved band fall through to the rail's
@@ -475,15 +476,19 @@
 }
 /* Opaque backdrop over the conversation column (App renders it as the
  * track's first child, so it paints below the bar card; bottom posture
- * only). Stops one --rail-gutter short of the column's right edge -- that
- * reserved band holds the rail's scrollbar plus its border, which stays
- * visible and, via the slot's pointer-events:none, draggable.
- * pointer-events:auto keeps wheel events bubbling to the slot's forwarder
- * and blocks clicks on the thread content sliding behind. */
+ * only). Stops at the rail's scrollbar -- --rail-sb-w is measured once at
+ * startup (App.tsx), the +1px is the rail's column border -- so the only
+ * uncovered band is the scrollbar itself, visible and, via the slot's
+ * pointer-events:none, draggable. Content that overflows the reading
+ * column paints across the rail's padding up to its clip edge; stopping a
+ * full gutter short (the earlier form) left that overflow peeking through
+ * the padding part of the notch. pointer-events:auto keeps wheel events
+ * bubbling to the slot's forwarder and blocks clicks on the thread
+ * content sliding behind. */
 .shell-bar-slot.bottom .shell-bar-backdrop {
   grid-row: 1;
   grid-column: 2;
-  margin-right: var(--rail-gutter);
+  margin-right: calc(var(--rail-sb-w, 0px) + 1px);
   background: var(--background);
   pointer-events: auto;
 }
