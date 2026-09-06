@@ -481,37 +481,43 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
             className="session-rail"
             aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
           >
-            <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
-              <Thread
-                entries={s.thread}
-                selectedResult={viewedReference}
-                onSelectResult={s.handleSelectResult}
-                staleByReference={s.staleByReference}
-                datasetLabels={datasetLabels}
-                skillIndex={skillIndex}
-                // ADR-0078/0083 (issue #297): the in-flight turn's progressive
-                // trace card (tool-call rows + approval cards) trails the
-                // recorded thread while a turn runs.
-                liveTurn={s.liveTurn}
-                onRespondApproval={handleRespondApproval}
-                onRetryTurn={handleAskAgain}
-                busy={s.loading}
-              />
-            </ErrorBoundary>
-            {s.thread.length === 0 && s.liveTurn === null && (
-            // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
-            // padding) + the .muted color rule retired onto utility; the class
-            // hooks had no selector / test dependents and are dropped. Gated on
-            // liveTurn too (issue #297): a brand-new session's FIRST in-flight
-            // turn already renders the live card -- the "no conversations yet"
-            // hint would contradict it.
-              <p className="text-[0.85rem] p-2 text-muted-foreground">
-                <FormattedMessage
-                  id="session.rail.empty"
-                  defaultMessage="No conversations yet. Ask a question below or load data to begin."
+            {/* Issue #833: the rail is the full-width scroll container while the
+                workspace is folded; this wrapper is the centered reading
+                column that caps the thread's measure (.rail-reading-column in
+                styles.css, capped under .workspace-collapsed). */}
+            <div className="rail-reading-column">
+              <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
+                <Thread
+                  entries={s.thread}
+                  selectedResult={viewedReference}
+                  onSelectResult={s.handleSelectResult}
+                  staleByReference={s.staleByReference}
+                  datasetLabels={datasetLabels}
+                  skillIndex={skillIndex}
+                  // ADR-0078/0083 (issue #297): the in-flight turn's progressive
+                  // trace card (tool-call rows + approval cards) trails the
+                  // recorded thread while a turn runs.
+                  liveTurn={s.liveTurn}
+                  onRespondApproval={handleRespondApproval}
+                  onRetryTurn={handleAskAgain}
+                  busy={s.loading}
                 />
-              </p>
-            )}
+              </ErrorBoundary>
+              {s.thread.length === 0 && s.liveTurn === null && (
+              // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
+              // padding) + the .muted color rule retired onto utility; the class
+              // hooks had no selector / test dependents and are dropped. Gated on
+              // liveTurn too (issue #297): a brand-new session's FIRST in-flight
+              // turn already renders the live card -- the "no conversations yet"
+              // hint would contradict it.
+                <p className="text-[0.85rem] p-2 text-muted-foreground">
+                  <FormattedMessage
+                    id="session.rail.empty"
+                    defaultMessage="No conversations yet. Ask a question below or load data to begin."
+                  />
+                </p>
+              )}
+            </div>
           </section>
         </div>
 

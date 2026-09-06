@@ -1607,6 +1607,23 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(screen.getByRole("button", { name: "展开工作区" })).toBeInTheDocument();
   });
 
+  it("centers the thread content in a reading column when the workspace is folded (issue #833)", async () => {
+    // The rail is the full-width scroll container in the folded state; the
+    // thread content centers inside it via the .rail-reading-column wrapper
+    // (capped by --reading-column-cap under .workspace-collapsed). jsdom has
+    // no layout engine, so the pin is class-compositional: the pane carries
+    // the fold class, and the wrapper is the rail's direct child owning the
+    // thread content.
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    const wrapper = document.querySelector<HTMLElement>(".session-rail > .rail-reading-column");
+    expect(wrapper).toBeInTheDocument();
+    // openSession rejects the creation turn, so the rail renders its empty
+    // hint -- it must live INSIDE the wrapper, not beside it.
+    expect(within(wrapper!).getByText("尚无对话。在下方提问或加载数据开始。")).toBeInTheDocument();
+  });
+
   it("opens / closes the workspace via the header toggle (manual fold)", async () => {
     render(<App />);
     await openSession();

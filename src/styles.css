@@ -118,9 +118,12 @@
   /* Shared 4-track conversation grid (ADR-0083/0090). Both .session-body and
    * .shell-bar-track reference these so the bar sits exactly under the
    * conversation column. Default: rail open. Collapsed: workspace folded,
-   * conversation centered at any container width -- the 1fr spacers shrink to
-   * 0 below the 800px cap, so a narrow container still fills the width (no
-   * centering threshold needed; matches the cold-start bar's centering).
+   * the conversation track takes the container's full width -- the rail is
+   * the scroll container, so its scrollbar hugs the window edge and the old
+   * empty flank tracks cease to exist as dead spacer areas (wheel over them
+   * scrolls now). The reading measure is capped not by the track but by the
+   * .rail-reading-column wrapper inside the rail plus the bar mirror below
+   * (--reading-column-cap).
    *
    * Workspace floor (issue #770): the workspace track's 320px min mirrors
    * WORKSPACE_MIN_WIDTH in src/shell/layoutBounds.ts -- the grid-level
@@ -129,11 +132,25 @@
    * tracks (conversation/workspace) keep a matching minmax() structure in
    * both lists and the bare-flex spacers pair fr↔fr, so the fold animation's
    * grid-template-columns interpolation stays smooth (a bare 0fr in the
-   * collapsed list would pair a length min against auto and snap). */
+   * collapsed list would pair a length min against auto and snap). The
+   * collapsed conversation track pairs its expanded px max against 100% --
+   * length vs percentage, both resolving against the same definite container
+   * width -- so the fold slide interpolates as smoothly as the retired
+   * px ↔ px pair did. */
   --workspace-min-width: 320px;
   --track-grid:
     0fr minmax(0, var(--rail-width, 350px)) minmax(var(--workspace-min-width), 1fr) 0fr;
-  --track-grid-collapsed: 1fr minmax(0, 800px) minmax(0, 0fr) 1fr;
+  --track-grid-collapsed: 0fr minmax(0, 100%) minmax(0, 0fr) 0fr;
+  /* Collapsed reading column cap (issue #833): the retired centered fold
+   * track capped the RAIL box at 800px and the rail's horizontal gutter
+   * (--rail-gutter per side) ate into that budget; capping the content
+   * wrapper at 800px minus the same gutter keeps the grid-track-era text
+   * measure. --rail-gutter is the single source for the rail's horizontal
+   * padding, the bar's expanded side margins, and this cap, so the three
+   * cannot drift apart. Shared with the bar mirror so the two columns never
+   * drift. */
+  --rail-gutter: 1.75rem;
+  --reading-column-cap: calc(800px - 2 * var(--rail-gutter));
   /* Session header height (issue #782): single 40px source shared by
    * .session-header (height/min-height) and .rail-resize-handle (top) so the
    * drag line stops exactly at the header's bottom edge — ADR-0092 lifted
@@ -399,8 +416,8 @@
  * Bottom width tracking (ADR-0090 calibration, ADR-0092): the
  * .shell-bar-track mirrors the pane's 4-track .session-body grid so the bar
  * sits exactly under the conversation column — rail width (--rail-width)
- * when the workspace is open, the centered 800px fold track when the active
- * pane is workspace-collapsed (App mirrors the fold via .ws-collapsed,
+ * when the workspace is open, the full-width conversation track when the
+ * active pane is workspace-collapsed (App mirrors the fold via .ws-collapsed,
  * reported upward through the composer fields). The track's
  * grid-template-columns transition matches the pane's so the bar follows the
  * fold animation + rail drag.
@@ -447,20 +464,31 @@
   grid-column: 3;
   background: var(--card);
 }
-/* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar
- * follows the conversation column's centered 800px geometry. Both selectors
+/* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar's
+ * track spans the same full-width conversation column. Both selectors
  * reference the shared custom properties on .shell so the two surfaces never
- * drift. */
+ * drift. The bar card itself trades its expanded 1.75rem side margins for
+ * the same centered reading column the thread content uses: width follows
+ * the identical min(cap, track − gutter) formula the rail's wrapper
+ * computes, so the card edges track the thread's text column at every
+ * width. The formula is continuous with the expanded margins (below
+ * the cap it degenerates to the same 1.75rem inset), so nothing jumps when
+ * the fold starts and the card rides the 280ms track slide without its own
+ * transition. */
 .shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
   grid-template-columns: var(--track-grid-collapsed);
+}
+.shell-bar-slot.bottom.ws-collapsed .question-bar {
+  width: min(var(--reading-column-cap), calc(100% - 2 * var(--rail-gutter)));
+  margin-inline: auto;
 }
 .shell-bar-slot.bottom .question-bar {
   grid-column: 2;
   min-width: 0;
   /* The old .session-questionbar padding, moved onto the bar inside the
-   * conversation-width track: 1.75rem matches the rail's horizontal padding
-   * so the bar's edges align with the rail's text column. */
-  margin: 0.5rem 1.75rem 1rem;
+   * conversation-width track: --rail-gutter matches the rail's horizontal
+   * padding so the bar's edges align with the rail's text column. */
+  margin: 0.5rem var(--rail-gutter) 1rem;
 }
 /* Disable the track's grid transition during rail / sidebar drag so the bar
  * width follows the pointer 1:1 instead of lagging (same rule the pane's
@@ -491,14 +519,17 @@
   display: flex;
   flex-direction: column;
 }
-/* Workspace folded (ADR-0083, issue #298): 4-track grid centers the
- * conversation when the workspace folds. Tracks: [left-spacer] [conversation]
- * [workspace] [right-spacer]. The 1fr spacers center the 800px column at any
- * container width (they shrink to 0 below the cap, so a narrow container
- * fills the width); the workspace column shrinks minmax(min, 1fr) ->
- * minmax(0, 0fr). Every track interpolates (minmax<->minmax px-by-px on the
- * conversation/workspace tracks, bare fr<->fr on the spacers) so no
- * jitter. */
+/* Workspace folded (ADR-0083, issue #298): 4-track grid hands the container's
+ * full width to the conversation track when the workspace folds. Tracks:
+ * [spacer 0fr] [conversation minmax(0, 100%)] [workspace minmax(0, 0fr)]
+ * [spacer 0fr] -- the rail scroll container spans the pane's full width
+ * (scrollbar pinned to the window edge, wheel over the old empty flanks
+ * scrolls because that surface is rail now, not dead spacer grid area), and
+ * the .rail-reading-column wrapper inside the rail caps the reading measure.
+ * The workspace column shrinks minmax(min, 1fr) -> minmax(0, 0fr). Every
+ * track interpolates (minmax<->minmax length-vs-percentage on the
+ * conversation max, px-by-px on the workspace min, bare fr<->fr on the
+ * spacers) so no jitter. */
 .shell .session-pane.workspace-collapsed .session-body {
   grid-template-columns: var(--track-grid-collapsed);
 }
@@ -547,7 +578,7 @@
 /* Grid row: conversation + workspace. Same grid-template-columns slide
  * pattern as the shell sidebar -- the transition on grid-template-columns
  * makes the column boundary slide smoothly (expanded rail track <-> the
- * centered 800px fold tracks).
+ * full-width fold track).
  * background prevents white flash during the slide.
  *
  * --rail-width (set inline on .shell by useRailResize) drives the
@@ -578,8 +609,9 @@
    --rail-width variable (set
    inline on .shell by useRailResize) drives left placement. Hidden when
    cold-start, settings mode, or the workspace is folded
-   (.workspace-collapsed) -- the 4-track grid reflows for centering and the
-   boundary no longer maps to --rail-width. touch-action:none prevents the
+   (.workspace-collapsed) -- the 4-track grid hands the conversation track
+   the full width and the boundary no longer maps to --rail-width.
+   touch-action:none prevents the
    browser from interpreting the drag as a pan/zoom. */
 .rail-resize-handle {
   position: absolute;
@@ -641,7 +673,7 @@
   overflow-y: auto;
   border-right: 1px solid var(--border);
   background: var(--background);
-  padding: 0.5rem 1.75rem;
+  padding: 0.5rem var(--rail-gutter);
   transition: opacity 200ms ease,
     padding 200ms ease,
     border-right-width 200ms ease,
@@ -652,6 +684,22 @@
    #185): the scattered .rail-empty empty-state rule (font-size + padding)
    retired onto the SessionPane rail-empty <p> as utility (text-[0.85rem] +
    p-2); the class hook had no selector / test dependent and is dropped. */
+
+/* Reading column (issue #833): the direct child wrapper carrying the rail's
+   content. The rail itself is the full-width scroll container in the folded
+   state (scrollbar at the window edge); this wrapper centers the thread
+   content and, under .workspace-collapsed, caps it at
+   --reading-column-cap so the text measure carries over from the retired
+   centered-track era. Inert in the expanded
+   state (the rail's 600px drag ceiling keeps it under the cap) and
+   continuous through the fold animation -- min(cap, rail − gutter) rides
+   the track slide without its own transition. */
+.rail-reading-column {
+  margin-inline: auto;
+}
+.shell .session-pane.workspace-collapsed .rail-reading-column {
+  max-width: var(--reading-column-cap);
+}
 
 .session-workspace {
   grid-column: 3;
