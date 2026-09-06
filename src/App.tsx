@@ -1030,6 +1030,39 @@ export default function App() {
                       width tracks the conversation column in both postures. */}
                   <div
                     className={`shell-bar-slot${isColdStart ? " centered" : " bottom"}${activeWsCollapsed ? " ws-collapsed" : ""}`}
+                    onWheel={(e) => {
+                      // Issue #834: ADR-0092 lifted the bar out of the rail's
+                      // scroll container, so a wheel over the bar strip finds
+                      // no scrollable ancestor and dies -- and the caret rests
+                      // there exactly while reading the latest content. Forward
+                      // the delta to the active pane's rail; scrollBy clamps at
+                      // the edges natively. A wheel that lands on a scrollable
+                      // inside the bar itself (the multi-line textarea's own
+                      // overflow, the open skill-picker list) scrolls that
+                      // element natively -- skip it so the rail does not
+                      // double-scroll behind. The per-event query tracks the
+                      // keep-alive layer's .active flag without ref-lifecycle
+                      // wiring; cold start has no active layer, so the forward
+                      // is a structural no-op.
+                      for (
+                        let node = e.target as HTMLElement | null;
+                        node && node !== e.currentTarget;
+                        node = node.parentElement
+                      ) {
+                        const { overflowY } = window.getComputedStyle(node);
+                        if (
+                          (overflowY === "auto" || overflowY === "scroll") &&
+                          node.scrollHeight > node.clientHeight
+                        ) {
+                          return;
+                        }
+                      }
+                      mainAreaRef.current
+                        ?.querySelector<HTMLElement>(
+                          ".session-pane-layer.active .session-rail",
+                        )
+                        ?.scrollBy(0, e.deltaY);
+                    }}
                   >
                     {isColdStart && (
                       <label

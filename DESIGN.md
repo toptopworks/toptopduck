@@ -443,7 +443,7 @@ The structural signature. Three independently collapsible columns:
 2. **Conversation rail** (320px): Thread of turns (questions + outcomes + source lifecycle events). Collapses to 0 width.
 3. **Workspace** (flexible): Result tables, charts, dataset detail, privacy controls. Default collapsed in cold-start; expands when a turn produces results.
 
-When the workspace folds, the conversation column promotes to primary surface — the rail scroll container spans the pane's full width (scrollbar pinned to the window edge; both flanks are rail surface and wheel-scroll), while the thread content caps to a centered reading column of `800px` minus the rail's horizontal padding inside it.
+When the workspace folds, the conversation column promotes to primary surface — the rail scroll container spans the pane's full width (scrollbar pinned to the window edge; both flanks are rail surface and wheel-scroll), while the thread content caps to a centered reading column of `800px` minus the rail's horizontal padding inside it. The shell-level question bar sits below the scroll container (ADR-0092) and forwards its wheel to the rail too — the whole bottom strip scrolls the conversation (issue #834).
 
 ### Grid
 - Shell: `grid-template-columns: 220px 1fr` (sidebar + main block).
