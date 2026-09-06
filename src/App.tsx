@@ -774,9 +774,11 @@ export default function App() {
   // publishes it as --shell-bar-h on the main area (styles.css turns it
   // into the rail's padding-bottom). A height change (a growing draft, the
   // picker opening) only grows or shrinks that padding -- content above
-  // never reflows, so scrollTop is undisturbed. The slot never unmounts
-  // (ADR-0092 single instance), so one mount-scoped observer covers every
-  // posture.
+  // never reflows, so scrollTop is undisturbed. A posture flip briefly
+  // leaves the stale centered height in the var — always the taller value,
+  // so the one frame the observer needs to catch up is conservative. The
+  // slot never unmounts (ADR-0092 single instance), so one mount-scoped
+  // observer covers every posture.
   const shellBarSlotRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const slot = shellBarSlotRef.current;
@@ -1229,9 +1231,10 @@ export default function App() {
 
                   {/* Draggable rail resize handle at the conversation/workspace
                       boundary. Hoisted to .main-area (ADR-0092) so it spans the
-                      full height — including the shell-level QuestionBar below
-                      the pane host — matching the sidebar handle's reach. Hidden
-                      via CSS when cold-start, settings mode, or workspace folded. */}
+                      full height — including the shell-level QuestionBar overlay
+                      (z-index 10 keeps it grabbable across the bar strip) —
+                      matching the sidebar handle's reach. Hidden via CSS when
+                      cold-start, settings mode, or workspace folded. */}
                   <div
                     className="rail-resize-handle"
                     onPointerDown={onRailResizeStart}

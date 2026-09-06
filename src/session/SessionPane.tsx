@@ -477,8 +477,10 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
       {/* session-body: grid container for the conversation column + workspace
           so both collapses animate via grid-template-columns (interpolatable).
           ADR-0092: the QuestionBar no longer lives inside session-conversation
-          — it is a shell-level sibling below the pane host, so the session-body
-          fills the pane's full height and never overlaps the bar. */}
+          — it is a shell-level overlay above the pane host (issue #836), so
+          the session-body fills the pane's full height and the rail's tail
+          scrolls behind the bar (the rail's dynamic bottom padding keeps the
+          last element readable above it). */}
       <div className="session-body">
         <div className="session-conversation">
           {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}

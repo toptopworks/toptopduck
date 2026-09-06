@@ -417,7 +417,10 @@
  * translateY(0). Each property interpolates on the same curve, so the
  * composed trajectory stays exactly linear — the same glide the old
  * flex-grow pair produced, without resizing the pane host mid-flight (the
- * rail keeps a constant height through the slide).
+ * rail keeps a constant height through the slide). The bottom anchor is
+ * layout-bound by necessity: translate percentages resolve against the
+ * element's own box, so only an inset anchor can pin the midline in pure
+ * CSS — and the flex-grow pair it replaces was layout-bound too.
  *
  * The overlay paints NOTHING of its own (issue #836): the strip carries no
  * background, so the rail's scrollbar runs visibly down to the window's
@@ -471,10 +474,11 @@
 }
 /* Extend the workspace card background through the shell-bar area so the
    workspace column visually reaches the viewport bottom (ADR-0092: the bar
-   sits at the shell level below the pane host — without this the card
-   background stops at the pane-host boundary). The ::before fills the
-   workspace grid track (col 3) with the same --card token; it collapses to
-   0fr when the workspace is folded, so no rule is needed for ws-collapsed. */
+   is a shell-level overlay above the pane host, issue #836 — without this
+   the card background stops at the pane-host boundary). The ::before fills
+   the workspace grid track (col 3) with the same --card token; it collapses
+   to 0fr when the workspace is folded, so no rule is needed for
+   ws-collapsed. */
 .shell-bar-slot.bottom .shell-bar-track::before {
   content: "";
   grid-row: 1;
@@ -695,10 +699,12 @@
   padding: 0.5rem var(--rail-gutter);
   /* Issue #836: the bar overlays the strip at the rail's bottom, so the
      scroll container's usable height must end ABOVE the overlay: the
-     dynamic bottom padding tracks the slot's measured height (--shell-bar-h,
+     dynamic bottom padding follows the slot's measured height (--shell-bar-h,
      published by App.tsx's ResizeObserver on .main-area) plus the resting
      0.5rem, keeping the last element fully readable above the bar at
-     maxScroll while the tail passes behind it. */
+     maxScroll while the tail passes behind it. The calc rides this rule's
+     existing padding transition, so a height change eases the bound over
+     200ms rather than jumping. */
   padding-bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
   transition: opacity 200ms ease,
     padding 200ms ease,
