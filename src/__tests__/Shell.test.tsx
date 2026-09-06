@@ -1607,6 +1607,43 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(screen.getByRole("button", { name: "展开工作区" })).toBeInTheDocument();
   });
 
+  it("centers the thread content in a reading column when the workspace is folded (issue #833)", async () => {
+    // The rail is the full-width scroll container in the folded state; the
+    // thread content centers inside it via the .rail-reading-column wrapper
+    // (capped by --reading-column-cap). jsdom has no layout engine, so the
+    // pin is class-compositional: the pane carries the fold class, and the
+    // wrapper is the rail's direct child. BOTH residency halves are pinned:
+    // openSession rejects the creation turn, so the rail renders its empty
+    // hint, and after a materialized turn populates the thread the question
+    // itself must resolve inside the wrapper too -- a future edit that
+    // scopes only one of the two into the reading column goes red here.
+    // The wrapper is also the rail's only child, so a rail-level sibling
+    // cannot silently opt out of the reading column.
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    const wrapper = document.querySelector<HTMLElement>(".session-rail > .rail-reading-column");
+    expect(wrapper).toBeInTheDocument();
+    expect(within(wrapper!).getByText("尚无对话。在下方提问或加载数据开始。")).toBeInTheDocument();
+    // Materialized turn (the suite's ADR-0083 idiom): auto-expands the
+    // workspace, which does not matter here -- the wrapper is unconditional.
+    vi.mocked(askQuestion).mockResolvedValueOnce({
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        assumption: null,
+      },
+    });
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // 2 asks total: the creation turn (rejected) + this one.
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(2));
+    await within(wrapper!).findByText("第一问");
+    const rail = document.querySelector(".session-rail")!;
+    expect(Array.from(rail.children)).toHaveLength(1);
+  });
+
   it("opens / closes the workspace via the header toggle (manual fold)", async () => {
     render(<App />);
     await openSession();
@@ -1615,6 +1652,26 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // The toggle flips to its close label once open.
     fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+  });
+
+  it("hides the rail scrollbar visually for the fold slide window (issue #833)", async () => {
+    // The 280ms grid slide reflows the thread while the composer bar's
+    // auto-height settles behind it, so the rail's content can graze the
+    // viewport mid-slide and the classic scrollbar flashes in and out.
+    // The pane carries .workspace-animating for exactly that window; the
+    // CSS hides the rail scrollbar visually (wheel scrolling keeps
+    // working). The class must be absent at rest and present through both
+    // toggle directions.
+    render(<App />);
+    await openSession();
+    const pane = document.querySelector(".session-pane")!;
+    expect(pane.classList.contains("workspace-animating")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
+    expect(pane.classList.contains("workspace-animating")).toBe(true);
+    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    expect(pane.classList.contains("workspace-animating")).toBe(true);
+    await waitFor(() => expect(pane.classList.contains("workspace-animating")).toBe(false));
   });
 
   it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {

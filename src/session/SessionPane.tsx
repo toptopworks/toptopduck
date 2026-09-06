@@ -123,6 +123,10 @@ const NO_APPROVALS: ApprovalEntry[] = [];
 // The workspace tab order (ADR-0045): result first, working set second.
 // Module-level so the APG keyboard handler can index/wrap it (issue #760).
 const WORKSPACE_TABS = ["result", "workingSet"] as const;
+/** Matches the 280ms grid-template-columns fold transition on .session-body
+ * and .shell-bar-track in styles.css -- the window during which the rail's
+ * scrollbar is visually suppressed (see the workspace-animating rule). */
+const WORKSPACE_FOLD_SLIDE_MS = 280;
 type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
 export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
@@ -389,8 +393,34 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
   // not a member access like s.pendingActiveDelete.
   const pendingActiveDelete = s.pendingActiveDelete;
 
+  // Issue #833: during the 280ms fold/unfold slide the thread reflows while
+  // the shell-level bar's auto-height settles a frame or two behind, so the
+  // rail's content can graze the viewport by a pixel or two mid-slide -- the
+  // classic scrollbar flashes in for those frames and vanishes once the bar
+  // settles (narrow panes have the least headroom). workspace-animating
+  // rides the slide and styles.css hides the rail's scrollbar visually for
+  // exactly that window (scrollbar-width only hides the bar -- wheel
+  // scrolling keeps working, so no dead zone); at rest the scrollbar
+  // (re)appears once, stable. Fires on every fold-state change: the header
+  // toggle and the one-shot first-Materialized expansion both land here.
+  const [isFoldAnimating, setIsFoldAnimating] = useState(false);
+  const prevWorkspaceCollapsed = useRef(s.workspaceCollapsed);
+  useEffect(() => {
+    if (prevWorkspaceCollapsed.current === s.workspaceCollapsed) return;
+    prevWorkspaceCollapsed.current = s.workspaceCollapsed;
+    setIsFoldAnimating(true);
+    const timer = window.setTimeout(() => setIsFoldAnimating(false), WORKSPACE_FOLD_SLIDE_MS);
+    return () => window.clearTimeout(timer);
+  }, [s.workspaceCollapsed]);
+
   return (
-    <div className={cn("session-pane", s.workspaceCollapsed && "workspace-collapsed")}>
+    <div
+      className={cn(
+        "session-pane",
+        s.workspaceCollapsed && "workspace-collapsed",
+        isFoldAnimating && "workspace-animating",
+      )}
+    >
       {/* Session header (row 1): session name + management menu + workspace
           toggle. Moved here from the global topbar so session-scoped chrome
           lives with the pane. ADR-0093 (issue #512): the `⋯` management menu
@@ -481,37 +511,43 @@ export function SessionPane({ sessionId, pendingIngestPaths, onIngestConsumed, p
             className="session-rail"
             aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
           >
-            <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
-              <Thread
-                entries={s.thread}
-                selectedResult={viewedReference}
-                onSelectResult={s.handleSelectResult}
-                staleByReference={s.staleByReference}
-                datasetLabels={datasetLabels}
-                skillIndex={skillIndex}
-                // ADR-0078/0083 (issue #297): the in-flight turn's progressive
-                // trace card (tool-call rows + approval cards) trails the
-                // recorded thread while a turn runs.
-                liveTurn={s.liveTurn}
-                onRespondApproval={handleRespondApproval}
-                onRetryTurn={handleAskAgain}
-                busy={s.loading}
-              />
-            </ErrorBoundary>
-            {s.thread.length === 0 && s.liveTurn === null && (
-            // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
-            // padding) + the .muted color rule retired onto utility; the class
-            // hooks had no selector / test dependents and are dropped. Gated on
-            // liveTurn too (issue #297): a brand-new session's FIRST in-flight
-            // turn already renders the live card -- the "no conversations yet"
-            // hint would contradict it.
-              <p className="text-[0.85rem] p-2 text-muted-foreground">
-                <FormattedMessage
-                  id="session.rail.empty"
-                  defaultMessage="No conversations yet. Ask a question below or load data to begin."
+            {/* Issue #833: the rail is the full-width scroll container while the
+                workspace is folded; this wrapper is the centered reading
+                column that caps the thread's measure (.rail-reading-column in
+                styles.css, capped at --reading-column-cap). */}
+            <div className="rail-reading-column">
+              <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
+                <Thread
+                  entries={s.thread}
+                  selectedResult={viewedReference}
+                  onSelectResult={s.handleSelectResult}
+                  staleByReference={s.staleByReference}
+                  datasetLabels={datasetLabels}
+                  skillIndex={skillIndex}
+                  // ADR-0078/0083 (issue #297): the in-flight turn's progressive
+                  // trace card (tool-call rows + approval cards) trails the
+                  // recorded thread while a turn runs.
+                  liveTurn={s.liveTurn}
+                  onRespondApproval={handleRespondApproval}
+                  onRetryTurn={handleAskAgain}
+                  busy={s.loading}
                 />
-              </p>
-            )}
+              </ErrorBoundary>
+              {s.thread.length === 0 && s.liveTurn === null && (
+              // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
+              // padding) + the .muted color rule retired onto utility; the class
+              // hooks had no selector / test dependents and are dropped. Gated on
+              // liveTurn too (issue #297): a brand-new session's FIRST in-flight
+              // turn already renders the live card -- the "no conversations yet"
+              // hint would contradict it.
+                <p className="text-[0.85rem] p-2 text-muted-foreground">
+                  <FormattedMessage
+                    id="session.rail.empty"
+                    defaultMessage="No conversations yet. Ask a question below or load data to begin."
+                  />
+                </p>
+              )}
+            </div>
           </section>
         </div>
 
