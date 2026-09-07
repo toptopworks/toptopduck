@@ -8,9 +8,10 @@
 //! variants carry it. `src/types.ts` mirrors the shapes asserted here -- if one
 //! side changes, the other must follow, and these tests make that coupling loud.
 
+use toptopduck_lib::commands::LiveSessionEntry;
 use toptopduck_lib::{
     DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet,
-    GuidanceSheetState, LoadError, LoadOutcome, RectifyProvenance, SheetRectify,
+    GuidanceSheetState, LoadError, LoadOutcome, RectifyProvenance, SessionId, SheetRectify,
 };
 
 /// Serialize `value`, assert the JSON equals `expected` (the pinned wire
@@ -1813,5 +1814,51 @@ fn builtin_scan_entry_wire_shape() {
             description: "Converts documents".into(),
         },
         r#"{"state":"conflict","name":"pandoc","description":"Converts documents"}"#,
+    );
+}
+
+/// Serialize-only wire pin for the `list_live_sessions` row (issue #842): a
+/// flat snake_case data row hand-mirrored by `src/api.ts`'s `LiveSessionEntry`.
+/// Unlike `assert_wire` this is one-way (the reply never deserializes in
+/// Rust, so no `Deserialize + PartialEq` bounds): `to_value` + the exact
+/// object pin the field names, the null arms, and the boolean the sweep's
+/// adopt/close verdict consumes -- a serde rename or a commands-layer mapping
+/// regression fails here instead of drifting silently to a reloaded webview.
+#[test]
+fn live_session_entry_serializes_as_a_flat_snake_case_row() {
+    let sid = SessionId::parse("d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10").expect("valid v4 id");
+    let row = LiveSessionEntry {
+        session_id: sid.clone(),
+        duck_path: Some("/sessions/a/session.duck".into()),
+        session_name: Some("analysis".into()),
+        in_flight: false,
+    };
+    assert_eq!(
+        serde_json::to_value(&row).expect("serialize"),
+        serde_json::json!({
+            "session_id": "d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10",
+            "duck_path": "/sessions/a/session.duck",
+            "session_name": "analysis",
+            "in_flight": false,
+        }),
+        "wire format drifted from pinned contract"
+    );
+    // The degraded / unbound arms the sweep's close arm keys on: null path
+    // and null name must stay explicit nulls (not omitted, not defaulted).
+    let degraded = LiveSessionEntry {
+        session_id: sid,
+        duck_path: None,
+        session_name: None,
+        in_flight: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&degraded).expect("serialize"),
+        serde_json::json!({
+            "session_id": "d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10",
+            "duck_path": null,
+            "session_name": null,
+            "in_flight": true,
+        }),
+        "degraded row drifted from pinned contract"
     );
 }

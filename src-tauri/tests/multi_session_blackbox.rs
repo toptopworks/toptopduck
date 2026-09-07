@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::json;
+use toptopduck_lib::persistence::{canonicalize_duck, release, try_acquire};
 use toptopduck_lib::provider::tool_calling::{ToolTurnReply, ToolUse};
 use toptopduck_lib::{
     ActiveResolution, CancelToken, FakeProvider, LoadOutcome, Session, SessionError, SessionId,
@@ -908,4 +909,114 @@ fn empty_session_close_idempotent_when_dir_already_deleted() {
     std::fs::remove_dir_all(&session_dir).expect("pre-delete");
     let cleaned = store.close_and_cleanup_empty(&id).expect("close + cleanup");
     assert!(cleaned, "NotFound should report cleanup (idempotent)");
+}
+
+// --- Issue #842: the startup re-adoption sweep (list_live) -------------------
+
+#[test]
+fn list_live_is_empty_on_a_cold_start() {
+    // The normal cold start: no webview reload happened, the store holds no
+    // sessions, and the sweep is a no-op (an empty reply leaves the frontend's
+    // open-session set untouched).
+    let store = SessionStore::new();
+    assert!(store.list_live().expect("list_live").is_empty());
+}
+
+#[test]
+fn list_live_reports_bound_sessions_and_close_releases_the_key() {
+    // Issue #842: after a webview reload the frontend loses every sid, but
+    // the store still holds the sessions (and their canonical single-writer
+    // keys). list_live hands the reloaded frontend the rows it needs to
+    // re-adopt; closing a listed session both drops it from the enumeration
+    // AND releases its key -- the deadlock the issue describes is that no
+    // other path could do either.
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck_a = dir.path().join("a.duck");
+    let duck_b = dir.path().join("b.duck");
+    let a = bound_session(&store, &duck_a);
+    let b = bound_session(&store, &duck_b);
+
+    let rows = store.list_live().expect("list_live");
+    assert_eq!(rows.len(), 2, "both live sessions are enumerated");
+    // Rows are sorted by sid: deterministic despite the HashMap's unordered
+    // iteration, so the frontend's "activate the first row" is stable.
+    assert!(rows[0].session_id < rows[1].session_id);
+    for row in &rows {
+        assert!(!row.in_flight, "no turn is in flight");
+        let duck = if row.session_id == a {
+            &duck_a
+        } else {
+            &duck_b
+        };
+        assert_eq!(row.duck_path.as_deref(), Some(duck.as_path()));
+        assert_eq!(row.session_name.as_deref(), Some("测试"));
+    }
+
+    // Close b: it leaves the sweep and frees the canonical key for a fresh
+    // open of the same .duck (the re-open path the reload had lost).
+    store.close(&b).expect("close");
+    let rows = store.list_live().expect("list_live");
+    assert_eq!(rows.len(), 1, "only the open session remains");
+    assert_eq!(rows[0].session_id, a);
+    let canonical_b = canonicalize_duck(&duck_b).expect("canonicalize");
+    assert!(
+        try_acquire(&canonical_b),
+        "close released the single-writer key"
+    );
+    // Release what the assertion itself acquired: the registry is
+    // process-global, and a leaked key would poison later tests.
+    release(&canonical_b);
+}
+
+#[test]
+fn list_live_marks_an_in_flight_session_unadoptable() {
+    // Issue #842 (triage Q2): a session whose turn is still running when the
+    // sweep reads it is marked in_flight -- steering the reloaded frontend to
+    // close it rather than adopt a session whose outcome it cannot observe.
+    // The lock-held fields degrade to None (the sweep never blocks on a turn).
+    let store = SessionStore::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("session.duck");
+
+    let cancel = Arc::new(CancelToken::new());
+    let provider = FakeProvider::new()
+        .with_cancel(cancel.clone())
+        .scripted_tool_turn_blocking("慢查询", answer("never"));
+    let id = store
+        .create(cancel.clone(), Box::new(provider), Default::default())
+        .expect("create");
+    let handle = store.get(&id).expect("handle");
+    {
+        let mut s = handle.session_lock().unwrap();
+        s.bind_duck(duck.clone(), "测试".into()).expect("bind");
+    }
+
+    // Spawn the blocked ask, then sweep while it holds the session lock.
+    let handle_for_thread = Arc::clone(&handle);
+    let ask = thread::spawn(move || {
+        let mut s = handle_for_thread.session_lock().unwrap();
+        s.ask("慢查询")
+    });
+    await_in_flight(&cancel, Duration::from_secs(2));
+
+    let rows = store.list_live().expect("list_live");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].session_id, id);
+    assert!(
+        rows[0].in_flight,
+        "an in-flight turn marks the row unadoptable"
+    );
+    assert_eq!(
+        rows[0].duck_path, None,
+        "the lock-held fields degrade to None"
+    );
+
+    // Tear down: close cancels the blocked turn, the ask lands Cancelled.
+    store.close(&id).expect("close");
+    let outcome = ask.join().expect("ask thread");
+    assert!(
+        matches!(outcome, TurnOutcome::Cancelled),
+        "in-flight turn lands as Cancelled after close fires cancel, got {outcome:?}"
+    );
 }

@@ -85,6 +85,27 @@ export async function closeSession(sessionId: string): Promise<boolean> {
   return invoke<boolean>("close_session", { sessionId });
 }
 
+/** One row from `list_live_sessions` (issue #842): a live backend session the
+ * reloaded frontend can re-adopt. The consumer rule is close-when
+ * `in_flight` is true OR `duck_path` is null -- a null path is never
+ * adoptable whatever the flag says. `duck_path` / `session_name` are null for
+ * an unbound session or when any holder occupied the session lock at sweep
+ * time (an in-flight turn, a transient command, a poisoned lock). */
+export interface LiveSessionEntry {
+  session_id: string;
+  duck_path: string | null;
+  session_name: string | null;
+  in_flight: boolean;
+}
+
+// Enumerate the store's live sessions (issue #842): the frontend's startup
+// re-adoption sweep after a webview reload wiped its open-session set while
+// the backend sessions (and their canonical single-writer keys) stayed alive.
+// Empty on a normal cold start -- no reload happened, nothing to re-adopt.
+export async function listLiveSessions(): Promise<LiveSessionEntry[]> {
+  return invoke<LiveSessionEntry[]>("list_live_sessions");
+}
+
 // Close a session AND wait for the canonical single-writer key to be released
 // (ADR-0063). The delete path's variant: blocks (<=120s, aligned to ADR-0021
 // REQUEST_TIMEOUT) until the in-flight ask's Arc clone drops and Session::Drop

@@ -75,6 +75,9 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
+    // Issue #842: the startup re-adoption sweep fires on mount; an empty
+    // reply keeps it a no-op.
+    listLiveSessions: vi.fn(async () => []),
     // The app-level approval channel (issue #297) mounts on App render;
     // inert no-op listeners keep the real Tauri event listen (absent in
     // jsdom) from rejecting unhandled.

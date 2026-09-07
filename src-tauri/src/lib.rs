@@ -73,7 +73,8 @@ pub use session::{
     ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceResolution, TurnInputs,
 };
 pub use session_store::{
-    ClosingFlag, SessionError, SessionHandle, SessionId, SessionStore, UNKNOWN_SESSION,
+    ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
+    UNKNOWN_SESSION,
 };
 pub use skills::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
@@ -384,6 +385,7 @@ pub fn run() {
             commands::create_session,
             commands::close_session,
             commands::close_session_and_wait_release,
+            commands::list_live_sessions,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,
