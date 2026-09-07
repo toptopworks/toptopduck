@@ -1148,9 +1148,15 @@ fn try_spawn_bridge(server: &serde_json::Value) {
         return;
     }
     let mut cmd = Command::new(command);
-    if let Some(env) = server.get("env").and_then(serde_json::Value::as_object) {
-        for (k, v) in env {
-            if let Some(v) = v.as_str() {
+    // env is the `{name, value}` pair array the schema crate named by
+    // `wire::MODELED_SCHEMA` defines for the session/new wire (issue #851) --
+    // read it as the array the strict agents validate.
+    if let Some(env) = server.get("env").and_then(serde_json::Value::as_array) {
+        for var in env {
+            if let (Some(k), Some(v)) = (
+                var.get("name").and_then(serde_json::Value::as_str),
+                var.get("value").and_then(serde_json::Value::as_str),
+            ) {
                 cmd.env(k, v);
             }
         }

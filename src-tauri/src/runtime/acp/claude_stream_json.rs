@@ -283,12 +283,20 @@ pub(crate) fn build_mcp_config_flags(mcp_servers: &[McpServer]) -> Vec<String> {
             env,
         } = server
         {
+            // The ACP wire shape named by `wire::MODELED_SCHEMA` carries env
+            // as a `{name, value}` pair array (issue #851); claude-code's
+            // native `--mcp-config` format wants the map form, so rebuild it
+            // here.
+            let env_map: serde_json::Map<String, Value> = env
+                .iter()
+                .map(|var| (var.name.clone(), Value::String(var.value.clone())))
+                .collect();
             servers.insert(
                 name.clone(),
                 serde_json::json!({
                     "command": command,
                     "args": args,
-                    "env": env,
+                    "env": Value::Object(env_map),
                 }),
             );
         }
