@@ -86,9 +86,11 @@ export async function closeSession(sessionId: string): Promise<boolean> {
 }
 
 /** One row from `list_live_sessions` (issue #842): a live backend session the
- * reloaded frontend can re-adopt. `duck_path` / `session_name` are null for an
- * unbound session or when an in-flight turn held the session lock at sweep
- * time; `in_flight` is the "close instead of adopt" verdict. */
+ * reloaded frontend can re-adopt. The consumer rule is close-when
+ * `in_flight` is true OR `duck_path` is null -- a null path is never
+ * adoptable whatever the flag says. `duck_path` / `session_name` are null for
+ * an unbound session or when any holder occupied the session lock at sweep
+ * time (an in-flight turn, a transient command, a poisoned lock). */
 export interface LiveSessionEntry {
   session_id: string;
   duck_path: string | null;

@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { StrictMode, type ComponentType, type ReactNode } from "react";
 import { createIntl } from "react-intl";
 import { QueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -147,14 +148,18 @@ function alreadyMounted(name: string) {
 // px == the physical drop positions the tests fire.
 const BAR_RECT = { left: 100, top: 200, right: 400, bottom: 300 };
 
-function renderSessions() {
+/** Render the hook. An optional wrapper (e.g. StrictMode, passed directly --
+ *  an arrow-function host around it does NOT trigger the double-invoke)
+ *  exercises mount-lifecycle postures the default bare render cannot reach. */
+function renderSessions(wrapper?: ComponentType<{ children: ReactNode }>) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const refreshSessions = vi.fn();
   const setShellError = vi.fn();
-  const helpers = renderHook(() =>
-    useShellSessions({ intl, queryClient, refreshSessions, setShellError }),
+  const helpers = renderHook(
+    () => useShellSessions({ intl, queryClient, refreshSessions, setShellError }),
+    wrapper ? { wrapper } : undefined,
   );
   return { ...helpers, refreshSessions, setShellError, queryClient };
 }
@@ -1309,5 +1314,50 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     // (the reloaded shell lands on the empty state, as before the sweep).
     expect(result.current.openSessions).toEqual([]);
     expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("splits orphan-close rejects by kind: NotFound logs debug, others warn", async () => {
+    // The sweep's fire-and-forget close mirrors closeOpen's triage: NotFound
+    // (the snapshot raced a detach -- the row is already closed) is the
+    // expected idempotent path at debug level; a genuine failure stays a
+    // warn so it remains observable. Neither surfaces a shell error.
+    vi.mocked(listLiveSessions).mockResolvedValue([
+      { session_id: "x", duck_path: "/sessions/x/session.duck", session_name: null, in_flight: true },
+      { session_id: "y", duck_path: null, session_name: null, in_flight: true },
+    ]);
+    vi.mocked(closeSession)
+      .mockRejectedValueOnce({ kind: "NotFound" })
+      .mockRejectedValueOnce(new Error("close ipc failed"));
+    const { result, setShellError } = renderSessions();
+    await act(async () => {});
+    expect(closeSession).toHaveBeenCalledTimes(2);
+    expect(log.debug).toHaveBeenCalledWith(
+      "useShellSessions",
+      "orphan close: session already gone",
+      "x",
+    );
+    expect(log.warn).toHaveBeenCalledWith(
+      "useShellSessions",
+      "orphan close failed",
+      expect.anything(),
+    );
+    expect(result.current.openSessions).toEqual([]);
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("sweeps exactly once under StrictMode and re-arms on a real remount", async () => {
+    // The app entry mounts under React.StrictMode (src/main.tsx), so every
+    // dev reload double-invokes the mount effect; sweptRef must hold the
+    // one-shot line (listLiveSessions exactly once). A REAL unmount-remount
+    // is the issue's own escape hatch -- the next reload's sweep -- so a
+    // fresh mount re-arms and enumerates again.
+    vi.mocked(listLiveSessions).mockResolvedValue([]);
+    const first = renderSessions(StrictMode);
+    await act(async () => {});
+    expect(listLiveSessions).toHaveBeenCalledTimes(1);
+    first.unmount();
+    renderSessions(StrictMode);
+    await act(async () => {});
+    expect(listLiveSessions).toHaveBeenCalledTimes(2);
   });
 });

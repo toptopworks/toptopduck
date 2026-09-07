@@ -431,8 +431,10 @@ export function useShellSessions({
   // are still live: idle ones are re-adopted into the open set (the backend
   // returns them sid-sorted, so activating the first is deterministic), while
   // in-flight ones (and any unbound oddity) are closed best-effort -- the turn
-  // is cancelled, the session stays on disk, and the user re-opens it from the
-  // sidebar. Best-effort by design: a rejected enumeration only logs -- the
+  // is cancelled, the session stays on disk (an empty timeline lets the
+  // close's ADR-0089 Decision 6 cleanup remove the directory -- nothing of
+  // value to keep), and the user re-opens it from the sidebar. Best-effort by
+  // design: a rejected enumeration only logs -- the
   // reloaded shell lands on the centered empty state, same as before the
   // sweep existed, and the sessions stay closable via the next reload's sweep.
   const sweptRef = useRef(false);
@@ -458,11 +460,37 @@ export function useShellSessions({
           // drops (HTTP <=120s), so a sidebar re-open inside that window
           // still rejects with AlreadyOpen -- eventual, not instant. The
           // null-path arm also covers a lock-busy row (try_session_lock
-          // failed without a turn/resume flag), unreachable after a reload
-          // in practice but harmless to sweep the same way.
-          void closeSession(entry.session_id).catch((e) =>
-            log.warn("useShellSessions", "orphan close failed", fmtError(e, intl)),
-          );
+          // failed without a turn/resume flag) -- reachable only while a
+          // command initiated before the reload still runs (a long ingest
+          // holds the session lock for its whole copy-in); rare, and
+          // sweeping it the same way is harmless.
+          void closeSession(entry.session_id)
+            .then((cleanedUp: boolean) => {
+              // Mirror closeOpen: an empty-timeline close (ADR-0089 Decision
+              // 6) deletes the directory, and the mounted sidebar scan
+              // predates that deletion -- re-fetch or a ghost row lingers.
+              if (cleanedUp) refreshSessions();
+            })
+            .catch((e: unknown) => {
+              // Split by SessionError kind like closeOpen: NotFound is the
+              // expected idempotent path (the snapshot raced a detach -- the
+              // row is already closed); debug-level only. Everything else
+              // stays a warn so a genuine close failure remains observable.
+              if (
+                typeof e === "object" &&
+                e !== null &&
+                "kind" in e &&
+                e.kind === "NotFound"
+              ) {
+                log.debug(
+                  "useShellSessions",
+                  "orphan close: session already gone",
+                  entry.session_id,
+                );
+                return;
+              }
+              log.warn("useShellSessions", "orphan close failed", fmtError(e, intl));
+            });
           continue;
         }
         if (firstAdopted === null) firstAdopted = entry.session_id;
@@ -479,7 +507,7 @@ export function useShellSessions({
       // re-activate it over whatever landed last.
       if (firstAdopted !== null) activateSession(firstAdopted);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot on mount: listLiveSessions / closeSession are module imports, registerOpen / activateSession are useCallback-stable, intl is stable per locale
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot on mount: listLiveSessions / closeSession are module imports, registerOpen / activateSession / refreshSessions are useCallback-stable, intl is stable per locale
   }, []);
 
   // Shared mint: createSession (backend creates + persists immediately,

@@ -614,8 +614,10 @@ impl SessionHandle {
 /// One row of [`SessionStore::list_live`] (issue #842): a live session the
 /// frontend no longer knows about after a webview reload. `duck_path` /
 /// `session_name` are `None` for an unbound session (test constructors) or
-/// when an in-flight turn holds the session lock at sweep time; `in_flight`
-/// folds the turn and resume flags into the "not safe to adopt now" verdict.
+/// when any holder occupies the session lock at sweep time -- an in-flight
+/// turn, a transient non-turn command, or a poisoned mutex (`try_lock` folds
+/// all three into `None`); `in_flight` folds the turn and resume flags into
+/// the "not safe to adopt now" verdict.
 #[derive(Debug, Clone)]
 pub struct LiveSessionSnapshot {
     pub session_id: SessionId,
@@ -730,8 +732,10 @@ impl SessionStore {
     /// those sessions and every re-open of the same file rejects with
     /// `AlreadyOpen` until process restart. Rows are sorted by sid so the
     /// sweep is deterministic despite the HashMap's unordered iteration (the
-    /// frontend activates the first adoptable row). `in_flight` folds the
-    /// handle's turn flag with the resume flag -- both mean "not safe to
+    /// frontend activates the first adoptable row; sid order is arbitrary --
+    /// UUID v4 carries no time bits, so the sort buys stability, not
+    /// recency). `in_flight` folds the handle's turn flag with the resume
+    /// flag -- both mean "not safe to
     /// adopt now". Locking follows the ADR-0056 brief-lock invariant: the map
     /// read lock is held only to clone the handles; each session is then read
     /// via `try_session_lock` so an in-flight turn (which holds the session
