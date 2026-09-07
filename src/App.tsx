@@ -107,12 +107,15 @@ function handleIntlError(err: Error): void {
 // internally (session error state), so this catch only records an
 // UNEXPECTED throw -- the unmapped runtime stamp's loud failure (#725) or
 // a settled callback -- instead of surfacing it as an unhandled rejection
-// with no trace on the main interaction path (ADR-0029). The same contract
+// with no trace on the main interaction path. The same contract
 // SessionPane's pendingQuestion replay and ask-again sinks carry; log-only
-// -- the busy gate reopens in useTurnFlow's finally regardless, so nothing
-// user-facing is compensated here.
-function fireShellAsk(fields: ComposerSessionFields, question: string): void {
-  void fields.handleAsk(question).catch((e) =>
+// -- once the tail try is entered, the busy gate reopens in useTurnFlow's
+// tail finally, so nothing user-facing is compensated here.
+function fireShellAsk(
+  fields: Pick<ComposerSessionFields, "handleAsk">,
+  question: string,
+): void {
+  void fields.handleAsk(question).catch((e: unknown) =>
     log.error("App", "shell submit handleAsk threw unexpectedly", e),
   );
 }

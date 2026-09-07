@@ -2941,7 +2941,7 @@ describe("shell submit fire-path defensive log (#825)", () => {
   // pendingQuestion replay and ask-again sinks. handleAsk settles its designed
   // failures internally; an UNEXPECTED throw -- the unmapped runtime stamp
   // (#725's designed loud failure) -- must surface through the fire path's
-  // defensive log.error (ADR-0029), never as a silent unhandled rejection on
+  // defensive log.error, never as a silent unhandled rejection on
   // the main interaction path (#825).
   let logError: MockInstance;
 
@@ -2978,9 +2978,9 @@ describe("shell submit fire-path defensive log (#825)", () => {
   });
 
   afterEach(() => {
-    // clearAllMocks neither clears nor restores a spy -- restore it here so
-    // its call history cannot leak into a later describe's assertions and a
-    // second spyOn of the same method never chains onto this one.
+    // clearAllMocks clears a spy's history but never restores it -- restore
+    // it here so the spy detaches from log.error and a second spyOn of the
+    // same method never chains onto this one.
     logError.mockRestore();
   });
 
