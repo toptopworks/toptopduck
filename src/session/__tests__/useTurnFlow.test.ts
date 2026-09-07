@@ -17,6 +17,7 @@ import { materialized, textual } from "./fixtures";
 import type { ApprovalEntry } from "../useApprovalEvents";
 import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
 import type { TurnProgress } from "../../types/session";
+import type { SessionRuntimeChoice } from "../../types/runtime";
 
 // Tests for useTurnFlow (issue #230, evolved by issue #297) -- pins the
 // behaviors extracted from useSessionState: the long-lived turn-progress
@@ -945,6 +946,31 @@ describe("useTurnFlow", () => {
       if (first?.entry === "Turn") {
         expect(first.data.provenance.runtime).toBeUndefined();
       }
+    });
+
+    it("reopens the busy gate when the unmapped choice throws (#825)", async () => {
+      // The stamp's designed loud failure (#725) rejects handleAsk from
+      // inside the tail try; the fire paths' log-only catches (#825) rest
+      // on the tail finally clearing loading BEFORE the rejection escapes
+      // -- pin the reopen directly, the safety story no other test observes.
+      const { deps, setLoading } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      // Once, not a plain override: clearAllMocks never restores a mock's
+      // implementation, so a lingering resolved value would poison every
+      // later test that rides the factory default (the read is single-shot
+      // per ask, so one Once covers it).
+      vi.mocked(getSessionRuntime).mockResolvedValueOnce(
+        { kind: "genuinely_unmapped" } as unknown as SessionRuntimeChoice,
+      );
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      let rejection: unknown;
+      await act(async () => {
+        rejection = await result.current.handleAsk("q").catch((e: unknown) => e);
+      });
+
+      expect((rejection as Error).message).toContain("unhandled runtime choice");
+      expect(setLoading).toHaveBeenLastCalledWith(false);
     });
 
     it("invalidates workingSet + active on a Materialized outcome", async () => {

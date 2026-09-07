@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import type { DatasetDescriptor, RowPage } from "../types/dataset";
@@ -173,6 +174,8 @@ import {
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig } from "../types/mcp";
 import type { SkillEntry } from "../types/skills";
+import type { SessionRuntimeChoice } from "../types/runtime";
+import { log } from "../lib/log";
 
 // ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
 // creates a session); a session is created by submitting from the shell-level
@@ -2907,5 +2910,125 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     );
     expect(screen.getByText("charting")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "技能 (1/2)" })).toBeInTheDocument();
+  });
+});
+
+// An unmapped wire shape: a choice kind choiceToTurnRuntime does not map, so
+// both the live marker update and the success tail's stamp throw by design
+// (#725 loud failure). The cast is deliberate -- SessionRuntimeChoice is the
+// contract, the wire is the wild; #825 reproduces exactly the throw the fire
+// path's defensive catch must log.
+const UNMAPPED_RUNTIME_CHOICE = {
+  kind: "genuinely_unmapped",
+} as unknown as SessionRuntimeChoice;
+
+// Any resolved outcome reaches the success tail's stamp -- the throw site
+// runs while the optimistic entry is being built, before any outcome.kind
+// branch, so the kind here is incidental; it only has to resolve where the
+// beforeEach default rejects.
+const STAMP_OUTCOME: TurnOutcome = {
+  kind: "Materialized",
+  data: {
+    promotions: [{ dataset: src("r1"), sql: "SELECT 1" }],
+    viz: null,
+    assumption: null,
+  },
+};
+
+describe("shell submit fire-path defensive log (#825)", () => {
+  // The composer fire path (the shell bar's submit delegating to the active
+  // session's handleAsk) is the third turn-fire surface besides SessionPane's
+  // pendingQuestion replay and ask-again sinks. handleAsk settles its designed
+  // failures internally; an UNEXPECTED throw -- the unmapped runtime stamp
+  // (#725's designed loud failure) -- must surface through the fire path's
+  // defensive log.error, never as a silent unhandled rejection on
+  // the main interaction path (#825).
+  let logError: MockInstance;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+    logError = vi.spyOn(log, "error");
+    // clearAllMocks only clears call history, not implementations set by
+    // prior describes -- pin the session-scoped reads the pane + picker ride
+    // back to their factory behavior (mirrors the composer control row
+    // describe).
+    state.thread = [];
+    state.workingSet = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig({ sidebar_collapsed: false }));
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => null);
+    vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");
+    vi.mocked(setAuthorizationMode).mockResolvedValue(undefined);
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(rescanAdapters).mockResolvedValue([]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [skillEntry("charting")], ignored: [], root_error: null });
+    vi.mocked(listMountedSkills).mockResolvedValue([]);
+    vi.mocked(listActivatedSkills).mockResolvedValue([]);
+    vi.mocked(mountSkill).mockResolvedValue(undefined);
+    vi.mocked(activateSkill).mockResolvedValue(undefined);
+    // Every turn rejects so the creation turn settles immediately (the
+    // openSession pattern); the stamp tests override the test's own ask.
+    vi.mocked(askQuestion).mockRejectedValue(new Error("discard turns"));
+  });
+
+  afterEach(() => {
+    // clearAllMocks clears a spy's history but never restores it -- restore
+    // it here so the spy detaches from log.error and a second spyOn of the
+    // same method never chains onto this one.
+    logError.mockRestore();
+  });
+
+  it("logs the stamp throw from the direct fire (no staged activations)", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue(UNMAPPED_RUNTIME_CHOICE);
+    vi.mocked(askQuestion).mockResolvedValue(STAMP_OUTCOME);
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(logError).toHaveBeenCalledWith(
+        "App",
+        "shell submit handleAsk threw unexpectedly",
+        expect.objectContaining({
+          message: expect.stringContaining("unhandled runtime choice"),
+        }),
+      ),
+    );
+  });
+
+  it("logs the stamp throw from the post-materialization fire (activation branch)", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue(UNMAPPED_RUNTIME_CHOICE);
+    vi.mocked(askQuestion).mockResolvedValue(STAMP_OUTCOME);
+    render(<App />);
+    await openSession();
+    // Stage an activation the way a picker pick does (the ADR-0112
+    // in-session pattern): the submit materializes it BEFORE firing the
+    // ask, so the fire rides the materialization .then -- the second fire
+    // site the defensive log must cover.
+    const bar = screen.getByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(activateSkill).toHaveBeenCalledWith("sess-1", "charting"),
+    );
+    await waitFor(() =>
+      expect(logError).toHaveBeenCalledWith(
+        "App",
+        "shell submit handleAsk threw unexpectedly",
+        expect.objectContaining({
+          message: expect.stringContaining("unhandled runtime choice"),
+        }),
+      ),
+    );
   });
 });
