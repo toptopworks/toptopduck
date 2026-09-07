@@ -25,7 +25,8 @@ const RESUME_BAND_PX = 40;
  *  - Range (issue #843): a ResizeObserver on the rail. Extent changes can
  *    resize the rail's own box with no React signal and no scroll event --
  *    chiefly the bar's height change easing the rail's bottom padding over
- *    its 200ms transition and the workspace fold/unfold reflow, but a
+ *    its 200ms transition (styles.css) and the workspace fold/unfold
+ *    reflow, but a
  *    window resize or the rail-width handle drag ride the same observer.
  *    Every source resizes the rail's content box (the observer's default
  *    box), so one observer covers them all, firing per frame through the
@@ -56,7 +57,9 @@ const RESUME_BAND_PX = 40;
  *  position makes the browser clamp scrollTop, which fires one scroll event
  *  at distance 0 -- re-entering the follow, which the clamped bottom
  *  already is. (In-content folds -- a thread card's <details> -- resize no
- *  box; they ride the next append.)
+ *  box; they ride the next signal of any kind -- an append, submit,
+ *  activation, or range change -- and on an idle session the drift lasts
+ *  until one arrives.)
  *
  *  Session switch PRESERVES posture (the keep-alive contract, ADR-0051):
  *  open panes stay MOUNTED but display:none when not active, so a switch is
@@ -195,18 +198,13 @@ export function useRailFollow({
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Range signal (#843): extent changes can resize the rail's own box with
-  // no React signal and no scroll event -- chiefly the bar's height change
-  // easing the rail's bottom padding through its 200ms transition
-  // (styles.css) and the workspace fold/unfold reflow, but a window resize
-  // or the rail-width handle drag ride the same observer. Every source
-  // resizes the rail's content box (the observer's default box: the eased
-  // padding changes it frame by frame; the reflow changes the width), so
-  // one observer covers them all, firing per frame across the transition.
-  // The callback schedules the SAME rAF -- no separate scroll path -- so it
-  // passes the same hidden/paused gates as every other scheduler: a hidden
-  // pane's collapsed (0x0) box fires the callback too, and the activeRef
-  // stop inside the frame keeps the preserve contract intact.
+  // Range signal (#843): a rail-box resize carries no React signal and no
+  // scroll event -- the sources and the one-observer box coverage are in
+  // the doc block's Range entry above. The callback schedules the SAME rAF
+  // -- no separate scroll path -- so it passes the same hidden/paused gates
+  // as every other scheduler: a hidden pane's collapsed (0x0) box fires
+  // the callback too, and the activeRef stop inside the frame keeps the
+  // preserve contract intact.
   useEffect(() => {
     const el = railRef.current;
     if (el === null) return;

@@ -24,10 +24,46 @@ type FrameCb = (t: number) => void;
 let queued: { id: number; cb: FrameCb }[] = [];
 let nextId = 1;
 
+// --- ResizeObserver stub ---------------------------------------------------
+// Same shape as the rAF stub: swap the global, and the test fires the
+// callback by hand -- a range change (the rail's box resizing: the eased
+// bar padding, the fold/unfold reflow) reaches the hook only through it.
+
+type RangeCb = () => void;
+let observers: RangeObserverStub[] = [];
+
+class RangeObserverStub {
+  cb: RangeCb;
+  observed: Element[] = [];
+  disconnected = false;
+  constructor(cb: RangeCb) {
+    this.cb = cb;
+    observers.push(this);
+  }
+
+  observe(target: Element): void {
+    this.observed.push(target);
+  }
+
+  unobserve(): void {}
+
+  disconnect(): void {
+    this.disconnected = true;
+  }
+}
+
+/** Fire a range change on every still-connected observer (exactly one in
+ * steady state; StrictMode's remount cycle disconnects the first). */
+function fireRange(): void {
+  act(() => {
+    for (const o of observers) {
+      if (!o.disconnected) o.cb();
+    }
+  });
+}
+
 // The shared per-test reset -- it registers both scheduler stubs and also
-// resets the ResizeObserver stub's registry (declared further down; the
-// stub's callbacks only run after module evaluation, so the forward
-// reference is safe).
+// resets the ResizeObserver stub's registry.
 beforeEach(() => {
   queued = [];
   nextId = 1;
@@ -48,46 +84,6 @@ function flushFrame(): void {
   queued = [];
   act(() => {
     for (const { cb } of pending) cb(0);
-  });
-}
-
-// --- ResizeObserver stub ---------------------------------------------------
-// Same shape as the rAF stub: swap the global, and the test fires the
-// callback by hand -- a range change (the rail's box resizing: the eased
-// bar padding, the fold/unfold reflow) reaches the hook only through it.
-
-type RangeCb = () => void;
-let observers: {
-  cb: RangeCb;
-  observed: Element[];
-  disconnected: boolean;
-}[] = [];
-
-class RangeObserverStub {
-  cb: RangeCb;
-  observed: Element[] = [];
-  disconnected = false;
-  constructor(cb: RangeCb) {
-    this.cb = cb;
-    observers.push(this);
-  }
-
-  observe(target: Element): void {
-    this.observed.push(target);
-  }
-
-  disconnect(): void {
-    this.disconnected = true;
-  }
-}
-
-/** Fire a range change on every still-connected observer (exactly one in
- * steady state; StrictMode's remount cycle disconnects the first). */
-function fireRange(): void {
-  act(() => {
-    for (const o of observers) {
-      if (!o.disconnected) o.cb();
-    }
   });
 }
 
@@ -471,6 +467,20 @@ describe("useRailFollow", () => {
     fireRange();
     flushFrame();
     expect(rig.scrollTop()).toBe(900);
+  });
+
+  it("keeps aligning when ResizeObserver is unavailable (the guard's jsdom arm)", () => {
+    // The shared setup installs the registry stub; stubbing the global
+    // away entirely is what exercises the guard's early return (the
+    // useRailResize precedent). The machine degrades to its pre-#843
+    // self: the append effect's mount firing still lands the align, with
+    // no observer attached.
+    vi.stubGlobal("ResizeObserver", undefined);
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rig = rigRail(getByTestId("rail") as HTMLElement);
+    flushFrame();
+    expect(observers).toHaveLength(0); // the guard skipped the observer
+    expect(rig.hookWrites()).toBe(1); // the mount land still lands
   });
 
   // --- Keep-alive: hidden layers (ADR-0051) --------------------------------
