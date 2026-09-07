@@ -707,11 +707,13 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // IPC round-trip, so the read is long resolved).
       // The success tail, finally-wrapped: ANY unexpected throw between the
       // ask and the tail (choiceToTurnRuntime on an unmapped runtime stamp,
-      // a settled callback) still reopens the busy gate -- the fire paths'
-      // defensive catches log it (ADR-0029), but without this clear the
-      // session would sit permanently disabled with the log line as the only
-      // trace. The designed failure paths (askQuestion rejection, refresh
-      // failure) settle internally above and reach this clear the same way.
+      // a settled callback) still reopens the busy gate -- every fire path's
+      // defensive catch logs it (ADR-0029: SessionPane's pendingQuestion and
+      // ask-again catches, the shell submit's fire log, #825), but without
+      // this clear the session would sit permanently disabled with the log
+      // line as the only trace. The designed failure paths (askQuestion
+      // rejection, refresh failure) settle internally above and reach this
+      // clear the same way.
       try {
         const runtimeChoice = await runtimeRead;
         // Optimistic thread append (ADR-0051): the outcome object is the same

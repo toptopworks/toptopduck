@@ -100,6 +100,23 @@ function handleIntlError(err: Error): void {
   log.warn("i18n", err.message);
 }
 
+// The composer fire path's defensive log (#825): the shell bar's submit
+// delegates to the active session's handleAsk at three fire sites (the
+// no-activation direct fire, and the fires inside the materialization
+// .then / .catch callbacks). handleAsk settles its designed failures
+// internally (session error state), so this catch only records an
+// UNEXPECTED throw -- the unmapped runtime stamp's loud failure (#725) or
+// a settled callback -- instead of surfacing it as an unhandled rejection
+// with no trace on the main interaction path (ADR-0029). The same contract
+// SessionPane's pendingQuestion replay and ask-again sinks carry; log-only
+// -- the busy gate reopens in useTurnFlow's finally regardless, so nothing
+// user-facing is compensated here.
+function fireShellAsk(fields: ComposerSessionFields, question: string): void {
+  void fields.handleAsk(question).catch((e) =>
+    log.error("App", "shell submit handleAsk threw unexpectedly", e),
+  );
+}
+
 export default function App() {
   // QueryClient (ADR-0051): lazy-init once per App mount so test renders never
   // share cache.
@@ -504,7 +521,7 @@ export default function App() {
         if (!fields) return;
         const intents = sessionActivations;
         if (intents.length === 0) {
-          void fields.handleAsk(question);
+          fireShellAsk(fields, question);
           return;
         }
         // ADR-0112 Decision 4: materialize the pre-activations BEFORE the ask
@@ -518,12 +535,12 @@ export default function App() {
         void materializeActivations(activeSessionId, intents)
           .then(() => {
             setViewActivations({ sid: activeSessionId, names: [] });
-            fields.handleAsk(question);
+            fireShellAsk(fields, question);
           })
           .catch((e: unknown) => {
             setViewActivations({ sid: activeSessionId, names: [] });
             setShellError(toAppError(e, intl, "shell"));
-            fields.handleAsk(question);
+            fireShellAsk(fields, question);
           });
         return;
       }
