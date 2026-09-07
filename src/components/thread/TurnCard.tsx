@@ -122,8 +122,9 @@ export function TurnCard({
   const glyphInMeta = !weakened;
   const showsMetaRow = glyphInMeta || record.settled_at !== undefined;
   // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
-  // IS text: a Textual turn's body. Materialized answers with a result link,
-  // Failed/Cancelled with markers -- nothing textual to copy.
+  // IS text: a Textual turn's body. A Materialized turn carries prose (#847)
+  // but it is read in the rail, not copied (a deliberate exclusion);
+  // Failed/Cancelled carry markers -- nothing textual to copy.
   const replyText = record.outcome.kind === "Textual" ? record.outcome.data.body : null;
   // Issue #818: the per-turn runtime attribution. Only a runtime that can
   // name its adapter renders (built-in / unrecorded stay silent).
@@ -312,9 +313,10 @@ function TraceRoundBlock({
 // so the rendering isn't duplicated across the two outcomes that carry it.
 // mt-0.5 mirrors the prose root's offset so the note keeps the same gap
 // below whatever precedes it -- the RoundProse block on Textual (issue
-// #827) and the inline link/chip row inside the Materialized <p>; the
-// offset is new with #827 on both faces (the note previously carried no
-// margin).
+// #827) or on a Materialized turn carrying a body (#847), and the inline
+// link/chip row inside the Materialized <p> when no body rode the turn;
+// the offset is new with #827 on both faces (the note previously carried
+// no margin).
 function AssumptionNote({ assumption }: { assumption: string | null }) {
   const intl = useIntl();
   if (!assumption) return null;

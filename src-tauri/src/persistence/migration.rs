@@ -1167,8 +1167,7 @@ mod tests {
         // End-to-end: a synthetic v2 fixture migrates to the current version
         // and deserializes as a v3 Recipe. The single v2 result becomes a
         // one-element promotion chain; the replayable chain re-materializes
-        // the same result_N with the same SQL, and the turn-level assumption
-        // rides the primary (chain tail) promotion.
+        // the same result_N with the same SQL.
         use crate::persistence::recipe::{Recipe, RecipeEntry};
         let v2 = serde_json::json!({
             "format_version": 2,

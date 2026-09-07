@@ -345,12 +345,19 @@ pub fn render_response(r: &ResponsePayload) -> String {
         ResponsePayload::Materialized {
             result,
             sql,
+            body,
             assumption,
         } => {
             let mut s = format!("（已生成结果 {result}）");
             if let Some(sql) = sql {
                 s.push_str(" SQL：");
                 s.push_str(sql);
+            }
+            // #847: the terminal text is the turn's answer -- the model
+            // re-reads its own prior conclusion on follow-up turns.
+            if let Some(b) = body {
+                s.push_str(" 回答：");
+                s.push_str(b);
             }
             if let Some(a) = assumption {
                 s.push_str(" 方法/假设：");
@@ -1064,6 +1071,7 @@ mod tests {
                 response: ResponsePayload::Materialized {
                     result: "result_1".into(),
                     sql: Some("SELECT 1".into()),
+                    body: None,
                     assumption: None,
                 },
             }],
@@ -1080,6 +1088,34 @@ mod tests {
         // Asking question closes as the final user entry.
         assert_eq!(pairs[2].0, "user");
         assert_eq!(pairs[2].1, "现在呢");
+    }
+
+    /// #847: a Materialized turn's terminal text is the provider's own prior
+    /// answer -- the window ships it so a follow-up question can reference
+    /// the earlier conclusion (ADR-0023 point 1). The pre-#847 window carried
+    /// this text (mislabeled, via the assumption slot); the body field
+    /// restores it under its own name.
+    #[test]
+    fn render_history_messages_full_turn_carries_the_terminal_text() {
+        let req = history_request(
+            "现在呢",
+            vec![TurnPayload::Full {
+                question: "上一问".into(),
+                response: ResponsePayload::Materialized {
+                    result: "result_1".into(),
+                    sql: Some("SELECT 1".into()),
+                    body: Some("共 5 人，无重复。".into()),
+                    assumption: None,
+                },
+            }],
+        );
+        let pairs = render_history_messages(&req);
+        assert_eq!(pairs[1].0, "assistant");
+        assert!(
+            pairs[1].1.contains("共 5 人，无重复。"),
+            "the terminal text rides the rendered history: {}",
+            pairs[1].1
+        );
     }
 
     #[test]

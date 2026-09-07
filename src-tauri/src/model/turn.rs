@@ -177,9 +177,9 @@ pub enum TurnOutcome {
     /// chain tail is the turn's primary result -- derived via
     /// [`TurnOutcome::primary_promotion`], never a stored field. Plus the
     /// agent loop's terminal text (`body`) and the provider's optional
-    /// assumption note (ADR-0009), surfaced as a correctable side note. This
-    /// is the only outcome that advances result_N numbering (one number per
-    /// promotion, in promotion order, ADR-0022).
+    /// assumption note (ADR-0009) -- the latter surfaced as a correctable
+    /// side note. This is the only outcome that advances result_N numbering
+    /// (one number per promotion, in promotion order, ADR-0022).
     Materialized {
         /// The turn's promotions in promotion order (ADR-0022 monotonic
         /// numbering: result_1, result_2, ...). Non-empty for a result turn;
@@ -195,8 +195,10 @@ pub enum TurnOutcome {
         viz: Option<VizSpec>,
         /// The agent loop's terminal text (#847): the turn's prose answer --
         /// a full markdown report that rides the same rendering pipeline as
-        /// the Textual body. `#[serde(default)]` keeps older persisted turns
-        /// (whose terminal text rode `assumption`) deserializing to `None`.
+        /// the Textual body. `#[serde(default)]` keeps wire payloads from
+        /// older IPC peers (no `body` key) deserializing to `None`; turns
+        /// persisted before #847 carry their terminal text in `assumption`
+        /// and resume as `None` here via the recipe's own default.
         #[serde(default)]
         body: Option<String>,
         /// The provider's optional assumption note (ADR-0009): a one-line

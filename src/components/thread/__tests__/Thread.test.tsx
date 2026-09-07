@@ -164,8 +164,8 @@ describe("Thread", () => {
   });
 
   it("orders the Materialized turn link row, prose, and side note (#847)", () => {
-    // Q5 order pin: result link row -> prose -> side note -> preview card --
-    // the same caption-row -> prose -> note rhythm the Textual branch uses.
+    // Q5 order pin: result link row -> prose -> side note -- the same
+    // caption-row -> prose -> note rhythm the Textual branch uses.
     const record = materializedRecord("result_1", "按世代分组", "正文第一段。");
     const { container } = renderThread(
       <Thread entries={[turnEntry(record)]} selectedResult="result_1" onSelectResult={() => {}} />,
