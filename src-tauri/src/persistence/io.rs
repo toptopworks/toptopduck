@@ -258,6 +258,7 @@ mod tests {
                         sql: "SELECT 1".into(),
                         stale: None,
                     }],
+                    body: None,
                     assumption: None,
                 },
             ))],

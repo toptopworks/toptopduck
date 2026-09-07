@@ -173,6 +173,7 @@ impl RecipePersister {
                         crate::model::TurnOutcome::Materialized {
                             promotions,
                             viz: _,
+                            body,
                             assumption,
                         } => {
                             // ADR-0084: persist EVERY promotion as its own
@@ -203,6 +204,7 @@ impl RecipePersister {
                             }
                             RecipeOutcome::Materialized {
                                 promotions: recipe_promotions,
+                                body: body.clone(),
                                 assumption: assumption.clone(),
                             }
                         }
@@ -787,6 +789,51 @@ mod tests {
     }
 
     #[test]
+    fn build_recipe_carries_the_materialized_terminal_text_body() {
+        // #847: the turn's prose answer rides the persisted outcome's `body`
+        // -- a resumed conversation restores it verbatim from there, so the
+        // projection must carry it through.
+        let mut ws = WorkingSet::default();
+        ws.register_result(test_source("result_1", "/tmp/r1"));
+
+        let timeline = vec![TimelineEntry::Turn {
+            record: TurnRecord {
+                question: "q1".into(),
+                outcome: TurnOutcome::Materialized {
+                    promotions: vec![crate::model::Promotion {
+                        dataset: test_source("result_1", "/tmp/r1"),
+                        sql: "SELECT 1".into(),
+                    }],
+                    viz: None,
+                    body: Some("## 报告\n\n统计完成。".into()),
+                    assumption: None,
+                },
+                trace: Vec::new(),
+                provenance: Default::default(),
+                asked_at: None,
+                settled_at: None,
+            },
+            audit: TurnAudit::test_new(Vec::new(), Default::default()),
+        }];
+
+        let persister = RecipePersister::new();
+        let recipe = persister.build_recipe(
+            &ws,
+            &timeline,
+            &crate::session::SessionRuntimeFacts::default(),
+        );
+        match &recipe.history[0] {
+            RecipeEntry::Turn(t) => match &t.outcome {
+                RecipeOutcome::Materialized { body, .. } => {
+                    assert_eq!(body.as_deref(), Some("## 报告\n\n统计完成。"));
+                }
+                other => panic!("expected Materialized, got {other:?}"),
+            },
+            other => panic!("expected Turn, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_recipe_drops_materialized_turn_with_no_surviving_promotions() {
         // A Materialized turn whose result_1 is NOT in the working set (GC'd)
         // -> the turn is dropped (ADR-0041 GC exception).
@@ -802,6 +849,7 @@ mod tests {
                         sql: "SELECT 1".into(),
                     }],
                     viz: None,
+                    body: None,
                     assumption: None,
                 },
                 trace: Vec::new(),

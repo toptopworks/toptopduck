@@ -45,6 +45,7 @@ fn write_recipe(dir: &std::path::Path, file: &str, session_name: &str, src: &str
                     sql: "SELECT 1".into(),
                     stale: None,
                 }],
+                body: None,
                 assumption: None,
             },
         ))],

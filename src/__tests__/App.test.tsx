@@ -303,6 +303,7 @@ function materializedOutcome(referenceName: string): TurnOutcome {
         },
       ],
       viz: null,
+      body: null,
       assumption: null,
     },
   };

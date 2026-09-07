@@ -263,11 +263,12 @@ fn read_rows_pages_a_materialized_result() {
 }
 
 #[test]
-fn ask_surfaces_the_terminal_answer_as_the_assumption_note() {
+fn ask_surfaces_the_terminal_answer_as_the_body() {
     // The tool-calling contract carries no separate assumption field (the
     // single-SQL JSON contract did): the model's terminal text answer rides
-    // the Materialized outcome's assumption when the turn also promoted, so
-    // the UI still renders it as a correctable side note.
+    // the Materialized outcome's `body` when the turn also promoted (#847 --
+    // it previously rode `assumption`, a side-note slot), so the UI renders
+    // it through the markdown prose pipeline.
     let provider = FakeProvider::new().scripted_tool_turn_seq(
         "数行",
         vec![
@@ -279,8 +280,11 @@ fn ask_surfaces_the_terminal_answer_as_the_assumption_note() {
     load_source(&mut session, &fixture("people.csv"));
 
     match session.ask("数行") {
-        TurnOutcome::Materialized { assumption, .. } => {
-            assert_eq!(assumption.as_deref(), Some("把 id 当作主键"));
+        TurnOutcome::Materialized {
+            body, assumption, ..
+        } => {
+            assert_eq!(body.as_deref(), Some("把 id 当作主键"));
+            assert_eq!(assumption, None, "the side-note slot stays reserved");
         }
         other => panic!("expected Materialized, got {other:?}"),
     }

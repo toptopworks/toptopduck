@@ -239,9 +239,10 @@ fn turn_outcome_materialized_carries_the_promotion_chain_and_assumption() {
                 sql: "SELECT 1".into(),
             }],
             viz: None,
+            body: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":null,"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":null,"body":null,"assumption":null}}"#,
     );
 }
 
@@ -265,9 +266,10 @@ fn turn_outcome_materialized_carries_a_viz_spec() {
                 kind: ChartKind::Bar,
                 spec: "{\"mark\":\"bar\"}".into(),
             }),
+            body: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"body":null,"assumption":null}}"#,
     );
 }
 

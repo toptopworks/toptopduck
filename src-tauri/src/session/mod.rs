@@ -2259,8 +2259,10 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 /// - Converged (terminal text) with >=1 promotion -> [`TurnOutcome::Materialized`].
 ///   The LAST promotion is the turn's primary result (a later materialize
 ///   supersedes earlier ones as the analysis focus); its verbatim SQL rides
-///   `sql`, the terminal text rides `assumption`. ADR-0022 monotonic numbering
-///   already applied inside the loop (result_1, result_2, ...).
+///   `sql`, the terminal text rides `body` and renders through the same
+///   markdown pipeline as a Textual body (#847 -- it previously rode
+///   `assumption`, a side-note slot). ADR-0022 monotonic numbering already
+///   applied inside the loop (result_1, result_2, ...).
 /// - Converged with no promotion -> [`TurnOutcome::Textual`] with
 ///   [`TextKind::Agent`]: the tool-calling contract carries no structural
 ///   clarify/refuse marker, so an honest answer, a clarification, and a
@@ -2294,11 +2296,16 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
                     // The tool-calling contract carries no viz intent (the
                     // presentation slice is separate); a plain table turn.
                     viz: None,
-                    assumption: if text.trim().is_empty() {
+                    // #847: the terminal text is the turn's prose answer, not a
+                    // side note -- it rides `body` (markdown-rendered). No live
+                    // agent source emits an assumption note, so `assumption`
+                    // stays None.
+                    body: if text.trim().is_empty() {
                         None
                     } else {
                         Some(text)
                     },
+                    assumption: None,
                 }
             }
         }
@@ -2687,8 +2694,8 @@ fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, TOOL_OUTPUT_DIR_NAME};
-    use crate::model::{TurnFailure, TurnOutcome, TurnRuntime};
+    use super::{turn_outcome_from_loop, Session, TOOL_OUTPUT_DIR_NAME};
+    use crate::model::{DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
     use crate::provider::ProviderError;
@@ -2777,6 +2784,23 @@ mod tests {
 
     // --- merge_outcomes (issue #299 slice 9c, ADR-0085 trace merge) -------
 
+    /// A minimal result dataset descriptor (the #847 turn-outcome mapping
+    /// tests need one promotion to route the terminal text onto `body`).
+    fn test_dataset(reference_name: &str) -> DatasetDescriptor {
+        DatasetDescriptor {
+            reference_name: reference_name.into(),
+            display_name: reference_name.into(),
+            source_path: "/tmp/source.csv".into(),
+            columns: Vec::new(),
+            row_count: 0,
+            sample: Vec::new(),
+            fingerprint: "fp".into(),
+            rectify: crate::model::RectifyProvenance::NotApplicable,
+            privacy: Default::default(),
+            stale: None,
+        }
+    }
+
     /// Build a trace entry with default fields (the merge tests vary
     /// `name` + `success` -- the pairing keys; the in-place tests override
     /// the display fields after construction to pin the whole-row
@@ -2829,6 +2853,57 @@ mod tests {
             merged.trace[0].calls[0].success,
             "the gateway success flag wins"
         );
+    }
+
+    /// #847: a converged turn with promotions maps its terminal text onto
+    /// `body` (the prose answer, markdown-rendered downstream) -- never onto
+    /// `assumption`, which stays reserved for a one-line side note no live
+    /// agent source emits.
+    #[test]
+    fn turn_outcome_maps_terminal_text_to_body_not_assumption() {
+        let outcome = LoopOutcome {
+            termination: Termination::Text("## 报告\n\n正文 `code`".into()),
+            promotions: vec![crate::model::Promotion {
+                dataset: test_dataset("result_1"),
+                sql: "SELECT 1".into(),
+            }],
+            trace: Vec::new(),
+            discovered_runtime: None,
+        };
+        match turn_outcome_from_loop(outcome) {
+            TurnOutcome::Materialized {
+                body, assumption, ..
+            } => {
+                assert_eq!(body.as_deref(), Some("## 报告\n\n正文 `code`"));
+                assert_eq!(assumption, None, "the side-note slot stays empty");
+            }
+            other => panic!("expected Materialized, got {other:?}"),
+        }
+    }
+
+    /// A whitespace-only terminal text carries no prose at all -- neither
+    /// slot gets a value (the same empty-text judgment the routing has
+    /// always applied).
+    #[test]
+    fn turn_outcome_blank_terminal_text_yields_no_body() {
+        let outcome = LoopOutcome {
+            termination: Termination::Text("   \n".into()),
+            promotions: vec![crate::model::Promotion {
+                dataset: test_dataset("result_1"),
+                sql: "SELECT 1".into(),
+            }],
+            trace: Vec::new(),
+            discovered_runtime: None,
+        };
+        match turn_outcome_from_loop(outcome) {
+            TurnOutcome::Materialized {
+                body, assumption, ..
+            } => {
+                assert_eq!(body, None);
+                assert_eq!(assumption, None);
+            }
+            other => panic!("expected Materialized, got {other:?}"),
+        }
     }
 
     /// Issue #673: a registered CLI tool name is gateway-served too, so the

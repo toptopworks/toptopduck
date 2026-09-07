@@ -383,7 +383,7 @@ function TurnBody({
     );
   switch (record.outcome.kind) {
     case "Materialized": {
-      const { promotions, assumption } = record.outcome.data;
+      const { promotions, body, assumption } = record.outcome.data;
       // ADR-0084: the chain tail is the primary result (the answer the question
       // produced); earlier promotions are intermediate results, rendered as a
       // muted "derived from" line so the lineage stays visible without
@@ -440,8 +440,15 @@ function TurnBody({
                 onJump={onStaleChipJump}
               />
             )}
-            <AssumptionNote assumption={assumption} />
           </p>
+          {/* #847: the terminal text is the turn's prose answer, rendered
+              through the same RoundProse markdown pipeline as a Textual body
+              (issue #827) -- it previously rode the assumption side-note slot
+              and displayed as raw markdown. The prose sits between the result
+              link row and the preview card, mirroring the Textual branch's
+              caption-row -> prose -> note rhythm. */}
+          {body && <RoundProse text={body} />}
+          <AssumptionNote assumption={assumption} />
           {/* ADR-0083 (issue #298): the primary result's inline preview card --
               the windowed sample (first rows, ADR-0026) for a rail-scan glance
               at the answer. Clicking it selects the result (the caller opens

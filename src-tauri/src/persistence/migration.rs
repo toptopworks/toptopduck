@@ -1198,11 +1198,6 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].reference_name, "result_1");
         assert_eq!(chain[0].sql, "SELECT 1");
-        assert_eq!(
-            chain[0].assumption.as_deref(),
-            Some("把 id 当作主键"),
-            "the turn-level assumption rides the primary promotion on replay",
-        );
     }
 
     // --- v3 -> v4 (ADR-0086, issue #363) --------------------------------------

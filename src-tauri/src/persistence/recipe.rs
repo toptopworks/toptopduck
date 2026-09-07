@@ -8,11 +8,12 @@
 //!
 //! The conversation timeline mirrors [`crate::model::ThreadEntry`] but trims
 //! every field resume re-derives: a Materialized turn carries the result
-//! reference name, the display label, the verbatim SQL, and the assumption
-//! note -- but NOT the columns / sample / row-count / fingerprint / viz (all
-//! rebuilt by replay). Source lifecycle events pass through verbatim
-//! (ADR-0040). The productive replay chain is derived from this history at
-//! resume time, so the recipe has one source of truth, not two.
+//! reference name, the display label, the verbatim SQL, the terminal-text
+//! body, and the optional assumption note -- but NOT the columns / sample /
+//! row-count / fingerprint / viz (all rebuilt by replay). Source lifecycle
+//! events pass through verbatim (ADR-0040). The productive replay chain is
+//! derived from this history at resume time, so the recipe has one source of
+//! truth, not two.
 
 use std::collections::HashSet;
 
@@ -83,6 +84,13 @@ use crate::model::{
 /// actor field deserializes as None when absent (`serde(default)`), so a v5
 /// shape IS a valid v6 shape. Older clients reading a v6 file hit the
 /// existing higher-version honest-refuse path (ADR-0036).
+///
+/// Still v6 (#847): `RecipeOutcome::Materialized` gains the optional
+/// terminal-text `body` with no version bump -- it rides `serde(default)`,
+/// so an existing v6 shape (no `body` key) deserializes as `None`. This is
+/// the same no-op-widening posture as v6's actor field; turns persisted
+/// before #847 keep their terminal text in `assumption` (displayed as-is,
+/// not migrated).
 pub const RECIPE_FORMAT_VERSION: u32 = 6;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
@@ -122,17 +130,14 @@ pub struct SourceRef {
 /// One productive turn in the replayable chain (ADR-0034): the `result_N`
 /// reference name (stable identity), the user-facing display label (so a
 /// rename survives resume, ADR-0037), the verbatim SQL (re-executed on resume
-/// to re-materialize `result_N`, ADR-0009), and the optional assumption note
-/// (ADR-0009). The viz spec is deliberately absent -- viz is not persisted
-/// (ADR-0036), so a reopened chart renders as a table until the user
-/// re-requests one (ADR-0033).
+/// to re-materialize `result_N`, ADR-0009). The viz spec is deliberately
+/// absent -- viz is not persisted (ADR-0036), so a reopened chart renders as a
+/// table until the user re-requests one (ADR-0033).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductiveTurn {
     pub reference_name: String,
     pub display_name: String,
     pub sql: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assumption: Option<String>,
 }
 
 /// The recipe's conversation timeline (ADR-0028/0039/0040/0086): every turn,
@@ -494,6 +499,11 @@ pub enum RecipeOutcome {
         /// The turn's promotions in promotion order (ADR-0022 monotonic
         /// numbering: result_1, result_2, ...). Non-empty for a result turn.
         promotions: Vec<RecipePromotion>,
+        /// #847: the agent loop's terminal text -- the turn's prose answer,
+        /// restored verbatim into the rebuilt timeline's `body`. Absent on
+        /// turns persisted before #847.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assumption: Option<String>,
     },
@@ -796,30 +806,19 @@ impl Recipe {
                     // ADR-0084: flatten the turn's promotion chain into the flat
                     // replay list, in promotion order. Each live promotion
                     // (stale: None) re-materializes its result_N; stale ones
-                    // (ADR-0041 dead results) are skipped. The turn-level
-                    // assumption rides the PRIMARY (chain tail) only -- the
-                    // answer the question produced; antecedents carry none.
-                    RecipeOutcome::Materialized {
-                        promotions,
-                        assumption,
-                    } => {
-                        let primary_idx = promotions.len().saturating_sub(1);
-                        promotions
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, p)| p.stale.is_none())
-                            .map(|(i, p)| ProductiveTurn {
-                                reference_name: p.reference_name.clone(),
-                                display_name: p.display_name.clone(),
-                                sql: p.sql.clone(),
-                                assumption: if i == primary_idx {
-                                    assumption.clone()
-                                } else {
-                                    None
-                                },
-                            })
-                            .collect::<Vec<_>>()
-                    }
+                    // (ADR-0041 dead results) are skipped. Replay re-executes
+                    // SQL only (LLM-free resume) -- the turn-level prose and
+                    // side note ride the timeline rebuild, not this chain (#847
+                    // retired the assumption slot here; nothing read it).
+                    RecipeOutcome::Materialized { promotions, .. } => promotions
+                        .iter()
+                        .filter(|p| p.stale.is_none())
+                        .map(|p| ProductiveTurn {
+                            reference_name: p.reference_name.clone(),
+                            display_name: p.display_name.clone(),
+                            sql: p.sql.clone(),
+                        })
+                        .collect::<Vec<_>>(),
                     _ => Vec::new(),
                 },
                 RecipeEntry::Source(_) | RecipeEntry::Skill(_) => Vec::new(),
@@ -961,6 +960,7 @@ mod tests {
                             sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                             stale: None,
                         }],
+                        body: None,
                         assumption: None,
                     },
                 )),
@@ -1056,6 +1056,7 @@ mod tests {
                             sql: "SELECT 1".into(),
                             stale: None,
                         }],
+                        body: None,
                         assumption: None,
                     },
                 )),
@@ -1068,6 +1069,7 @@ mod tests {
                             sql: "SELECT * FROM \"result_1\"".into(),
                             stale: None,
                         }],
+                        body: None,
                         assumption: None,
                     },
                 )),
@@ -1150,6 +1152,7 @@ mod tests {
                     reason,
                 }),
             }],
+            body: None,
             assumption: None,
         }
     }
@@ -1173,6 +1176,7 @@ mod tests {
                             sql: "SELECT 1".into(),
                             stale: None,
                         }],
+                        body: None,
                         assumption: None,
                     },
                 )),
@@ -1276,6 +1280,7 @@ mod tests {
                             sql: "SELECT 1".into(),
                             stale: None,
                         }],
+                        body: None,
                         assumption: None,
                     },
                 )),
@@ -1297,6 +1302,7 @@ mod tests {
                             sql: "SELECT 3".into(),
                             stale: None,
                         }],
+                        body: None,
                         assumption: None,
                     },
                 )),
@@ -1344,6 +1350,7 @@ mod tests {
                         sql: "SELECT 1".into(),
                         stale: None,
                     }],
+                    body: None,
                     assumption: None,
                 },
             ))],
@@ -1398,6 +1405,7 @@ mod tests {
                     sql: "SELECT 1".into(),
                     stale: None,
                 }],
+                body: None,
                 assumption: None,
             },
         );
@@ -1580,6 +1588,7 @@ mod tests {
                     sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                     stale: None,
                 }],
+                body: None,
                 assumption: None,
             },
             trace: vec![RecipeTraceRound {
@@ -1627,6 +1636,7 @@ mod tests {
                     sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                     stale: None,
                 }],
+                body: None,
                 assumption: None,
             },
             trace.clone(),
@@ -2085,6 +2095,7 @@ mod tests {
                             sql: "SELECT 1".into(),
                             stale: None,
                         }],
+                        body: None,
                         assumption: None,
                     },
                 )),

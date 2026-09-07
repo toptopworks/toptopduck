@@ -71,8 +71,14 @@ export type TurnOutcome =
       // renders it via Vega-Embed or degrades to the table with a disclosure
       // when the spec is malformed or fails to render.
       viz: VizSpec | null;
+      // #847: the agent loop's terminal text -- the turn's prose answer,
+      // rendered through the same markdown pipeline as a Textual body. null
+      // when the turn converged without terminal text, and on turns persisted
+      // before #847. Mirrors the Rust field (#[serde(default)]).
+      body: string | null;
       // The provider optional assumption note (ADR-0009), surfaced as a side
-      // note the user can correct; null when the provider offered none.
+      // note the user can correct; null when the provider offered none. No
+      // live agent source emits one (#847); reserved for a future provider.
       assumption: string | null;
     };
   }

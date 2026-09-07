@@ -32,6 +32,7 @@ export function materialized(referenceName: string): ThreadEntry {
           // chain tail is the primary result.
           promotions: [{ dataset: src(referenceName), sql: "SELECT 1" }],
           viz: null,
+          body: null,
           assumption: null,
         },
       },
