@@ -407,7 +407,7 @@ fn play_scenario(
             let mut echoed = String::new();
             if let Some(blocks) = req
                 .get("params")
-                .and_then(|p| p.get("blocks"))
+                .and_then(|p| p.get("prompt"))
                 .and_then(|b| b.as_array())
             {
                 for block in blocks {

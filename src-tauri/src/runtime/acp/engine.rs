@@ -344,7 +344,7 @@ impl AcpEngine {
             "session/prompt",
             PromptParams {
                 session_id: session_id.clone(),
-                blocks: input.prompt_blocks.clone(),
+                prompt: input.prompt_blocks.clone(),
             },
         );
         // Issue #813: the prompt is the whole windowed context (often past

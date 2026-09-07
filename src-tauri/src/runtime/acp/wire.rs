@@ -220,15 +220,16 @@ pub struct NewSessionResult {
 // session/prompt (app → agent, request) -- the turn driver
 // ---------------------------------------------------------------------------
 
-/// `session/prompt` params. `blocks` carries the full windowed context for this
-/// turn (the question + the assembled history), as text content blocks. ADR-0076
+/// `session/prompt` params. `prompt` carries the full windowed context for
+/// this turn (the question + the assembled history), as text content blocks
+/// under the field name the schema names (`PromptRequest.prompt`). ADR-0076
 /// statelessness: the engine sends the WHOLE context every turn -- it never
 /// relies on an upstream session handle (`session/load` is deliberately unused).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptParams {
     pub session_id: String,
-    pub blocks: Vec<ContentBlock>,
+    pub prompt: Vec<ContentBlock>,
 }
 
 /// `session/prompt` result. `stop_reason` is the agent's terminal verdict on
@@ -827,6 +828,33 @@ mod tests {
         for key in ["type", "name", "command", "args", "env"] {
             assert!(s.get(key).is_some(), "field `{key}` must be present");
         }
+    }
+
+    /// Outbound `session/prompt` raw pin (the request-side raw-pin family
+    /// above): the content array rides under the field name `prompt` -- the
+    /// shape the schema crate named by [`MODELED_SCHEMA`] defines
+    /// (`PromptRequest.prompt`). A strict agent (opencode, issue #851
+    /// real-machine acceptance) rejects the request with -32602 when the
+    /// array rides any other key.
+    #[test]
+    fn session_prompt_params_pin_outbound_schema_shape() {
+        let req = Request::new(
+            RequestId::Num(3),
+            "session/prompt",
+            PromptParams {
+                session_id: "ses_1".into(),
+                prompt: vec![ContentBlock::text("hello")],
+            },
+        );
+        let v: Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["method"], "session/prompt");
+        assert_eq!(v["params"]["sessionId"], "ses_1");
+        let prompt = v["params"]["prompt"]
+            .as_array()
+            .expect("prompt must serialize as an array under the `prompt` key");
+        assert_eq!(prompt.len(), 1);
+        assert_eq!(prompt[0]["type"], "text");
+        assert_eq!(prompt[0]["text"], "hello");
     }
 
     /// stop_reason round-trips to the ACP lowercase wire form.
