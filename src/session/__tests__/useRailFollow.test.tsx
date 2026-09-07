@@ -5,9 +5,10 @@ import type { LiveTurn } from "../useTurnFlow";
 import { useRailFollow } from "../useRailFollow";
 
 // useRailFollow owns the rail's stick-to-bottom posture (issue #829): the
-// four-behavior state machine (submit -> bottom / append -> rAF follow /
-// user scroll beyond the band -> pause / scroll back within the band ->
-// resume). jsdom has no layout engine, so the machine is pinned as pure
+// five-behavior state machine (submit -> bottom / append -> rAF follow /
+// range change -> rAF follow / user scroll beyond the band -> pause /
+// scroll back within the band -> resume). jsdom has no layout engine, so
+// the machine is pinned as pure
 // state-machine assertions: geometry (scrollHeight / clientHeight) is stubbed
 // on the rail element, scrollTop is a counting spy (hook writes count; the
 // test's user-scroll simulation bypasses the counter, standing in for the
@@ -23,9 +24,51 @@ type FrameCb = (t: number) => void;
 let queued: { id: number; cb: FrameCb }[] = [];
 let nextId = 1;
 
+// --- ResizeObserver stub ---------------------------------------------------
+// Same shape as the rAF stub: swap the global, and the test fires the
+// callback by hand -- a range change (the rail's box resizing: the eased
+// bar padding, the fold/unfold reflow) reaches the hook only through it.
+
+type RangeCb = () => void;
+let observers: RangeObserverStub[] = [];
+
+class RangeObserverStub {
+  cb: RangeCb;
+  observed: Element[] = [];
+  disconnected = false;
+  constructor(cb: RangeCb) {
+    this.cb = cb;
+    observers.push(this);
+  }
+
+  observe(target: Element): void {
+    this.observed.push(target);
+  }
+
+  unobserve(): void {}
+
+  disconnect(): void {
+    this.disconnected = true;
+  }
+}
+
+/** Fire a range change on every still-connected observer (exactly one in
+ * steady state; StrictMode's remount cycle disconnects the first). */
+function fireRange(): void {
+  act(() => {
+    for (const o of observers) {
+      if (!o.disconnected) o.cb();
+    }
+  });
+}
+
+// The shared per-test reset -- it registers both scheduler stubs and also
+// resets the ResizeObserver stub's registry.
 beforeEach(() => {
   queued = [];
   nextId = 1;
+  observers = [];
+  vi.stubGlobal("ResizeObserver", RangeObserverStub);
   vi.stubGlobal("requestAnimationFrame", (cb: FrameCb): number => {
     const id = nextId++;
     queued.push({ id, cb });
@@ -339,6 +382,105 @@ describe("useRailFollow", () => {
     flushFrame();
     expect(followingText()).toBe("true");
     expect(rig.scrollTop()).toBe(700);
+  });
+
+  // --- Range: extent changes that carry no React signal (#843) -------------
+
+  it("re-aligns on a range change with no append/submit/activation (eased bar padding / fold reflow)", () => {
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+    expect(rig.hookWrites()).toBe(1); // the mount land
+
+    // The observer watches the rail itself: its content box resizes both
+    // when the eased bottom padding (#836's calc) changes and when the
+    // workspace fold/unfold reflow changes the width.
+    expect(observers).toHaveLength(1);
+    expect(observers[0].observed).toEqual([rail]);
+
+    // The extent grows with NO rerender -- nothing in {entryCount, liveTurn,
+    // active} changed, only the rail's box did (the padding transition's
+    // next frame, or the reflow). Without the range signal the machine held
+    // the stale maxScroll until the next streaming delta.
+    rig.geo.scrollHeight = 1200; // -> maxScroll 900
+    fireRange();
+    flushFrame();
+    expect(rig.hookWrites()).toBe(2);
+    expect(rig.scrollTop()).toBe(900);
+    expect(followingText()).toBe("true");
+  });
+
+  it("writes nothing on a hidden pane's range change (the collapsed box must not bypass the gate)", () => {
+    // display:none reports a 0x0 box -- the observer still fires on the
+    // collapse. The callback rides the same rAF, whose activeRef gate stops
+    // it before the scrollTop write (an align would land scrollTop 0 and
+    // corrupt the preserved reading position).
+    const { getByTestId } = render(
+      <Host active={false} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rig = rigRail(getByTestId("rail") as HTMLElement);
+    flushFrame();
+    expect(rig.hookWrites()).toBe(0);
+
+    fireRange(); // the pane was hidden -- the box collapsed to 0
+    flushFrame();
+    expect(rig.hookWrites()).toBe(0);
+    expect(followingText()).toBe("true");
+  });
+
+  it("does not drag a paused reader on a range change", () => {
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+
+    rig.userScrollTo(400); // the user reads history -> pause
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    rig.geo.scrollHeight = 1200;
+    fireRange();
+    flushFrame();
+    expect(rig.scrollTop()).toBe(400); // reading position preserved
+    expect(rig.hookWrites()).toBe(1); // the mount land -- nothing since
+    expect(followingText()).toBe("false");
+  });
+
+  it("keeps the range observer armed across the StrictMode remount cycle", () => {
+    const { getByTestId } = render(
+      <StrictMode>
+        <Host active={true} entryCount={3} liveTurn={null} />
+      </StrictMode>,
+    );
+    const rig = rigRail(getByTestId("rail") as HTMLElement);
+    flushFrame();
+    expect(rig.hookWrites()).toBe(1); // the remounted machine still lands
+
+    // The remount cycle's first observer is disconnected; only the latest
+    // observes the rail. A range change through it still lands the follow.
+    const armed = observers.filter((o) => !o.disconnected);
+    expect(armed).toHaveLength(1);
+    rig.geo.scrollHeight = 1200;
+    fireRange();
+    flushFrame();
+    expect(rig.scrollTop()).toBe(900);
+  });
+
+  it("keeps aligning when ResizeObserver is unavailable (the guard's jsdom arm)", () => {
+    // The shared setup installs the registry stub; stubbing the global
+    // away entirely is what exercises the guard's early return (the
+    // useRailResize precedent). The machine degrades to its pre-#843
+    // self: the append effect's mount firing still lands the align, with
+    // no observer attached.
+    vi.stubGlobal("ResizeObserver", undefined);
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rig = rigRail(getByTestId("rail") as HTMLElement);
+    flushFrame();
+    expect(observers).toHaveLength(0); // the guard skipped the observer
+    expect(rig.hookWrites()).toBe(1); // the mount land still lands
   });
 
   // --- Keep-alive: hidden layers (ADR-0051) --------------------------------

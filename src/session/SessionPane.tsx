@@ -161,7 +161,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // settled count grows on appends, liveTurn's identity changes per streaming
   // event and per approval-channel update (and its null -> live transition
   // is the submit), and isActive's false -> true transition is the keep-alive
-  // session switch (ADR-0051).
+  // session switch (ADR-0051). The extent changes that reach no signal here
+  // (the eased bar padding, the fold/unfold reflow) the hook observes itself
+  // (#843).
   // isFollowing has no render consumer yet; the hook exposes it for tests /
   // a future jump-to-latest affordance.
   const { railRef } = useRailFollow({
