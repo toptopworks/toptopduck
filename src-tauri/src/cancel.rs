@@ -29,10 +29,10 @@ use std::sync::{Arc, Mutex};
 use duckdb::InterruptHandle;
 
 /// A turn's identity for the wall-clock watchdog: minted per
-/// [`CancelToken::begin_turn`], retired when the next turn begins. Opaque --
-/// compared only through [`CancelToken::request_if`] -- so a raw counter
-/// cannot stand in for it (the same pairing-as-type posture as the dispatch
-/// core's `GhostSnapshot`, issue #696).
+/// [`CancelToken::begin_turn`], retired when the turn's [`InFlightGuard`]
+/// drops. Opaque -- compared only through [`CancelToken::request_if`] -- so a
+/// raw counter cannot stand in for it (the same pairing-as-type posture as
+/// the dispatch core's `GhostSnapshot`, issue #696).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnGeneration(u64);
 
@@ -197,11 +197,12 @@ impl CancelToken {
     }
 
     /// Advance the turn generation and clear the request flag in one swap --
-    /// [`Self::begin_turn`]'s word update without the in-flight half, for the
-    /// full-pull paths' start (issue #779). A pull is not a turn, so this
-    /// both consumes a leftover request (a stop that landed after the last
-    /// turn or pull must not kill this pull on its first row) and retires any
-    /// still-sleeping wall-clock watchdog from the last turn: the watchdog
+    /// [`Self::begin_turn`]'s word update without the in-flight half. Called
+    /// by [`InFlightGuard`]'s drop (every turn exit, issue #849) and the
+    /// full-pull paths' start (issue #779). A pull is not a turn, so the
+    /// call both consumes a leftover request (a stop that landed after the
+    /// last turn or pull must not kill this pull on its first row) and retires
+    /// any still-sleeping wall-clock watchdog from the last turn: the watchdog
     /// fires `request_if(old_generation)` into a generation that no longer
     /// exists and stands down, instead of cancelling a pull the user never
     /// stopped. A racing `request()` has the same nondeterminism `begin_turn`
@@ -215,8 +216,11 @@ impl CancelToken {
 
 /// RAII guard for the in-flight flag. Created by
 /// [`CancelToken::begin_turn`]; dropping it (at every exit from `ask`) clears
-/// in-flight + the interrupt slot. Holds an `Arc<CancelToken>` (not a borrow)
-/// so it coexists with `&mut self` method calls on the Session within `ask`.
+/// in-flight + the interrupt slot and retires the turn's generation, so a
+/// wall-clock watchdog still holding it stands down instead of parking a
+/// stale cancel flag between turns (issue #849). Holds an `Arc<CancelToken>`
+/// (not a borrow) so it coexists with `&mut self` method calls on the Session
+/// within `ask`.
 pub struct InFlightGuard {
     token: Arc<CancelToken>,
     generation: TurnGeneration,
@@ -225,7 +229,7 @@ pub struct InFlightGuard {
 impl InFlightGuard {
     /// The turn's generation -- the wall-clock watchdog's turn identity.
     /// Pass to [`CancelToken::request_if`]; the token retires the
-    /// generation at the next `begin_turn`, so a watchdog firing after its
+    /// generation when this guard drops, so a watchdog firing after its
     /// turn ended stands down instead of cancelling the successor turn (the
     /// race the retired `alive` flag left open, closed by issue #696).
     pub fn generation(&self) -> TurnGeneration {
@@ -237,6 +241,7 @@ impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.token.in_flight.store(false, Ordering::SeqCst);
         self.token.clear_interrupt();
+        self.token.retire_generation();
     }
 }
 
@@ -277,6 +282,43 @@ mod tests {
         assert!(token.is_requested());
         let _guard = token.begin_turn();
         assert!(!token.is_requested(), "stale request must be cleared");
+    }
+
+    #[test]
+    fn dropping_the_guard_retires_the_generation() {
+        // Issue #849: a wall-clock watchdog that wakes after its turn ended --
+        // but before any successor began -- must stand down on the retired
+        // generation instead of parking a stale cancel flag between turns.
+        // External runtimes serve the gateway before the next `begin_turn`
+        // runs (it is the engine thread's first step), so the retire cannot
+        // wait for the next turn to start.
+        let token = Arc::new(CancelToken::new());
+        let generation = {
+            let guard = token.begin_turn();
+            guard.generation()
+        }; // drop: retires the generation
+        assert!(
+            !token.request_if(generation),
+            "a watchdog waking between turns stands down"
+        );
+        assert!(
+            !token.is_requested(),
+            "no stale flag is parked between turns"
+        );
+    }
+
+    #[test]
+    fn dropping_the_guard_consumes_the_turns_leftover_request() {
+        // The other half of issue #849: a request that landed during the turn
+        // has no query left to cancel once the guard drops -- drop consumes
+        // it so it cannot leak into the between-turns window that the
+        // external serve path reads before the next `begin_turn`.
+        let token = Arc::new(CancelToken::new());
+        {
+            let guard = token.begin_turn();
+            assert!(token.request_if(guard.generation()));
+        }
+        assert!(!token.is_requested(), "drop consumes the leftover flag");
     }
 
     #[test]

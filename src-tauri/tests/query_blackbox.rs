@@ -1683,9 +1683,11 @@ fn a_turn_after_a_cancelled_turn_starts_clean_with_no_stale_request() {
         handle.join().expect("ask thread"),
         TurnOutcome::Cancelled
     ));
-    // The flag is still set from the cancelled turn; the next ask must clear
-    // it via begin_turn and run to completion.
-    assert!(cancel.is_requested());
+    // The cancelled turn's guard drop already consumed the flag (issue
+    // #849: it must not sit between turns, where the external serve path
+    // reads it before the next begin_turn could clear it); either way the
+    // next ask starts clean and runs to completion.
+    assert!(!cancel.is_requested());
     let (name, rows, _) = materialized(session.lock().unwrap().ask("正常"));
     assert_eq!(name, "result_1"); // promoted, not cancelled
     assert_eq!(rows, 1);
