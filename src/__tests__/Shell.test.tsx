@@ -238,6 +238,7 @@ function materializedTurn(referenceName: string): ThreadEntry {
         data: {
           promotions: [{ dataset: src(referenceName), sql: "SELECT 1" }],
           viz: null,
+          body: null,
           assumption: null,
         },
       },
@@ -317,6 +318,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
       data: {
         promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
         viz: null,
+        body: null,
         assumption: null,
       },
     });
@@ -368,6 +370,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
       data: {
         promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
         viz: null,
+        body: null,
         assumption: null,
       },
     });
@@ -1638,6 +1641,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       data: {
         promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
         viz: null,
+        body: null,
         assumption: null,
       },
     });
@@ -1857,6 +1861,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         data: {
           promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
           viz: null,
+          body: null,
           assumption: null,
         },
       })
@@ -1865,6 +1870,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         data: {
           promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
           viz: null,
+          body: null,
           assumption: null,
         },
       });
@@ -1907,6 +1913,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       data: {
         promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
         viz: null,
+        body: null,
         assumption: null,
       },
     });
@@ -2931,6 +2938,7 @@ const STAMP_OUTCOME: TurnOutcome = {
   data: {
     promotions: [{ dataset: src("r1"), sql: "SELECT 1" }],
     viz: null,
+    body: null,
     assumption: null,
   },
 };

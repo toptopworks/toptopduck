@@ -51,7 +51,7 @@ pub enum Termination {
     /// The model emitted a terminal text reply. Carries the verbatim text.
     /// Maps to `TurnOutcome::Textual` when the turn had no promotion, or
     /// `TurnOutcome::Materialized` when it also promoted >=1 result (the text
-    /// rides as the assumption / side note).
+    /// rides `body`, the prose answer -- #847).
     Text(String),
     /// The step cap was reached without a terminal reply (the agent did not
     /// converge). Carries the cap value so the wiring seam can render an honest

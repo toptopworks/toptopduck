@@ -461,6 +461,7 @@ mod tests {
                     sql: format!("SELECT * FROM {}", result),
                 }],
                 viz: None,
+                body: None,
                 assumption: None,
             },
             // The window assembler reads question + outcome only (ADR-0078
@@ -599,6 +600,7 @@ mod tests {
                     sql: "SELECT 1".to_string(),
                 }],
                 viz: None,
+                body: None,
                 assumption: None,
             },
             trace: poisoned_trace.clone(),
@@ -681,6 +683,7 @@ mod tests {
                     },
                 ],
                 viz: None,
+                body: None,
                 assumption: None,
             },
             trace: vec![],

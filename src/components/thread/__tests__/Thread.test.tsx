@@ -53,7 +53,11 @@ describe("Thread", () => {
 
   // A materialized record built from the shared mock descriptor (reference_name
   // overridden) -- the only outcome that needs a full dataset payload.
-  function materializedRecord(referenceName: string, assumption: string | null): TurnRecord {
+  function materializedRecord(
+    referenceName: string,
+    assumption: string | null,
+    body: string | null = null,
+  ): TurnRecord {
     return {
       question: `问 ${referenceName}`,
       outcome: {
@@ -63,6 +67,7 @@ describe("Thread", () => {
             { dataset: { ...mockDataset, reference_name: referenceName }, sql: "SELECT 1" },
           ],
           viz: null,
+          body,
           assumption,
         },
       },
@@ -116,6 +121,7 @@ describe("Thread", () => {
             { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
           ],
           viz: null,
+          body: null,
           assumption: null,
         },
       },
@@ -130,6 +136,51 @@ describe("Thread", () => {
     // The antecedent is NOT a result link -- it rides the muted disclosure.
     expect(screen.queryByRole("button", { name: /结果：result_1/ })).not.toBeInTheDocument();
     expect(screen.getByText(/由 result_1 派生/)).toBeInTheDocument();
+  });
+
+  it("renders a Materialized turn's terminal text as markdown prose, not a side note (#847)", () => {
+    // The terminal text is the turn's prose answer: headings / code spans /
+    // tables render as elements through the same RoundProse pipeline a
+    // Textual body rides. It previously rode the assumption side-note slot
+    // and displayed as raw markdown in a plain-text italic line.
+    const record = materializedRecord(
+      "result_1",
+      null,
+      "## 统计报告\n\n共 18 行，含 `type_1` 分组。\n\n| type_1 | cnt |\n| --- | --- |\n| Fire | 12 |",
+    );
+    const { container } = renderThread(
+      <Thread entries={[turnEntry(record)]} selectedResult="result_1" onSelectResult={() => {}} />,
+    );
+
+    // Markdown renders structurally: the heading is a heading, the code span
+    // is a code element, the table is a table -- not raw "##" / pipe text.
+    expect(screen.getByRole("heading", { name: "统计报告" })).toBeInTheDocument();
+    expect(container.querySelector("code")).toHaveTextContent("type_1");
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("table")).toHaveTextContent("Fire");
+    // A null assumption renders no side note at all (the mounted-note
+    // coverage lives in the labeled-turn test below).
+    expect(screen.queryByText(/^假设：/)).not.toBeInTheDocument();
+  });
+
+  it("orders the Materialized turn link row, prose, and side note (#847)", () => {
+    // Q5 order pin: result link row -> prose -> side note -- the same
+    // caption-row -> prose -> note rhythm the Textual branch uses.
+    const record = materializedRecord("result_1", "按世代分组", "正文第一段。");
+    const { container } = renderThread(
+      <Thread entries={[turnEntry(record)]} selectedResult="result_1" onSelectResult={() => {}} />,
+    );
+
+    const seq = [...container.querySelectorAll(".result-link, .round-text, .assumption")].map(
+      (el) =>
+        el.classList.contains("result-link")
+          ? "link"
+          : el.classList.contains("round-text")
+            ? "prose"
+            : "note",
+    );
+    expect(seq.indexOf("link")).toBeLessThan(seq.indexOf("prose"));
+    expect(seq.indexOf("prose")).toBeLessThan(seq.indexOf("note"));
   });
 
   it("renders every turn labeled by its verbatim question with its outcome kind", () => {
@@ -2656,6 +2707,7 @@ describe("Thread", () => {
               { dataset: { ...mockDataset, reference_name: "result_2" }, sql: "SELECT 2" },
             ],
             viz: null,
+            body: null,
             assumption: null,
           },
         },
@@ -2710,6 +2762,7 @@ describe("Thread", () => {
               },
             ],
             viz: null,
+            body: null,
             assumption: null,
           },
         },
@@ -2788,6 +2841,7 @@ describe("Thread", () => {
               },
             ],
             viz: null,
+            body: null,
             assumption: null,
           },
         },

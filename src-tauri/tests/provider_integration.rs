@@ -243,6 +243,7 @@ fn real_provider_end_to_end_materializes_result() {
     match outcome {
         TurnOutcome::Materialized {
             promotions,
+            body,
             assumption,
             ..
         } => {
@@ -265,8 +266,10 @@ fn real_provider_end_to_end_materializes_result() {
                 primary.dataset.sample.first().and_then(|r| r.first()),
                 Some(&"5".to_string())
             );
-            // The terminal text answer rides the assumption side note.
-            assert_eq!(assumption.as_deref(), Some("共 5 人"));
+            // The terminal text answer rides the body (#847); the side-note
+            // slot stays reserved.
+            assert_eq!(body.as_deref(), Some("共 5 人"));
+            assert_eq!(assumption, None, "the side-note slot stays reserved");
         }
         other => panic!("expected Materialized, got {other:?}"),
     }
@@ -396,6 +399,7 @@ fn real_openai_provider_end_to_end_materializes_result() {
     match outcome {
         TurnOutcome::Materialized {
             promotions,
+            body,
             assumption,
             ..
         } => {
@@ -417,7 +421,10 @@ fn real_openai_provider_end_to_end_materializes_result() {
                 primary.dataset.sample.first().and_then(|r| r.first()),
                 Some(&"5".to_string())
             );
-            assert_eq!(assumption.as_deref(), Some("共 5 人"));
+            // The terminal text answer rides the body (#847); the side-note
+            // slot stays reserved.
+            assert_eq!(body.as_deref(), Some("共 5 人"));
+            assert_eq!(assumption, None, "the side-note slot stays reserved");
         }
         other => panic!("expected Materialized, got {other:?}"),
     }

@@ -122,8 +122,9 @@ export function TurnCard({
   const glyphInMeta = !weakened;
   const showsMetaRow = glyphInMeta || record.settled_at !== undefined;
   // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
-  // IS text: a Textual turn's body. Materialized answers with a result link,
-  // Failed/Cancelled with markers -- nothing textual to copy.
+  // IS text: a Textual turn's body. A Materialized turn carries prose (#847)
+  // but it is read in the rail, not copied (a deliberate exclusion);
+  // Failed/Cancelled carry markers -- nothing textual to copy.
   const replyText = record.outcome.kind === "Textual" ? record.outcome.data.body : null;
   // Issue #818: the per-turn runtime attribution. Only a runtime that can
   // name its adapter renders (built-in / unrecorded stay silent).
@@ -312,9 +313,10 @@ function TraceRoundBlock({
 // so the rendering isn't duplicated across the two outcomes that carry it.
 // mt-0.5 mirrors the prose root's offset so the note keeps the same gap
 // below whatever precedes it -- the RoundProse block on Textual (issue
-// #827) and the inline link/chip row inside the Materialized <p>; the
-// offset is new with #827 on both faces (the note previously carried no
-// margin).
+// #827) or on a Materialized turn carrying a body (#847), and the inline
+// link/chip row inside the Materialized <p> when no body rode the turn;
+// the offset is new with #827 on both faces (the note previously carried
+// no margin).
 function AssumptionNote({ assumption }: { assumption: string | null }) {
   const intl = useIntl();
   if (!assumption) return null;
@@ -383,7 +385,7 @@ function TurnBody({
     );
   switch (record.outcome.kind) {
     case "Materialized": {
-      const { promotions, assumption } = record.outcome.data;
+      const { promotions, body, assumption } = record.outcome.data;
       // ADR-0084: the chain tail is the primary result (the answer the question
       // produced); earlier promotions are intermediate results, rendered as a
       // muted "derived from" line so the lineage stays visible without
@@ -440,8 +442,15 @@ function TurnBody({
                 onJump={onStaleChipJump}
               />
             )}
-            <AssumptionNote assumption={assumption} />
           </p>
+          {/* #847: the terminal text is the turn's prose answer, rendered
+              through the same RoundProse markdown pipeline as a Textual body
+              (issue #827) -- it previously rode the assumption side-note slot
+              and displayed as raw markdown. The prose sits between the result
+              link row and the preview card, mirroring the Textual branch's
+              caption-row -> prose -> note rhythm. */}
+          {body && <RoundProse text={body} />}
+          <AssumptionNote assumption={assumption} />
           {/* ADR-0083 (issue #298): the primary result's inline preview card --
               the windowed sample (first rows, ADR-0026) for a rail-scan glance
               at the answer. Clicking it selects the result (the caller opens

@@ -27,6 +27,9 @@ export interface ViewedResult {
  * materialized that reference name (a race during optimistic append, or a stale
  * view pointing at a GC'd result). */
 export interface ResultPayload {
+  // No live agent source emits an assumption (#847); the field stays
+  // reserved for a future provider, mirroring the Rust comment on the
+  // outcome -- populated only on turns persisted before #847.
   assumption: string | null;
   viz: VizSpec | null;
   /** Issue #758: the question the matched turn asked -- the stale banner's

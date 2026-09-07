@@ -103,6 +103,11 @@ pub enum ResponsePayload {
         /// on a recent materialized turn so the provider sees its own prior SQL.
         /// `None` only when the source turn predates the field.
         sql: Option<String>,
+        /// The agent loop's terminal text (#847): the turn's prose answer,
+        /// shipped so the provider re-reads its own prior conclusion on
+        /// follow-up turns (ADR-0023 point 1). `None` on turns that converged
+        /// without terminal text, and on turns persisted before #847.
+        body: Option<String>,
         assumption: Option<String>,
     },
     Textual {
@@ -122,6 +127,7 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
         match outcome {
             TurnOutcome::Materialized {
                 promotions,
+                body,
                 assumption,
                 // viz intentionally dropped: a prior turn's chart intent is
                 // irrelevant to SQL generation (the ADR-0023 window carries the
@@ -137,6 +143,10 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
                 ResponsePayload::Materialized {
                     result: primary.dataset.reference_name.clone(),
                     sql: Some(primary.sql.clone()),
+                    // #847: the terminal text ships too -- ADR-0023 point 1
+                    // says a recent turn carries the provider's prior response,
+                    // and on a Materialized turn that response is this text.
+                    body: body.clone(),
                     assumption: assumption.clone(),
                 }
             }
@@ -378,5 +388,44 @@ mod tests {
         let rendered = format!("{facts:?}");
         assert!(!rendered.contains("sk-secret"), "got {rendered}");
         assert!(rendered.contains("[redacted]"), "got {rendered}");
+    }
+
+    /// #847: the window projection carries the Materialized terminal text.
+    /// The rename previously left the body in the projection's rest pattern,
+    /// so the model's own prior answer vanished from the window (ADR-0023
+    /// point 1 says a recent turn ships the provider's prior response).
+    #[test]
+    fn response_payload_projection_carries_the_materialized_body() {
+        use crate::model::{DatasetDescriptor, Promotion, RectifyProvenance, TurnOutcome};
+        let dataset = DatasetDescriptor {
+            reference_name: "result_1".into(),
+            display_name: "result_1".into(),
+            source_path: "/tmp/source.csv".into(),
+            columns: Vec::new(),
+            row_count: 0,
+            sample: Vec::new(),
+            fingerprint: "fp".into(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: Default::default(),
+            stale: None,
+        };
+        let outcome = TurnOutcome::Materialized {
+            promotions: vec![Promotion {
+                dataset,
+                sql: "SELECT 1".into(),
+            }],
+            viz: None,
+            body: Some("共 5 人".into()),
+            assumption: None,
+        };
+        match ResponsePayload::from(&outcome) {
+            ResponsePayload::Materialized {
+                body, assumption, ..
+            } => {
+                assert_eq!(body.as_deref(), Some("共 5 人"));
+                assert_eq!(assumption, None, "the side-note slot stays reserved");
+            }
+            other => panic!("expected Materialized, got {other:?}"),
+        }
     }
 }

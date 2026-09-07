@@ -452,6 +452,7 @@ impl<'a> Resumer<'a> {
                     let outcome = match &turn.outcome {
                         RecipeOutcome::Materialized {
                             promotions,
+                            body,
                             assumption,
                         } => {
                             // ADR-0035 honest partial state + ADR-0084: if
@@ -497,6 +498,10 @@ impl<'a> Resumer<'a> {
                                 TurnOutcome::Materialized {
                                     promotions: rebuilt,
                                     viz: None,
+                                    // #847: the turn's terminal text restores
+                                    // verbatim -- replay is LLM-free, so the
+                                    // prose cannot be re-derived, only carried.
+                                    body: body.clone(),
                                     assumption: assumption.clone(),
                                 }
                             }
@@ -1204,6 +1209,7 @@ mod tests {
                     sql: sql.into(),
                     stale: None,
                 }],
+                body: None,
                 assumption: None,
             },
         ))
@@ -1227,6 +1233,7 @@ mod tests {
                         reason: StaleReason::Deleted,
                     }),
                 }],
+                body: None,
                 assumption: None,
             },
         ))
@@ -1585,6 +1592,45 @@ mod tests {
                 "got {:?}",
                 t.outcome
             );
+        }
+    }
+
+    #[test]
+    fn rebuild_timeline_restores_the_terminal_text_body() {
+        // #847: replay is LLM-free, so the turn's prose answer cannot be
+        // re-derived -- the rebuild restores it verbatim from the recipe's
+        // `body`, or a resumed conversation would silently lose its answer
+        // text.
+        let recipe = recipe_with(
+            vec![RecipeEntry::Turn(RecipeTurn::without_audit(
+                "q",
+                RecipeOutcome::Materialized {
+                    promotions: vec![RecipePromotion {
+                        reference_name: "result_1".into(),
+                        display_name: "result_1".into(),
+                        sql: "SELECT 1".into(),
+                        stale: None,
+                    }],
+                    body: Some("## 报告\n\n统计完成。".into()),
+                    assumption: None,
+                },
+            ))],
+            Some("people"),
+        );
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1"));
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let timeline = resumer.rebuild_timeline(&mut ws, None).unwrap();
+        let TimelineEntry::Turn { record, .. } = &timeline[0] else {
+            panic!("expected Turn, got {:?}", timeline[0])
+        };
+        match &record.outcome {
+            TurnOutcome::Materialized { body, .. } => {
+                assert_eq!(body.as_deref(), Some("## 报告\n\n统计完成。"));
+            }
+            other => panic!("expected Materialized, got {other:?}"),
         }
     }
 

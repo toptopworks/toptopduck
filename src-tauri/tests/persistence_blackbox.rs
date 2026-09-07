@@ -548,6 +548,21 @@ fn resume_round_trips_the_real_multi_call_trace_and_builtin_provenance() {
         "a live turn records the built-in runtime"
     );
     assert!(turn.provenance.skills.is_empty(), "skill tracking unwired");
+    // #847: the loop's terminal text ("3 人") persists as the turn's `body`
+    // -- the prose answer, not a side note.
+    match &turn.outcome {
+        RecipeOutcome::Materialized {
+            body, assumption, ..
+        } => {
+            assert_eq!(body.as_deref(), Some("3 人"), "terminal text rides body");
+            assert_eq!(
+                assumption.as_deref(),
+                None,
+                "the side-note slot stays empty"
+            );
+        }
+        other => panic!("expected Materialized, got {other:?}"),
+    }
     // ADR-0103 (issue #608): a live-recorded turn carries both timestamps
     // (stamped at submit / settle), in order.
     let asked_at = turn.asked_at.expect("asked_at stamped at submit");
@@ -594,7 +609,78 @@ fn resume_round_trips_the_real_multi_call_trace_and_builtin_provenance() {
         (Some(asked_at), Some(settled_at)),
         "the resumed TurnRecord keeps the recorded timestamps"
     );
+    // #847: the terminal text survives the restart boundary on the
+    // IPC-visible record too (rebuild_timeline restores it verbatim).
+    match &resumed_record.outcome {
+        toptopduck_lib::model::TurnOutcome::Materialized { body, .. } => {
+            assert_eq!(body.as_deref(), Some("3 人"));
+        }
+        other => panic!("expected Materialized, got {other:?}"),
+    }
     drop(resumed);
+}
+
+#[test]
+fn v6_recipe_without_body_key_reads_back_with_assumption_intact() {
+    // #847 (AC: legacy files stay readable): a pre-#847 v6 file carries its
+    // terminal text in `assumption` and has NO `body` key. Writing a recipe
+    // whose Materialized body is None reproduces that byte-level shape
+    // exactly (the field serializes only when Some) -- read_duck must parse
+    // it without error, yielding body=None and the legacy assumption
+    // verbatim. Not migrated: the text keeps rendering as the side note it
+    // was stored as.
+    use toptopduck_lib::persistence::recipe::{
+        RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn,
+    };
+    use toptopduck_lib::persistence::{read_duck, save_atomic, Recipe};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+
+    let recipe = Recipe::build(
+        "旧档".into(),
+        vec![],
+        vec![RecipeEntry::Turn(RecipeTurn::without_audit(
+            "q".to_string(),
+            RecipeOutcome::Materialized {
+                promotions: vec![RecipePromotion {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    sql: "SELECT 1".into(),
+                    stale: None,
+                }],
+                body: None,
+                assumption: Some("旧的终止文本存放在旁注槽".into()),
+            },
+        ))],
+        None,
+    )
+    .expect("build");
+
+    let text = serde_json::to_string(&recipe).expect("serialize");
+    assert!(
+        !text.contains("\"body\""),
+        "a None body leaves no key: {text}"
+    );
+
+    save_atomic(&duck, &recipe).expect("save");
+    let reread = read_duck(&duck).expect("legacy shape parses");
+    match &reread.history[0] {
+        RecipeEntry::Turn(t) => match &t.outcome {
+            RecipeOutcome::Materialized {
+                body, assumption, ..
+            } => {
+                assert_eq!(body.as_deref(), None, "the absent key deserializes as None");
+                assert_eq!(
+                    assumption.as_deref(),
+                    Some("旧的终止文本存放在旁注槽"),
+                    "the legacy side-note text survives verbatim"
+                );
+            }
+            other => panic!("expected Materialized, got {other:?}"),
+        },
+        other => panic!("expected Turn, got {other:?}"),
+    }
 }
 
 #[test]
@@ -3080,6 +3166,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
                         sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                         stale: None,
                     }],
+                    body: None,
                     assumption: None,
                 },
             )),
@@ -3092,6 +3179,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
                         sql: "SELECT * FROM nonexistent_relation".into(),
                         stale: None,
                     }],
+                    body: None,
                     assumption: None,
                 },
             )),
@@ -3108,6 +3196,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
                         sql: "SELECT COUNT(*) AS n FROM \"people\".data".into(),
                         stale: None,
                     }],
+                    body: None,
                     assumption: None,
                 },
             )),

@@ -22,7 +22,10 @@ const noPrimaryTurn: ThreadEntry = {
   entry: "Turn",
   data: {
     question: "q",
-    outcome: { kind: "Materialized", data: { promotions: [], viz: null, assumption: null } },
+    outcome: {
+      kind: "Materialized",
+      data: { promotions: [], viz: null, body: null, assumption: null },
+    },
     trace: [], provenance: { skills: [] },
   },
 };
@@ -38,6 +41,7 @@ describe("findMaterializedPayload", () => {
           data: {
             promotions: [{ dataset: src("result_1"), sql: "SELECT 1" }],
             viz: { kind: "bar", spec: "{\"mark\":\"bar\"}" },
+            body: null,
             assumption: "grouped by product",
           },
         },
@@ -223,6 +227,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
                 { dataset: src("result_1"), sql: "SELECT 2" },
               ],
               viz: null,
+              body: null,
               assumption: null,
             },
           },

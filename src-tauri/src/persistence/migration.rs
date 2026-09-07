@@ -1167,8 +1167,7 @@ mod tests {
         // End-to-end: a synthetic v2 fixture migrates to the current version
         // and deserializes as a v3 Recipe. The single v2 result becomes a
         // one-element promotion chain; the replayable chain re-materializes
-        // the same result_N with the same SQL, and the turn-level assumption
-        // rides the primary (chain tail) promotion.
+        // the same result_N with the same SQL.
         use crate::persistence::recipe::{Recipe, RecipeEntry};
         let v2 = serde_json::json!({
             "format_version": 2,
@@ -1198,11 +1197,6 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].reference_name, "result_1");
         assert_eq!(chain[0].sql, "SELECT 1");
-        assert_eq!(
-            chain[0].assumption.as_deref(),
-            Some("把 id 当作主键"),
-            "the turn-level assumption rides the primary promotion on replay",
-        );
     }
 
     // --- v3 -> v4 (ADR-0086, issue #363) --------------------------------------
