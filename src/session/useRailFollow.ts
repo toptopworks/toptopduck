@@ -13,7 +13,7 @@ import type { LiveTurn } from "./useTurnFlow";
  *  hysteresis keeps sub-threshold wiggles from flapping the state. */
 const RESUME_BAND_PX = 40;
 
-/** The rail's stick-to-bottom posture (issue #829). Four behaviors over one
+/** The rail's stick-to-bottom posture (issue #829). Five behaviors over one
  *  boolean state:
  *
  *  - Submit: liveTurn null -> live is the submit signal (the user bubble
@@ -22,6 +22,16 @@ const RESUME_BAND_PX = 40;
  *  - Append: settled entries growing (entryCount) or the live turn streaming
  *    (liveTurn identity changes per delta) schedule ONE rAF-coalesced write
  *    to the bottom per frame -- no per-delta hard scroll.
+ *  - Range (issue #843): a ResizeObserver on the rail. Extent changes can
+ *    resize the rail's own box with no React signal and no scroll event --
+ *    chiefly the bar's height change easing the rail's bottom padding over
+ *    its 200ms transition and the workspace fold/unfold reflow, but a
+ *    window resize or the rail-width handle drag ride the same observer.
+ *    Every source resizes the rail's content box (the observer's default
+ *    box), so one observer covers them all, firing per frame through the
+ *    transition; the callback rides the same rAF, and the follow tracks the
+ *    eased bound instead of holding a stale maxScroll until the next
+ *    streaming delta.
  *  - Pause: a scroll event landing beyond RESUME_BAND_PX from the bottom.
  *    Programmatic aligns always land AT the bottom, so they never trip it;
  *    a mid-timeline jump (the stale-chip scrollIntoView, Thread.tsx --
@@ -38,12 +48,15 @@ const RESUME_BAND_PX = 40;
  *  dynamic bottom padding (#836), so scrollHeight - clientHeight - scrollTop
  *  measures the true reading distance without the hook knowing the bar
  *  exists. #839's `scrollbar-gutter: stable both-edges` keeps the scrollbar
- *  appearing/disappearing reflow-free. Unfolds, and any fold that shrinks
- *  the extent no lower than the current position, change content height
- *  WITHOUT firing scroll events (scrollTop is unchanged), so the machine
- *  never sees them; a fold that shrinks past the current position makes the
- *  browser clamp scrollTop, which fires one scroll event at distance 0 --
- *  re-entering the follow, which the clamped bottom already is.
+ *  appearing/disappearing reflow-free. The workspace unfold, and any
+ *  workspace fold that shrinks the extent no lower than the current
+ *  position, changes content height WITHOUT firing scroll events (scrollTop
+ *  is unchanged) -- the range observer above is what sees it, via the
+ *  reflow resizing the rail's box. A fold that shrinks past the current
+ *  position makes the browser clamp scrollTop, which fires one scroll event
+ *  at distance 0 -- re-entering the follow, which the clamped bottom
+ *  already is. (In-content folds -- a thread card's <details> -- resize no
+ *  box; they ride the next append.)
  *
  *  Session switch PRESERVES posture (the keep-alive contract, ADR-0051):
  *  open panes stay MOUNTED but display:none when not active, so a switch is
@@ -181,6 +194,27 @@ export function useRailFollow({
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
+
+  // Range signal (#843): extent changes can resize the rail's own box with
+  // no React signal and no scroll event -- chiefly the bar's height change
+  // easing the rail's bottom padding through its 200ms transition
+  // (styles.css) and the workspace fold/unfold reflow, but a window resize
+  // or the rail-width handle drag ride the same observer. Every source
+  // resizes the rail's content box (the observer's default box: the eased
+  // padding changes it frame by frame; the reflow changes the width), so
+  // one observer covers them all, firing per frame across the transition.
+  // The callback schedules the SAME rAF -- no separate scroll path -- so it
+  // passes the same hidden/paused gates as every other scheduler: a hidden
+  // pane's collapsed (0x0) box fires the callback too, and the activeRef
+  // stop inside the frame keeps the preserve contract intact.
+  useEffect(() => {
+    const el = railRef.current;
+    if (el === null) return;
+    if (typeof ResizeObserver === "undefined") return; // jsdom (test-setup stubs it)
+    const observer = new ResizeObserver(() => scheduleAlign());
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [scheduleAlign]);
 
   // A pending frame must not outlive the pane: unmounting (a pane close, or
   // the session ErrorBoundary's key bump remounting -- a session switch never
