@@ -39,6 +39,7 @@ import {
   deleteSession,
   exportSession,
   getSessionName,
+  listLiveSessions,
   mountSkill,
   onResumeProgress,
   openDuck,
@@ -49,6 +50,7 @@ import {
   setSessionPosture,
   setSessionRuntime,
 } from "../api";
+import type { LiveSessionEntry } from "../api";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import type { AppError } from "../types/error";
@@ -420,6 +422,65 @@ export function useShellSessions({
     },
     [apply],
   );
+
+  // Issue #842: the startup re-adoption sweep. A webview reload (dev Ctrl+R /
+  // HMR full-reload, WebView2 F5) wipes this hook's open-session set while the
+  // backend sessions stay alive holding their canonical single-writer keys --
+  // every re-open of the same `.duck` then rejects with AlreadyOpen until
+  // process restart. On mount the frontend asks the backend which sessions
+  // are still live: idle ones are re-adopted into the open set (the backend
+  // returns them sid-sorted, so activating the first is deterministic), while
+  // in-flight ones (and any unbound oddity) are closed best-effort -- the turn
+  // is cancelled, the session stays on disk, and the user re-opens it from the
+  // sidebar. Best-effort by design: a rejected enumeration only logs -- the
+  // reloaded shell lands on the centered empty state, same as before the
+  // sweep existed, and the sessions stay closable via the next reload's sweep.
+  const sweptRef = useRef(false);
+  useEffect(() => {
+    // StrictMode dev double-invoke guard: the sweep is a one-shot. Every
+    // callback it touches is stable, so the ref (not the deps) carries the
+    // "already ran" verdict.
+    if (sweptRef.current) return;
+    sweptRef.current = true;
+    void (async () => {
+      let live: LiveSessionEntry[];
+      try {
+        live = await listLiveSessions();
+      } catch (e) {
+        log.warn("useShellSessions", "live-session sweep failed", fmtError(e, intl));
+        return;
+      }
+      let firstAdopted: string | null = null;
+      for (const entry of live) {
+        if (entry.in_flight || entry.duck_path === null) {
+          // Note the bounded transient window (ADR-0021 soft-cancel): the
+          // single-writer key releases only when the cancelled turn's Arc
+          // drops (HTTP <=120s), so a sidebar re-open inside that window
+          // still rejects with AlreadyOpen -- eventual, not instant. The
+          // null-path arm also covers a lock-busy row (try_session_lock
+          // failed without a turn/resume flag), unreachable after a reload
+          // in practice but harmless to sweep the same way.
+          void closeSession(entry.session_id).catch((e) =>
+            log.warn("useShellSessions", "orphan close failed", fmtError(e, intl)),
+          );
+          continue;
+        }
+        if (firstAdopted === null) firstAdopted = entry.session_id;
+        registerOpen({
+          sid: entry.session_id,
+          name: entry.session_name ?? "",
+          path: entry.duck_path,
+          pendingIngestPaths: [],
+          pendingQuestion: null,
+        });
+      }
+      // registerOpen activates each entry as it lands; the sweep's own
+      // contract (issue #842 triage Q1) is the FIRST adoptable row wins, so
+      // re-activate it over whatever landed last.
+      if (firstAdopted !== null) activateSession(firstAdopted);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot on mount: listLiveSessions / closeSession are module imports, registerOpen / activateSession are useCallback-stable, intl is stable per locale
+  }, []);
 
   // Shared mint: createSession (backend creates + persists immediately,
   // returning the runtime id + bound .duck path, ADR-0061/0089) -> apply the

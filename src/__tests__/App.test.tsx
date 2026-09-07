@@ -68,6 +68,9 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
+    // Issue #842: the startup re-adoption sweep fires on mount; an empty
+    // reply keeps it a no-op.
+    listLiveSessions: vi.fn(async () => []),
     closeSession: vi.fn(async () => false),
     createSession: vi.fn(async () => "sess-1"),
     ingestFile: vi.fn(),

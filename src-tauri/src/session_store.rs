@@ -611,6 +611,19 @@ impl SessionHandle {
     }
 }
 
+/// One row of [`SessionStore::list_live`] (issue #842): a live session the
+/// frontend no longer knows about after a webview reload. `duck_path` /
+/// `session_name` are `None` for an unbound session (test constructors) or
+/// when an in-flight turn holds the session lock at sweep time; `in_flight`
+/// folds the turn and resume flags into the "not safe to adopt now" verdict.
+#[derive(Debug, Clone)]
+pub struct LiveSessionSnapshot {
+    pub session_id: SessionId,
+    pub duck_path: Option<std::path::PathBuf>,
+    pub session_name: Option<String>,
+    pub in_flight: bool,
+}
+
 /// The multi-session map (ADR-0056). Managed once as Tauri state; every
 /// session-scoped command parses its `session_id` wire string into a
 /// [`SessionId`] and looks up its target here.
@@ -707,6 +720,56 @@ impl SessionStore {
             .read()
             .map_err(|_| SessionError::Engine("session store lock poisoned".into()))?;
         map.get(session_id).cloned().ok_or(SessionError::NotFound)
+    }
+
+    /// Enumerate every live session as [`LiveSessionSnapshot`] rows (issue
+    /// #842): the startup re-adoption sweep. A webview reload wipes the
+    /// frontend's open-session set (and with it every runtime sid) while the
+    /// sessions here stay alive holding their single-writer `.duck` keys --
+    /// without this enumeration the reloaded frontend has no path back to
+    /// those sessions and every re-open of the same file rejects with
+    /// `AlreadyOpen` until process restart. Rows are sorted by sid so the
+    /// sweep is deterministic despite the HashMap's unordered iteration (the
+    /// frontend activates the first adoptable row). `in_flight` folds the
+    /// handle's turn flag with the resume flag -- both mean "not safe to
+    /// adopt now". Locking follows the ADR-0056 brief-lock invariant: the map
+    /// read lock is held only to clone the handles; each session is then read
+    /// via `try_session_lock` so an in-flight turn (which holds the session
+    /// lock for its whole duration) degrades that row to `duck_path: None`
+    /// instead of blocking the sweep.
+    pub fn list_live(&self) -> Result<Vec<LiveSessionSnapshot>, SessionError> {
+        let handles: Vec<(SessionId, Arc<SessionHandle>)> = {
+            let map = self
+                .sessions
+                .read()
+                .map_err(|_| SessionError::Engine("session store lock poisoned".into()))?;
+            map.iter()
+                .map(|(id, handle)| (id.clone(), Arc::clone(handle)))
+                .collect()
+        };
+        let mut rows: Vec<LiveSessionSnapshot> = handles
+            .into_iter()
+            .map(|(session_id, handle)| {
+                let in_flight = handle.is_in_flight() || handle.is_resuming();
+                let (duck_path, session_name) = handle
+                    .try_session_lock()
+                    .map(|s| {
+                        (
+                            s.duck_path().map(std::path::PathBuf::from),
+                            s.session_name().map(str::to_string),
+                        )
+                    })
+                    .unwrap_or((None, None));
+                LiveSessionSnapshot {
+                    session_id,
+                    duck_path,
+                    session_name,
+                    in_flight,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        Ok(rows)
     }
 
     /// Mark a session closing, fire cancel, and detach it from the map. Shared

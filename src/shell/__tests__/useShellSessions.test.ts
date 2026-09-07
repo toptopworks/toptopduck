@@ -41,6 +41,9 @@ vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return {
     ...actual,
+    // Issue #842: the startup re-adoption sweep fires on mount; an empty
+    // reply keeps it a no-op.
+    listLiveSessions: vi.fn(async () => []),
     createSession: vi.fn(),
     closeSession: vi.fn(async () => false),
     closeSessionAndWaitRelease: vi.fn(async () => {}),
@@ -89,6 +92,7 @@ import {
   createSession,
   exportSession,
   getSessionName,
+  listLiveSessions,
   mountSkill,
   openDuck,
   onResumeProgress,
@@ -1210,5 +1214,100 @@ describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)
     // writes); the redundant mount stays silent and the sequence resolves
     // regardless.
     expect(setShellError).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dropListener.current = null;
+    document.body.innerHTML = "";
+  });
+
+  it("re-adopts idle live sessions and activates the first", async () => {
+    vi.mocked(listLiveSessions).mockResolvedValue([
+      {
+        session_id: "a",
+        duck_path: "/sessions/a/session.duck",
+        session_name: "分析",
+        in_flight: false,
+      },
+      {
+        session_id: "b",
+        duck_path: "/sessions/b/session.duck",
+        session_name: null,
+        in_flight: false,
+      },
+    ]);
+    const { result, setShellError } = renderSessions();
+    await waitFor(() => expect(result.current.openSessions).toHaveLength(2));
+    // Adopted rows carry the backend's facts and none of the mint-time
+    // pending payloads (the reload already consumed or never had them).
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "a",
+      name: "分析",
+      path: "/sessions/a/session.duck",
+      pendingIngestPaths: [],
+      pendingQuestion: null,
+    });
+    expect(result.current.openSessions[1]).toMatchObject({ sid: "b", name: "" });
+    // Triage Q1: the FIRST adoptable row wins the activation -- not the last
+    // one registerOpen happened to land.
+    expect(result.current.activeSessionId).toBe("a");
+    expect(closeSession).not.toHaveBeenCalled();
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("closes in-flight + unbound rows instead of adopting (triage Q2)", async () => {
+    vi.mocked(listLiveSessions).mockResolvedValue([
+      {
+        session_id: "x",
+        duck_path: "/sessions/x/session.duck",
+        session_name: null,
+        in_flight: true,
+      },
+      { session_id: "y", duck_path: null, session_name: null, in_flight: false },
+      {
+        session_id: "z",
+        duck_path: "/sessions/z/session.duck",
+        session_name: "活的",
+        in_flight: false,
+      },
+    ]);
+    const { result } = renderSessions();
+    await waitFor(() => expect(closeSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.openSessions).toHaveLength(1));
+    // The in-flight turn's session and the lock-degraded unbound row are
+    // closed best-effort (turn cancelled, .duck stays on disk); only the
+    // adoptable row enters the open set.
+    expect(closeSession).toHaveBeenCalledWith("x");
+    expect(closeSession).toHaveBeenCalledWith("y");
+    expect(result.current.openSessions[0]).toMatchObject({ sid: "z" });
+    expect(result.current.activeSessionId).toBe("z");
+  });
+
+  it("is a no-op on a cold start (empty enumeration)", async () => {
+    // Explicitly re-pin the empty reply: clearAllMocks does NOT clear a
+    // prior test's mockResolvedValue, so the default alone would be a leak
+    // hazard -- and the explicit [] documents the cold-start contract.
+    vi.mocked(listLiveSessions).mockResolvedValue([]);
+    const { result } = renderSessions();
+    // Nothing observable to wait for: the empty sweep resolves without
+    // touching state. Flush the microtask queue, then assert.
+    await act(async () => {});
+    expect(listLiveSessions).toHaveBeenCalledTimes(1);
+    expect(result.current.openSessions).toEqual([]);
+    expect(result.current.activeSessionId).toBeNull();
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+
+  it("only logs when the enumeration rejects", async () => {
+    vi.mocked(listLiveSessions).mockRejectedValue(new Error("invoke unavailable"));
+    const { result, setShellError } = renderSessions();
+    await act(async () => {});
+    // Best-effort by design: a failed sweep never surfaces as a shell error
+    // (the reloaded shell lands on the empty state, as before the sweep).
+    expect(result.current.openSessions).toEqual([]);
+    expect(setShellError).not.toHaveBeenCalled();
   });
 });

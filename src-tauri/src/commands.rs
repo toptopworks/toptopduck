@@ -396,6 +396,39 @@ pub fn close_session(
     store.close_and_cleanup_empty(&id)
 }
 
+/// The wire row from `list_live_sessions` (issue #842): one live session the
+/// reloaded frontend can re-adopt (or, for `in_flight`, close and re-open
+/// from disk). Mirrors [`crate::LiveSessionSnapshot`] with the `.duck` path
+/// flattened to a lossy string, the same conversion `create_session`'s reply
+/// uses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveSessionEntry {
+    pub session_id: SessionId,
+    pub duck_path: Option<String>,
+    pub session_name: Option<String>,
+    pub in_flight: bool,
+}
+
+/// Enumerate the store's live sessions for the frontend's startup re-adoption
+/// sweep (issue #842). Read-only; an empty reply (the normal cold start --
+/// no webview reload happened) leaves the caller's open-session set
+/// untouched.
+#[tauri::command]
+pub fn list_live_sessions(
+    store: State<'_, Arc<SessionStore>>,
+) -> Result<Vec<LiveSessionEntry>, SessionError> {
+    Ok(store
+        .list_live()?
+        .into_iter()
+        .map(|row| LiveSessionEntry {
+            session_id: row.session_id,
+            duck_path: row.duck_path.map(|p| p.to_string_lossy().into_owned()),
+            session_name: row.session_name,
+            in_flight: row.in_flight,
+        })
+        .collect())
+}
+
 /// Close a session AND block until the canonical single-writer key is released
 /// (ADR-0063). The delete path's variant of close: `delete_session`'s
 /// `try_acquire` gate (ADR-0035) succeeds only once [`Session::Drop`] has run,
