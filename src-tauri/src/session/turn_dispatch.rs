@@ -56,8 +56,9 @@ use crate::tools::definitions;
 /// fires the app token on expiry, guarded by the turn's generation. Shared
 /// by the yoagent runner and the three ACP turn paths (issue #668) so the
 /// posture lives once. The generation is the watchdog's turn identity: a
-/// timeout that expires after its turn ended (and a successor began) stands
-/// down via [`CancelToken::request_if`] instead of cancelling the successor
+/// timeout that expires after its turn ended (its generation retired at
+/// the guard's drop, or a successor begun) stands down via
+/// [`CancelToken::request_if`] instead of cancelling a successor turn
 /// -- there is no check-then-act window, because the generation and the
 /// request flag share one atomic word (issue #696; the retired `alive` flag
 /// left this race open). catch_unwind keeps the detached thread

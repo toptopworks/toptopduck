@@ -231,6 +231,13 @@ pub fn serve_connection(
     let mut outcome = GatewayOutcome::default();
     loop {
         if ctx.cancel.is_requested() {
+            // The serve's one visible trace on a cancel exit (issue #849:
+            // this arm firing with no user cancel in the window was the
+            // invisible gateway drop).
+            log::debug!(
+                target: "toptopduck::gateway",
+                "serve loop exiting on the cancel flag"
+            );
             return Ok(outcome);
         }
         // Engine-completion signal (ADR-0085 serve-termination consequence):
@@ -306,6 +313,14 @@ fn accept_bridge(
     let stop = Instant::now() + deadline;
     loop {
         if cancel.is_requested() {
+            // Companion to the serve loop's arm: exiting here drops the
+            // listener before the bridge connects (issue #849's symptom
+            // surface); with no user cancel in the window this line is the
+            // red flag.
+            log::debug!(
+                target: "toptopduck::gateway",
+                "accept_bridge exiting on the cancel flag before a bridge connected"
+            );
             return Ok(None);
         }
         match listener.accept() {
