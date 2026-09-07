@@ -729,8 +729,10 @@ impl super::Session {
         // loops poll is_requested() between items so a user cancel lands as
         // [`ResumeError::Cancelled`] (a clean signal), not a masked partial
         // state indistinguishable from data corruption. Drop on exit clears
-        // in-flight and the interrupt slot (RAII -- every exit from open_duck,
-        // success or error, drops the guard). The resumed Session reuses the
+        // in-flight, the interrupt slot, and the turn's generation -- a stop
+        // that landed mid-resume is consumed there instead of persisting to
+        // the first ask (RAII -- every exit from open_duck, success or error,
+        // drops the guard). The resumed Session reuses the
         // SAME Arc<CancelToken>, so the next ask's begin_turn composes cleanly.
         let _guard = cancel.begin_turn();
 

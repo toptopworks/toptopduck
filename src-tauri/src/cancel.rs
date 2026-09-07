@@ -109,8 +109,8 @@ impl CancelToken {
     /// Fire the cancel only when `generation` is still the current turn's:
     /// the wall-clock watchdog's turn identity (issue #696). The generation
     /// and the request flag share one atomic word, so a turn boundary
-    /// (`begin_turn` swaps in the next generation) and a late watchdog
-    /// decision cannot interleave -- the watchdog either fires inside its own
+    /// (`begin_turn` or `retire_generation` swaps in the next generation)
+    /// and a late watchdog decision cannot interleave -- the watchdog either fires inside its own
     /// turn or observes the changed generation and stands down. Returns
     /// whether the cancel fired.
     pub fn request_if(&self, generation: TurnGeneration) -> bool {
@@ -173,12 +173,12 @@ impl CancelToken {
     }
 
     /// Begin a turn: clear any stale request from the prior turn and mark a
-    /// query as in-flight. Returns an [`InFlightGuard`] whose `Drop` clears the
-    /// in-flight flag and the interrupt slot (RAII -- every exit from `ask`,
-    /// including early Cancelled, drops the guard). The guard also carries the
-    /// turn's generation for the optional timeout watchdog: a slow timer's
-    /// cancel is generation-guarded (`request_if`) so it cannot fire into the
-    /// next turn.
+    /// query as in-flight. Returns an [`InFlightGuard`] whose `Drop` clears
+    /// the in-flight flag, the interrupt slot, and the turn's generation
+    /// (RAII -- every exit from `ask`, including early Cancelled, drops the
+    /// guard). The guard also carries the turn's generation for the optional
+    /// timeout watchdog: a slow timer's cancel is generation-guarded
+    /// (`request_if`) so it cannot fire into the next turn.
     pub fn begin_turn(self: &Arc<Self>) -> InFlightGuard {
         // Advance to the next generation with the flag cleared in ONE swap so
         // the new turn starts unrequested: a stale `requested=1` from a prior
@@ -210,7 +210,17 @@ impl CancelToken {
     /// after (honored by the pull's row loop).
     pub fn retire_generation(&self) {
         let generation = TurnGeneration((self.state.load(Ordering::SeqCst) >> 1) + 1);
-        self.state.swap(generation.0 << 1, Ordering::SeqCst);
+        let old = self.state.swap(generation.0 << 1, Ordering::SeqCst);
+        // The one visible trace of the #849 blind spot: a retire that
+        // consumed something means a request landed with no turn left to
+        // cancel -- expected for a turn-ending stop, a red flag if no user
+        // cancel happened in that window.
+        if old & 1 == 1 {
+            log::debug!(
+                target: "toptopduck::cancel",
+                "retire_generation consumed a leftover cancel request"
+            );
+        }
     }
 }
 

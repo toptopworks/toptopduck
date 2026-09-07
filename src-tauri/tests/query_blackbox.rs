@@ -559,12 +559,12 @@ fn export_and_copy_refuse_above_the_confirm_gate_until_confirmed() {
 
 #[test]
 fn a_leftover_cancel_request_does_not_kill_a_later_full_pull() {
-    // Issue #779 review finding: the cancel flag only `begin_turn` clears,
-    // and a full pull is not a turn -- so a request left over from the last
-    // cancelled turn or stopped pull must not silently kill the next pull on
-    // its first row (a quiet no-op the user reads as a dead button). The
-    // pull's start consumes the leftover request; a request fired DURING the
-    // scan is the mid-scan test below.
+    // Issue #779 review finding: a full pull is not a turn -- so a request
+    // left over from the last cancelled turn or stopped pull must not
+    // silently kill the next pull on its first row (a quiet no-op the user
+    // reads as a dead button). The leftover is consumed by retire_generation
+    // (the turn's guard drop, issue #849, or the pull's own start); a
+    // request fired DURING the scan is the mid-scan test below.
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
         .scripted_tool_turn_seq("大结果", productive("SELECT 1 AS n UNION ALL SELECT 2"));
@@ -679,13 +679,13 @@ fn copy_observe_the_cancel_token_mid_scan() {
 
 #[test]
 fn a_leftover_watchdog_window_does_not_kill_a_full_pull() {
-    // Issue #779 review: the wall-clock watchdog of the turn that produced
-    // the result has no disarm -- at its 120s mark it fires
-    // request_if(the generation it captured). The pull's start retires the
-    // token's generation (the begin_turn word update minus in-flight), so
-    // that request_if stands down instead of killing the pull mid-scan and
-    // landing as a quiet Cancelled. The stale generation is taken the way a
-    // real watchdog holds it: from the last begin_turn before the pull.
+    // Issue #779 review: a watchdog that sleeps past its turn must not kill
+    // a later pull -- at its 120s mark it fires request_if(the generation it
+    // captured), and that generation is already retired: the turn's guard
+    // drop retires it (issue #849), so the request_if stands down instead of
+    // killing the pull mid-scan and landing as a quiet Cancelled. The stale
+    // generation is taken the way a real watchdog holds it: from the last
+    // begin_turn of the turn that produced the result.
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new().scripted_tool_turn_seq(
         "大结果",
@@ -698,7 +698,7 @@ fn a_leftover_watchdog_window_does_not_kill_a_full_pull() {
     session.ask("大结果"); // result_1: 1_000_000 rows
 
     // The turn ended; a watchdog from it would still hold the turn's
-    // generation (nothing disarms it).
+    // generation, already retired by that turn's guard drop (issue #849).
     let guard = cancel.begin_turn();
     let stale_generation = guard.generation();
     drop(guard);
@@ -1685,8 +1685,8 @@ fn a_turn_after_a_cancelled_turn_starts_clean_with_no_stale_request() {
     ));
     // The cancelled turn's guard drop already consumed the flag (issue
     // #849: it must not sit between turns, where the external serve path
-    // reads it before the next begin_turn could clear it); either way the
-    // next ask starts clean and runs to completion.
+    // reads it before the next begin_turn could clear it); the next ask
+    // starts clean and runs to completion.
     assert!(!cancel.is_requested());
     let (name, rows, _) = materialized(session.lock().unwrap().ask("正常"));
     assert_eq!(name, "result_1"); // promoted, not cancelled
