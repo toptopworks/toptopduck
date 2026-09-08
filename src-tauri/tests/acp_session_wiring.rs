@@ -246,7 +246,7 @@ fn external_overlong_gateway_request_fails_the_turn() {
     let outcome = session.ask("run one over-long gateway tool call");
     std::env::set_var("PATH", old_path);
     match outcome {
-        TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
             assert!(
                 detail.contains("gateway serve failed"),
                 "the failure names its face: {detail}"
@@ -256,7 +256,7 @@ fn external_overlong_gateway_request_fails_the_turn() {
                 "the framing cause rides the detail: {detail}"
             );
         }
-        other => panic!("gateway_overlong_call must land Failed(Execute), got {other:?}"),
+        other => panic!("gateway_overlong_call must land Failed(Runtime), got {other:?}"),
     }
 }
 

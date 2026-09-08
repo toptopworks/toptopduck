@@ -1508,13 +1508,13 @@ impl Session {
         on_phase: O,
         inputs: &TurnInputs<'_>,
     ) -> (TurnOutcome, Vec<LoopRound>) {
-        // 1. Resolve the CLI binary. Not-on-PATH -> a transient turn failure
-        //    (the engine never spawns; nothing to clean up).
+        // 1. Resolve the CLI binary. Not-on-PATH -> an external-runtime
+        //    failure (the engine never spawns; nothing to clean up).
         let binary = match detect_adapter(&adapter) {
             Some(p) => p,
             None => {
                 return (
-                    TurnOutcome::Failed(TurnFailure::Execute {
+                    TurnOutcome::Failed(TurnFailure::Runtime {
                         detail: format!("external runtime `{}` not found on PATH", adapter.id),
                     }),
                     Vec::new(),
@@ -1528,7 +1528,7 @@ impl Session {
             Ok(h) => h,
             Err(e) => {
                 return (
-                    TurnOutcome::Failed(TurnFailure::Execute {
+                    TurnOutcome::Failed(TurnFailure::Runtime {
                         detail: format!("gateway bind failed: {e}"),
                     }),
                     Vec::new(),
@@ -1538,13 +1538,14 @@ impl Session {
         // 3. Build the bridge MCP descriptor. The CLI launches this binary as
         //    its MCP server; the bridge reads port + token from env and
         //    connects back to the gateway (ADR-0085 per-bridge lifecycle). A
-        //    missing bin path surfaces as a transient turn failure (the gateway
-        //    was bound but never served; dropping the handle releases the port).
+        //    missing bin path surfaces as an external-runtime failure (the
+        //    gateway was bound but never served; dropping the handle releases
+        //    the port).
         let bin_path = match bridge_bin_path() {
             Ok(p) => p,
             Err(detail) => {
                 return (
-                    TurnOutcome::Failed(TurnFailure::Execute { detail }),
+                    TurnOutcome::Failed(TurnFailure::Runtime { detail }),
                     Vec::new(),
                 );
             }
@@ -1681,13 +1682,14 @@ impl Session {
                 gateway_result,
             )
         });
-        // 6. A serve error after spawn surfaces as a transient failure; the
-        //    ACP trace still rides (the CLI may have done work before the gap).
+        // 6. A serve error after spawn surfaces as an external-runtime
+        //    failure; the ACP trace still rides (the CLI may have done work
+        //    before the gap).
         let gateway_outcome = match gateway_result {
             Ok(o) => o,
             Err(e) => {
                 return (
-                    TurnOutcome::Failed(TurnFailure::Execute {
+                    TurnOutcome::Failed(TurnFailure::Runtime {
                         detail: format!("gateway serve failed: {e}"),
                     }),
                     acp_outcome.trace,
@@ -2318,6 +2320,7 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
             TurnOutcome::Failed(TurnFailure::InvalidConfig { detail })
         }
         Termination::Transient(detail) => TurnOutcome::Failed(TurnFailure::Execute { detail }),
+        Termination::Runtime(detail) => TurnOutcome::Failed(TurnFailure::Runtime { detail }),
     }
 }
 

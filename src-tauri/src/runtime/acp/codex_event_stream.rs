@@ -428,7 +428,7 @@ pub(super) fn run_codex_event_stream(
         Ok(c) => c,
         Err(e) => {
             return outcome(
-                Termination::Transient(format!("failed to spawn codex exec `{}`: {e}", adapter.id)),
+                Termination::Runtime(format!("failed to spawn codex exec `{}`: {e}", adapter.id)),
                 Vec::new(),
             )
         }
@@ -447,7 +447,7 @@ pub(super) fn run_codex_event_stream(
         super::process::StdinWriteOutcome::Done => {}
         super::process::StdinWriteOutcome::Failed(e) => {
             return outcome(
-                Termination::Transient(format!("stdin write failed: {e}")),
+                Termination::Runtime(format!("stdin write failed: {e}")),
                 Vec::new(),
             )
         }
@@ -501,10 +501,10 @@ pub(super) fn run_codex_event_stream(
                 // stdout closed before a terminal event. If the tracker holds
                 // terminal text, treat it as success (codex may close stdout
                 // after the final message without an explicit turn.completed);
-                // otherwise it is a transient failure.
+                // otherwise it is an external-runtime failure.
                 termination = Some(
                     pump.tracker
-                        .text_or_transient("codex closed stdout without a terminal event"),
+                        .text_or_runtime("codex closed stdout without a terminal event"),
                 );
                 break;
             }
@@ -520,9 +520,10 @@ pub(super) fn run_codex_event_stream(
 
     let term = termination.unwrap_or_else(|| {
         // No terminal event and no error — the pump exited without resolution.
-        // Treat the terminal text as the answer if any; otherwise transient.
+        // Treat the terminal text as the answer if any; otherwise an
+        // external-runtime failure.
         pump.tracker
-            .text_or_transient("codex turn ended without a terminal event")
+            .text_or_runtime("codex turn ended without a terminal event")
     });
 
     // Close the trailing round's thought stream before the settle (the
@@ -568,7 +569,7 @@ impl JsonPump {
             // would confuse the UI. No-op.
             CodexEvent::TurnStarted => None,
             CodexEvent::TurnCompleted => Some(Termination::Text(self.tracker.terminal_text())),
-            CodexEvent::TurnFailed { error } => Some(Termination::Transient(error)),
+            CodexEvent::TurnFailed { error } => Some(Termination::Runtime(error)),
             CodexEvent::AgentMessage { text } => {
                 // Empty text (an `agent_message` item carrying an empty
                 // text string) would open a ghost round and fire a phantom
@@ -1608,7 +1609,7 @@ mod tests {
         );
         assert_eq!(pump.tracker.terminal_text(), "final answer");
         assert_eq!(
-            pump.tracker.text_or_transient("eof"),
+            pump.tracker.text_or_runtime("eof"),
             Termination::Text("final answer".into())
         );
         // Settling under the promoted Text drops the tail (its prose rode
@@ -1688,7 +1689,7 @@ mod tests {
         );
         assert_eq!(pump.tracker.terminal_text(), "checking");
         assert_eq!(
-            pump.tracker.text_or_transient("eof"),
+            pump.tracker.text_or_runtime("eof"),
             Termination::Text("checking".into())
         );
         let rounds = pump

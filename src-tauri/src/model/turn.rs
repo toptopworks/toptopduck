@@ -76,11 +76,11 @@ pub struct VizSpec {
 /// so the kind survives save/resume -- a resumed failure renders with the same
 /// locale message it had live, not a flattened string.
 ///
-/// `detail` (Execute / Resource) is a technical, engine-level explanation that
-/// rides the frontend's collapsed "Technical details" fold, never the primary
-/// message (ADR-0029: the detail is a DuckDB / engine string, audited to carry
-/// no API key). `StaleReference` carries the dead reference name so the locale
-/// template can name it.
+/// `detail` (Execute / Resource / Runtime) is a technical, engine-level
+/// explanation that rides the frontend's collapsed "Technical details" fold,
+/// never the primary message (ADR-0029: the detail is a DuckDB / engine
+/// string, audited to carry no API key). `StaleReference` carries the dead
+/// reference name so the locale template can name it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum TurnFailure {
@@ -90,6 +90,14 @@ pub enum TurnFailure {
     /// adapter's own HTTP retry (the transport detail rides `detail`; blind
     /// retry is abolished). Rides the technical fold.
     Execute { detail: String },
+    /// The external runtime's wiring or transport failed (issue #852): the
+    /// CLI binary was not on PATH, the gateway could not bind / serve, the
+    /// bridge binary was missing, or the ACP protocol layer rejected or
+    /// dropped the exchange (`detail` says so). Split out of
+    /// [`Self::Execute`] because these failures mostly strike before any
+    /// query starts executing -- the primary wording points the user at the
+    /// runtime, not the SQL. Rides the technical fold like Execute.
+    Runtime { detail: String },
     /// An engine-level resource cap aborted the turn (ADR-0005 L3): memory
     /// ceiling, result-row ceiling, or a blocked filesystem function. NOT
     /// retried -- the same SQL hits the same wall. `detail` is the engine's cap
@@ -124,6 +132,7 @@ impl std::fmt::Display for TurnFailure {
         // to the webview.
         match self {
             Self::Execute { detail } => write!(f, "turn failed (budget exhausted): {detail}"),
+            Self::Runtime { detail } => write!(f, "turn failed (external runtime): {detail}"),
             Self::Resource { detail } => write!(f, "turn aborted by resource cap: {detail}"),
             Self::NotWired => write!(f, "turn failed: no LLM provider wired"),
             Self::InvalidConfig { detail } => {

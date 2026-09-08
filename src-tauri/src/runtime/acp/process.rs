@@ -134,7 +134,7 @@ pub(super) enum StdinWriteOutcome {
     /// bounded, best-effort reap per [`kill_and_reap`]) or the send never
     /// reached the writer at all (a serialization failure with the child
     /// still alive) -- callers settle with a kill either way. The OS error
-    /// rides along for the caller's `Transient` message.
+    /// rides along for the caller's `Runtime` message.
     Failed(std::io::Error),
     /// Cancel landed mid-write; the child was killed (which breaks the pipe
     /// and unblocks the writer) and reaped (bounded, best-effort).
@@ -208,7 +208,7 @@ pub(super) fn write_prompt_with_cancel(
             return match writer.join() {
                 Ok(Ok(())) => StdinWriteOutcome::Done,
                 // The CLI died mid-write: the drivers' original
-                // reap-then-Transient shape.
+                // reap-then-Runtime shape.
                 Ok(Err(e)) => {
                     log::warn!(target: "toptopduck::acp", "stdin prompt write failed: {e}");
                     kill_and_reap(child);

@@ -661,7 +661,7 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
 }
 
 /// An agent that dies before draining the oversized `session/prompt` breaks
-/// the write mid-pipe: the turn settles as the Transient the engine has
+/// the write mid-pipe: the turn settles as the Runtime the engine has
 /// always produced for a dead-channel prompt send -- the
 /// `session/prompt: broken pipe before send` contract stays pinned across
 /// the #813 write fix (the #808 codex peer's rationale).
@@ -683,10 +683,10 @@ fn cli_death_during_stdin_write_settles_transient() {
     let start = std::time::Instant::now();
     let outcome = eng.run(&big, &fake_cli(), &approval, &sink, |_| {});
     match &outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(
                 msg.contains("session/prompt: broken pipe before send"),
-                "expected the broken-pipe prompt send to ride the Transient: {msg}"
+                "expected the broken-pipe prompt send to ride the Runtime: {msg}"
             );
             // The ca64bc7 rider: the io detail rides along after the frozen
             // prefix -- pin the suffix so the detail cannot silently vanish.
@@ -695,7 +695,7 @@ fn cli_death_during_stdin_write_settles_transient() {
                 "expected the io detail to ride along: {msg}"
             );
         }
-        other => panic!("blocked prompt write + CLI death -> Transient: {other:?}"),
+        other => panic!("blocked prompt write + CLI death -> Runtime: {other:?}"),
     }
     // The fixture's own death breaks the pipe: no cancel thread, no 30s hold
     // on this path; 5s as above -- the reap can still eat its 2s deadline.
@@ -772,14 +772,14 @@ fn runaway_output_cancel_keeps_termination_and_partial_prose() {
     );
 }
 
-/// A prompt-response RPC error surfaces as a Transient carrying the agent's
+/// A prompt-response RPC error surfaces as a Runtime carrying the agent's
 /// message, NOT "closed stdout" (the diagnostic-misdirection regression fixed
 /// alongside this fixture).
 #[test]
-fn prompt_rpc_error_lands_as_transient_with_the_agent_message() {
+fn prompt_rpc_error_lands_as_runtime_with_the_agent_message() {
     let (outcome, _) = run("prompt_error", 24);
     match &outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(
                 msg.contains("agent internal error"),
                 "carries the agent's message: {msg}"
@@ -789,25 +789,25 @@ fn prompt_rpc_error_lands_as_transient_with_the_agent_message() {
                 "must not misreport as EOF: {msg}"
             );
         }
-        other => panic!("expected Transient, got {other:?}"),
+        other => panic!("expected Runtime, got {other:?}"),
     }
 }
 
-/// A mid-turn crash (the fixture closes stdout) lands as a transient failure,
-/// not a hang.
+/// A mid-turn crash (the fixture closes stdout) lands as an external-runtime
+/// failure, not a hang.
 #[test]
-fn crash_mid_turn_lands_as_transient() {
+fn crash_mid_turn_lands_as_runtime() {
     let (outcome, _) = run("crash", 24);
     match outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(msg.contains("closed stdout"), "got: {msg}");
         }
-        other => panic!("expected Transient, got {other:?}"),
+        other => panic!("expected Runtime, got {other:?}"),
     }
 }
 
 /// Issue #628: a crash after partial prose keeps the prose on the trace's
-/// tail round. The Eof exit lands Transient (the ACP-native path never
+/// tail round. The Eof exit lands Runtime (the ACP-native path never
 /// promotes partial prose to Text, unlike the stream paths' EOF fallback),
 /// so the trace is the prose's only home -- clearing it there would lose it
 /// from every surface at once.
@@ -815,8 +815,8 @@ fn crash_mid_turn_lands_as_transient() {
 fn crash_mid_prose_keeps_partial_prose_in_trace() {
     let (outcome, _) = run("crash", 24);
     assert!(
-        matches!(outcome.termination, Termination::Transient(_)),
-        "the Eof exit stays Transient: {:?}",
+        matches!(outcome.termination, Termination::Runtime(_)),
+        "the Eof exit stays Runtime: {:?}",
         outcome.termination
     );
     assert_eq!(outcome.trace.len(), 1, "the tail round survives");
@@ -829,30 +829,30 @@ fn crash_mid_prose_keeps_partial_prose_in_trace() {
 
 /// A crash between initialize and session/new exercises the round-trip's own
 /// EOF path (distinct from the prompt pump's): the shared loop's Disconnected
-/// maps onto the frozen "ACP agent closed stdout" transient (issue #540 pins
-/// the engine-site round-trip mapping, previously untested).
+/// maps onto the frozen "ACP agent closed stdout" Runtime failure (issue #540
+/// pins the engine-site round-trip mapping, previously untested).
 #[test]
-fn crash_during_handshake_lands_as_transient_via_roundtrip_eof() {
+fn crash_during_handshake_lands_as_runtime_via_roundtrip_eof() {
     let (outcome, _) = run("handshake_crash", 24);
     match outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(
                 msg.contains("ACP agent closed stdout"),
                 "the round-trip EOF carries the frozen wording: {msg}"
             );
         }
-        other => panic!("expected Transient, got {other:?}"),
+        other => panic!("expected Runtime, got {other:?}"),
     }
 }
 
 /// A session/new response whose result has the wrong type fails the
 /// round-trip's response parse (the shared loop's Parse arm -> the frozen
-/// "response parse:" transient), never a hang (issue #540).
+/// "response parse:" Runtime failure), never a hang (issue #540).
 #[test]
-fn malformed_session_new_response_is_transient_parse_failure() {
+fn malformed_session_new_response_is_runtime_parse_failure() {
     let (outcome, _) = run("session_new_malformed", 24);
     match outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(
                 msg.contains("response parse:"),
                 "carries the parse prefix: {msg}"
@@ -862,7 +862,7 @@ fn malformed_session_new_response_is_transient_parse_failure() {
                 "must not misreport as EOF: {msg}"
             );
         }
-        other => panic!("expected Transient, got {other:?}"),
+        other => panic!("expected Runtime, got {other:?}"),
     }
 }
 
@@ -1362,7 +1362,7 @@ fn acp_turn_injects_model_and_thought_level() {
 }
 
 /// A CLI that rejects the config injection (RPC error on
-/// `session/set_config_option`) fails the turn honestly as a Transient
+/// `session/set_config_option`) fails the turn honestly as a Runtime
 /// naming the config id and the rejected value -- the acknowledged posture,
 /// now behaviorally pinned (the fixture acks only its catalog-declared ids,
 /// so an off-catalog id lands here too).
@@ -1381,7 +1381,7 @@ fn acp_turn_set_config_option_rejection_fails_the_turn() {
     std::env::set_var("ACP_FAKE_TRACE_FILE", &trace.path);
     let outcome = eng.run(&input, &fake_cli(), &approval, &sink, |_| {});
     match outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(
                 msg.contains("session/set_config_option"),
                 "the failure must name the injection call: {msg}"
@@ -1391,7 +1391,7 @@ fn acp_turn_set_config_option_rejection_fails_the_turn() {
                 "the failure must name the config id and the rejected value in order: {msg}"
             );
         }
-        other => panic!("expected Transient, got {other:?}"),
+        other => panic!("expected Runtime, got {other:?}"),
     }
     // The rejected request still reached the CLI (the fixture's reject is a
     // response, not a dropped request).

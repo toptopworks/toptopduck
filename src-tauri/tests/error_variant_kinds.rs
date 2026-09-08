@@ -57,6 +57,9 @@ fn turn_failure() -> Vec<TurnFailure> {
         TurnFailure::Execute {
             detail: String::new(),
         },
+        TurnFailure::Runtime {
+            detail: String::new(),
+        },
         TurnFailure::Resource {
             detail: String::new(),
         },
