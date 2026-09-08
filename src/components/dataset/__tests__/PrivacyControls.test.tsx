@@ -126,6 +126,10 @@ describe("PrivacyControls", () => {
     expect(classes).toContain("bg-info/10");
     expect(classes).toContain("border-info/40");
     expect(classes).toContain("text-info");
+    // The bare width utility is the tint's visible-edge half: the color
+    // class alone styles no border, and dropping it survives the color
+    // pins above (split-on-whitespace keeps it distinct from border-info/40).
+    expect(classes).toContain("border");
     expect(classes).not.toContain("bg-blue-50");
     expect(classes).not.toContain("border-blue-200");
     // The <strong> heading rides font-semibold: the weight discipline caps

@@ -37,9 +37,11 @@ interface PrivacyControlsProps {
 // punctuation), whereas the Alert's grid + AlertTitle/AlertDescription slot
 // structure serves block disclosure content (the DisclosureBanner info surface
 // from #108) -- a different surface from this per-dataset summary. The info
-// tint first rode Tailwind's blue scale (bg-blue-50 / border-blue-200, the
-// nearest-scale equivalent of the retired #f4f8ff / #d6e4ff) with no dark
-// variant -- under .dark it rendered a near-white block inside the dark
+// tint first rode Tailwind's blue scale (bg-blue-50, the nearest-scale
+// stand-in for the retired #f4f8ff, and border-blue-200 -- one step darker
+// than the nearest blue-100 so the edge stays visible, standing in for the
+// retired #d6e4ff) with no dark variant -- under .dark it rendered a
+// near-white block inside the dark
 // panel. Issue #864 promoted it to the --info token (the #108 --warning
 // promotion precedent) in the warning tint's shape (border-info/40 +
 // bg-info/10 + text-info), so both themes resolve it; the earlier

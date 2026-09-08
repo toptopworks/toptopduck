@@ -55,6 +55,9 @@ describe("DatasetDetail", () => {
       screen.getByRole("heading", { level: 2 }),
       ...screen.getAllByRole("heading", { level: 3 }),
     ];
+    // The count pins the enumeration itself: deleting a heading outright
+    // would pass the per-heading loop below untouched.
+    expect(headings).toHaveLength(3);
     for (const heading of headings) {
       expect(heading.className.split(/\s+/)).toContain("text-base");
       expect(heading.className.split(/\s+/)).toContain("font-semibold");

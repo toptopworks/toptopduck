@@ -54,8 +54,10 @@
      .viz-disclosure / .stale-disclosure tints the legacy styles.css owned, so
      the shadcn Alert warning variant consumes a token, not a hardcoded hex. */
   --warning: #b45309;
-  /* info blue (ADR-0050 token model, issue #864): the informational
-     disclosure semantic (the privacy summary's outgoing-payload tint).
+  /* info blue (ADR-0050 token model, issue #864): the informational-tint
+     semantic (the privacy summary's outgoing-payload tint; block
+     informational disclosures ride the Alert default surface, not this
+     token).
      Promoted from the hardcoded Tailwind blue scale the summary used to
      ride, which had no dark variant -- the token flips like --warning
      (the #108 warning promotion precedent) so the tint reads in both

@@ -376,7 +376,7 @@ The structural signature is a **three-column shell**: session sidebar (220px) + 
 - **Accent** (`{colors.accent}` — #e6f4f1): Light teal tint for active/highlighted states (active-source indicator, selected session entry).
 - **Destructive** (`{colors.destructive}` — #b00020): Error alerts, delete confirmations.
 - **Warning** (`{colors.warning}` — #b45309): Stale-result indicators, viz-degradation warnings. Used as indicator dots and alert tints — never as solid fills.
-- **Info** (`{colors.info}` — #1d4ed8): Informational disclosure tints (the privacy outgoing-payload summary). Same tint discipline as warning — never as solid fills.
+- **Info** (`{colors.info}` — #1d4ed8): Informational disclosure tints (the privacy outgoing-payload summary). Same tint discipline as warning — never as solid fills. Block informational disclosures (the settings privacy banner, the ADR-0057 hints) ride the Alert default surface; `--info` is the inline tint role.
 
 ### Dark Mode Surfaces
 - **Canvas Dark** (`{colors.canvas-dark}` — #0f1410): The dark page floor. RGB 15, 20, 16 — the G channel is highest, giving the surface a subtle green undertone that is visually harmonious with the teal brand.
@@ -430,7 +430,7 @@ The **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, Monaco, Co
 - **Negative tracking on display only.** `{typography.display}` and `{typography.headline-lg}` carry negative letter-spacing for tighter reading. Body and below have zero tracking.
 - **Monospace on every code surface.** SQL, data values, trace output, file paths, and result identifiers always render in the system monospace stack — never in the sans stack.
 - **Uppercase labels.** `{typography.label-caps}` defines the typographic properties (weight, tracking, size); apply CSS `text-transform: uppercase` at the element level. (Note: badge variants use `{typography.badge}` — medium weight, no uppercase — for a softer workbench feel; `{typography.label-caps}` is reserved for explicit section labels.)
-- **Tailwind mapping.** The Tailwind column shows the nearest utility class. Ad-hoc values like `text-[0.82rem]` and `text-[0.85rem]` are visual-polish variants within the `{typography.body-sm}` range.
+- **Tailwind mapping.** The Tailwind column shows the nearest utility class. Ad-hoc values like `text-[0.82rem]` and `text-[0.85rem]` are visual-polish variants within the `{typography.body-sm}` range; `text-[13px]` is the `{typography.code}` token's exact-size idiom.
 
 ## Layout
 

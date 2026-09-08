@@ -72,6 +72,26 @@ describe("WorkingSetList", () => {
   // mounts only for a non-empty set -- its empty-branch test moved to the
   // WorkingSetEmptyState suite.
 
+  it("pins the row-count annotation to the 12px caption token (issue #864)", () => {
+    // The workspace body's 14px baseline (issue #864) inherits into the
+    // annotation's parent chain, and the preflight small rule (80%) would
+    // resolve an unsized small at 11.2px -- below the caption token, the
+    // ladder's floor. text-xs pins 12px independent of that chain.
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName="people"
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const small = screen
+      .getByRole("button", { name: /^people/ })
+      .querySelector("small");
+    expect(small).not.toBeNull();
+    expect(small!.className.split(/\s+/)).toContain("text-xs");
+  });
+
   // --- Rename dialog (issue #759): the native window.prompt retired onto an
   // in-app Dialog + Input (ADR-0037 semantics unchanged -- display label only,
   // the reference name survives).
