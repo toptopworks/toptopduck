@@ -243,7 +243,11 @@ pub struct PromptResult {
 /// Why the agent stopped the turn (ACP `StopReason`). Serialized as a bare
 /// lowercase string by the `rename_all` so it matches the schema's enum form
 /// -- the variant names the schema crate named by [`MODELED_SCHEMA`] defines
-/// (`end_turn`, not `success`; `max_turn_requests`, not `max_turns`).
+/// (`end_turn`, not `success`; `max_turn_requests`, not `max_turns`). Unlike
+/// the streaming surfaces' lenient variants, an unknown inbound variant is
+/// deliberately a hard parse error: the terminal verdict must map onto a
+/// Termination (the engine surfaces the serde diagnostic as a Transient
+/// turn failure), never a silent degradation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -548,8 +552,9 @@ pub enum McpServer {
     /// executable; `args` / `env` carry the session-addressing parameter
     /// (slice 9b). All four fields are mandatory on the wire: `args` is sent
     /// even when empty and `env` is the schema's `{name, value}` pair array
-    /// (issue #851 -- the optional `_meta` member is deliberately not sent,
-    /// the `SetSessionConfigOptionRequest` convention).
+    /// (issue #851 -- the optional `_meta` members, descriptor- and
+    /// entry-level, are deliberately not sent, the
+    /// `SetSessionConfigOptionRequest` convention).
     Stdio {
         name: String,
         command: String,
@@ -835,9 +840,10 @@ mod tests {
     /// Outbound `session/prompt` raw pin (the request-side raw-pin family
     /// above): the content array rides under the field name `prompt` -- the
     /// shape the schema crate named by [`MODELED_SCHEMA`] defines
-    /// (`PromptRequest.prompt`). A strict agent (opencode, issue #851
-    /// real-machine acceptance) rejects the request with -32602 when the
-    /// array rides any other key.
+    /// (`PromptRequest.prompt`). A strict agent (opencode) rejects the
+    /// request with -32602 when the array rides any other key (recorded in
+    /// commit 8106638, the follow-up real-machine acceptance of issue
+    /// #851).
     #[test]
     fn session_prompt_params_pin_outbound_schema_shape() {
         let req = Request::new(

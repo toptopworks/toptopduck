@@ -622,7 +622,7 @@ impl ClaudePump {
                     return Some(Termination::Text(final_text));
                 }
                 // The agent's own turn ceiling maps onto the execution-level
-                // StepCap (the ACP path's MaxTurns precedent).
+                // StepCap (the ACP path's MaxTurnRequests precedent).
                 if subtype.contains("max_turns") {
                     return Some(Termination::StepCap(self.step_cap));
                 }
@@ -1404,7 +1404,7 @@ mod tests {
 
     /// An error result maps to a Transient carrying the CLI's detail; the
     /// max-turns subtype maps onto the execution-level StepCap (the ACP
-    /// MaxTurns precedent).
+    /// MaxTurnRequests precedent).
     #[test]
     fn result_error_maps_transient_and_max_turns_step_cap() {
         let mut pump = pump_with_bridge();

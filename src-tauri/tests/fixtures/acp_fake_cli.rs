@@ -396,6 +396,23 @@ fn play_scenario(
             notify(out, agent_message("the answer is 42"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // `prompt_response_raw` (issue #851): the prompt response as a raw
+        // schema-shaped line -- `stopReason: "end_turn"`, the spelling the
+        // schema crate named by `wire::MODELED_SCHEMA` defines. The typed
+        // respond_prompt serializes OUR StopReason (self consistency only);
+        // this line pins the inbound parse against the real-agent spelling
+        // (a wrong variant name must fail the parse).
+        "prompt_response_raw" => {
+            notify(out, agent_message("raw end_turn settles as text"));
+            write_line(
+                out,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "result": {"stopReason": "end_turn"},
+                }),
+            );
+        }
         // Issue #702 (PR #709 review): echo every text block the engine sent
         // in the `session/prompt` params back as one agent message,
         // block-separated. Stdout is the engine's protocol channel, so the
@@ -488,8 +505,8 @@ fn play_scenario(
             raw_session_update(out, "agent_message_chunk", "real terminal");
             respond_prompt(out, &id, StopReason::EndTurn);
         }
-        // Issue #611: prose alongside the batch, then Success with no trailing
-        // message stretch -- the terminal text falls back to the accumulated
+        // Issue #611: prose alongside the batch, then end_turn with no
+        // trailing message stretch -- the terminal text falls back to the accumulated
         // prose (the fallback semantics this slice must preserve).
         "midturn_prose_no_terminal" => {
             notify(out, agent_message("checking alongside"));
@@ -611,7 +628,7 @@ fn play_scenario(
             for i in 0..RUNAWAY_LINES {
                 notify(out, agent_message(&format!("runaway line {i}")));
             }
-            // This loop never produces a Success on its own: like the stuck
+            // This loop never produces an end_turn on its own: like the stuck
             // scenario, only the engine's cancel ends it.
             loop {
                 if *cancel_seen {

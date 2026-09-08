@@ -1254,6 +1254,19 @@ fn raw_schema_session_new_shape_parses_and_discovers() {
     assert_fake_catalog(d);
 }
 
+/// The prompt response as a raw schema-shaped line (`stopReason:
+/// "end_turn"`, issue #851): the turn must settle as Text. The typed
+/// fixture path serializes the crate's own `StopReason`, so only this raw
+/// line discriminates the inbound spelling end to end.
+#[test]
+fn raw_schema_stop_reason_end_turn_settles_as_text() {
+    let (outcome, _, _) = run_with_spec(&gemini_cli(), "prompt_response_raw", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "raw end_turn settles as text"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
 /// A handshake failure exits with `discovered_runtime: None` (discovery only
 /// exists once session/new answered).
 #[test]
