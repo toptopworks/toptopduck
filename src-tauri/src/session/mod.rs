@@ -868,17 +868,33 @@ impl Session {
 
     /// Record the turn's discovered runtime catalog (see
     /// [`Self::last_discovered_runtime`]). Called by
-    /// [`Self::run_external_turn`] before the outcome mapping; takes a bare
-    /// value -- a post-handshake ACP exit always carries a catalog (an empty
-    /// one is a real state: the CLI offered no models), so there is no "no
-    /// discovery" arm here; pre-handshake failures yield `None` and the
-    /// caller skips the call (issue #530).
+    /// [`Self::snapshot_discovered_runtime`], which both `run_external_turn`
+    /// exit faces route through; takes a bare value -- a post-handshake ACP
+    /// exit always carries a catalog (an empty one is a real state: the CLI
+    /// offered no models), so there is no "no discovery" arm here;
+    /// pre-handshake failures yield `None` and the caller skips the call
+    /// (issue #530).
     pub fn set_last_discovered_runtime(
         &mut self,
         discovered: crate::session::loop_contract::DiscoveredRuntime,
     ) {
         self.runtime_facts.cached_discovered = Some(discovered.clone());
         self.last_discovered_runtime = Some(discovered);
+    }
+
+    /// Snapshot the turn's discovered runtime catalog onto the session
+    /// (ADR-0095). Called from BOTH `run_external_turn` faces that follow a
+    /// completed handshake -- the serve-Ok merge path and the serve-failure
+    /// early return (#856) -- because the handshake's discovery is real
+    /// state the next turn reuses regardless of how the turn settles. A
+    /// serve failure that lands before the handshake produced discovery
+    /// yields `None` and the snapshot no-ops; the `None` semantics ("no
+    /// discovery", the previous catalog survives) live on the reader,
+    /// [`Self::last_discovered_runtime`].
+    fn snapshot_discovered_runtime(&mut self, outcome: &LoopOutcome) {
+        if let Some(discovered) = outcome.discovered_runtime.clone() {
+            self.set_last_discovered_runtime(discovered);
+        }
     }
 
     /// Build a session with an explicit provider (tests inject a scripted fake;
@@ -1688,6 +1704,20 @@ impl Session {
         let gateway_outcome = match gateway_result {
             Ok(o) => o,
             Err(e) => {
+                // #856: snapshot the turn's discovery before the early
+                // return -- `snapshot_discovered_runtime` carries the
+                // rationale (ADR-0095) and no-ops when the serve failure
+                // predates the handshake's discovery. The gateway's
+                // promotions are dropped here by decision:
+                // `serve_connection` returns `io::Result<GatewayOutcome>`,
+                // and the Err variant carries no collected outcome, while a
+                // `Failed` turn has no promotion slot in
+                // `turn_outcome_from_loop` (every non-converged arm drops
+                // them, StepCap alike -- the working-set writes the gateway
+                // already made stand unreported). The decided shape is
+                // pinned in
+                // `external_serve_failure_drops_collected_promotions`.
+                self.snapshot_discovered_runtime(&acp_outcome);
                 return (
                     TurnOutcome::Failed(TurnFailure::Runtime {
                         detail: format!("gateway serve failed: {e}"),
@@ -1697,16 +1727,8 @@ impl Session {
             }
         };
         // 7. Merge + map onto TurnOutcome (same mapper + trace-extraction
-        //    pattern as the built-in branch). ADR-0095: the ACP engine's
-        //    discovered catalog snapshots onto the Session first so the
-        //    command layer can mirror it onto the handle (lock-light reads)
-        //    even when the turn itself fails. `None` (handshake failed /
-        //    pre-handshake exit) means "no discovery" -- the previous
-        //    catalog survives (issue #530 removed the unreachable no-op arm
-        //    from the setter).
-        if let Some(discovered) = acp_outcome.discovered_runtime.clone() {
-            self.set_last_discovered_runtime(discovered);
-        }
+        //    pattern as the built-in branch).
+        self.snapshot_discovered_runtime(&acp_outcome);
         let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);
         (turn_outcome_from_loop(merged), trace)
