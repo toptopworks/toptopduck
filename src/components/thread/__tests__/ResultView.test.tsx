@@ -96,6 +96,10 @@ describe("ResultView", () => {
     // this file's utility-pin convention): the span is block + truncate.
     const titleText = within(heading).getByText(QUESTION);
     expect(titleText).toHaveClass("block", "truncate");
+    // Issue #864: the pane title carries headline-sm (16px/600) explicitly --
+    // the workspace-body 14px baseline inherits into a bare h2, which would
+    // flatten the result title to body size with zero hierarchy.
+    expect(heading).toHaveClass("text-base", "font-semibold");
     // Hover recovery (ADR-0050): the truncated trigger opens the tooltip with
     // the full question (jsdom reports 0 width, so the overflow gate passes).
     fireEvent.pointerMove(titleText);

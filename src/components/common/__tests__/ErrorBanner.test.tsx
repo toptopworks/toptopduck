@@ -39,6 +39,11 @@ describe("ErrorBanner (single AppError prop, issue #194)", () => {
     const fold = container.querySelector(".error-details");
     expect(fold).not.toBeNull();
     expect(fold?.textContent).toContain("close-wait timed out");
+    // Issue #864: the stack pre rides the code token's 13px idiom -- the
+    // fold renders inside the workspace panel, and an off-ladder mono size
+    // would drift below the documented code row.
+    const stack = fold?.querySelector("pre.error-stack");
+    expect(stack?.className.split(/\s+/)).toContain("text-[13px]");
   });
 
   it("omits the fold when detail is null", () => {

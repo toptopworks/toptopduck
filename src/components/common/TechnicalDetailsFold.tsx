@@ -31,7 +31,7 @@ export function TechnicalDetailsFold({ detail }: TechnicalDetailsFoldProps) {
       <summary className="text-muted-foreground cursor-pointer text-[0.82rem]">
         <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
       </summary>
-      <pre className="error-stack mt-1.5 p-2 bg-muted rounded-md font-mono text-[0.8rem] whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+      <pre className="error-stack mt-1.5 p-2 bg-muted rounded-md font-mono text-[13px] whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
         {detail}
       </pre>
     </details>

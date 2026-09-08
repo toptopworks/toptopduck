@@ -39,6 +39,29 @@ describe("DatasetDetail", () => {
     const typeCell = screen.getByText("BIGINT");
     expect(typeCell.tagName).toBe("CODE");
     expect(typeCell.className.split(/\s+/)).toContain("font-mono");
+    // Issue #864: the type code also carries the 13px {typography.code} size
+    // -- with the workspace body's 14px baseline, an unsized <code> would
+    // silently grow a step above the token.
+    expect(typeCell.className.split(/\s+/)).toContain("text-[13px]");
+  });
+
+  it("pins the section headings to headline-sm 16px/600 (issue #864)", () => {
+    // The workspace body's 14px baseline (issue #864) inherits into the bare
+    // h2/h3 unless each carries the headline token explicitly -- a heading
+    // that drops the utility would render at the body size with zero
+    // hierarchy. Pin all headings the section renders.
+    renderI18n(<DatasetDetail dataset={mockDataset} />);
+    const headings = [
+      screen.getByRole("heading", { level: 2 }),
+      ...screen.getAllByRole("heading", { level: 3 }),
+    ];
+    // The count pins the enumeration itself: deleting a heading outright
+    // would pass the per-heading loop below untouched.
+    expect(headings).toHaveLength(3);
+    for (const heading of headings) {
+      expect(heading.className.split(/\s+/)).toContain("text-base");
+      expect(heading.className.split(/\s+/)).toContain("font-semibold");
+    }
   });
 
   it("shows a no-rows hint when the sample is empty", () => {

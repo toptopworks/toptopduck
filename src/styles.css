@@ -70,8 +70,11 @@
  * .privacy-cols / .privacy-cols last-column / .disclosure-summary /
  * .privacy .muted visual rules retired onto PrivacyControls.tsx as Tailwind
  * utility + the Table primitive's last-cell className; the disclosure info
- * blue tint rides Tailwind's blue scale (bg-blue-50 / border-blue-200) as the
- * nearest-scale equivalent of the retired #f4f8ff / #d6e4ff. The class hooks
+ * tint first rode Tailwind's blue scale (bg-blue-50, nearest to the retired
+ * #f4f8ff; border-blue-200, one step darker than the nearest blue-100 for a
+ * visible edge, standing in for the retired #d6e4ff) and moved to the
+ * --info token (issue #864) so the tint resolves per theme instead of
+ * rendering a near-white block in dark mode. The class hooks
  * (.privacy / .privacy-samples / .privacy-cols / .disclosure-summary) stay on
  * the component for selector stability. ADR-0067 (issue #185): the global
  * .muted color rule + the global code font-family element rule also retired

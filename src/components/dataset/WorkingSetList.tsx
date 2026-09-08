@@ -310,8 +310,12 @@ export function WorkingSetList({
               <span className="min-w-0 flex-1 truncate">{d.display_name}</span>
               {/* font-normal overrides the active button's font-semibold so the
                   row-count annotation stays muted-weight in either state;
-                  shrink-0 + nowrap keep truncation from ever eliding the note. */}
-              <small className="shrink-0 whitespace-nowrap text-muted-foreground font-normal">
+                  shrink-0 + nowrap keep truncation from ever eliding the note.
+                  text-xs pins the caption token: the preflight small rule
+                  (80%) would resolve an unsized small at 11.2px under the
+                  panel's 14px baseline (issue #864) -- below the ladder's
+                  12px floor. */}
+              <small className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-normal">
                 {" "}
                 <FormattedMessage
                   id="workingSet.rowCount"

@@ -1062,6 +1062,16 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
       within(panelOf(workingSetTab)).getByRole("button", { name: /^people/ }),
     ).toBeInTheDocument();
   });
+
+  it("pins the workspace-body base type to 14px (issue #864)", async () => {
+    // The panel is the workspace's type root: every text node that does not
+    // carry an explicit size inherits from here. Without the text-sm baseline
+    // the bare inheritors render at the 16px document default (one step above
+    // the body-md token) -- pin it so the baseline cannot silently drop.
+    renderPane();
+    const { resultTab } = await openWorkspaceTabs();
+    expect(panelOf(resultTab).className.split(/\s+/)).toContain("text-sm");
+  });
 });
 
 describe("App working-set empty state (issue #792)", () => {

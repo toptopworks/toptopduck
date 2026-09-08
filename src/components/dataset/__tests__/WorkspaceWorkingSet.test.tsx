@@ -162,4 +162,22 @@ describe("WorkspaceWorkingSet", () => {
     expect(screen.getByText(/工作集为空/)).toBeInTheDocument();
     expect(container.querySelector(".layout")).toBeNull();
   });
+
+  it("pins the section heading to headline-sm 16px/600 (issue #864)", () => {
+    // The workspace body's 14px baseline (issue #864) inherits into the bare
+    // h2 unless it carries the headline token explicitly -- dropping the
+    // utility would flatten the list section's hierarchy to body size.
+    renderI18n(
+      <WorkspaceWorkingSet
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        viewedDescriptor={null}
+        {...NOOPS}
+      />,
+    );
+    const h2 = screen.getByRole("heading", { level: 2, name: /工作集 · 1/ });
+    expect(h2.className.split(/\s+/)).toContain("text-base");
+    expect(h2.className.split(/\s+/)).toContain("font-semibold");
+  });
 });

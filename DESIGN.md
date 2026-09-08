@@ -22,6 +22,7 @@ colors:
   destructive: "#b00020"
   destructive-foreground: "#ffffff"
   warning: "#b45309"
+  info: "#1d4ed8"
   border: "#e3e3e8"
 
   # --- Dark surfaces ---
@@ -37,6 +38,7 @@ colors:
   accent-foreground-dark: "#5eead4"
   destructive-dark: "#ef4444"
   warning-dark: "#f59e0b"
+  info-dark: "#60a5fa"
   border-dark: "#2a2f2a"
 
 typography:
@@ -374,6 +376,7 @@ The structural signature is a **three-column shell**: session sidebar (220px) + 
 - **Accent** (`{colors.accent}` — #e6f4f1): Light teal tint for active/highlighted states (active-source indicator, selected session entry).
 - **Destructive** (`{colors.destructive}` — #b00020): Error alerts, delete confirmations.
 - **Warning** (`{colors.warning}` — #b45309): Stale-result indicators, viz-degradation warnings. Used as indicator dots and alert tints — never as solid fills.
+- **Info** (`{colors.info}` — #1d4ed8): Informational disclosure tints (the privacy outgoing-payload summary). Same tint discipline as warning — never as solid fills. Block informational disclosures (the settings privacy banner, the ADR-0057 hints) ride the Alert default surface; `--info` is the inline tint role.
 
 ### Dark Mode Surfaces
 - **Canvas Dark** (`{colors.canvas-dark}` — #0f1410): The dark page floor. RGB 15, 20, 16 — the G channel is highest, giving the surface a subtle green undertone that is visually harmonious with the teal brand.
@@ -392,6 +395,7 @@ The structural signature is a **three-column shell**: session sidebar (220px) + 
 - **Accent Dark** (`{colors.accent-dark}` — #143833): Dark teal tint for active/highlighted states.
 - **Destructive Dark** (`{colors.destructive-dark}` — #ef4444): Error alerts in dark mode. Brighter red than light mode for visibility on dark canvas.
 - **Warning Dark** (`{colors.warning-dark}` — #f59e0b): Warning indicators in dark mode. Brighter amber than light mode.
+- **Info Dark** (`{colors.info-dark}` — #60a5fa): Info tints in dark mode. Brighter blue than light mode.
 
 ### Mode Mapping Principle
 Light and dark tokens share semantic names but carry different hex values. The mapping is 1:1 — `{colors.canvas}` in light mode becomes `{colors.canvas-dark}` in dark mode. The `primary` and `primary-foreground` tokens are mode-invariant. Focus rings always use `{colors.primary}` (teal) in both modes. In production, the same CSS variable (`--background`, `--card`, etc.) carries different values under the `.dark` class — the DESIGN.md `-dark` suffix is a documentation convention, not a separate variable name.
@@ -415,7 +419,7 @@ The **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, Monaco, Co
 | `{typography.body-sm}` | 13px | 400 | 0 | `text-[0.82rem]` | Technical details, tight metadata |
 | `{typography.caption}` | 12px | 400 | 0 | `text-xs` | Metadata, timestamps, sublines |
 | `{typography.label-caps}` | 12px | 600 | 0.05em | `text-xs` uppercase | Badges, section labels — render uppercase via CSS `text-transform: uppercase` |
-| `{typography.code}` | 13px | 400 | 0 | `font-mono` | SQL, data values, file paths — system monospace |
+| `{typography.code}` | 13px | 400 | 0 | `font-mono text-[13px]` | SQL, data values, file paths — system monospace |
 | `{typography.button}` | 14px | 500 | 0 | `text-sm font-medium` | Button labels |
 | `{typography.badge}` | 12px | 500 | 0 | `text-xs font-medium` | Badge labels — medium weight, no uppercase |
 | `{typography.nav-link}` | 14px | 500 | 0 | `text-sm` | Sidebar entries, session list items |
@@ -426,7 +430,7 @@ The **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, Monaco, Co
 - **Negative tracking on display only.** `{typography.display}` and `{typography.headline-lg}` carry negative letter-spacing for tighter reading. Body and below have zero tracking.
 - **Monospace on every code surface.** SQL, data values, trace output, file paths, and result identifiers always render in the system monospace stack — never in the sans stack.
 - **Uppercase labels.** `{typography.label-caps}` defines the typographic properties (weight, tracking, size); apply CSS `text-transform: uppercase` at the element level. (Note: badge variants use `{typography.badge}` — medium weight, no uppercase — for a softer workbench feel; `{typography.label-caps}` is reserved for explicit section labels.)
-- **Tailwind mapping.** The Tailwind column shows the nearest utility class. Ad-hoc values like `text-[0.82rem]` and `text-[0.85rem]` are visual-polish variants within the `{typography.body-sm}` range.
+- **Tailwind mapping.** The Tailwind column shows the nearest utility class. Ad-hoc values like `text-[0.82rem]` and `text-[0.85rem]` are visual-polish variants within the `{typography.body-sm}` range; `text-[13px]` is the `{typography.code}` token's exact-size idiom.
 
 ## Layout
 

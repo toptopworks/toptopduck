@@ -79,7 +79,7 @@ export function WorkspaceWorkingSet({
     // .layout rule.
     <div className="layout working-set-layout">
       <section className={PANEL_CARD_BASE}>
-        <h2>
+        <h2 className="text-base font-semibold">
           <FormattedMessage
             id="session.workingSet.title"
             defaultMessage="Working set · {count}"
