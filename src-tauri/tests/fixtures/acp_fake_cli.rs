@@ -394,7 +394,24 @@ fn play_scenario(
     match scenario {
         "text_reply" => {
             notify(out, agent_message("the answer is 42"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
+        // `prompt_response_raw` (issue #851): the prompt response as a raw
+        // schema-shaped line -- `stopReason: "end_turn"`, the spelling the
+        // schema crate named by `wire::MODELED_SCHEMA` defines. The typed
+        // respond_prompt serializes OUR StopReason (self consistency only);
+        // this line pins the inbound parse against the real-agent spelling
+        // (a wrong variant name must fail the parse).
+        "prompt_response_raw" => {
+            notify(out, agent_message("raw end_turn settles as text"));
+            write_line(
+                out,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "result": {"stopReason": "end_turn"},
+                }),
+            );
         }
         // Issue #702 (PR #709 review): echo every text block the engine sent
         // in the `session/prompt` params back as one agent message,
@@ -407,7 +424,7 @@ fn play_scenario(
             let mut echoed = String::new();
             if let Some(blocks) = req
                 .get("params")
-                .and_then(|p| p.get("blocks"))
+                .and_then(|p| p.get("prompt"))
                 .and_then(|b| b.as_array())
             {
                 for block in blocks {
@@ -422,7 +439,7 @@ fn play_scenario(
                 }
             }
             notify(out, agent_message(&echoed));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         "tool_calls" => {
             notify_tool_call_roundtrip(
@@ -433,7 +450,7 @@ fn play_scenario(
                 "rows: 3",
             );
             notify(out, agent_message("found 3 rows"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         "tool_failure" => {
             notify(
@@ -441,7 +458,7 @@ fn play_scenario(
                 tool_call_start_failed("tc_1", "explore bad sql", ToolKind::Search, "syntax error"),
             );
             notify(out, agent_message("the query failed"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // Issue #611: thought + prose chunks ahead of each tool-call batch,
         // a terminal prose stretch after the last batch. Drives the per-round
@@ -468,7 +485,7 @@ fn play_scenario(
                 "rows: 1",
             );
             notify(out, agent_message("both rounds folded"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // Issue #611: raw JSON lines in the schema-crate wire shape named by
         // `wire::MODELED_SCHEMA` (the `sessionUpdate` discriminator + ONE
@@ -486,10 +503,10 @@ fn play_scenario(
                 "rows: 9",
             );
             raw_session_update(out, "agent_message_chunk", "real terminal");
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
-        // Issue #611: prose alongside the batch, then Success with no trailing
-        // message stretch -- the terminal text falls back to the accumulated
+        // Issue #611: prose alongside the batch, then end_turn with no
+        // trailing message stretch -- the terminal text falls back to the accumulated
         // prose (the fallback semantics this slice must preserve).
         "midturn_prose_no_terminal" => {
             notify(out, agent_message("checking alongside"));
@@ -500,7 +517,7 @@ fn play_scenario(
                 ToolKind::Search,
                 "rows: 3",
             );
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // A schema-legal `kind: "read"` tool_call on the raw wire (the typed
         // helpers never emit it) -- the line must parse and the call must
@@ -509,7 +526,7 @@ fn play_scenario(
             raw_tool_call_start(out, "tc_r", "read the schema", "read");
             notify(out, tool_call_finish("tc_r", "read the schema", "42 lines"));
             notify(out, agent_message("read it"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // A pending call whose completion arrives AFTER the next round
         // opened -- the row must land on the round that opened it, not
@@ -522,7 +539,7 @@ fn play_scenario(
             notify(out, agent_thought("the finish is still in flight"));
             notify(out, agent_message("round two prose"));
             notify(out, tool_call_finish("tc_1", "explore SELECT 1", "rows: 3"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // A call left unresolved when the turn ends -- the drain lands it on
         // its opening round as a completed row.
@@ -532,10 +549,10 @@ fn play_scenario(
                 out,
                 tool_call_start("tc_1", "explore SELECT 1", ToolKind::Search),
             );
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         "max_turns" => {
-            respond_prompt(out, &id, StopReason::MaxTurns);
+            respond_prompt(out, &id, StopReason::MaxTurnRequests);
         }
         "refusal" => {
             notify(out, agent_message("I can't do that"));
@@ -548,7 +565,7 @@ fn play_scenario(
             // Read the client's response (drain until the matching id).
             drain_until_response(reader, &req_id, cancel_seen);
             notify(out, agent_message("done"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         "step_cap_overflow" => {
             // Emit more tool-call starts than the step cap, THEN drain for
@@ -581,7 +598,7 @@ fn play_scenario(
                 return;
             }
             notify(out, agent_message("ran many calls"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         "stuck" => {
             // Never produce a prompt response; wait for the engine's wall-clock
@@ -611,7 +628,7 @@ fn play_scenario(
             for i in 0..RUNAWAY_LINES {
                 notify(out, agent_message(&format!("runaway line {i}")));
             }
-            // This loop never produces a Success on its own: like the stuck
+            // This loop never produces an end_turn on its own: like the stuck
             // scenario, only the engine's cancel ends it.
             loop {
                 if *cancel_seen {
@@ -685,7 +702,7 @@ fn play_scenario(
             for _ in 0..3 {
                 notify(out, agent_message(&chunk));
             }
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // Issue #629 review: a line past the 4-MiB line cap is dropped and
         // the connection stays up -- the prose on the NEXT line still
@@ -694,7 +711,7 @@ fn play_scenario(
         "line_cap_overlong" => {
             let _ = writeln!(out, "{}", "g".repeat(5 * 1024 * 1024));
             notify(out, agent_message("still alive"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         "crash" => {
             // Close stdout mid-turn (the engine sees reader EOF -> Eof path).
@@ -725,7 +742,7 @@ fn play_scenario(
             notify(out, tool_call_start("gw_1", "explore", ToolKind::Search));
             notify(out, tool_call_finish("gw_1", "explore", "rows: 1"));
             notify(out, agent_message("done via gateway"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // Issue #673 (ADR-0108 Decision 6): a registered CLI tool must be
         // advertised on the bridge's `tools/list` (single tool plane) and a
@@ -784,7 +801,7 @@ fn play_scenario(
                 tool_call_finish("gw_cli_1", "cli-fixture-echo", "echoed"),
             );
             notify(out, agent_message("done via cli gateway"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // Issue #646: same chain as gateway_tool_call, but the tools/call
         // frame exceeds the gateway's per-line byte cap. The gateway fails the
@@ -814,7 +831,7 @@ fn play_scenario(
             // proceeds -- the prompt response is what lets the turn settle on
             // the serve error, not a hang.
             let _ = bridge_read();
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // Issue #630: one round, two calls in the same batch -- starts
         // interleaved (start, start) before the finishes. Pins the saw_call
@@ -833,20 +850,20 @@ fn play_scenario(
             );
             notify(out, tool_call_finish("tc_1", "explore SELECT 1", "rows: 3"));
             notify(out, tool_call_finish("tc_2", "explore SELECT 2", "rows: 1"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         // `session_new_raw` (issue #630) differs only in the handshake's
         // session/new line (raw schema shape); the prompt phase is the plain
         // text reply.
         "session_new_raw" => {
             notify(out, agent_message("the answer is 42"));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
         other => {
             // Unknown scenario: respond success with a marker so a mis-spelled
             // scenario name fails loudly rather than hanging.
             notify(out, agent_message(&format!("unknown scenario: {other}")));
-            respond_prompt(out, &id, StopReason::Success);
+            respond_prompt(out, &id, StopReason::EndTurn);
         }
     }
 }
@@ -1148,9 +1165,15 @@ fn try_spawn_bridge(server: &serde_json::Value) {
         return;
     }
     let mut cmd = Command::new(command);
-    if let Some(env) = server.get("env").and_then(serde_json::Value::as_object) {
-        for (k, v) in env {
-            if let Some(v) = v.as_str() {
+    // env is the `{name, value}` pair array the schema crate named by
+    // `wire::MODELED_SCHEMA` defines for the session/new wire (issue #851) --
+    // read it as the array the strict agents validate.
+    if let Some(env) = server.get("env").and_then(serde_json::Value::as_array) {
+        for var in env {
+            if let (Some(k), Some(v)) = (
+                var.get("name").and_then(serde_json::Value::as_str),
+                var.get("value").and_then(serde_json::Value::as_str),
+            ) {
                 cmd.env(k, v);
             }
         }

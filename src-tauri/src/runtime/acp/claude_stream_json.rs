@@ -283,12 +283,20 @@ pub(crate) fn build_mcp_config_flags(mcp_servers: &[McpServer]) -> Vec<String> {
             env,
         } = server
         {
+            // The ACP wire shape named by `wire::MODELED_SCHEMA` carries env
+            // as a `{name, value}` pair array (issue #851); claude-code's
+            // native `--mcp-config` format wants the map form, so rebuild it
+            // here.
+            let env_map: serde_json::Map<String, Value> = env
+                .iter()
+                .map(|var| (var.name.clone(), Value::String(var.value.clone())))
+                .collect();
             servers.insert(
                 name.clone(),
                 serde_json::json!({
                     "command": command,
                     "args": args,
-                    "env": env,
+                    "env": Value::Object(env_map),
                 }),
             );
         }
@@ -614,7 +622,7 @@ impl ClaudePump {
                     return Some(Termination::Text(final_text));
                 }
                 // The agent's own turn ceiling maps onto the execution-level
-                // StepCap (the ACP path's MaxTurns precedent).
+                // StepCap (the ACP path's MaxTurnRequests precedent).
                 if subtype.contains("max_turns") {
                     return Some(Termination::StepCap(self.step_cap));
                 }
@@ -1396,7 +1404,7 @@ mod tests {
 
     /// An error result maps to a Transient carrying the CLI's detail; the
     /// max-turns subtype maps onto the execution-level StepCap (the ACP
-    /// MaxTurns precedent).
+    /// MaxTurnRequests precedent).
     #[test]
     fn result_error_maps_transient_and_max_turns_step_cap() {
         let mut pump = pump_with_bridge();

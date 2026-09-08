@@ -220,15 +220,16 @@ pub struct NewSessionResult {
 // session/prompt (app → agent, request) -- the turn driver
 // ---------------------------------------------------------------------------
 
-/// `session/prompt` params. `blocks` carries the full windowed context for this
-/// turn (the question + the assembled history), as text content blocks. ADR-0076
+/// `session/prompt` params. `prompt` carries the full windowed context for
+/// this turn (the question + the assembled history), as text content blocks
+/// under the field name the schema names (`PromptRequest.prompt`). ADR-0076
 /// statelessness: the engine sends the WHOLE context every turn -- it never
 /// relies on an upstream session handle (`session/load` is deliberately unused).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptParams {
     pub session_id: String,
-    pub blocks: Vec<ContentBlock>,
+    pub prompt: Vec<ContentBlock>,
 }
 
 /// `session/prompt` result. `stop_reason` is the agent's terminal verdict on
@@ -240,16 +241,22 @@ pub struct PromptResult {
 }
 
 /// Why the agent stopped the turn (ACP `StopReason`). Serialized as a bare
-/// lowercase string by the `rename_all` so it matches the schema's enum form.
+/// lowercase string by the `rename_all` so it matches the schema's enum form
+/// -- the variant names the schema crate named by [`MODELED_SCHEMA`] defines
+/// (`end_turn`, not `success`; `max_turn_requests`, not `max_turns`). Unlike
+/// the streaming surfaces' lenient variants, an unknown inbound variant is
+/// deliberately a hard parse error: the terminal verdict must map onto a
+/// Termination (the engine surfaces the serde diagnostic as a Transient
+/// turn failure), never a silent degradation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// The turn ended successfully (terminal agent message emitted).
-    Success,
+    EndTurn,
     /// The agent hit its own max-tokens ceiling.
     MaxTokens,
-    /// The agent hit its own max-turns ceiling.
-    MaxTurns,
+    /// The agent hit its own max-turn-requests ceiling.
+    MaxTurnRequests,
     /// The agent refused to continue.
     Refusal,
     /// The client cancelled via `session/cancel`.
@@ -543,18 +550,30 @@ impl ContentBlock {
 pub enum McpServer {
     /// A stdio MCP server. `command` is the absolute path of the bridge
     /// executable; `args` / `env` carry the session-addressing parameter
-    /// (slice 9b).
+    /// (slice 9b). All four fields are mandatory on the wire: `args` is sent
+    /// even when empty and `env` is the schema's `{name, value}` pair array
+    /// (issue #851 -- the optional `_meta` members, descriptor- and
+    /// entry-level, are deliberately not sent, the
+    /// `SetSessionConfigOptionRequest` convention).
     Stdio {
         name: String,
         command: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        env: BTreeMap<String, String>,
+        env: Vec<EnvVariable>,
     },
     /// Any other transport (http / sse). Not produced by the v1 engine.
     #[serde(other)]
     Other,
+}
+
+/// One `{name, value}` entry of a stdio server's `env` array -- the shape
+/// `MODELED_SCHEMA` defines. Input sources hand the bridge a `BTreeMap`
+/// (sorted keys); [`McpServer::stdio_bridge`] projects it here so the array
+/// order stays deterministic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EnvVariable {
+    pub name: String,
+    pub value: String,
 }
 
 impl McpServer {
@@ -569,7 +588,10 @@ impl McpServer {
             name: name.into(),
             command: command.into(),
             args,
-            env,
+            env: env
+                .into_iter()
+                .map(|(name, value)| EnvVariable { name, value })
+                .collect(),
         }
     }
 }
@@ -743,6 +765,9 @@ mod tests {
         assert_eq!(v, raw);
     }
 
+    /// A stdio descriptor serializes with the `type` tag and the schema
+    /// crate's field shapes: `env` is an array of `{name, value}` pairs, not
+    /// a map (issue #851).
     #[test]
     fn mcp_server_stdio_serializes_with_type_tag_and_fields() {
         let server = McpServer::stdio_bridge(
@@ -755,17 +780,101 @@ mod tests {
         assert_eq!(v["type"], "stdio");
         assert_eq!(v["name"], "toptopduck-gateway");
         assert_eq!(v["command"], "/abs/path/to/bridge");
-        assert_eq!(v["args"][0], "--session");
-        assert_eq!(v["env"]["SID"], "abc");
+        assert_eq!(v["args"], serde_json::json!(["--session"]));
+        assert_eq!(
+            v["env"],
+            serde_json::json!([{"name": "SID", "value": "abc"}])
+        );
     }
 
-    /// stop_reason round-trips to the ACP lowercase wire form.
+    /// Outbound `session/new` raw pin -- the request-side mirror of issue
+    /// #630's response-side raw pin. `mcpServers` must serialize as an ARRAY
+    /// of stdio descriptors whose `type` / `name` / `command` / `args` /
+    /// `env` are all present, with `env` an array of `{name, value}` pairs
+    /// and `args` present as `[]` even when empty -- the shape the schema
+    /// crate named by [`MODELED_SCHEMA`] defines. A strict agent (opencode,
+    /// issue #851) rejects the request with -32602 when `env` lands as an
+    /// object or `args` is dropped.
+    #[test]
+    fn session_new_params_pin_outbound_mcp_servers_schema_shape() {
+        let server = McpServer::stdio_bridge(
+            "toptopduck-gateway",
+            "/abs/path/to/bridge",
+            Vec::new(),
+            BTreeMap::from([
+                ("GATEWAY_PORT".to_string(), "12345".to_string()),
+                ("GATEWAY_TOKEN".to_string(), "abc".to_string()),
+            ]),
+        );
+        let req = Request::new(
+            RequestId::Num(1),
+            "session/new",
+            NewSessionParams {
+                cwd: "/tmp".into(),
+                mcp_servers: vec![server],
+            },
+        );
+        let v: Value = serde_json::to_value(&req).unwrap();
+        let servers = v["params"]["mcpServers"]
+            .as_array()
+            .expect("mcpServers must serialize as an array");
+        assert_eq!(servers.len(), 1);
+        let s = &servers[0];
+        assert_eq!(s["type"], "stdio");
+        assert_eq!(s["name"], "toptopduck-gateway");
+        assert_eq!(s["command"], "/abs/path/to/bridge");
+        assert_eq!(s["args"], serde_json::json!([]));
+        // Sorted BTreeMap input projects to a deterministic array order.
+        assert_eq!(
+            s["env"],
+            serde_json::json!([
+                {"name": "GATEWAY_PORT", "value": "12345"},
+                {"name": "GATEWAY_TOKEN", "value": "abc"},
+            ])
+        );
+        for key in ["type", "name", "command", "args", "env"] {
+            assert!(s.get(key).is_some(), "field `{key}` must be present");
+        }
+    }
+
+    /// Outbound `session/prompt` raw pin (the request-side raw-pin family
+    /// above): the content array rides under the field name `prompt` -- the
+    /// shape the schema crate named by [`MODELED_SCHEMA`] defines
+    /// (`PromptRequest.prompt`). A strict agent (opencode) rejects the
+    /// request with -32602 when the array rides any other key (recorded in
+    /// commit 8106638, the follow-up real-machine acceptance of issue
+    /// #851).
+    #[test]
+    fn session_prompt_params_pin_outbound_schema_shape() {
+        let req = Request::new(
+            RequestId::Num(3),
+            "session/prompt",
+            PromptParams {
+                session_id: "ses_1".into(),
+                prompt: vec![ContentBlock::text("hello")],
+            },
+        );
+        let v: Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["method"], "session/prompt");
+        assert_eq!(v["params"]["sessionId"], "ses_1");
+        let prompt = v["params"]["prompt"]
+            .as_array()
+            .expect("prompt must serialize as an array under the `prompt` key");
+        assert_eq!(prompt.len(), 1);
+        assert_eq!(prompt[0]["type"], "text");
+        assert_eq!(prompt[0]["text"], "hello");
+    }
+
+    /// stop_reason round-trips to the ACP lowercase wire form -- the variant
+    /// spellings the schema crate named by [`MODELED_SCHEMA`] defines
+    /// (`end_turn` / `max_tokens` / `max_turn_requests` / `refusal` /
+    /// `cancelled`; a strict agent sends `end_turn`, not `success`).
     #[test]
     fn stop_reason_round_trips_to_snake_case() {
         for (reason, spelling) in [
-            (StopReason::Success, "success"),
+            (StopReason::EndTurn, "end_turn"),
             (StopReason::MaxTokens, "max_tokens"),
-            (StopReason::MaxTurns, "max_turns"),
+            (StopReason::MaxTurnRequests, "max_turn_requests"),
             (StopReason::Refusal, "refusal"),
             (StopReason::Cancelled, "cancelled"),
         ] {

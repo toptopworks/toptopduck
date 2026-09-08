@@ -342,11 +342,12 @@ pub(crate) fn build_config_overrides(mcp_servers: &[McpServer]) -> Vec<String> {
                 flags.push("-c".to_string());
                 flags.push(format!("mcp_servers.{name}.args=[{joined}]"));
             }
-            for (k, v) in env {
+            for var in env {
                 flags.push("-c".to_string());
                 flags.push(format!(
-                    "mcp_servers.{name}.env.{k}={}",
-                    encode_toml_string(v)
+                    "mcp_servers.{name}.env.{}={}",
+                    var.name,
+                    encode_toml_string(&var.value)
                 ));
             }
             // Server-level tool-approval posture (issue #800): codex exec's
