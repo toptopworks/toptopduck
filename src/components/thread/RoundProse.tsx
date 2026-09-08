@@ -197,7 +197,14 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   table: ({ children }) => (
     <div className="overflow-x-auto rounded-md border border-border">
-      <table className="w-full border-collapse [&_tr:last-child>td]:border-b-0">{children}</table>
+      {/* min-w-max: a width:100% table squeezed under the column width
+          overflows invisibly -- the spill never enters the wrapper's
+          scrollWidth, so the scroll host idles. Content width keeps wide
+          tables scrollable (issue #860) while w-full still fills narrow
+          ones. */}
+      <table className="w-full min-w-max border-collapse [&_tr:last-child>td]:border-b-0">
+        {children}
+      </table>
     </div>
   ),
   th: ({ children }) => (
@@ -214,7 +221,11 @@ export const RoundProse = memo(function RoundProse({ text }: { text: string }) {
     // round-text is a cross-module stability hook: this suite's own pins plus
     // TurnCard/Thread's composition selectors (`.turn-outcome.textual
     // .round-text`) query through it.
-    <div className="round-text m-0 mt-0.5 space-y-4 text-sm leading-[1.75] text-foreground break-words">
+    // max-w-full: the root hangs off the stream (flex-col items-start) as a
+    // non-stretched flex item, so its min-content (a wide markdown table)
+    // stretches the whole item past the card and the rail's overflow-x
+    // crops it -- the #826 trace-round cap's prose twin (issue #860).
+    <div className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words">
       <Markdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
         {text}
       </Markdown>

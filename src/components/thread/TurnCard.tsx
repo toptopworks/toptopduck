@@ -504,7 +504,12 @@ function TurnBody({
       // selector's last-child exemption -- only a future non-last child
       // without its own m-0 would take the space-y margin).
       return (
-        <div className={cn("turn-outcome textual mt-1", text_kind.toLowerCase())}>
+        // max-w-full: the outcome rides the stream as a non-stretched flex
+        // item, so a wide markdown table's min-content stretches it past
+        // the card (issue #860). The cap must sit HERE -- the prose root's
+        // own clamp cannot reach this layer (its containing block is this
+        // container), the #826 trace-round precedent's textual twin.
+        <div className={cn("turn-outcome textual mt-1 max-w-full", text_kind.toLowerCase())}>
           {badge && (
             // The kind badge is chrome, not discourse: it stands on its own
             // caption row ahead of the prose, keeping the caption tier

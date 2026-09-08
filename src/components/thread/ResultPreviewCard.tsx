@@ -40,7 +40,12 @@ export function ResultPreviewCard({
       // (phrasing content) stays valid. The preview is a glance artifact --
       // the full table semantics live in the workspace ResultView.
       className={cn(
-        "result-preview block mt-1.5 ml-6 max-w-full overflow-x-auto cursor-pointer",
+        // mt-4 joins the prose root's 16px block rhythm (space-y-4); no
+        // left indent -- the #298 trace-gutter anchor lost its neighbor
+        // when #847 put terminal prose between the link row and the card,
+        // leaving this the stream's only offset item (and in narrow
+        // columns the margin rides past the max-w-full cap outright).
+        "result-preview block mt-4 max-w-full overflow-x-auto cursor-pointer",
         // The bare border rides the app.css base layer's var(--border) (same
         // as shadcn card / badge chrome); active flips it to --primary.
         "rounded-md border bg-background text-left text-xs transition-colors",
