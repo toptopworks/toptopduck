@@ -847,6 +847,45 @@ fn play_scenario(
             let _ = bridge_read();
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // Issue #856: a serve that already promoted a result (a successful
+        // materialize dispatch -- a working-set write plus a collected
+        // promotion) and THEN dies on an over-long frame. The turn must
+        // land Failed(Runtime) all the same: the serve-error early return
+        // drops the collected promotions by decision. Unlike
+        // `gateway_overlong_call` (whose first and only tools/call IS the
+        // over-long frame, so nothing was ever dispatched), this scenario
+        // gives the drop decision a discriminating face -- the promotion
+        // exists, the turn reports Failed (#851's lesson: a fixture without
+        // the interesting state pins nothing).
+        "gateway_materialize_then_overlong" => {
+            bridge_write(&mcp_request(
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
+            ));
+            let _ = bridge_read();
+            bridge_write(&mcp_request(
+                2,
+                "tools/call",
+                serde_json::json!({"name":"materialize","arguments":{"sql":"SELECT 1 AS x"}}),
+            ));
+            let promoted = bridge_read().expect("materialize response");
+            assert_eq!(
+                promoted["result"]["isError"],
+                serde_json::json!(false),
+                "the promotion lands through the gateway first: {promoted}"
+            );
+            // Same 5 MiB-with-margin shape as `gateway_overlong_call` over
+            // the 4 MiB per-line cap.
+            let big = "x".repeat(5 * 1024 * 1024);
+            bridge_write(&mcp_request(
+                3,
+                "tools/call",
+                serde_json::json!({"name":"explore","arguments":{"sql":big}}),
+            ));
+            let _ = bridge_read();
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         // Issue #630: one round, two calls in the same batch -- starts
         // interleaved (start, start) before the finishes. Pins the saw_call
         // prelude firing once for the round's FIRST call, not per call. The

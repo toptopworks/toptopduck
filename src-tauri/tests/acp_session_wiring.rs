@@ -240,6 +240,14 @@ fn external_cli_tool_call_routes_through_the_gateway() {
 /// id-matched response ever exists). The turn lands on the serve-error path
 /// with the framing cause riding the failure detail -- never a `Cancelled`
 /// hang waiting on a response the gateway refused to write.
+///
+/// Issue #856 AC1: the handshake's discovered catalog still snapshots onto
+/// the session on this serve-failure exit (ADR-0095 -- the snapshot precedes
+/// the outcome mapping "even when the turn itself fails"), so the next turn
+/// must not re-discover the catalog. The promotion-drop half of #856 has its
+/// own discriminating face in
+/// `external_serve_failure_drops_collected_promotions` (this scenario's only
+/// tools/call IS the over-long frame -- nothing was ever dispatched).
 #[test]
 fn external_overlong_gateway_request_fails_the_turn() {
     let (mut session, old_path, _guard) = external_session("gateway_overlong_call");
@@ -257,6 +265,46 @@ fn external_overlong_gateway_request_fails_the_turn() {
             );
         }
         other => panic!("gateway_overlong_call must land Failed(Runtime), got {other:?}"),
+    }
+    let discovered = session
+        .last_discovered_runtime()
+        .expect("the serve-failure exit snapshots the discovered catalog");
+    assert_eq!(
+        discovered.adapter_id.as_deref(),
+        Some("fake-cli"),
+        "the snapshot carries this turn's handshake discovery"
+    );
+}
+
+/// Issue #856 AC2 (chosen shape, pinned here with a discriminating face):
+/// when the gateway serve dies AFTER a successful materialize dispatch --
+/// `result_1` already written into the working set, the promotion already
+/// collected -- the turn still lands `Failed(Runtime)` and the collected
+/// promotion is dropped. A `Failed` outcome has no promotion slot anywhere
+/// in `turn_outcome_from_loop` (every non-converged arm drops them, StepCap
+/// alike), and widening `TurnFailure` for one exit path was rejected as out
+/// of proportion; the working-set write stands unreported. A future change
+/// that merges the serve-failure promotions back would map this turn onto
+/// `Materialized` and redden the match below.
+#[test]
+fn external_serve_failure_drops_collected_promotions() {
+    let (mut session, old_path, _guard) = external_session("gateway_materialize_then_overlong");
+    let outcome = session.ask("promote one result, then break the gateway");
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
+            assert!(
+                detail.contains("gateway serve failed"),
+                "the failure names its face: {detail}"
+            );
+            assert!(
+                detail.contains("frame line exceeded"),
+                "the framing cause rides the detail: {detail}"
+            );
+        }
+        other => panic!(
+            "a serve failure after a promotion must stay Failed(Runtime)              with the promotion dropped, got {other:?}"
+        ),
     }
 }
 
