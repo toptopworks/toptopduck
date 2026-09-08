@@ -2273,7 +2273,9 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 /// - Step cap exhausted (the agent never converged) -> [`TurnOutcome::Failed`]
 ///   (`Execute`, carrying the cap). Provider faults map by class: NotWired /
 ///   InvalidConfig permanent, a surfaced transient fault an `Execute` failure
-///   (the adapter's HTTP retry already ran; blind retry is abolished).
+///   (the adapter's HTTP retry already ran; blind retry is abolished), and an
+///   external-runtime wiring / transport fault a `Runtime` failure (issue
+///   #852 -- the ACP domain never lands the built-in transient kind).
 /// - Cancel (user / close / wall-clock watchdog) -> [`TurnOutcome::Cancelled`].
 ///
 /// Tool-level errors (SQL failure, approval denial) never land here -- the
@@ -2515,7 +2517,7 @@ pub(crate) const ACP_BRIDGE_BIN_ENV: &str = "TOPTOPDUCK_ACP_BRIDGE_BIN";
 ///
 /// Returns `Err` with a turn-failure detail when [`ACP_BRIDGE_BIN_ENV`] is
 /// unset or empty (a non-Unicode value gets its own detail) so the
-/// orchestrator surfaces a `TurnOutcome::Failed(Execute)` --
+/// orchestrator surfaces a `TurnOutcome::Failed(Runtime)` --
 /// consistent with the `detect_adapter` and `bind_gateway` failure paths in
 /// [`Session::run_external_turn`] -- instead of poisoning the session mutex
 /// with a panic. The var is read at run time (`env!`/`option_env!` are
@@ -2881,6 +2883,27 @@ mod tests {
                 assert_eq!(assumption, None, "the side-note slot stays empty");
             }
             other => panic!("expected Materialized, got {other:?}"),
+        }
+    }
+
+    /// Issue #852: the projection maps the ACP domain's `Termination::Runtime`
+    /// onto `TurnFailure::Runtime` -- the arm a silent revert to `Execute`
+    /// would leave every external-runtime failure wearing the neutral
+    /// execution wording with the suite green (the engine tests assert the
+    /// pre-projection `Termination`; this pins the projection itself).
+    #[test]
+    fn turn_outcome_maps_runtime_termination_to_runtime_failure() {
+        let outcome = LoopOutcome {
+            termination: Termination::Runtime("external runtime `cli-a` not found on PATH".into()),
+            promotions: Vec::new(),
+            trace: Vec::new(),
+            discovered_runtime: None,
+        };
+        match turn_outcome_from_loop(outcome) {
+            TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
+                assert_eq!(detail, "external runtime `cli-a` not found on PATH");
+            }
+            other => panic!("expected Failed(Runtime), got {other:?}"),
         }
     }
 

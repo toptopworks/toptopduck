@@ -410,15 +410,15 @@ fn round_prose_settles_per_round_with_live_variants() {
     );
 }
 
-/// A turn.failed event maps to Transient with the error message.
+/// A turn.failed event maps to Runtime with the error message.
 #[test]
-fn turn_failed_maps_to_transient() {
+fn turn_failed_maps_to_runtime() {
     let (outcome, _, _) = run("turn_failed", 24);
     match &outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(msg.contains("rate limited"), "carries the error: {msg}");
         }
-        other => panic!("expected Transient, got {other:?}"),
+        other => panic!("expected Runtime, got {other:?}"),
     }
 }
 
@@ -444,7 +444,7 @@ fn step_cap_overflow_yields_step_cap_termination() {
 /// Stdout closes mid-turn after emitting partial agent text but no terminal
 /// event. The pump's Disconnected fallback treats accumulated text as the
 /// answer (codex may close stdout after the final message without an explicit
-/// turn.completed), so the outcome is Text — not Transient.
+/// turn.completed), so the outcome is Text — not Runtime.
 #[test]
 fn crash_with_partial_text_treats_as_success() {
     let (outcome, _, _) = run("crash", 24);
@@ -484,15 +484,15 @@ fn overlong_line_is_dropped_and_reading_continues() {
     }
 }
 
-/// Stdout closes with no events and no text -> Transient (no recovery possible).
+/// Stdout closes with no events and no text -> Runtime (no recovery possible).
 #[test]
-fn empty_stdout_lands_as_transient() {
+fn empty_stdout_lands_as_runtime() {
     let (outcome, _, _) = run("empty_stdout", 24);
     match outcome.termination {
-        Termination::Transient(msg) => {
+        Termination::Runtime(msg) => {
             assert!(msg.contains("without a terminal event"), "got: {msg}");
         }
-        other => panic!("expected Transient, got {other:?}"),
+        other => panic!("expected Runtime, got {other:?}"),
     }
 }
 
@@ -606,11 +606,11 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
 }
 
 /// A CLI that dies before draining stdin breaks the oversized prompt write
-/// mid-pipe: the turn settles as a Transient carrying the stdin write
+/// mid-pipe: the turn settles as a Runtime carrying the stdin write
 /// failure -- the pre-#808-fix behavior's main path, now pinned (the
 /// claude_stream_json.rs peer's rationale).
 #[test]
-fn cli_death_during_stdin_write_settles_transient() {
+fn cli_death_during_stdin_write_settles_runtime() {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
@@ -625,11 +625,11 @@ fn cli_death_during_stdin_write_settles_transient() {
     let start = std::time::Instant::now();
     let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
     match &outcome.termination {
-        Termination::Transient(msg) => assert!(
+        Termination::Runtime(msg) => assert!(
             msg.contains("stdin write failed"),
-            "expected the stdin write failure to ride the Transient: {msg}"
+            "expected the stdin write failure to ride the Runtime: {msg}"
         ),
-        other => panic!("blocked write + CLI death -> Transient: {other:?}"),
+        other => panic!("blocked write + CLI death -> Runtime: {other:?}"),
     }
     // The child's own death breaks the pipe: no cancel thread, no 30s hold
     // on this path.

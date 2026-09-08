@@ -111,7 +111,7 @@ fn main() {
 
     // The mid-write death leg of the #808 write: a CLI that exits before
     // draining stdin (e.g. a startup config rejection) breaks the oversized
-    // prompt write on the pipe, which settles the turn as a Transient stdin
+    // prompt write on the pipe, which settles the turn as a Runtime stdin
     // write failure.
     if scenario == "die_before_stdin" {
         std::process::exit(1);
@@ -363,7 +363,7 @@ fn main() {
         }
         "empty_stdout" => {
             // Close stdout immediately — no events, no text. The pump sees
-            // Disconnected with no text -> Transient.
+            // Disconnected with no text -> Runtime.
         }
         "cancel_with_prose" => {
             // A command execution, then agent text, then hold stdout open

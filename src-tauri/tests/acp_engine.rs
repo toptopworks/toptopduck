@@ -666,7 +666,7 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
 /// `session/prompt: broken pipe before send` contract stays pinned across
 /// the #813 write fix (the #808 codex peer's rationale).
 #[test]
-fn cli_death_during_stdin_write_settles_transient() {
+fn cli_death_during_stdin_write_settles_runtime() {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();

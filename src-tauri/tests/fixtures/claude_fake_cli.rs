@@ -112,7 +112,7 @@ fn run_turn(scenario: &str) {
     }
     // The mid-write death leg of the #808 write: a CLI that exits before
     // draining stdin breaks the oversized prompt write on the pipe, which
-    // settles the turn as a Transient stdin write failure (the codex
+    // settles the turn as a Runtime stdin write failure (the codex
     // fixture's convention).
     if scenario == "die_before_stdin" {
         std::process::exit(1);

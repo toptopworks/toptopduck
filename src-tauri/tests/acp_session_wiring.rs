@@ -589,10 +589,17 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
     }));
     let second = session.ask("this one cannot even spawn");
     std::env::set_var("PATH", old_path);
-    assert!(
-        matches!(second, TurnOutcome::Failed(_)),
-        "the missing-binary turn must fail, got {second:?}"
-    );
+    // Issue #852: the engine-before-it-starts failure is a Runtime failure
+    // naming its face, not the neutral Execute bucket.
+    match second {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
+            assert!(
+                detail.contains("not found on PATH"),
+                "the missing-binary turn names its face: {detail}"
+            );
+        }
+        other => panic!("the missing-binary turn must fail as Runtime, got {other:?}"),
+    }
 
     // The no-discovery turn preserved both the session-side snapshot and the
     // recipe-header cache (one storage, issue #530).

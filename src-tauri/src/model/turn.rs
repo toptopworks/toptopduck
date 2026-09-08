@@ -76,7 +76,7 @@ pub struct VizSpec {
 /// so the kind survives save/resume -- a resumed failure renders with the same
 /// locale message it had live, not a flattened string.
 ///
-/// `detail` (Execute / Resource / Runtime) is a technical, engine-level
+/// `detail` (Execute / Resource / Runtime / InvalidConfig) is a technical, engine-level
 /// explanation that rides the frontend's collapsed "Technical details" fold,
 /// never the primary message (ADR-0029: the detail is a DuckDB / engine
 /// string, audited to carry no API key). `StaleReference` carries the dead
@@ -228,7 +228,8 @@ pub enum TurnOutcome {
     },
     /// Outcome C -- a failed turn: the agent loop's execution cap exhausted
     /// without convergence, a provider fault (not-wired / invalid-config /
-    /// transient), or a replayed-chain failure on resume (ADR-0028, calibrated
+    /// transient), an external-runtime wiring / transport fault (issue
+    /// #852), or a replayed-chain failure on resume (ADR-0028, calibrated
     /// by ADR-0077/0081). Tool-level errors (SQL failure / stale reference)
     /// do NOT fail the turn on the live path -- they route back to the model
     /// for self-correction (ADR-0077). Carries the typed [`TurnFailure`] kind
