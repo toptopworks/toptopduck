@@ -29,7 +29,7 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
     // consumers (<pre> error-stack in TechnicalDetailsFold) and avoid a
     // bespoke --font-mono token override (ADR-0067 Decision 2).
     <section className="dataset-detail">
-      <h2 className="m-0 mb-1">
+      <h2 className="m-0 mb-1 text-base font-semibold">
         {dataset.display_name}{" "}
         <small className="text-muted-foreground font-normal">
           <FormattedMessage
@@ -60,7 +60,7 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
         />
       </p>
 
-      <h3>
+      <h3 className="text-base font-semibold">
         <FormattedMessage
           id="workingSet.detail.columnsHeading"
           defaultMessage="Columns & inferred types"
@@ -83,13 +83,13 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
               <TableCell>{c.name}</TableCell>
               {/* Nested DuckDB types (STRUCT(...)/LIST(...)) wrap instead of
                   overflowing the panel. */}
-              <TableCell><code className="font-mono break-words whitespace-pre-wrap">{c.canonical_type}</code></TableCell>
+              <TableCell><code className="font-mono text-[13px] break-words whitespace-pre-wrap">{c.canonical_type}</code></TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
 
-      <h3>
+      <h3 className="text-base font-semibold">
         <FormattedMessage
           id="workingSet.detail.sampleHeading"
           defaultMessage="First 3 rows frozen at load time"

@@ -292,7 +292,7 @@ export function ResultView({
         <div className="min-w-0">
           {/* ADR-0067 (issue #173): the .result-view h2 margin rule retired
               from styles.css onto utility. */}
-          <h2 id={headingId} className="mb-1">
+          <h2 id={headingId} className="mb-1 text-base font-semibold">
             {question ? (
               /* Issue #772: the title is the producing question's verbatim
                * text -- a human coordinate, not the machine reference name

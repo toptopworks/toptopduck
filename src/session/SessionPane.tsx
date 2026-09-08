@@ -629,7 +629,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             retired from styles.css; the flex-1 + overflow-y-auto layout could
             move too, but the hook stays for selector / test stability. */}
           <div
-            className="workspace-body flex-1 overflow-y-auto p-4"
+            className="workspace-body flex-1 overflow-y-auto p-4 text-sm"
             id={workspacePanelId}
             role="tabpanel"
             aria-labelledby={tab === "result" ? resultTabId : workingSetTabId}

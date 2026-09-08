@@ -37,10 +37,15 @@ interface PrivacyControlsProps {
 // punctuation), whereas the Alert's grid + AlertTitle/AlertDescription slot
 // structure serves block disclosure content (the DisclosureBanner info surface
 // from #108) -- a different surface from this per-dataset summary. The info
-// blue tint rides Tailwind's blue scale (bg-blue-50 / border-blue-200) as the
-// nearest-scale equivalent of the retired #f4f8ff / #d6e4ff; this summary is
-// the app's only blue surface, so it stays on the Tailwind scale rather than a
-// bespoke info token (ADR-0067 Decision 2).
+// tint first rode Tailwind's blue scale (bg-blue-50 / border-blue-200, the
+// nearest-scale equivalent of the retired #f4f8ff / #d6e4ff) with no dark
+// variant -- under .dark it rendered a near-white block inside the dark
+// panel. Issue #864 promoted it to the --info token (the #108 --warning
+// promotion precedent) in the warning tint's shape (border-info/40 +
+// bg-info/10 + text-info), so both themes resolve it; the earlier
+// no-bespoke-info-token reading of ADR-0067 Decision 2 is retired with it
+// (color-semantic tokens are outside that decision's scope, per its
+// calibration).
 export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyControlsProps) {
   const intl = useIntl();
   const { privacy, columns, reference_name } = dataset;
@@ -83,7 +88,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
 
   return (
     <div className="privacy mt-2">
-      <h3 className="mt-3 mb-1">
+      <h3 className="mt-3 mb-1 text-base font-semibold">
         <FormattedMessage id="privacy.heading" defaultMessage="Privacy controls" />
       </h3>
 
@@ -130,7 +135,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
             <TableRow key={c.name}>
               <TableCell>{c.name}</TableCell>
               <TableCell>
-                <code className="font-mono">{c.canonical_type}</code>
+                <code className="font-mono text-[13px]">{c.canonical_type}</code>
               </TableCell>
               <TableCell className="w-[1%] whitespace-nowrap text-center">
                 <input
@@ -149,8 +154,8 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
         </TableBody>
       </Table>
 
-      <p className="disclosure-summary text-sm bg-blue-50 border border-blue-200 rounded-md px-3 py-2 my-2">
-        <strong>
+      <p className="disclosure-summary text-sm bg-info/10 border border-info/40 text-info rounded-md px-3 py-2 my-2">
+        <strong className="font-semibold">
           {intl.formatMessage({
             id: "privacy.summary.heading",
             defaultMessage: "Current outgoing payload:",

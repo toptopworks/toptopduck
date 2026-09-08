@@ -11,7 +11,7 @@
 **（2）不新增 elevation / typography / spacing token**
 - 字号走 Tailwind `text-xs/sm/base/lg/xl`；间距走 `gap-2 / p-3` 等；阴影走 `shadow-sm/md/lg`。
 - 颜色与圆角继续用 ADR-0050 既定 token（`--primary` / `--radius` 等）。
-- 现有 token 系统不扩——避免与 Tailwind v4 自带 scale 重复（DRY）。
+- 现有 token 系统不扩——避免与 Tailwind v4 自带 scale 重复（DRY）。校准：不扩的范围是本决策枚举的 elevation / typography / spacing 三维度；颜色语义 token 不在此限，按 ADR-0050 的披露语义增补（`--warning` / `--info`）。
 
 **（3）slice-by-slice incremental 作为迁移风险策略**
 - 采用增量切片迁移（非 big-bang 全量重写）——650 行 legacy CSS 集中重写 review 困难、风险集中；增量迁移每步可验证、可回退。项目历史即 slice 路线（0050 注释「land with the component migration slices」）。

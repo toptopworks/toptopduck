@@ -110,4 +110,38 @@ describe("PrivacyControls", () => {
     expect(screen.getByLabelText(/向云端 LLM 发送样本值/)).toBeDisabled();
     expect(screen.getByLabelText(/仅类型 id/)).toBeDisabled();
   });
+
+  it("pins the disclosure summary to the info tinted token shape (issue #864)", () => {
+    // The summary used to hardcode Tailwind's blue scale (bg-blue-50 /
+    // border-blue-200), which has no dark variant -- under .dark it rendered
+    // a near-white block inside the dark panel. The tint now rides the
+    // --info token (the warning tint's shape: border/40 + bg/10 + text), so
+    // both themes resolve it. Pin the shape so a regression to either the
+    // hardcoded blue or an untinted block fails loudly.
+    renderI18n(
+      <PrivacyControls dataset={mockDataset} loading={false} onPrivacyChange={() => {}} />,
+    );
+    const summary = document.querySelector("p.disclosure-summary")!;
+    const classes = summary.className.split(/\s+/);
+    expect(classes).toContain("bg-info/10");
+    expect(classes).toContain("border-info/40");
+    expect(classes).toContain("text-info");
+    expect(classes).not.toContain("bg-blue-50");
+    expect(classes).not.toContain("border-blue-200");
+    // The <strong> heading rides font-semibold: the weight discipline caps
+    // emphasis at 600 (an unsized <strong> resolves to bolder = 700).
+    const strong = summary.querySelector("strong")!;
+    expect(strong.className.split(/\s+/)).toContain("font-semibold");
+  });
+
+  it("pins the privacy heading and type code to the token ladder (issue #864)", () => {
+    renderI18n(
+      <PrivacyControls dataset={mockDataset} loading={false} onPrivacyChange={() => {}} />,
+    );
+    const heading = screen.getByRole("heading", { level: 3, name: /隐私控制/ });
+    expect(heading.className.split(/\s+/)).toContain("text-base");
+    expect(heading.className.split(/\s+/)).toContain("font-semibold");
+    const typeCode = screen.getByText("BIGINT");
+    expect(typeCode.className.split(/\s+/)).toContain("text-[13px]");
+  });
 });

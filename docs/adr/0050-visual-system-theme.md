@@ -6,7 +6,7 @@
 
 **（1）调色板基线（Q10）**
 - **primary = teal `#0d9488`**（沿用 0047 已编为 A 轮色，存活进新栈、零重决策）。
-- 标准 shadcn token 集（`--primary / --background / --foreground / --card / --muted / --destructive / --border`…），light/dark 成对，在 Tailwind `@theme` 定义。
+- 标准 shadcn token 集（`--primary / --background / --foreground / --card / --muted / --destructive / --border`…），light/dark 成对，在 Tailwind `@theme` 定义。校准：披露语义后续各补一对 accent token——`--warning`（警示披露）与 `--info`（信息性披露）——形态同既有 accent（浅色取深档、深色翻浅档，tint 与文字同色源），不另立 token 体系。
 - 语义映射：teal→`--primary`；红→`--destructive`（0047 C 失败轮）；灰→`--muted`（0047 D 取消轮 + stale 鬼影）；B 文本态轮用 `--muted / --secondary`（中性，0047 B≠C）。
 
 **（2）明暗模式（Q11）**
