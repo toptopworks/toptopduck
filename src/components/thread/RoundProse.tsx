@@ -197,11 +197,12 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   table: ({ children }) => (
     <div className="overflow-x-auto rounded-md border border-border">
-      {/* min-w-max: a width:100% table squeezed under the column width
-          overflows invisibly -- the spill never enters the wrapper's
-          scrollWidth, so the scroll host idles. Content width keeps wide
-          tables scrollable (issue #860) while w-full still fills narrow
-          ones. */}
+      {/* min-w-max: w-full alone lets a table whose min-content fits the
+          column squeeze down to the column width (cells wrap, no scroll
+          range appears); min-width:max-content keeps the table at natural
+          width so a wide table gets a real scroll range instead of
+          squeezing (issue #860), while narrow tables still fill via
+          w-full. */}
       <table className="w-full min-w-max border-collapse [&_tr:last-child>td]:border-b-0">
         {children}
       </table>
@@ -221,10 +222,12 @@ export const RoundProse = memo(function RoundProse({ text }: { text: string }) {
     // round-text is a cross-module stability hook: this suite's own pins plus
     // TurnCard/Thread's composition selectors (`.turn-outcome.textual
     // .round-text`) query through it.
-    // max-w-full: the root hangs off the stream (flex-col items-start) as a
-    // non-stretched flex item, so its min-content (a wide markdown table)
-    // stretches the whole item past the card and the rail's overflow-x
-    // crops it -- the #826 trace-round cap's prose twin (issue #860).
+    // max-w-full: on the #847 materialized face the root hangs off the
+    // stream (flex-col items-start) as a non-stretched flex item, so its
+    // min-content (a wide markdown table) stretches the whole item past
+    // the card and the rail's overflow-x crops it -- the #826 trace-round
+    // cap's prose twin (issue #860); the other consumers sit inside
+    // already-capped containers (.trace-round, .turn-outcome.textual).
     <div className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words">
       <Markdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
         {text}

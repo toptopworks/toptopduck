@@ -146,11 +146,11 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(wrapper?.className).toContain("overflow-x-auto");
       expect(wrapper?.className).toContain("border-border");
       expect(container.querySelector("th")?.className).toContain("border-border");
-      // A width:100% table squeezed under the column width overflows
-      // invisibly -- the spill never enters the wrapper's scrollWidth, so
-      // the scroll host idles with nothing to scroll. min-w-max keeps the
-      // wide table at content width (counted into the scroll range) while
-      // narrow tables keep the w-full fill.
+      // w-full alone lets a table whose min-content fits the column
+      // squeeze down to the column width (cells wrap, no scroll range
+      // appears); min-w-max keeps the table at natural width so it
+      // scrolls instead of squeezing, while narrow tables keep the
+      // w-full fill.
       const table = container.querySelector("table");
       expect(table).toHaveClass("w-full");
       expect(table).toHaveClass("min-w-max");

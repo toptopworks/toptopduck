@@ -167,7 +167,8 @@ describe("TurnCard narrow-column width caps (issue #860)", () => {
     // item; its min-content (a wide markdown table) stretches the whole
     // item past the card, and the rail's overflow-x: hidden crops it. The
     // RoundProse root carries the cap for every consumer (live rounds,
-    // settled rounds) through the single pipeline point.
+    // settled rounds, the materialized terminal, the textual body)
+    // through the single pipeline point.
     const { container } = renderCard(
       materializedRecord("| 很长的列名一 | 很长的列名二 |\n| --- | --- |\n| a | b |"),
     );
@@ -185,6 +186,10 @@ describe("TurnCard narrow-column width caps (issue #860)", () => {
     const { container } = renderCard(materializedRecord(null));
     const preview = container.querySelector(".result-preview");
     expect(preview).not.toBeNull();
+    // The card is itself a stream flex item: its own cap keeps the sample
+    // grid's min-content inside the column -- the margin-past-cap clause
+    // above leans on this class.
+    expect(preview).toHaveClass("max-w-full");
     expect(preview).not.toHaveClass("ml-6");
     expect(preview).toHaveClass("mt-4");
   });
