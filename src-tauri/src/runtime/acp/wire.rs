@@ -569,7 +569,10 @@ pub enum McpServer {
 /// One `{name, value}` entry of a stdio server's `env` array -- the shape
 /// `MODELED_SCHEMA` defines. Input sources hand the bridge a `BTreeMap`
 /// (sorted keys); [`McpServer::stdio_bridge`] projects it here so the array
-/// order stays deterministic.
+/// order stays deterministic. New construction sites must route through
+/// `stdio_bridge` (or an equivalent helper projecting a sorted map):
+/// assembling the `Vec` directly would forgo the by-construction guarantee
+/// of deterministic order and key uniqueness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnvVariable {
     pub name: String,
@@ -832,9 +835,9 @@ mod tests {
                 {"name": "GATEWAY_TOKEN", "value": "abc"},
             ])
         );
-        for key in ["type", "name", "command", "args", "env"] {
-            assert!(s.get(key).is_some(), "field `{key}` must be present");
-        }
+        // Each per-field equality assertion above implies presence: a
+        // missing key indexes to `Value::Null` and fails the comparison, so
+        // the mandatory-field contract rides on them.
     }
 
     /// Outbound `session/prompt` raw pin (the request-side raw-pin family

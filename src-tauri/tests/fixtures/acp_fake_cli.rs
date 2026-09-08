@@ -732,13 +732,27 @@ fn play_scenario(
                 "initialize",
                 serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
             ));
-            let _ = bridge_read();
+            // Consumed, not drained (issue #854): the initialize response
+            // arriving at all is this scenario's own proof that the spawn's
+            // env propagation reached the bridge, independent of the
+            // cli_gateway scenario's assertions.
+            let initialized = bridge_read().expect("initialize response");
+            assert_eq!(
+                initialized["id"],
+                serde_json::json!(1),
+                "the initialize response carries the matching id: {initialized}"
+            );
             bridge_write(&mcp_request(
                 2,
                 "tools/call",
                 serde_json::json!({"name":"explore","arguments":{"sql":"SELECT 1 AS x"}}),
             ));
-            let _ = bridge_read();
+            let called = bridge_read().expect("tools/call response");
+            assert_eq!(
+                called["result"]["isError"],
+                serde_json::json!(false),
+                "the explore call lands through the gateway: {called}"
+            );
             notify(out, tool_call_start("gw_1", "explore", ToolKind::Search));
             notify(out, tool_call_finish("gw_1", "explore", "rows: 1"));
             notify(out, agent_message("done via gateway"));
@@ -1207,9 +1221,10 @@ fn bridge_write(msg: &serde_json::Value) {
 }
 
 /// Read one NDJSON line back from the bridge. `None` on EOF, parse failure, or
-/// no bridge -- the scenario treats a missing response as "the gateway did not
-/// serve" and proceeds; the integration test asserts on the observable trace,
-/// not on this helper's return.
+/// no bridge -- draining scenarios treat a missing response as "the gateway
+/// did not serve" and let the observable trace carry the assertion; consuming
+/// scenarios (issue #854) `.expect` the response here to fail fast at the
+/// source.
 fn bridge_read() -> Option<serde_json::Value> {
     let mut guard = BRIDGE.lock().unwrap();
     let b = guard.as_mut()?;
