@@ -2,6 +2,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 import { PrivacyControls } from "./PrivacyControls";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 interface DatasetDetailProps {
   dataset: DatasetDescriptor;
@@ -42,23 +43,28 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
       {/* #793: the always-on 12-char fingerprint slice is near-zero value at a
           glance (it proves "the file really did change" during troubleshooting)
           -- the meta line keeps Rows only, the full fingerprint rides the
-          native tooltip. */}
-      <p
-        className="meta text-muted-foreground mt-1 mb-3"
-        title={intl.formatMessage(
-          {
-            id: "workingSet.detail.fingerprintTitle",
-            defaultMessage: "Fingerprint: {fingerprint}",
-          },
-          { fingerprint: dataset.fingerprint },
-        )}
-      >
-        <FormattedMessage
-          id="workingSet.detail.meta"
-          defaultMessage="Rows: {rows}"
-          values={{ rows: dataset.row_count }}
-        />
-      </p>
+          tooltip (#865 moved it from the OS-native title to the
+          theme-following Radix tooltip). */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <p className="meta text-muted-foreground mt-1 mb-3">
+            <FormattedMessage
+              id="workingSet.detail.meta"
+              defaultMessage="Rows: {rows}"
+              values={{ rows: dataset.row_count }}
+            />
+          </p>
+        </TooltipTrigger>
+        <TooltipContent>
+          {intl.formatMessage(
+            {
+              id: "workingSet.detail.fingerprintTitle",
+              defaultMessage: "Fingerprint: {fingerprint}",
+            },
+            { fingerprint: dataset.fingerprint },
+          )}
+        </TooltipContent>
+      </Tooltip>
 
       <h3 className="text-base font-semibold">
         <FormattedMessage

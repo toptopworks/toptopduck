@@ -18,6 +18,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "../../lib/utils";
 import type { DatasetDescriptor } from "../../types/dataset";
 
@@ -32,13 +33,26 @@ const BUTTON_CHROME = "appearance-none border-0 cursor-pointer rounded-md";
 // The select button: fills the row's leftover width (flex-1 + min-w-0 so the
 // label can truncate inside), compact padding, left alignment (UA button text
 // is centered). Active state (bg-accent + font-semibold) layers on via cn()
-// at the call site.
-const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left`;
+// at the call site. Issue #865 adds the app-standard hover feedback
+// (transition-colors + hover:bg-accent, the WorkspaceToggle form) so an
+// inactive row answers the pointer immediately instead of only the active
+// row carrying a tint.
+const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left transition-colors hover:bg-accent`;
 // The per-row icon actions (issue #790): a 28px square hit area (h-7 w-7)
-// wrapping a 14px glyph -- the #774 header-chrome spec. Weakly visible at
-// opacity-60 and restored to full opacity on row hover / keyboard focus (the
-// #251 sidebar inline-action convention; fully hiding was rejected there).
-const ICON_BUTTON_BASE = `${BUTTON_CHROME} h-7 w-7 shrink-0 flex items-center justify-center text-foreground opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
+// wrapping a 14px glyph -- the #774 header-chrome spec. Issue #865 retires
+// the #790/#251 weak-visibility form (opacity-60 always on, adopted so
+// keyboard/touch/AT users could discover the actions without hovering): the
+// actions now hover-reveal -- opacity-0 + pointer-events-none by default, so
+// an un-hovered row reads as plain data, with display AND hit area restored
+// on row hover / keyboard focus-visible. Tab order and aria-labels are
+// untouched (focus-visible recovery keeps the actions keyboard-reachable);
+// `invisible` stays rejected -- it drops the buttons from the a11y tree. The
+// bare `transition` (Tailwind's default property set) eases both the opacity
+// fade and the hover:bg-accent tint. The loading state rides
+// disabled:cursor-progress alone: the former disabled:opacity-50 dimming is
+// retired with the weak-visibility form, because a dim layered over opacity-0
+// would resurface every row's disabled actions mid-load.
+const ICON_BUTTON_BASE = `${BUTTON_CHROME} h-7 w-7 shrink-0 flex items-center justify-center text-foreground opacity-0 pointer-events-none transition group-hover:opacity-100 group-hover:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress`;
 
 // Rename dialog (issue #759, ADR-0037): display label only -- the reference
 // name is never touched, so selection / SQL / active references all stay
@@ -283,10 +297,11 @@ export function WorkingSetList({
         {datasets.map((d) => (
           // One horizontal row per dataset (issue #790): the select button and
           // the icon actions side by side; group is the hover hook the icon
-          // weak-show restore keys off. A stale dataset renders its short chip
-          // after the row actions (issue #793 retired the #790 basis-full badge
-          // + flex-wrap second line -- the chip is an inline shrink-0 peer, so
-          // the row stays one flex line at any column width).
+          // actions' hover-reveal restore keys off (#865). A stale dataset
+          // renders its short chip after the row actions (issue #793 retired
+          // the #790 basis-full badge + flex-wrap second line -- the chip is
+          // an inline shrink-0 peer, so the row stays one flex line at any
+          // column width).
           <li
             key={d.reference_name}
             className={cn(
@@ -295,103 +310,135 @@ export function WorkingSetList({
               d.stale && "stale",
             )}
           >
-            <button
-              type="button"
-              title={d.display_name}
-              className={cn(
-                SELECT_BUTTON_BASE,
-                d.reference_name === activeName && "bg-accent font-semibold",
-              )}
-              onClick={() => onSelect(d.reference_name)}
-            >
-              {/* #793: the " · current table" suffix is retired -- active is
-                  carried by the row highlight (below) and the tab-row Targets
-                  badge, so the label truncates cleanly in narrow columns. */}
-              <span className="min-w-0 flex-1 truncate">{d.display_name}</span>
-              {/* font-normal overrides the active button's font-semibold so the
-                  row-count annotation stays muted-weight in either state;
-                  shrink-0 + nowrap keep truncation from ever eliding the note.
-                  text-xs pins the caption token: the preflight small rule
-                  (80%) would resolve an unsized small at 11.2px under the
-                  panel's 14px baseline (issue #864) -- below the ladder's
-                  12px floor. */}
-              <small className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-normal">
-                {" "}
-                <FormattedMessage
-                  id="workingSet.rowCount"
-                  defaultMessage="{count, plural, one {# row} other {# rows}}"
-                  values={{ count: d.row_count }}
-                />
-              </small>
-            </button>
-            <button
-              type="button"
-              className={cn(ICON_BUTTON_BASE, "rename")}
-              aria-label={intl.formatMessage(
-                { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
-                { name: d.display_name },
-              )}
-              title={intl.formatMessage({ id: "workingSet.rename.title", defaultMessage: "Rename display label" })}
-              disabled={loading}
-              onClick={(e) => openRename(d, e.currentTarget)}
-            >
-              <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
+            {/* #865: the truncated label's full text rides the app-standard
+                Radix tooltip (the ADR-0050/0054 truncation-recovery mapping),
+                replacing the OS-native title whose chrome follows the OS, not
+                the theme tokens. */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className={cn(
+                    SELECT_BUTTON_BASE,
+                    d.reference_name === activeName && "bg-accent font-semibold",
+                  )}
+                  onClick={() => onSelect(d.reference_name)}
+                >
+                  {/* #793: the " · current table" suffix is retired -- active is
+                      carried by the row highlight (below) and the tab-row
+                      Targets badge, so the label truncates cleanly in narrow
+                      columns. */}
+                  <span className="min-w-0 flex-1 truncate">{d.display_name}</span>
+                  {/* font-normal overrides the active button's font-semibold so
+                      the row-count annotation stays muted-weight in either
+                      state; shrink-0 + nowrap keep truncation from ever
+                      eliding the note. text-xs pins the caption token: the
+                      preflight small rule (80%) would resolve an unsized small
+                      at 11.2px under the panel's 14px baseline (issue #864) --
+                      below the ladder's 12px floor. */}
+                  <small className="shrink-0 whitespace-nowrap text-xs text-muted-foreground font-normal">
+                    {" "}
+                    <FormattedMessage
+                      id="workingSet.rowCount"
+                      defaultMessage="{count, plural, one {# row} other {# rows}}"
+                      values={{ count: d.row_count }}
+                    />
+                  </small>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>{d.display_name}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className={cn(ICON_BUTTON_BASE, "rename")}
+                  aria-label={intl.formatMessage(
+                    { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
+                    { name: d.display_name },
+                  )}
+                  disabled={loading}
+                  onClick={(e) => openRename(d, e.currentTarget)}
+                >
+                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {intl.formatMessage({ id: "workingSet.rename.title", defaultMessage: "Rename display label" })}
+              </TooltipContent>
+            </Tooltip>
             {onReplace && (
-              <button
-                type="button"
-                className={cn(ICON_BUTTON_BASE, "replace")}
-                aria-label={intl.formatMessage(
-                  { id: "workingSet.replace.ariaLabel", defaultMessage: "Replace source {name}" },
-                  { name: d.display_name },
-                )}
-                title={intl.formatMessage({
-                  id: "workingSet.replace.title",
-                  defaultMessage: "Re-upload to replace this dataset (keeps the reference name)",
-                })}
-                disabled={loading}
-                onClick={() => void pickReplace(d)}
-              >
-                <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={cn(ICON_BUTTON_BASE, "replace")}
+                    aria-label={intl.formatMessage(
+                      { id: "workingSet.replace.ariaLabel", defaultMessage: "Replace source {name}" },
+                      { name: d.display_name },
+                    )}
+                    disabled={loading}
+                    onClick={() => void pickReplace(d)}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {intl.formatMessage({
+                    id: "workingSet.replace.title",
+                    defaultMessage: "Re-upload to replace this dataset (keeps the reference name)",
+                  })}
+                </TooltipContent>
+              </Tooltip>
             )}
             {onDelete && (
-              <button
-                type="button"
-                className={cn(ICON_BUTTON_BASE, "delete")}
-                aria-label={intl.formatMessage(
-                  { id: "workingSet.delete.ariaLabel", defaultMessage: "Delete {name}" },
-                  { name: d.display_name },
-                )}
-                title={intl.formatMessage({
-                  id: "workingSet.delete.title",
-                  defaultMessage: "Remove this dataset from the working set",
-                })}
-                disabled={loading}
-                onClick={(e) => openDelete(d, e.currentTarget)}
-              >
-                <X className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={cn(ICON_BUTTON_BASE, "delete")}
+                    aria-label={intl.formatMessage(
+                      { id: "workingSet.delete.ariaLabel", defaultMessage: "Delete {name}" },
+                      { name: d.display_name },
+                    )}
+                    disabled={loading}
+                    onClick={(e) => openDelete(d, e.currentTarget)}
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {intl.formatMessage({
+                    id: "workingSet.delete.title",
+                    defaultMessage: "Remove this dataset from the working set",
+                  })}
+                </TooltipContent>
+              </Tooltip>
             )}
             {d.stale && (
-              // #793: a short chip with the full causal sentence on the native
-              // tooltip -- the sentence used to wrap inside the badge and break
-              // the chip shape in narrow columns. No action outlet here: the
-              // rerun path lives with the result panel's stale banner (#758).
-              <Badge
-                variant="secondary"
-                className="stale-badge shrink-0"
-                title={intl.formatMessage(
-                  {
-                    id: "workingSet.staleRow.title",
-                    defaultMessage:
-                      "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
-                  },
-                  { name: d.stale.display_name, reason: d.stale.reason },
-                )}
-              >
-                <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
-              </Badge>
+              // #793: a short chip with the full causal sentence on the
+              // tooltip -- the sentence used to wrap inside the badge and
+              // break the chip shape in narrow columns (#865 moved it from
+              // the OS-native title to the theme-following Radix tooltip). No
+              // action outlet here: the rerun path lives with the result
+              // panel's stale banner (#758).
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge variant="secondary" className="stale-badge shrink-0">
+                    <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {intl.formatMessage(
+                    {
+                      id: "workingSet.staleRow.title",
+                      defaultMessage:
+                        "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
+                    },
+                    { name: d.stale.display_name, reason: d.stale.reason },
+                  )}
+                </TooltipContent>
+              </Tooltip>
             )}
           </li>
         ))}

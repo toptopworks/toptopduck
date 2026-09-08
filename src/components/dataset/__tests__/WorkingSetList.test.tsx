@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
+import { TooltipProvider } from "../../ui/tooltip";
 import { WorkingSetList } from "../WorkingSetList";
 import type { DatasetDescriptor, StaleReason } from "../../../types/dataset";
 import { mockDataset } from "./helpers";
@@ -573,12 +574,13 @@ describe("WorkingSetList", () => {
     expect(screen.getByRole("button", { name: /删除/ })).toBeDisabled();
   });
 
-  it("renders a short stale chip whose title carries the Deleted causal sentence (issue #793)", () => {
+  it("renders a short stale chip; the Deleted causal sentence rides the Radix tooltip (issue #793, #865)", async () => {
     // #793 AC1: the row badge is the short "已失效" chip; the full causal
     // sentence -- with "已删除" for a Deleted anchor and "已更新" for a
-    // Replaced one, from the workingSet.staleRow.title ICU select -- moves to
-    // the native tooltip, so a narrow column can no longer wrap the sentence
-    // inside the chip. No action outlet rides the chip: the rerun path stays
+    // Replaced one, from the workingSet.staleRow.title ICU select -- rides the
+    // tooltip, so a narrow column can no longer wrap the sentence inside the
+    // chip. #865 moves it from the OS-native title to the theme-following
+    // Radix tooltip. No action outlet rides the chip: the rerun path stays
     // with the result panel's stale banner (#758).
     const stale: DatasetDescriptor = {
       ...mockDataset,
@@ -598,8 +600,10 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    const chip = screen.getByText("已失效");
-    expect(chip).toHaveAttribute("title", "因「员工表」已删除而失效");
+    const chip = screen.getByText("已失效").closest(".stale-badge")!;
+    expect(chip).not.toHaveAttribute("title");
+    fireEvent.pointerMove(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
   });
 
   it("renders the row-count plural 'one' branch via the en defaultMessage (ADR-0052)", () => {
@@ -608,14 +612,18 @@ describe("WorkingSetList", () => {
     // An empty English provider (the renderSettings pattern) routes FormattedMessage
     // to the canonical defaultMessage so the plural stays covered. The negative
     // assertion guards against a one/other swap or a stray "rows" in the one arm.
+    // The TooltipProvider rides along (renderI18n carries it; this bare-en
+    // render must hand-wrap -- the list's tooltips (#865) require it).
     render(
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        <WorkingSetList
-          datasets={[{ ...mockDataset, row_count: 1 }]}
-          activeName={null}
-          onSelect={() => {}}
-          onRename={() => {}}
-        />
+        <TooltipProvider>
+          <WorkingSetList
+            datasets={[{ ...mockDataset, row_count: 1 }]}
+            activeName={null}
+            onSelect={() => {}}
+            onRename={() => {}}
+          />
+        </TooltipProvider>
       </IntlProvider>,
     );
     expect(screen.getByRole("button", { name: /1 row/ })).toBeInTheDocument();
@@ -625,18 +633,20 @@ describe("WorkingSetList", () => {
   it("renders the row-count plural 'other' branch via the en defaultMessage (ADR-0052)", () => {
     render(
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        <WorkingSetList
-          datasets={[{ ...mockDataset, row_count: 5 }]}
-          activeName={null}
-          onSelect={() => {}}
-          onRename={() => {}}
-        />
+        <TooltipProvider>
+          <WorkingSetList
+            datasets={[{ ...mockDataset, row_count: 5 }]}
+            activeName={null}
+            onSelect={() => {}}
+            onRename={() => {}}
+          />
+        </TooltipProvider>
       </IntlProvider>,
     );
     expect(screen.getByRole("button", { name: /5 rows/ })).toBeInTheDocument();
   });
 
-  it("renders the stale chip title verb for a Replaced anchor (issue #41 AC4)", () => {
+  it("renders the stale tooltip verb for a Replaced anchor (issue #41 AC4, #865)", async () => {
     // Pins the Replaced arm of the workingSet.staleRow.title ICU select (the
     // Deleted arm is covered above) so a regression that drops the arm renders
     // an incomplete tooltip; mirrors the ResultView stale-verb coverage in the
@@ -659,8 +669,9 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    const chip = screen.getByText("已失效");
-    expect(chip).toHaveAttribute("title", "因「员工表」已更新而失效");
+    const chip = screen.getByText("已失效").closest(".stale-badge")!;
+    fireEvent.pointerMove(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已更新而失效");
   });
 
   it("exhausts every StaleReason variant in the workingSet.staleRow.title select (ADR-0041)", () => {
@@ -679,7 +690,8 @@ describe("WorkingSetList", () => {
   // --- Row layout (issue #790): each dataset renders as ONE horizontal row --
   // the select button plus the rename/replace/delete icon actions side by
   // side, retiring the #5-era stack of four full-width block buttons. Icons
-  // follow the #774 hit-area spec and weak-show per the #251 convention.
+  // follow the #774 hit-area spec; their visibility form is the #865
+  // hover-reveal (retiring the #790/#251 weak-show).
 
   it("lays each dataset out as one flex row with the three icon actions inline (issue #790)", () => {
     renderI18n(
@@ -735,7 +747,13 @@ describe("WorkingSetList", () => {
     expect(screen.queryByText("✕")).not.toBeInTheDocument();
   });
 
-  it("weak-shows the icon actions and restores full opacity on row hover / focus (issue #790, #251 convention)", () => {
+  it("hover-reveals the icon actions: hidden and unhoverable until row hover / focus (issue #865)", () => {
+    // #865 retires the #790/#251 weak-visibility convention (opacity-60
+    // always on) for the working-set rows: an un-hovered row reads as plain
+    // data, with the actions at opacity-0 + pointer-events-none. Row hover and
+    // keyboard focus-visible restore both display and hit area; `invisible`
+    // stays rejected (it would drop the buttons from the a11y tree), and the
+    // tab order / aria-labels are untouched.
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -746,14 +764,37 @@ describe("WorkingSetList", () => {
     );
     const rename = screen.getByRole("button", { name: /重命名/ });
     const classes = rename.className.split(/\s+/);
-    expect(classes).toContain("opacity-60");
+    expect(classes).toContain("opacity-0");
+    expect(classes).toContain("pointer-events-none");
     expect(classes).toContain("group-hover:opacity-100");
+    expect(classes).toContain("group-hover:pointer-events-auto");
     expect(classes).toContain("focus-visible:opacity-100");
+    expect(classes).toContain("focus-visible:pointer-events-auto");
+    expect(classes).not.toContain("opacity-60");
     // The row <li> carries the group hook the hover restore keys off.
     expect(rename.closest("li")!.className.split(/\s+/)).toContain("group");
   });
 
-  it("truncates the label but not the row-count note, and titles the full name (issue #790)", () => {
+  it("tints the select button on hover, with the color change transitioned (issue #865)", () => {
+    // The inactive select button used to give zero hover feedback (the active
+    // row's bg-accent was the only tint); #865 aligns it with the app-wide
+    // interaction-row convention -- hover:bg-accent, and transition-colors so
+    // the tint (and the icon actions' hover background) eases instead of
+    // snapping (transition-opacity alone did not cover background color).
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const classes = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
+    expect(classes).toContain("hover:bg-accent");
+    expect(classes).toContain("transition-colors");
+  });
+
+  it("truncates the label but not the row-count note; the full name rides the Radix tooltip (issue #790, #865)", async () => {
     const long: DatasetDescriptor = {
       ...mockDataset,
       display_name: "a-very-long-dataset-display-label",
@@ -767,14 +808,42 @@ describe("WorkingSetList", () => {
       />,
     );
     const select = screen.getByRole("button", { name: /^a-very-long/ });
-    // The native tooltip carries the untruncated display name.
-    expect(select).toHaveAttribute("title", "a-very-long-dataset-display-label");
+    // The native title is retired (#865); the untruncated display name moves
+    // to the app-standard Radix tooltip (the ADR-0050/0054 truncation-recovery
+    // mapping), surfaced on hover.
+    expect(select).not.toHaveAttribute("title");
+    fireEvent.pointerMove(select);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "a-very-long-dataset-display-label",
+    );
     // Truncation lives on the label span so the trailing row-count note stays
     // visible (shrink-0, never the elided part) at any column width.
     const label = select.querySelector(".truncate");
     expect(label).toHaveTextContent("a-very-long-dataset-display-label");
     const note = select.querySelector("small");
     expect(note!.className.split(/\s+/)).toContain("shrink-0");
+  });
+
+  it("retires the native titles on the row controls; the action hints ride Radix tooltips (issue #865)", async () => {
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    // All four row controls drop the OS-native title (its chrome follows the
+    // OS, not the theme tokens).
+    for (const name of [/^people/, /重命名/, /换源/, /删除/]) {
+      expect(screen.getByRole("button", { name })).not.toHaveAttribute("title");
+    }
+    // The hint copy moves into the theme-following Radix tooltip -- wire check
+    // on the rename action (its siblings share the same wiring).
+    fireEvent.pointerMove(screen.getByRole("button", { name: /重命名/ }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名显示名");
   });
 
   it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {

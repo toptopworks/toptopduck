@@ -808,7 +808,16 @@
   min-width: 0;
   overflow: hidden auto;
   display: flex; flex-direction: column;
-  background: var(--card);
+  /* Page-floor surface (issue #865): the workspace column rides the canvas
+     (--background), not card, so in-content card surfaces that sit directly on
+     it (the working-set panels, turn cards) read as a layer above the floor
+     per the DESIGN.md surface levels -- dark mode gains the brightness step
+     (canvas #0f1410 -> card #181b18); light mode is same-white by design and
+     keeps the hairline + shadow-sm edge (the system's light-mode depth
+     method). Before #865 this was var(--card), which made the working-set
+     panel card-on-card: same token on same token, hairline as the only
+     separation. */
+  background: var(--background);
   transition: opacity 200ms ease;
   /* Inline-size container (issue #791): the .layout working-set grid (rule
      at the top of this file) queries this column's width for the narrow

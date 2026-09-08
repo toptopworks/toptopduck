@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { DatasetDetail } from "../DatasetDetail";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import { mockDataset } from "./helpers";
@@ -18,15 +18,21 @@ describe("DatasetDetail", () => {
     expect(screen.queryByText(/隐私控制/)).toBeNull();
   });
 
-  it("keeps the meta line to the row count; the full fingerprint rides the tooltip (issue #793)", () => {
+  it("keeps the meta line to the row count; the full fingerprint rides the Radix tooltip (issue #793, #865)", async () => {
     // AC3: the always-on 12-char fingerprint slice is near-zero value at a
     // glance -- it exists to prove "the file really did change" during
-    // troubleshooting. The visible meta keeps Rows only; the tooltip carries
-    // the full (untruncated) fingerprint so that check stays one hover away.
+    // troubleshooting. The visible meta keeps Rows only; the full
+    // (untruncated) fingerprint rides the tooltip so that check stays one
+    // hover away. #865 moves it from the OS-native title to the
+    // theme-following Radix tooltip.
     renderI18n(<DatasetDetail dataset={mockDataset} />);
     const meta = screen.getByText(/行数：5/);
     expect(meta).not.toHaveTextContent(/指纹/);
-    expect(meta).toHaveAttribute("title", `指纹：${mockDataset.fingerprint}`);
+    expect(meta).not.toHaveAttribute("title");
+    fireEvent.pointerMove(meta);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      `指纹：${mockDataset.fingerprint}`,
+    );
   });
 
   it("pins the schema-type <code> to font-mono (ADR-0067, issue #185)", () => {
