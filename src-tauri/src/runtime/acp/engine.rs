@@ -398,13 +398,13 @@ impl AcpEngine {
         pump.tracker.freeze_trailing_thinking(&mut on_phase);
 
         let termination = match end {
-            PromptEnd::Stop(StopReason::Success | StopReason::Refusal) => {
+            PromptEnd::Stop(StopReason::EndTurn | StopReason::Refusal) => {
                 Termination::Text(pump.tracker.terminal_text())
             }
             PromptEnd::Stop(StopReason::Cancelled) => Termination::Cancelled,
             // The agent's own turn/token ceilings are execution-level caps;
             // map onto our StepCap (the wiring seam renders Failed either way).
-            PromptEnd::Stop(StopReason::MaxTurns | StopReason::MaxTokens) => {
+            PromptEnd::Stop(StopReason::MaxTurnRequests | StopReason::MaxTokens) => {
                 Termination::StepCap(self.step_cap)
             }
             PromptEnd::Cancelled => Termination::Cancelled,

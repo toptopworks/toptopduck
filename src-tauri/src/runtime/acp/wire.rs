@@ -241,16 +241,18 @@ pub struct PromptResult {
 }
 
 /// Why the agent stopped the turn (ACP `StopReason`). Serialized as a bare
-/// lowercase string by the `rename_all` so it matches the schema's enum form.
+/// lowercase string by the `rename_all` so it matches the schema's enum form
+/// -- the variant names the schema crate named by [`MODELED_SCHEMA`] defines
+/// (`end_turn`, not `success`; `max_turn_requests`, not `max_turns`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// The turn ended successfully (terminal agent message emitted).
-    Success,
+    EndTurn,
     /// The agent hit its own max-tokens ceiling.
     MaxTokens,
-    /// The agent hit its own max-turns ceiling.
-    MaxTurns,
+    /// The agent hit its own max-turn-requests ceiling.
+    MaxTurnRequests,
     /// The agent refused to continue.
     Refusal,
     /// The client cancelled via `session/cancel`.
@@ -857,13 +859,16 @@ mod tests {
         assert_eq!(prompt[0]["text"], "hello");
     }
 
-    /// stop_reason round-trips to the ACP lowercase wire form.
+    /// stop_reason round-trips to the ACP lowercase wire form -- the variant
+    /// spellings the schema crate named by [`MODELED_SCHEMA`] defines
+    /// (`end_turn` / `max_tokens` / `max_turn_requests` / `refusal` /
+    /// `cancelled`; a strict agent sends `end_turn`, not `success`).
     #[test]
     fn stop_reason_round_trips_to_snake_case() {
         for (reason, spelling) in [
-            (StopReason::Success, "success"),
+            (StopReason::EndTurn, "end_turn"),
             (StopReason::MaxTokens, "max_tokens"),
-            (StopReason::MaxTurns, "max_turns"),
+            (StopReason::MaxTurnRequests, "max_turn_requests"),
             (StopReason::Refusal, "refusal"),
             (StopReason::Cancelled, "cancelled"),
         ] {
