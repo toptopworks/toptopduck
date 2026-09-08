@@ -243,7 +243,7 @@ describe("Thread", () => {
     expect(screen.getByText("预测不在 v1 能力范围内")).toBeInTheDocument();
     // Failed renders the typed Execute message via the locale catalog (the
     // engine detail rides the collapsed fold); cancelled renders the marker.
-    expect(screen.getByText("执行查询失败")).toBeInTheDocument();
+    expect(screen.getByText("执行失败")).toBeInTheDocument();
     expect(screen.getByText("已取消")).toBeInTheDocument();
   });
 
@@ -493,7 +493,7 @@ describe("Thread", () => {
     );
     // Both are present in the DOM (not collapsed away).
     expect(screen.getByText("坏查询")).toBeInTheDocument();
-    expect(screen.getByText("执行查询失败")).toBeInTheDocument();
+    expect(screen.getByText("执行失败")).toBeInTheDocument();
     expect(screen.getByText("中途取消")).toBeInTheDocument();
     expect(screen.getByText("已取消")).toBeInTheDocument();
     // Both carry their outcome attribute (weakening is CSS opacity, asserted at
@@ -1854,7 +1854,7 @@ describe("Thread", () => {
       // line, the technical fold inside the card below them.
       expect(card!.querySelector(".outcome-icon")?.getAttribute("aria-label")).toBe("失败");
       const head = card!.querySelector(".outcome-icon")!.parentElement;
-      expect(head?.querySelector(".failed-reason")?.textContent).toBe("执行查询失败");
+      expect(head?.querySelector(".failed-reason")?.textContent).toBe("执行失败");
       expect(card!.querySelector(".error-details")).not.toBeNull();
       // The fold sits below the glyph head: it is the card's second child,
       // after the head row (same element as the .error-details query).

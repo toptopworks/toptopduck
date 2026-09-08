@@ -237,18 +237,18 @@ impl AcpEngine {
                 "toptopduck::acp",
             );
         }
-        // Spawn the CLI. Any spawn failure lands as a transient turn failure
-        // (the engine never panics into the host).
+        // Spawn the CLI. Any spawn failure lands as an external-runtime
+        // failure (the engine never panics into the host).
         let mut child = match spawn(binary, &self.adapter) {
             Ok(c) => c,
-            Err(detail) => return self.outcome(Termination::Transient(detail), Vec::new(), None),
+            Err(detail) => return self.outcome(Termination::Runtime(detail), Vec::new(), None),
         };
         let stdout = child.inner.stdout.take().expect("piped stdout");
         let stdin = child.inner.stdin.take().expect("piped stdin");
         let mut io = AcpIo::new(stdin, stdout);
 
-        // Handshake: initialize -> session/new. A failure here is a transient
-        // turn failure (the CLI is not an ACP agent / crashed).
+        // Handshake: initialize -> session/new. A failure here is an
+        // external-runtime failure (the CLI is not an ACP agent / crashed).
         let hs = match handshake(&mut io, &mut child, &self.cancel, input, &self.adapter) {
             Ok(hs) => hs,
             Err(term) => {
@@ -314,7 +314,7 @@ impl AcpEngine {
                 Ok(resp) => {
                     if let Some(e) = resp.error {
                         let outcome = self.outcome(
-                            Termination::Transient(format!(
+                            Termination::Runtime(format!(
                                 "session/set_config_option `{config_id}` = `{value}` error: {}",
                                 e.message
                             )),
@@ -358,7 +358,7 @@ impl AcpEngine {
             // io detail riding along (the sibling drivers' #808 shape).
             super::process::StdinWriteOutcome::Failed(e) => {
                 let outcome = self.outcome(
-                    Termination::Transient(format!("session/prompt: broken pipe before send: {e}")),
+                    Termination::Runtime(format!("session/prompt: broken pipe before send: {e}")),
                     Vec::new(),
                     discovered,
                 );
@@ -408,12 +408,12 @@ impl AcpEngine {
                 Termination::StepCap(self.step_cap)
             }
             PromptEnd::Cancelled => Termination::Cancelled,
-            // Reader EOF / pipe break before a response: a transient turn
+            // Reader EOF / pipe break before a response: an external-runtime
             // failure (the agent crashed or closed stdout).
-            PromptEnd::Eof => Termination::Transient("ACP agent closed stdout mid-turn".into()),
+            PromptEnd::Eof => Termination::Runtime("ACP agent closed stdout mid-turn".into()),
             // The agent answered with a parse failure / RPC error / empty
             // result -- surface the real diagnostic, NOT "closed stdout".
-            PromptEnd::Failed(reason) => Termination::Transient(reason),
+            PromptEnd::Failed(reason) => Termination::Runtime(reason),
         };
         let rounds = pump.tracker.settle_rounds(&termination);
         let outcome = self.outcome(termination, rounds, discovered);
@@ -506,12 +506,12 @@ fn handshake(
     match (init.result, init.error) {
         (Some(_), _) => {}
         (None, Some(e)) => {
-            return Err(Termination::Transient(format!(
+            return Err(Termination::Runtime(format!(
                 "initialize error: {}",
                 e.message
             )));
         }
-        (None, None) => return Err(Termination::Transient("initialize: empty response".into())),
+        (None, None) => return Err(Termination::Runtime("initialize: empty response".into())),
     }
     let new_resp = io.request_roundtrip::<NewSessionParams, wire::NewSessionResult>(
         child,
@@ -537,11 +537,11 @@ fn handshake(
                 discovered,
             })
         }
-        (None, Some(e)) => Err(Termination::Transient(format!(
+        (None, Some(e)) => Err(Termination::Runtime(format!(
             "session/new error: {}",
             e.message
         ))),
-        (None, None) => Err(Termination::Transient("session/new: empty response".into())),
+        (None, None) => Err(Termination::Runtime("session/new: empty response".into())),
     }
 }
 
@@ -813,12 +813,10 @@ fn map_roundtrip_termination(
     match e {
         RoundtripError::Abort(_) => Termination::Cancelled,
         RoundtripError::Serialize(detail) | RoundtripError::Write(detail) => {
-            Termination::Transient(format!("write: {detail}"))
+            Termination::Runtime(format!("write: {detail}"))
         }
-        RoundtripError::Eof => Termination::Transient("ACP agent closed stdout".into()),
-        RoundtripError::Parse(detail) => {
-            Termination::Transient(format!("response parse: {detail}"))
-        }
+        RoundtripError::Eof => Termination::Runtime("ACP agent closed stdout".into()),
+        RoundtripError::Parse(detail) => Termination::Runtime(format!("response parse: {detail}")),
     }
 }
 
@@ -840,7 +838,7 @@ enum PromptEnd {
     Eof,
     /// The agent returned a response the engine could not treat as a stop
     /// (parse failure / RPC `error` / empty result). Carries the diagnostic so
-    /// the turn's `Transient` message names the real cause instead of
+    /// the turn's `Runtime` message names the real cause instead of
     /// "closed stdout".
     Failed(String),
 }
@@ -1041,14 +1039,14 @@ impl RoundTracker {
 
     /// The turn's closing shape when no terminal event settled it: the
     /// terminal text becomes the answer (the honest degrade); without any,
-    /// a transient failure carrying `message`. Shared by the EOF and
+    /// an external-runtime failure carrying `message`. Shared by the EOF and
     /// post-pump fallback exits of the stream paths.
-    pub(super) fn text_or_transient(&self, message: &str) -> Termination {
+    pub(super) fn text_or_runtime(&self, message: &str) -> Termination {
         let text = self.terminal_text();
         if !text.is_empty() {
             Termination::Text(text)
         } else {
-            Termination::Transient(message.to_string())
+            Termination::Runtime(message.to_string())
         }
     }
 
@@ -1673,13 +1671,13 @@ mod tests {
     /// Issue #628: a non-Text termination carries no text, so the trailing
     /// round keeps its partial prose -- symmetric with its thinking, which
     /// the turn-end freeze always keeps. Holds for Cancelled, StepCap, and
-    /// Transient alike (the policy matches only Text).
+    /// Runtime alike (the policy matches only Text).
     #[test]
     fn non_text_settle_keeps_trailing_prose_and_thinking() {
         for termination in [
             Termination::Cancelled,
             Termination::StepCap(24),
-            Termination::Transient("agent closed stdout".into()),
+            Termination::Runtime("agent closed stdout".into()),
         ] {
             let mut tracker = RoundTracker::new();
             let mut on_phase = |_p: TurnPhase| {};
@@ -2015,7 +2013,7 @@ mod tests {
 
     /// ADR-0094 dispatch seam: an adapter whose `stream_format` is
     /// `CodexEventStream` routes to the codex event stream driver (not the
-    /// ACP path). A nonexistent binary produces a Transient spawn failure
+    /// ACP path). A nonexistent binary produces a Runtime spawn failure
     /// naming the adapter, proving the dispatch fires through the module.
     #[test]
     fn codex_event_stream_dispatches_to_driver() {
@@ -2048,13 +2046,13 @@ mod tests {
             |_| {},
         );
         match &outcome.termination {
-            Termination::Transient(msg) => {
+            Termination::Runtime(msg) => {
                 assert!(
                     msg.contains("stub-test"),
                     "spawn failure names the adapter: {msg}"
                 );
             }
-            other => panic!("expected Transient from spawn failure, got {other:?}"),
+            other => panic!("expected Runtime from spawn failure, got {other:?}"),
         }
         assert!(
             outcome.trace.is_empty(),
@@ -2097,13 +2095,13 @@ mod tests {
             |_| {},
         );
         match &outcome.termination {
-            Termination::Transient(msg) => {
+            Termination::Runtime(msg) => {
                 assert!(
                     msg.contains("stub-claude"),
                     "spawn failure names the adapter: {msg}"
                 );
             }
-            other => panic!("expected Transient from spawn failure, got {other:?}"),
+            other => panic!("expected Runtime from spawn failure, got {other:?}"),
         }
         assert!(
             outcome.trace.is_empty(),

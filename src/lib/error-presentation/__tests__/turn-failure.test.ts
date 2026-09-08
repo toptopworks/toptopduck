@@ -11,7 +11,8 @@ import type { TurnFailure } from "../../../types/thread";
 const intl = createIntl({
   locale: "en",
   messages: {
-    "error.turn.execute": "Failed to execute the query",
+    "error.turn.execution": "Execution failed",
+    "error.turn.runtime": "Failed to connect to the external runtime",
     "error.turn.resource": "A resource limit was reached",
     "error.turn.notWired": "No LLM provider is configured",
     "error.turn.invalidConfig": "The provider configuration is invalid",
@@ -23,9 +24,18 @@ describe("formatTurnFailure", () => {
   // Each TurnFailure kind renders through its own catalog id (issue #125), not
   // a backend string. The detail (engine diagnosis or the configuration policy
   // reason) never enters the primary message -- it rides the fold below.
+  // Issue #852: turn-level Execute renders the neutral `error.turn.execution`
+  // (a turn may be a pure conversation, so "query" prejudges the context);
+  // external-runtime failures render `error.turn.runtime`. The query-worded
+  // `error.turn.execute` is RowReadError::Execute's id (format.ts), pinned
+  // there.
   it("renders each TurnFailure kind via the locale catalog", () => {
     const cases: Array<[TurnFailure, string]> = [
-      [{ kind: "Execute", data: { detail: "bad column" } }, "Failed to execute the query"],
+      [{ kind: "Execute", data: { detail: "bad column" } }, "Execution failed"],
+      [
+        { kind: "Runtime", data: { detail: "external runtime `cli-a` not found on PATH" } },
+        "Failed to connect to the external runtime",
+      ],
       [{ kind: "Resource", data: { detail: "timeout" } }, "A resource limit was reached"],
       [{ kind: "NotWired" }, "No LLM provider is configured"],
       [
@@ -44,14 +54,20 @@ describe("formatTurnFailure", () => {
 });
 
 describe("turnFailureDetail", () => {
-  // Execute / Resource / InvalidConfig carry the audited technical detail for
-  // the collapsed fold (ADR-0029 -- no API key); NotWired / StaleReference are
-  // self-contained (the locale message already names them) -> no fold. The
-  // InvalidConfig case (issue #277) is the one this suite was added to pin:
-  // the configuration policy reason must reach the fold, not be dropped.
+  // Execute / Resource / InvalidConfig / Runtime carry the audited technical
+  // detail for the collapsed fold (ADR-0029 -- no API key); NotWired /
+  // StaleReference are self-contained (the locale message already names them)
+  // -> no fold. The InvalidConfig case (issue #277) is the one this suite was
+  // added to pin: the configuration policy reason must reach the fold, not be
+  // dropped. Runtime (issue #852) likewise: the runtime diagnostic must reach
+  // the fold.
   it("returns the detail for the fold-carrying kinds", () => {
     const withDetail: Array<[TurnFailure, string]> = [
       [{ kind: "Execute", data: { detail: "bad column" } }, "bad column"],
+      [
+        { kind: "Runtime", data: { detail: "external runtime `cli-a` not found on PATH" } },
+        "external runtime `cli-a` not found on PATH",
+      ],
       [{ kind: "Resource", data: { detail: "timeout" } }, "timeout"],
       [
         { kind: "InvalidConfig", data: { detail: "scheme `file` is not http/https" } },

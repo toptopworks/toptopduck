@@ -246,7 +246,7 @@ fn external_overlong_gateway_request_fails_the_turn() {
     let outcome = session.ask("run one over-long gateway tool call");
     std::env::set_var("PATH", old_path);
     match outcome {
-        TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
             assert!(
                 detail.contains("gateway serve failed"),
                 "the failure names its face: {detail}"
@@ -256,7 +256,7 @@ fn external_overlong_gateway_request_fails_the_turn() {
                 "the framing cause rides the detail: {detail}"
             );
         }
-        other => panic!("gateway_overlong_call must land Failed(Execute), got {other:?}"),
+        other => panic!("gateway_overlong_call must land Failed(Runtime), got {other:?}"),
     }
 }
 
@@ -589,10 +589,17 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
     }));
     let second = session.ask("this one cannot even spawn");
     std::env::set_var("PATH", old_path);
-    assert!(
-        matches!(second, TurnOutcome::Failed(_)),
-        "the missing-binary turn must fail, got {second:?}"
-    );
+    // Issue #852: the engine-before-it-starts failure is a Runtime failure
+    // naming its face, not the neutral Execute bucket.
+    match second {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
+            assert!(
+                detail.contains("not found on PATH"),
+                "the missing-binary turn names its face: {detail}"
+            );
+        }
+        other => panic!("the missing-binary turn must fail as Runtime, got {other:?}"),
+    }
 
     // The no-discovery turn preserved both the session-side snapshot and the
     // recipe-header cache (one storage, issue #530).

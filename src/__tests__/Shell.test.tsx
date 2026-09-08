@@ -462,7 +462,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
       expect(document.querySelector(".turn-outcome.failed")).toBeInTheDocument(),
     );
     const card = document.querySelector(".turn-outcome.failed") as HTMLElement;
-    expect(within(card).getByText("执行查询失败")).toBeInTheDocument(); // error.turn.execute
+    expect(within(card).getByText("执行失败")).toBeInTheDocument(); // error.turn.execution
     expect(within(card).getByText("no_such_col")).toBeInTheDocument(); // fold detail
     // The workspace shows no outcome card for the failed turn.
     expect(document.querySelector(".workspace-hero")).toBeInTheDocument();

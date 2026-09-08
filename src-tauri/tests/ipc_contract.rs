@@ -628,6 +628,22 @@ fn turn_outcome_failed_nests_typed_failure_under_data() {
 }
 
 #[test]
+fn turn_outcome_failed_runtime_carries_detail_under_data() {
+    // Issue #852: an external-runtime wiring / transport failure nests the
+    // typed TurnFailure::Runtime under data, adjacently-tagged like Execute
+    // so the frontend narrows on kind and folds the detail. Pinned alongside
+    // Execute / InvalidConfig -- the golden `error_variant_kinds` only pins
+    // the `kind` label, not this shape.
+    use toptopduck_lib::{TurnFailure, TurnOutcome};
+    assert_wire(
+        &TurnOutcome::Failed(TurnFailure::Runtime {
+            detail: "external runtime `cli-a` not found on PATH".into(),
+        }),
+        r#"{"kind":"Failed","data":{"kind":"Runtime","data":{"detail":"external runtime `cli-a` not found on PATH"}}}"#,
+    );
+}
+
+#[test]
 fn turn_outcome_failed_invalid_config_carries_detail_under_data() {
     // Outcome C (ADR-0028, issue #277): a permanent configuration fault nests
     // the typed TurnFailure::InvalidConfig under data, adjacently-tagged like

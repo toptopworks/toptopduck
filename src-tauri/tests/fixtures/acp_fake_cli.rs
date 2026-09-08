@@ -643,7 +643,7 @@ fn play_scenario(
         }
         "prompt_error" => {
             // The agent returns a JSON-RPC error for session/prompt (no result).
-            // The engine maps it to a Transient carrying this message, NOT
+            // The engine maps it to a Runtime carrying this message, NOT
             // "closed stdout" (the diagnostic-misdirection regression fixed
             // alongside this fixture).
             respond(

@@ -9,17 +9,26 @@ import type { IntlShape } from "react-intl";
 import type { TurnFailure } from "../../types/thread";
 
 // Format a TurnFailure (TurnOutcome::Failed.data, issue #125) through the
-// locale catalog. Execute shares the merged `error.turn.execute` id with
-// SessionError::Turn::Execute (DRY -- one "query failed" message, not two);
-// Resource / NotWired / InvalidConfig / StaleReference each have their own id,
-// and StaleReference interpolates the dead reference name. Each formatMessage
-// call carries a literal id + defaultMessage so @formatjs extract recovers it.
+// locale catalog. Execute renders the neutral `error.turn.execution` (issue
+// #852 -- a turn may be a pure conversation, so "query" prejudges the
+// context); the query-worded `error.turn.execute` stays with
+// RowReadError::Execute in format.ts, where the wording is accurate. Runtime
+// (issue #852) points the user at the external runtime, not the SQL.
+// Resource / NotWired / InvalidConfig / StaleReference each have their own
+// id, and StaleReference interpolates the dead reference name. Each
+// formatMessage call carries a literal id + defaultMessage so @formatjs
+// extract recovers it.
 export function formatTurnFailure(failure: TurnFailure, intl: IntlShape): string {
   switch (failure.kind) {
     case "Execute":
       return intl.formatMessage({
-        id: "error.turn.execute",
-        defaultMessage: "Failed to execute the query",
+        id: "error.turn.execution",
+        defaultMessage: "Execution failed",
+      });
+    case "Runtime":
+      return intl.formatMessage({
+        id: "error.turn.runtime",
+        defaultMessage: "Failed to connect to the external runtime",
       });
     case "Resource":
       return intl.formatMessage({
@@ -54,13 +63,15 @@ export function formatTurnFailure(failure: TurnFailure, intl: IntlShape): string
 }
 
 // Extract the technical detail for the collapsed "Technical details" fold from
-// a TurnFailure (issue #125). Execute / Resource / InvalidConfig carry the
-// detail (engine detail or the configuration diagnosis; audited to hold no API
-// key, ADR-0029); NotWired / StaleReference are self-contained (the message
-// already names them) -> no fold.
+// a TurnFailure (issue #125). Execute / Runtime / Resource / InvalidConfig
+// carry the detail (engine detail, the runtime diagnostic, or the
+// configuration diagnosis; audited to hold no API key, ADR-0029); NotWired /
+// StaleReference are self-contained (the message already names them) -> no
+// fold.
 export function turnFailureDetail(failure: TurnFailure): string | null {
   switch (failure.kind) {
     case "Execute":
+    case "Runtime":
     case "Resource":
     case "InvalidConfig":
       return failure.data.detail;

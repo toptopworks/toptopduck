@@ -246,7 +246,7 @@ pub struct PromptResult {
 /// (`end_turn`, not `success`; `max_turn_requests`, not `max_turns`). Unlike
 /// the streaming surfaces' lenient variants, an unknown inbound variant is
 /// deliberately a hard parse error: the terminal verdict must map onto a
-/// Termination (the engine surfaces the serde diagnostic as a Transient
+/// Termination (the engine surfaces the serde diagnostic as a Runtime
 /// turn failure), never a silent degradation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

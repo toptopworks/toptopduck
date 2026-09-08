@@ -70,7 +70,13 @@ pub enum Termination {
     InvalidConfig(String),
     /// A transient provider fault surfaced after the adapter's own HTTP retry
     /// exhausted (ADR-0077/0081). Maps to `TurnOutcome::Failed(Execute)`.
+    /// Built-in provider path only (issue #852) -- the ACP domain produces
+    /// [`Termination::Runtime`] for its transport faults instead.
     Transient(String),
+    /// The external runtime's wiring / protocol / transport failed (issue
+    /// #852): an ACP-domain constructor (RPC reject, response parse, broken
+    /// pipe, stdout close, spawn). Maps to `TurnOutcome::Failed(Runtime)`.
+    Runtime(String),
 }
 
 /// One entry in the execution trace (ADR-0078). The trace is the persisted,

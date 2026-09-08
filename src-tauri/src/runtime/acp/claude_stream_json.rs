@@ -367,7 +367,7 @@ pub(super) fn run_claude_stream_json(
         Ok(c) => c,
         Err(e) => {
             return outcome(
-                Termination::Transient(format!(
+                Termination::Runtime(format!(
                     "failed to spawn claude-code headless `{}`: {e}",
                     adapter.id
                 )),
@@ -388,7 +388,7 @@ pub(super) fn run_claude_stream_json(
         super::process::StdinWriteOutcome::Done => {}
         super::process::StdinWriteOutcome::Failed(e) => {
             return outcome(
-                Termination::Transient(format!("stdin write failed: {e}")),
+                Termination::Runtime(format!("stdin write failed: {e}")),
                 Vec::new(),
                 None,
             )
@@ -458,11 +458,11 @@ pub(super) fn run_claude_stream_json(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // stdout closed before a `result` frame. With accumulated
-                // text, treat it as the answer (honest degrade); without, a
-                // transient failure.
+                // text, treat it as the answer (honest degrade); without, an
+                // external-runtime failure.
                 termination = Some(
                     pump.tracker
-                        .text_or_transient("claude closed stdout without a result frame"),
+                        .text_or_runtime("claude closed stdout without a result frame"),
                 );
                 break;
             }
@@ -486,7 +486,7 @@ pub(super) fn run_claude_stream_json(
 
     let term = termination.unwrap_or_else(|| {
         pump.tracker
-            .text_or_transient("claude turn ended without a result frame")
+            .text_or_runtime("claude turn ended without a result frame")
     });
 
     // ADR-0097 Decision 5: `system{init}` reports the model this turn
@@ -627,7 +627,7 @@ impl ClaudePump {
                     return Some(Termination::StepCap(self.step_cap));
                 }
                 let detail = if text.is_empty() { subtype } else { text };
-                Some(Termination::Transient(format!(
+                Some(Termination::Runtime(format!(
                     "claude turn failed: {detail}"
                 )))
             }
@@ -1250,7 +1250,7 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert_eq!(
-            pump.tracker.text_or_transient("claude closed stdout"),
+            pump.tracker.text_or_runtime("claude closed stdout"),
             Termination::Text("final answer".into())
         );
         // The mid-batch prose fired live as its round's RoundText.
@@ -1402,11 +1402,11 @@ mod tests {
         assert_eq!(end, Some(Termination::Text("streamed".into())));
     }
 
-    /// An error result maps to a Transient carrying the CLI's detail; the
+    /// An error result maps to a Runtime carrying the CLI's detail; the
     /// max-turns subtype maps onto the execution-level StepCap (the ACP
     /// MaxTurnRequests precedent).
     #[test]
-    fn result_error_maps_transient_and_max_turns_step_cap() {
+    fn result_error_maps_runtime_and_max_turns_step_cap() {
         let mut pump = pump_with_bridge();
         let end = pump.fold(
             ClaudeEvent::Result {
@@ -1417,10 +1417,10 @@ mod tests {
             &mut |_| {},
         );
         match end {
-            Some(Termination::Transient(msg)) => {
+            Some(Termination::Runtime(msg)) => {
                 assert!(msg.contains("rate limited"), "{msg}")
             }
-            other => panic!("expected Transient, got {other:?}"),
+            other => panic!("expected Runtime, got {other:?}"),
         }
         let end = pump.fold(
             ClaudeEvent::Result {

@@ -239,7 +239,7 @@ impl NdjsonIo {
         child: &mut Child,
     ) -> Result<(), RoundtripError<Cancelled>> {
         // Both prelude failures map to Write: `map_roundtrip_termination`
-        // folds Serialize and Write onto the same Transient anyway.
+        // folds Serialize and Write onto the same Runtime anyway.
         let (line, stdin) = self.line_and_stdin(req).map_err(RoundtripError::Write)?;
         let (outcome, stdin) = super::process::write_line_with_cancel(stdin, line, cancel, child);
         self.stdin = stdin;

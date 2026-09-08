@@ -42,7 +42,10 @@ import snapshot from "../../../src-tauri/tests/error_variant_kinds.json";
 // the mirroring TS type adds the variant.
 const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null>>>> = {
   TurnFailure: {
-    Execute: "error.turn.execute",
+    // Issue #852: turn-level Execute renders the neutral execution id; the
+    // query-worded `error.turn.execute` is RowReadError::Execute's id below.
+    Execute: "error.turn.execution",
+    Runtime: "error.turn.runtime",
     Resource: "error.turn.resource",
     NotWired: "error.turn.notWired",
     InvalidConfig: "error.turn.invalidConfig",

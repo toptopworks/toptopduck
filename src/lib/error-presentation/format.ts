@@ -357,8 +357,12 @@ function formatRenameDatasetError(e: RenameError, intl: IntlShape): string {
 
 // Format a RowReadError (read_rows failure) through the locale catalog (issue
 // #121). UnknownDataset shares the merged `error.dataset.notFound` id; Execute
-// renders a generic message and the engine detail rides the technical-details
-// fold (the detail is a DuckDB read error, never an API key per ADR-0029).
+// renders the query-worded `error.turn.execute` id -- deliberately kept here
+// while the turn-level Execute renders `error.turn.execution` (issue #852):
+// a read_rows failure is a query failure, so the wording is accurate on this
+// path (the mirror note lives in turn-failure.ts). The engine detail rides
+// the technical-details fold (the detail is a DuckDB read error, never an
+// API key per ADR-0029).
 // Format a SkillMountError (issue #363, ADR-0086; issue #698, ADR-0110),
 // reached via SessionError::SkillMount. AlreadyMounted / NotMounted /
 // NotMountedForActivation name the offending skill in the primary message;

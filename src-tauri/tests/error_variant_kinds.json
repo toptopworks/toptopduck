@@ -79,6 +79,7 @@
     "InvalidConfig",
     "NotWired",
     "Resource",
+    "Runtime",
     "StaleReference"
   ]
 }
