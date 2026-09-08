@@ -12,8 +12,9 @@ import type { SkillEntry } from "../../../types/skills";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
 
 // A materialized-record fixture (reference_name overridden per test) -- the
-// only outcome that needs a full dataset payload. Lives in this file because
-// Thread is the sole thread-domain consumer of a full descriptor.
+// only outcome that needs a full dataset payload. File-local per the suite
+// convention: TurnCard.test.tsx carries its own descriptor (preview-card
+// pins, issue #860) rather than reaching into this suite's fixture.
 const mockDataset: DatasetDescriptor = {
   reference_name: "people",
   display_name: "people",

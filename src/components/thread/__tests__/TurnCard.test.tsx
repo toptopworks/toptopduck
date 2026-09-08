@@ -13,6 +13,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
 import type { ReactNode } from "react";
+import type { DatasetDescriptor } from "../../../types/dataset";
 import type { TextKind, TurnRecord } from "../../../types/thread";
 
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
@@ -118,6 +119,79 @@ describe("TurnCard trace round width cap (issue #826)", () => {
     };
     const { container } = renderCard(record);
     expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
+  });
+});
+
+describe("TurnCard narrow-column width caps (issue #860)", () => {
+  const previewDataset: DatasetDescriptor = {
+    reference_name: "result_1",
+    display_name: "result_1",
+    source_path: "/x/r.csv",
+    row_count: 1,
+    fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
+    columns: [
+      { name: "平均HP", canonical_type: "DOUBLE" },
+      { name: "平均攻击", canonical_type: "DOUBLE" },
+    ],
+    sample: [["69.3", "79.0"]],
+    rectify: { kind: "NotApplicable" },
+    privacy: { send_samples: true, type_only_columns: [] },
+  };
+
+  function materializedRecord(body: string | null): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: [{ dataset: previewDataset, sql: "SELECT 1" }],
+          viz: null,
+          body,
+          assumption: null,
+        },
+      },
+    };
+  }
+
+  it("caps the textual outcome container at the stream width", () => {
+    // The outcome rides the stream as a non-stretched flex item -- the
+    // #826 trace-round twin. The cap must sit here: the prose root's own
+    // max-w-full cannot reach this layer (its containing block IS this
+    // container, so clamping the child leaves the blown parent in place).
+    const { container } = renderCard(recordWith(undefined));
+    expect(container.querySelector(".turn-outcome.textual")).toHaveClass("max-w-full");
+  });
+
+  it("caps the materialized terminal prose at the stream width", () => {
+    // #847 hangs the terminal prose directly off the stream as a flex
+    // item; its min-content (a wide markdown table) stretches the whole
+    // item past the card, and the rail's overflow-x: hidden crops it. The
+    // RoundProse root carries the cap for every consumer (live rounds,
+    // settled rounds, the materialized terminal, the textual body)
+    // through the single pipeline point.
+    const { container } = renderCard(
+      materializedRecord("| 很长的列名一 | 很长的列名二 |\n| --- | --- |\n| a | b |"),
+    );
+    expect(container.querySelector(".round-text")).toHaveClass("max-w-full");
+  });
+
+  it("aligns the preview card with the prose column and paces its top gap", () => {
+    // ml-6 was the #298 anchor to the trace-call gutter; since #847 put
+    // terminal prose between the link row and the card, the visual
+    // neighbors (prose, tables, meta icons) all sit at the column edge --
+    // the indent made the card the stream's only offset item, and in
+    // narrow columns the margin rides past the max-w-full cap outright.
+    // mt-4 joins the prose root's 16px block rhythm (space-y-4) instead
+    // of hugging the last block at 6px.
+    const { container } = renderCard(materializedRecord(null));
+    const preview = container.querySelector(".result-preview");
+    expect(preview).not.toBeNull();
+    // The card is itself a stream flex item: its own cap keeps the sample
+    // grid's min-content inside the column -- the margin-past-cap clause
+    // above leans on this class.
+    expect(preview).toHaveClass("max-w-full");
+    expect(preview).not.toHaveClass("ml-6");
+    expect(preview).toHaveClass("mt-4");
   });
 });
 

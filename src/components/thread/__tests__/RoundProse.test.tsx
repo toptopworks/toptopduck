@@ -67,6 +67,12 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     // compact leading from sneaking back onto the prose root.
     expect(classes).toContain("leading-[1.75]");
     expect(classes).not.toContain("leading-snug");
+    // The root hangs off the stream (flex-col items-start) as a
+    // non-stretched flex item: the max-w-full cap keeps a wide markdown
+    // table's min-content from stretching the prose past the card (the
+    // #826 trace-round precedent -- the clamp must sit on the flex item
+    // itself, a containing block one level down clamps nothing).
+    expect(classes).toContain("max-w-full");
   });
 
   describe("structure", () => {
@@ -140,6 +146,14 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(wrapper?.className).toContain("overflow-x-auto");
       expect(wrapper?.className).toContain("border-border");
       expect(container.querySelector("th")?.className).toContain("border-border");
+      // w-full alone lets a table whose min-content fits the column
+      // squeeze down to the column width (cells wrap, no scroll range
+      // appears); min-w-max keeps the table at natural width so it
+      // scrolls instead of squeezing, while narrow tables keep the
+      // w-full fill.
+      const table = container.querySelector("table");
+      expect(table).toHaveClass("w-full");
+      expect(table).toHaveClass("min-w-max");
     });
 
     it("renders a blockquote as a left-ruled quote", () => {
