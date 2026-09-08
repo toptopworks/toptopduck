@@ -571,8 +571,8 @@ pub enum McpServer {
 /// (sorted keys); [`McpServer::stdio_bridge`] projects it here so the array
 /// order stays deterministic. New construction sites must route through
 /// `stdio_bridge` (or an equivalent helper projecting a sorted map):
-/// assembling the `Vec` directly would bypass the deterministic order and
-/// key uniqueness.
+/// assembling the `Vec` directly would forgo the by-construction guarantee
+/// of deterministic order and key uniqueness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnvVariable {
     pub name: String,
@@ -835,9 +835,9 @@ mod tests {
                 {"name": "GATEWAY_TOKEN", "value": "abc"},
             ])
         );
-        // The five per-field equality assertions imply presence: a missing
-        // key indexes to `Value::Null` and fails the comparison, so the
-        // mandatory-field contract rides on them.
+        // Each per-field equality assertion above implies presence: a
+        // missing key indexes to `Value::Null` and fails the comparison, so
+        // the mandatory-field contract rides on them.
     }
 
     /// Outbound `session/prompt` raw pin (the request-side raw-pin family

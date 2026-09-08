@@ -1221,9 +1221,10 @@ fn bridge_write(msg: &serde_json::Value) {
 }
 
 /// Read one NDJSON line back from the bridge. `None` on EOF, parse failure, or
-/// no bridge -- the scenario treats a missing response as "the gateway did not
-/// serve" and proceeds; the integration test asserts on the observable trace,
-/// not on this helper's return.
+/// no bridge -- draining scenarios treat a missing response as "the gateway
+/// did not serve" and let the observable trace carry the assertion; consuming
+/// scenarios (issue #854) `.expect` the response here to fail fast at the
+/// source.
 fn bridge_read() -> Option<serde_json::Value> {
     let mut guard = BRIDGE.lock().unwrap();
     let b = guard.as_mut()?;
