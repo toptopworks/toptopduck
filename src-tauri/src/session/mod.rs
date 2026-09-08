@@ -886,9 +886,11 @@ impl Session {
     /// (ADR-0095). Called from BOTH `run_external_turn` faces that follow a
     /// completed handshake -- the serve-Ok merge path and the serve-failure
     /// early return (#856) -- because the handshake's discovery is real
-    /// state the next turn reuses regardless of how the turn settles. The
-    /// `None` semantics ("no discovery", the previous catalog survives) live
-    /// on the reader, [`Self::last_discovered_runtime`].
+    /// state the next turn reuses regardless of how the turn settles. A
+    /// serve failure that lands before the handshake produced discovery
+    /// yields `None` and the snapshot no-ops; the `None` semantics ("no
+    /// discovery", the previous catalog survives) live on the reader,
+    /// [`Self::last_discovered_runtime`].
     fn snapshot_discovered_runtime(&mut self, outcome: &LoopOutcome) {
         if let Some(discovered) = outcome.discovered_runtime.clone() {
             self.set_last_discovered_runtime(discovered);
@@ -1702,11 +1704,14 @@ impl Session {
         let gateway_outcome = match gateway_result {
             Ok(o) => o,
             Err(e) => {
-                // #856: the handshake's discovery is real state regardless
-                // of how the turn settles -- snapshot it before the early
-                // return (ADR-0095). The gateway's promotions are dropped
-                // here by decision: an `Err` carries no `GatewayOutcome`,
-                // and a `Failed` turn has no promotion slot in
+                // #856: snapshot the turn's discovery before the early
+                // return -- `snapshot_discovered_runtime` carries the
+                // rationale (ADR-0095) and no-ops when the serve failure
+                // predates the handshake's discovery. The gateway's
+                // promotions are dropped here by decision:
+                // `serve_connection` returns `io::Result<GatewayOutcome>`,
+                // and the Err variant carries no collected outcome, while a
+                // `Failed` turn has no promotion slot in
                 // `turn_outcome_from_loop` (every non-converged arm drops
                 // them, StepCap alike -- the working-set writes the gateway
                 // already made stand unreported). The decided shape is
@@ -1722,10 +1727,7 @@ impl Session {
             }
         };
         // 7. Merge + map onto TurnOutcome (same mapper + trace-extraction
-        //    pattern as the built-in branch). ADR-0095: the ACP engine's
-        //    discovered catalog snapshots onto the Session first so the
-        //    command layer can mirror it onto the handle (lock-light reads)
-        //    even when the turn itself fails.
+        //    pattern as the built-in branch).
         self.snapshot_discovered_runtime(&acp_outcome);
         let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);

@@ -243,9 +243,9 @@ fn external_cli_tool_call_routes_through_the_gateway() {
 ///
 /// Issue #856 AC1: the handshake's discovered catalog still snapshots onto
 /// the session on this serve-failure exit (ADR-0095 -- the snapshot precedes
-/// the outcome mapping "even when the turn itself fails"), so the next turn
-/// must not re-discover the catalog. The promotion-drop half of #856 has its
-/// own discriminating face in
+/// the outcome mapping, so the session-level catalog reflects this turn's
+/// handshake even though the turn failed). The promotion-drop half of #856
+/// has its own discriminating face in
 /// `external_serve_failure_drops_collected_promotions` (this scenario's only
 /// tools/call IS the over-long frame -- nothing was ever dispatched).
 #[test]
@@ -280,10 +280,11 @@ fn external_overlong_gateway_request_fails_the_turn() {
 /// when the gateway serve dies AFTER a successful materialize dispatch --
 /// `result_1` already written into the working set, the promotion already
 /// collected -- the turn still lands `Failed(Runtime)` and the collected
-/// promotion is dropped. A `Failed` outcome has no promotion slot anywhere
-/// in `turn_outcome_from_loop` (every non-converged arm drops them, StepCap
-/// alike), and widening `TurnFailure` for one exit path was rejected as out
-/// of proportion; the working-set write stands unreported. A future change
+/// promotion is dropped. A `Failed` outcome has no promotion slot (the
+/// serve-error arm in `run_external_turn` drops them by decision, and its
+/// comment carries the rationale), and widening `TurnFailure` for one exit
+/// path was rejected as out of proportion; the working-set write itself
+/// stands (asserted below), unreported by the turn outcome. A future change
 /// that merges the serve-failure promotions back would map this turn onto
 /// `Materialized` and redden the match below.
 #[test]
@@ -303,9 +304,13 @@ fn external_serve_failure_drops_collected_promotions() {
             );
         }
         other => panic!(
-            "a serve failure after a promotion must stay Failed(Runtime)              with the promotion dropped, got {other:?}"
+            "a serve failure after a promotion must stay Failed(Runtime) with the promotion dropped, got {other:?}"
         ),
     }
+    assert!(
+        session.get("result_1").is_some(),
+        "the promotion's working-set write stands the serve failure"
+    );
 }
 
 // --- helpers for skill-injection tests (issue #368) -------------------------
