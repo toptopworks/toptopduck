@@ -253,18 +253,21 @@ describe("TurnCard materialized link-row narrow-column caps (issue #872)", () =>
   }
 
   it("caps the link-row paragraph at the stream width and lets long names break", () => {
-    // The link row's paragraph is the stream's last uncapped flex item: the
-    // antecedents line and the result-link button both ride it, and a long
-    // unbroken dataset name stretches the paragraph's min-content past the
-    // column, where the rail's overflow-x crop eats it with no scroll path
-    // (#860 capped the prose twin; #862 the outcome card -- this branch is
-    // #872's residue). The cap + break sit on the paragraph itself.
+    // The link row's paragraph is the last stretch-prone stream item the
+    // earlier caps left uncovered: the antecedents line and the result-link
+    // button both ride it, and a long unbroken dataset name stretches the
+    // paragraph's min-content past the column, where the rail's overflow-x
+    // crop eats it with no scroll path (#860 capped the prose twin; #862 the
+    // outcome card -- this branch is #872's residue). The cap + break sit on
+    // the paragraph itself.
     const { container } = renderCard(linkRowRecord());
     expect(container.querySelector(".turn-outcome")).toHaveClass("max-w-full", "break-words");
     // The result-link is an inline-block: break-words only joins the
     // laid-out line, not the intrinsic-size math, so the button needs its
     // own element-level cap before the cascaded break can engage inside it.
-    expect(container.querySelector(".result-link")).toHaveClass("max-w-full");
+    // inline-block joins the pin because the pair is what a rogue
+    // all-unset-style arbitrary property would clobber first.
+    expect(container.querySelector(".result-link")).toHaveClass("inline-block", "max-w-full");
   });
 });
 

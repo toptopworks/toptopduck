@@ -421,20 +421,25 @@ function TurnBody({
                 />
               </span>
             )}
-            {/* result-link is a real <button> (clickable, focusable) but stripped
-                of native button chrome via [all:unset] so it reads as an inline
-                link; subsequent utilities rebuild the box model + token color.
-                `active`/`stale` are kept as hook classes (semantic + test
-                selectors) -- their visual lands on the same element via the
-                conditional utilities below. max-w-full is the element-level
-                cap: break-words inherited from the paragraph only joins the
-                laid-out line, not the intrinsic-size math, so the
-                inline-block needs its own clamp to stop a long dataset name
-                from outrunning the column (issue #872). */}
+            {/* result-link is a real <button> (clickable, focusable) stripped
+                of native chrome by appearance-none + bg-transparent -- the
+                ADR-0067 bareButtonReset pair without border-0, since the
+                rebuild below re-establishes the 1px transparent border the
+                active-state swap paints. Never [all:unset] here: Tailwind v4
+                emits that arbitrary property after the named utilities in
+                the same layer, so it silently clobbers display/max-width
+                back (engine-verified in the #872 review). `active`/`stale`
+                are hook classes (semantic + test selectors) -- their visual
+                lands on the same element via the conditional utilities
+                below. max-w-full is the element-level cap: break-words
+                inherited from the paragraph only joins the laid-out line,
+                not the intrinsic-size math, so the inline-block needs its
+                own clamp to stop a long dataset name from outrunning the
+                column (issue #872). */}
             <button
               type="button"
               className={cn(
-                "result-link [all:unset] cursor-pointer inline-block max-w-full text-primary",
+                "result-link appearance-none bg-transparent cursor-pointer inline-block max-w-full text-primary",
                 "px-1.5 py-0.5 rounded-md border border-transparent",
                 "hover:bg-accent",
                 active && "active font-semibold border-primary",
