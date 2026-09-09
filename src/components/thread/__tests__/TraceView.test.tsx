@@ -183,6 +183,37 @@ describe("LiveRow approval tool name shrink (issue #872)", () => {
   });
 });
 
+describe("LiveRow trace name shrink (issue #874)", () => {
+  it("lets the settled and running rows' tool name truncate instead of shoving the row", () => {
+    // The settled and running trace rows carry the same head shape as the
+    // approval card (#872): the tool name is the row's identity token, and
+    // an external tool rides a server prefix + tool name that can outrun
+    // the narrow column. shrink-0 refused to shrink at all, pushing the
+    // summary and badges past the row edge. min-w-0 + truncate joins the
+    // same row's summary family (#826): single line, tail ellipsis, while
+    // the badge chrome keeps its shrink-0.
+    const TOOL_NAME = "some_extremely_long_server_prefix__tool_name";
+    const settled = renderWithProviders(
+      <LiveRow
+        row={rowWith({ approval: null, running: false, success: true, name: TOOL_NAME })}
+        onRespond={vi.fn()}
+      />,
+    );
+    const settledName = settled.container.querySelector(".trace-name");
+    expect(settledName).toHaveTextContent(TOOL_NAME);
+    expect(settledName).toHaveClass("min-w-0", "truncate");
+    const running = renderWithProviders(
+      <LiveRow
+        row={rowWith({ approval: null, running: true, name: TOOL_NAME })}
+        onRespond={vi.fn()}
+      />,
+    );
+    const runningName = running.container.querySelector(".trace-name");
+    expect(runningName).toHaveTextContent(TOOL_NAME);
+    expect(runningName).toHaveClass("min-w-0", "truncate");
+  });
+});
+
 describe("LiveRow approval card file values", () => {
   it("hides the file contents until the approver expands them", () => {
     renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
