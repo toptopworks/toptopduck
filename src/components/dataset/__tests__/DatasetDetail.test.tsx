@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fireEvent, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { DatasetDetail } from "../DatasetDetail";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import { mockDataset } from "./helpers";
@@ -18,21 +18,29 @@ describe("DatasetDetail", () => {
     expect(screen.queryByText(/隐私控制/)).toBeNull();
   });
 
-  it("keeps the meta line to the row count; the full fingerprint rides the Radix tooltip (issue #793, #865)", async () => {
-    // AC3: the always-on 12-char fingerprint slice is near-zero value at a
-    // glance -- it exists to prove "the file really did change" during
-    // troubleshooting. The visible meta keeps Rows only; the full
-    // (untruncated) fingerprint rides the tooltip so that check stays one
-    // hover away. #865 moves it from the OS-native title to the
-    // theme-following Radix tooltip.
+  it("keeps the meta line to the row count and renders the fingerprint under the source file (issue #793)", () => {
+    // AC3: the always-on fingerprint slice is near-zero value at a glance --
+    // it exists to prove "the file really did change" during troubleshooting.
+    // The visible meta keeps Rows only, and the full fingerprint sits
+    // directly under the source-file line so that check needs no hover (the
+    // former tooltip form is gone: no title attribute, no tooltip in the
+    // tree).
     renderI18n(<DatasetDetail dataset={mockDataset} />);
     const meta = screen.getByText(/行数：5/);
     expect(meta).not.toHaveTextContent(/指纹/);
     expect(meta).not.toHaveAttribute("title");
-    fireEvent.pointerMove(meta);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      `指纹：${mockDataset.fingerprint}`,
-    );
+    expect(screen.getByText(/来源文件：\/x\/people\.csv/)).toBeInTheDocument();
+    expect(screen.getByText(`指纹：${mockDataset.fingerprint}`)).toBeInTheDocument();
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("hides the source-file block entirely when the source path is empty", () => {
+    // No file provenance -> neither the path line nor the fingerprint that
+    // proves its changes renders; a dangling fingerprint alone would prove
+    // nothing.
+    renderI18n(<DatasetDetail dataset={{ ...mockDataset, source_path: "" }} />);
+    expect(screen.queryByText(/来源文件/)).toBeNull();
+    expect(screen.queryByText(/指纹/)).toBeNull();
   });
 
   it("pins the schema-type <code> to font-mono (ADR-0067, issue #185)", () => {

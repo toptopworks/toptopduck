@@ -19,6 +19,9 @@ import { log } from "../lib/log";
 // useSessionState -> useTurnFlow). Passed in by the caller and merged with the
 // hook's own draft state.
 export interface ComposerSessionFields {
+  /** The TURN domain only (ask/cancel in flight, ADR-0021): the pane's
+   *  turnLoading, not the union loading. A dataset/ingest mutation's
+   *  in-flight window must not flip the bar's Ask/Stop button. */
   loading: boolean;
   phase: TurnPhase | null;
   handleAsk: (question: string) => Promise<void>;

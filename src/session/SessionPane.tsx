@@ -177,14 +177,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 
   // ADR-0092: lift this session's bar-relevant fields to the shell-level bar.
   // handleAsk / handleCancel / handleIngestFiles are useCallback-stable inside
-  // useSessionState; loading / phase change during a turn; workspaceCollapsed
+  // useSessionState; turnLoading / phase change during a turn; the pane's
+  // union `loading` (turn OR mutation, ADR-0040) stays pane-internal -- it
+  // must NOT reach the shell bar, or a dataset mutation's in-flight window
+  // flips the bar's Ask/Stop button (the reported flicker). workspaceCollapsed
   // (bar-shaping, ADR-0083 fold) changes on the fold toggle + the one-shot
   // first-Materialized expansion. The effect fires on those changes, keeping
   // the shell's per-session composerFields registry fresh for the active
   // session.
   useEffect(() => {
     onComposerFields(sessionId, {
-      loading: s.loading,
+      loading: s.turnLoading,
       phase: s.phase,
       handleAsk: s.handleAsk,
       handleCancel: s.handleCancel,
@@ -193,7 +196,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     });
   }, [
     sessionId,
-    s.loading,
+    s.turnLoading,
     s.phase,
     s.handleAsk,
     s.handleCancel,

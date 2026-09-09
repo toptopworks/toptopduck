@@ -578,7 +578,7 @@
   "workingSet.delete.title": "Delete",
   "workingSet.detail.columnsHeading": "Columns & inferred types",
   "workingSet.detail.meta": "Rows: {rows}",
-  "workingSet.detail.fingerprintTitle": "Fingerprint: {fingerprint}",
+  "workingSet.detail.fingerprint": "Fingerprint: {fingerprint}",
   "workingSet.detail.referenceName": "(reference name: {name})",
   "workingSet.detail.sampleHeading": "First 3 rows frozen at load time",
   "workingSet.detail.sourceFile": "Source file: {path}",

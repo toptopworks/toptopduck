@@ -80,6 +80,11 @@ export interface UseSessionState {
    *  already-materialized session does not re-arm it. */
   workspaceCollapsed: boolean;
   loading: boolean;
+  /** The turn domain alone (ask/cancel in flight): what the shell-level bar
+   *  keys off (Stop button + disabled input, ADR-0021). Dataset/ingest
+   *  mutations never flip it, so their in-flight window leaves the bar
+   *  untouched. */
+  turnLoading: boolean;
   /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
    *  1-based step or the last tool-call event. null when no turn is running.
    *  Client UI state only -- never enters TanStack Query / the thread cache
@@ -248,7 +253,18 @@ export function useSessionState(
     toggleWorkspace,
     notePromotion,
   } = useWorkspaceCollapse(thread);
-  const [loading, setLoading] = useState(false);
+  // Two loading domains (kept apart so the shell bar keys off the turn domain
+  // only -- a dataset mutation's loading flag leaking into the shell bar made
+  // the Ask/Stop button flip for the mutation's whole in-flight window):
+  // turnLoading -- an ask/cancel is in flight (useTurnFlow); drives the bar's
+  //   Stop button + disabled input (ADR-0021 single in-flight).
+  // mutationLoading -- a dataset/ingest mutation (rename / privacy / replace /
+  //   delete / ingest) is in flight; drives the working-set buttons' disabled
+  //   gate (ADR-0040). `loading` derives from both so every pane consumer
+  //   keeps the union semantics.
+  const [turnLoading, setTurnLoading] = useState(false);
+  const [mutationLoading, setMutationLoading] = useState(false);
+  const loading = turnLoading || mutationLoading;
   const [error, setError] = useState<AppError | null>(null);
   const [pendingActiveDelete, setPendingActiveDelete] =
     useState<DatasetDescriptor | null>(null);
@@ -320,7 +336,7 @@ export function useSessionState(
   const { phase, liveTurn, handleAsk, handleCancel } = useTurnFlow(sessionId, {
     queryClient,
     intl,
-    setLoading,
+    setLoading: setTurnLoading,
     setError,
     pollPersistError,
     viewed: { markProduced: markProducedWithExpand, suppressInit },
@@ -380,7 +396,7 @@ export function useSessionState(
     sessionId,
     {
       intl,
-      setLoading,
+      setLoading: setMutationLoading,
       setError,
       refreshServerState,
       pollPersistError,
@@ -392,18 +408,18 @@ export function useSessionState(
   // then refresh. Tagged per-kind so a refusal carries the right prefix.
   const runSimpleMutation = useCallback(
     async (kind: SessionFlowKind, fn: () => Promise<unknown>) => {
-      setLoading(true);
+      setMutationLoading(true);
       setError(null);
       try {
         await fn();
       } catch (e) {
         setError(toAppError(e, intl, kind));
-        setLoading(false);
+        setMutationLoading(false);
         void pollPersistError();
         return;
       }
       await refreshServerState(kind);
-      setLoading(false);
+      setMutationLoading(false);
       void pollPersistError();
     },
     [refreshServerState, pollPersistError, intl],
@@ -427,7 +443,7 @@ export function useSessionState(
 
   const handleReplace = useCallback(
     async (referenceName: string, path: string) => {
-      setLoading(true);
+      setMutationLoading(true);
       setError(null);
       try {
         const result = await replaceSource(sessionId, referenceName, path);
@@ -450,7 +466,7 @@ export function useSessionState(
       } catch (e) {
         setError(toAppError(e, intl, "replace"));
       } finally {
-        setLoading(false);
+        setMutationLoading(false);
         void pollPersistError();
       }
     },
@@ -526,6 +542,7 @@ export function useSessionState(
     workspaceContent,
     workspaceCollapsed,
     loading,
+    turnLoading,
     phase,
     liveTurn,
     error,

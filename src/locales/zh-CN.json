@@ -578,7 +578,7 @@
   "workingSet.delete.title": "删除",
   "workingSet.detail.columnsHeading": "列与推断类型",
   "workingSet.detail.meta": "行数：{rows}",
-  "workingSet.detail.fingerprintTitle": "指纹：{fingerprint}",
+  "workingSet.detail.fingerprint": "指纹：{fingerprint}",
   "workingSet.detail.referenceName": "（引用名：{name}）",
   "workingSet.detail.sampleHeading": "加载时冻结的首 3 行样本",
   "workingSet.detail.sourceFile": "来源文件：{path}",

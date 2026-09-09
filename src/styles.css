@@ -42,8 +42,19 @@
 /* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a 280px/1fr
    two-column master-detail grid is layout semantics, not a utility long-string,
    so the grid stays here; per-consumer margins live on the consumer
-   (SessionPane WorkspaceWorkingSet) as utility. Single consumer. */
-.layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; }
+   (SessionPane WorkspaceWorkingSet) as utility. Single consumer. The detail
+   track is minmax(0, 1fr) and the panels carry min-width: 0 -- a bare 1fr
+   track resolves its automatic minimum to the content's min-content, so a
+   wide dataset (a 40-column frozen sample) re-widens the column into
+   workspace-body overflow instead of scrolling inside the Table primitive's
+   overflow-x-auto container (ADR-0057). Same pin the narrow fallback below
+   carries. */
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 1.25rem;
+}
+.layout > .panel { min-width: 0; }
 
 /* Narrow-workspace fallback (issue #791): .session-workspace is an
    inline-size container (rule with .session-workspace below); when the
@@ -62,7 +73,6 @@
    fade-in below). */
 @container workspace (max-width: 600px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
-  .layout > .panel { min-width: 0; }
 }
 
 /* Privacy controls (ADR-0011, issue #9): sample switch + per-column type-only.
