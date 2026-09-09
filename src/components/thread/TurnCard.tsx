@@ -344,9 +344,12 @@ interface TurnBodyProps {
 // The shared shell of the Failed/Cancelled outcome cards (issue #720): one
 // constant so the two kinds stay isomorphic -- Failed tints it destructive,
 // Cancelled mutes it; only the tint utilities and the head content differ.
-// No width utility: the card hugs its content (the assistant stream is
-// items-start), stretching only as far as a long reason or detail forces.
-const OUTCOME_CARD_CLASS = "mt-1 rounded-md border px-2.5 py-2 text-xs leading-snug";
+// The card still hugs its content (the assistant stream is items-start),
+// but max-w-full caps the hug at the stream width: as a non-stretched
+// flex item its min-content (a long reason line) stretches it past the
+// column and the rail's overflow-x crop makes the spill unreachable
+// (issue #862, the #860 cap's non-table twin).
+const OUTCOME_CARD_CLASS = "mt-1 max-w-full rounded-md border px-2.5 py-2 text-xs leading-snug";
 
 function TurnBody({
   record,
@@ -543,7 +546,12 @@ function TurnBody({
             {/* Stale never lands here (Materialized only), so the visual is
                 derived with stale=false. */}
             <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
-            <span className="failed-reason text-destructive">
+            {/* min-w-0 + break-words: the span is a flex item of the head
+                row, so min-width:auto floors its shrink at the longest
+                unbreakable run and break-words alone never joins the
+                intrinsic-size math -- the locale reason must wrap inside
+                the capped card, not stretch past it (issue #862). */}
+            <span className="failed-reason text-destructive min-w-0 break-words">
               {formatTurnFailure(failure, intl)}
             </span>
           </div>
