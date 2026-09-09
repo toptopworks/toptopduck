@@ -18,15 +18,33 @@ describe("DatasetDetail", () => {
     expect(screen.queryByText(/隐私控制/)).toBeNull();
   });
 
-  it("keeps the meta line to the row count; the full fingerprint rides the tooltip (issue #793)", () => {
-    // AC3: the always-on 12-char fingerprint slice is near-zero value at a
-    // glance -- it exists to prove "the file really did change" during
-    // troubleshooting. The visible meta keeps Rows only; the tooltip carries
-    // the full (untruncated) fingerprint so that check stays one hover away.
+  it("keeps the meta line to the row count and renders the fingerprint under the source file (issue #793)", () => {
+    // AC3: the always-on fingerprint slice is near-zero value at a glance --
+    // it exists to prove "the file really did change" during troubleshooting.
+    // The visible meta keeps Rows only, and the full fingerprint sits
+    // directly under the source-file line so that check needs no hover (the
+    // former tooltip form is gone: no title attribute, no tooltip in the
+    // tree).
     renderI18n(<DatasetDetail dataset={mockDataset} />);
     const meta = screen.getByText(/行数：5/);
     expect(meta).not.toHaveTextContent(/指纹/);
-    expect(meta).toHaveAttribute("title", `指纹：${mockDataset.fingerprint}`);
+    expect(meta).not.toHaveAttribute("title");
+    expect(screen.getByText(/来源文件：\/x\/people\.csv/)).toBeInTheDocument();
+    // The hex value rides the {typography.code} mono token (the schema-type
+    // <code> form); the prose prefix stays in the body font.
+    const fingerprintCode = screen.getByText(mockDataset.fingerprint);
+    expect(fingerprintCode.tagName).toBe("CODE");
+    expect(fingerprintCode.className.split(/\s+/)).toContain("font-mono");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("hides the source-file block entirely when the source path is empty", () => {
+    // No file provenance -> neither the path line nor the fingerprint that
+    // proves its changes renders; a dangling fingerprint alone would prove
+    // nothing.
+    renderI18n(<DatasetDetail dataset={{ ...mockDataset, source_path: "" }} />);
+    expect(screen.queryByText(/来源文件/)).toBeNull();
+    expect(screen.queryByText(/指纹/)).toBeNull();
   });
 
   it("pins the schema-type <code> to font-mono (ADR-0067, issue #185)", () => {

@@ -221,8 +221,8 @@ export function findStaleSourceIdx(
 // deleted" (the reference name is gone, truly unavailable). The wording split
 // signals whether the user could re-ask to recover the result. Distinct from
 // the working-set list's stale row: its badge is the short "Stale" chip with
-// the full causal sentence on the native tooltip (workingSet.staleRow /
-// staleRow.title, issue #793) -- this chip is a compact, clickable label.
+// the full causal sentence on its Radix tooltip (workingSet.staleRow.hint,
+// issue #793 / #865) -- this chip is a compact, clickable label.
 export function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
   switch (reason) {
     case "Replaced":
