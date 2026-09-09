@@ -466,6 +466,50 @@ describe("App rename flow", () => {
     // The rename rejection must not inherit the ingest flow's load prefix.
     expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
   });
+
+  it("keeps the shell bar off the mutation domain while a rename is in flight (issue #865)", async () => {
+    // The loading split: mutationLoading contributes to the row buttons'
+    // gate, but the pane reports only turnLoading to the composer fields -- a
+    // dataset mutation's in-flight window must not flip the bar's Ask/Stop
+    // button. Suspend the rename IPC mid-flight and pin both halves of the
+    // window: the captured fields stay loading:false while the row's action
+    // buttons disable (reporting the union back would flip the first, and
+    // dropping mutationLoading from the union would flip the second).
+    state.workingSet = [guidedDataset];
+    renderPane();
+    fireEvent.click(await screen.findByRole("tab", { name: "工作集" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument(),
+    );
+
+    let release!: (value: DatasetDescriptor) => void;
+    vi.mocked(renameDataset).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    submitRename(/重命名/, "员工表");
+    await waitFor(() => expect(renameDataset).toHaveBeenCalled());
+
+    // The mutation window: row actions disabled (the union), bar idle
+    // (the turn domain alone). The registry only refreshes when its turn-domain
+    // deps change (ADR-0092), so the fold toggle re-fires it mid-window --
+    // the moment a union-valued report would leak the mutation into the bar.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /重命名/ })).toBeDisabled(),
+    );
+    // The fold toggle's label flips with the collapsed state (cold start is
+    // collapsed, ADR-0083), so match either form -- any fold change re-fires
+    // the registry.
+    fireEvent.click(screen.getByRole("button", { name: /工作区/ }));
+    expect(capturedComposerFields?.loading).toBe(false);
+
+    release({ ...guidedDataset, display_name: "员工表" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /重命名/ })).toBeEnabled(),
+    );
+  });
 });
 
 describe("App privacy flow", () => {

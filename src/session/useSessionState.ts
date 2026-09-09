@@ -259,9 +259,10 @@ export function useSessionState(
   // turnLoading -- an ask/cancel is in flight (useTurnFlow); drives the bar's
   //   Stop button + disabled input (ADR-0021 single in-flight).
   // mutationLoading -- a dataset/ingest mutation (rename / privacy / replace /
-  //   delete / ingest) is in flight; drives the working-set buttons' disabled
-  //   gate (ADR-0040). `loading` derives from both so every pane consumer
-  //   keeps the union semantics.
+  //   delete / ingest) is in flight; it contributes to the working-set
+  //   buttons' disabled gate -- the derived `loading` union drives it
+  //   (ADR-0040 execution window: either domain in flight disables). `loading`
+  //   derives from both so every pane consumer keeps the union semantics.
   const [turnLoading, setTurnLoading] = useState(false);
   const [mutationLoading, setMutationLoading] = useState(false);
   const loading = turnLoading || mutationLoading;

@@ -584,7 +584,7 @@ describe("WorkingSetList", () => {
   it("renders a short stale chip; the Deleted causal sentence rides the Radix tooltip (issue #793, #865)", async () => {
     // #793 AC1: the row badge is the short "已失效" chip; the full causal
     // sentence -- with "已删除" for a Deleted anchor and "已更新" for a
-    // Replaced one, from the workingSet.staleRow.title ICU select -- rides the
+    // Replaced one, from the workingSet.staleRow.hint ICU select -- rides the
     // tooltip, so a narrow column can no longer wrap the sentence inside the
     // chip. #865 moves it from the OS-native title to the theme-following
     // Radix tooltip. No action outlet rides the chip: the rerun path stays
@@ -654,7 +654,7 @@ describe("WorkingSetList", () => {
   });
 
   it("renders the stale tooltip verb for a Replaced anchor (issue #41 AC4, #865)", async () => {
-    // Pins the Replaced arm of the workingSet.staleRow.title ICU select (the
+    // Pins the Replaced arm of the workingSet.staleRow.hint ICU select (the
     // Deleted arm is covered above) so a regression that drops the arm renders
     // an incomplete tooltip; mirrors the ResultView stale-verb coverage in the
     // Thread suite.
@@ -681,8 +681,8 @@ describe("WorkingSetList", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已更新而失效");
   });
 
-  it("exhausts every StaleReason variant in the workingSet.staleRow.title select (ADR-0041)", () => {
-    // Compile-time guard: the workingSet.staleRow.title ICU {reason, select}
+  it("exhausts every StaleReason variant in the workingSet.staleRow.hint select (ADR-0041)", () => {
+    // Compile-time guard: the workingSet.staleRow.hint ICU {reason, select}
     // must name every StaleReason variant as an arm. Adding a variant without
     // extending this map fails tsc (mirrors Thread.tsx staleChipVerb's
     // never-guard), so the select's `other` arm stays unreachable instead of
@@ -785,6 +785,11 @@ describe("WorkingSetList", () => {
     const pill = rename.closest("div")!;
     const classes = pill.className.split(/\s+/);
     expect(classes).toContain("absolute");
+    // The pill anchors to the label-tail wrapper's trailing edge: right-1 +
+    // z-10 float it over the label's tail, clear of the chip that follows in
+    // flow (see the DOM-order pin in the stale-chip layout test).
+    expect(classes).toContain("right-1");
+    expect(classes).toContain("z-10");
     // The pill's ground is the row-hover tint itself (bg-accent) -- it reads
     // as part of the row, not a floating widget; opaque, it also keeps the
     // label underneath from bleeding through.
@@ -822,6 +827,9 @@ describe("WorkingSetList", () => {
     const select = screen.getByRole("button", { name: /^people/ });
     const rowClasses = select.closest("li")!.className.split(/\s+/);
     expect(rowClasses).toContain("hover:bg-accent");
+    // bg-clip-content keeps a py-gutter between adjacent rows' bands (padding
+    // carries the gap, not margin -- a margin gap is a hover dead zone).
+    expect(rowClasses).toContain("bg-clip-content");
     expect(rowClasses).not.toContain("transition-colors");
     expect(rowClasses).toContain("rounded-md");
     expect(select.className.split(/\s+/)).not.toContain("hover:bg-accent");
@@ -850,6 +858,11 @@ describe("WorkingSetList", () => {
       expect(classes).toContain("hover:text-foreground");
       expect(classes).toContain("focus-visible:text-foreground");
       expect(classes).toContain("transition-colors");
+      // The loading state signals on both channels, like every other action
+      // surface: the progress cursor + the disabled dim (the pill container
+      // owns visibility, so the dim only marks the one hovered row).
+      expect(classes).toContain("disabled:cursor-progress");
+      expect(classes).toContain("disabled:opacity-50");
       expect(classes).not.toContain("cursor-pointer");
       expect(classes).not.toContain("hover:bg-accent");
     }
@@ -913,14 +926,43 @@ describe("WorkingSetList", () => {
     }
     // The hint copy moves into the theme-following Radix tooltip -- wire check
     // on the rename action (its siblings share the same wiring). The icon
-    // hints are controlled, so the pointer-ENTER on the button drives the
-    // open (the uncontrolled tooltips fire on pointer-move).
+    // hints open on our own pointer-ENTER handlers; the stale chip's tooltip
+    // is controlled too but opens through Radix's pointer-move path (the
+    // delayed open bridges through onOpenChange).
     // jsdom fires pointer events with an empty pointerType; the real mouse
     // carries "mouse", which the touch guard requires.
     fireEvent.pointerEnter(screen.getByRole("button", { name: /重命名/ }), {
       pointerType: "mouse",
     });
     expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
+  });
+
+  it("keeps an open action hint owning the slot against a direct non-hint open (issue #865)", async () => {
+    // The mutex's guard arm: a non-hint open driven through setTip -- the
+    // name span's pointer-enter, which sets the state directly, unlike
+    // Radix-internal opens whose tooltip.open broadcast closes mounted peers
+    // before the request lands -- is rejected while an action hint owns the
+    // slot, so the tooltip keeps showing the hint under the pointer. Deleting
+    // the guard flips the tooltip to the display name (the mutant this test
+    // pins).
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const select = screen.getByRole("button", { name: /^people/ });
+    fireEvent.pointerEnter(screen.getByRole("button", { name: /删除/ }), {
+      pointerType: "mouse",
+    });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("删除");
+    fireEvent.pointerEnter(select.querySelector("span")!, { pointerType: "mouse" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("删除");
+    expect(screen.getByRole("tooltip")).not.toHaveTextContent("people");
   });
 
   it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
@@ -943,20 +985,25 @@ describe("WorkingSetList", () => {
       />,
     );
     // jsdom has no layout engine, so the guard pins the DOM order and the
-    // class contract the single-line layout depends on: select button first,
-    // the overlay pill (holding the three icon actions) in the middle, then
-    // the short chip last. The #790 shape (basis-full badge wrapping onto its
-    // own line via flex-wrap) is retired with #793 -- the chip is a shrink-0
-    // inline peer that never compresses and never needs to wrap, so the row
-    // stays one flex line.
+    // class contract the single-line layout depends on: the label-tail
+    // wrapper (select button + the overlay pill with the three icon actions
+    // anchored inside it) first, then the short chip as the row's trailing
+    // flow child -- the pill's anchor stays structurally clear of the chip,
+    // so the chip keeps its hover beside the revealed pill (#865). The #790
+    // shape (basis-full badge wrapping onto its own line via flex-wrap) is
+    // retired with #793 -- the chip is a shrink-0 inline peer that never
+    // compresses and never needs to wrap, so the row stays one flex line.
     const row = screen.getByRole("button", { name: /^people/ }).closest("li")!;
     const rowClasses = row.className.split(/\s+/);
     expect(rowClasses).toContain("flex");
     expect(rowClasses).not.toContain("flex-wrap");
     const children = [...row.children];
-    expect(children).toHaveLength(3);
-    expect(children[0].tagName).toBe("BUTTON");
-    const pill = children[1];
+    expect(children).toHaveLength(2);
+    const wrapper = children[0];
+    expect(wrapper.tagName).toBe("DIV");
+    expect(wrapper.className.split(/\s+/)).toContain("flex-1");
+    expect(wrapper.querySelector("button")).not.toBeNull();
+    const pill = wrapper.children[wrapper.children.length - 1];
     expect(pill.tagName).toBe("DIV");
     expect(pill.querySelectorAll("button")).toHaveLength(3);
     const badge = children[children.length - 1];

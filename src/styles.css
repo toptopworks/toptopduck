@@ -820,7 +820,7 @@
   display: flex; flex-direction: column;
   /* Page-floor surface (issue #865): the workspace column rides the canvas
      (--background), not card, so in-content card surfaces that sit directly on
-     it (the working-set panels, turn cards) read as a layer above the floor
+     it (the working-set panels) read as a layer above the floor
      per the DESIGN.md surface levels -- dark mode gains the brightness step
      (canvas #0f1410 -> card #181b18); light mode is same-white by design and
      keeps the hairline + shadow-sm edge (the system's light-mode depth
@@ -981,15 +981,18 @@
   background-color: var(--border);
 }
 
-/* Tooltip popper wrappers drop out of hit-testing: the tooltip content sets
-   pointer-events: none (pure hint layers -- no interactive content), but
-   Radix's positioning wrapper around it would still catch the pointer and
-   flip row :hover off for as long as the tooltip is up. Scoped to wrappers
-   containing a tooltip so menus / popovers keep their interactive wrappers.
+/* Tooltip popper wrappers drop out of hit-testing for the working-set row
+   tooltips only: those contents are pure hint layers (pointer-events-none, no
+   interactive content), but Radix's positioning wrapper around them would
+   still catch the pointer and flip row :hover off for as long as the tooltip
+   is up. Scoped by the data-hit-transparent marker the row TooltipContents
+   carry (the wrapper's direct child), so every other tooltip keeps its
+   wrapper hit-testing -- menus / popovers keep their interactive wrappers,
+   and the settings surface's scrollable tooltip keeps its scrollbar.
    ADR-0067 boundary: this is a global element rule, but the wrapper is a
    Radix portal mounted outside the React tree, so no caller-scoped utility
    can reach it -- the hit-testing seam is the one place a global rule is the
    only form (it shapes hit-testing, not visuals). */
-[data-radix-popper-content-wrapper]:has(> [role='tooltip']) {
+[data-radix-popper-content-wrapper]:has(> [data-hit-transparent]) {
   pointer-events: none;
 }

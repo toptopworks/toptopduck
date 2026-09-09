@@ -348,7 +348,7 @@ export default function App() {
   // onComposerFields. The shell-level QuestionBar reads the active session's
   // entry (or idle defaults when activeSessionId is null). handleAsk /
   // handleCancel / handleIngestFiles are useCallback-stable inside
-  // useSessionState; loading / phase change during a turn.
+  // useSessionState; turnLoading / phase change during a turn.
   const [composerFieldsMap, setComposerFieldsMap] = useState<
     Record<string, ComposerSessionFields>
   >({});
