@@ -204,7 +204,13 @@ export function LiveRow({
                 aria-hidden="true"
                 className="w-3.5 h-3.5 shrink-0 text-muted-foreground"
               />
-              <span className="approval-tool font-medium shrink-0">{row.name}</span>
+              {/* min-w-0 + truncate: an external tool rides a server prefix
+                  + tool name that can outrun the narrow column; shrink-0
+                  refused to shrink and pushed the summary and badge out of
+                  the card, whose border carries no overflow strategy
+                  (issue #872) -- this joins the same row's summary family
+                  (#826): single line, tail ellipsis. */}
+              <span className="approval-tool font-medium min-w-0 truncate">{row.name}</span>
               <OperationBadge kind={row.operationKind} />
             </>
           )}

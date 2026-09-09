@@ -399,7 +399,14 @@ function TurnBody({
       const active = primary.dataset.reference_name === selectedResult;
       return (
         <>
-          <p className="turn-outcome mt-1 text-xs leading-snug">
+          {/* max-w-full + break-words: the link row rides the stream as a
+              non-stretched flex item (the #860 prose twin's branch-mate),
+              and a long unbroken dataset name in the antecedents line or
+              the result link stretches its min-content past the column --
+              the rail's overflow-x crop eats it (issue #872). break-words
+              sits here once and inherits into both riders; the button
+              below carries its own cap so the break can engage inside it. */}
+          <p className="turn-outcome mt-1 max-w-full break-words text-xs leading-snug">
             {antecedents.length > 0 && (
               <span className="antecedents block mb-0.5 text-muted-foreground">
                 <FormattedMessage
@@ -419,11 +426,15 @@ function TurnBody({
                 link; subsequent utilities rebuild the box model + token color.
                 `active`/`stale` are kept as hook classes (semantic + test
                 selectors) -- their visual lands on the same element via the
-                conditional utilities below. */}
+                conditional utilities below. max-w-full is the element-level
+                cap: break-words inherited from the paragraph only joins the
+                laid-out line, not the intrinsic-size math, so the
+                inline-block needs its own clamp to stop a long dataset name
+                from outrunning the column (issue #872). */}
             <button
               type="button"
               className={cn(
-                "result-link [all:unset] cursor-pointer inline-block text-primary",
+                "result-link [all:unset] cursor-pointer inline-block max-w-full text-primary",
                 "px-1.5 py-0.5 rounded-md border border-transparent",
                 "hover:bg-accent",
                 active && "active font-semibold border-primary",
