@@ -137,7 +137,14 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
             <FormattedMessage
               id="workingSet.detail.fingerprint"
               defaultMessage="Fingerprint: {fingerprint}"
-              values={{ fingerprint: dataset.fingerprint }}
+              values={{
+                // The hex value rides the {typography.code} mono token (the
+                // schema-type <code> form): a 64-char data identifier reads
+                // best monospaced, the prose prefix stays in the body font.
+                fingerprint: (
+                  <code className="font-mono text-[13px]">{dataset.fingerprint}</code>
+                ),
+              }}
             />
           </p>
         </>

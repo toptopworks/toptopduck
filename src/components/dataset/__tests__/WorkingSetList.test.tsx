@@ -759,16 +759,18 @@ describe("WorkingSetList", () => {
     expect(screen.queryByText("✕")).not.toBeInTheDocument();
   });
 
-  it("hover-reveals the action pill: hidden and unhoverable until row hover / focus-within (issue #865)", () => {
+  it("hover-reveals the action pill: hidden and unhoverable until row hover / focus-visible (issue #865)", () => {
     // #865 retires the #790/#251 weak-visibility convention (opacity-60
     // always on) for the working-set rows: an un-hovered row reads as plain
     // data, with the action pill at opacity-0 + pointer-events-none. Row
-    // hover and keyboard focus-within (any tabbed-into action) restore both
-    // display and hit area on the CONTAINER -- the pill owns the visibility
-    // form now that it floats over the label, since a button-level
-    // focus-visible class cannot light a parent; `invisible` stays rejected
-    // (it would drop the buttons from the a11y tree), and the tab order /
-    // aria-labels are untouched.
+    // hover and keyboard focus (any tabbed-into action, via the container's
+    // has-[:focus-visible]) restore both display and hit area on the
+    // CONTAINER -- the pill owns the visibility form now that it floats over
+    // the label, since a button-level focus-visible class cannot light a
+    // parent; focus-visible rather than focus-within keeps the dialog-close
+    // programmatic focus restore from glowing the pill forever; `invisible`
+    // stays rejected (it would drop the buttons from the a11y tree), and the
+    // tab order / aria-labels are untouched.
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}

@@ -30,7 +30,11 @@ describe("DatasetDetail", () => {
     expect(meta).not.toHaveTextContent(/指纹/);
     expect(meta).not.toHaveAttribute("title");
     expect(screen.getByText(/来源文件：\/x\/people\.csv/)).toBeInTheDocument();
-    expect(screen.getByText(`指纹：${mockDataset.fingerprint}`)).toBeInTheDocument();
+    // The hex value rides the {typography.code} mono token (the schema-type
+    // <code> form); the prose prefix stays in the body font.
+    const fingerprintCode = screen.getByText(mockDataset.fingerprint);
+    expect(fingerprintCode.tagName).toBe("CODE");
+    expect(fingerprintCode.className.split(/\s+/)).toContain("font-mono");
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
