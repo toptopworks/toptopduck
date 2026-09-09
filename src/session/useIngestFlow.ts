@@ -48,7 +48,7 @@ import type { GuidanceRequest, LoadOutcome, SheetGuidance } from "../types/datas
 
 export interface UseIngestFlowDeps {
   intl: IntlShape;
-  setLoading: (loading: boolean) => void;
+  setMutationLoading: (loading: boolean) => void;
   setError: (error: AppError | null) => void;
   /** The generic post-mutation refresh (workingSet + active + thread). ingest
    *  has no optimistic append, so refreshing thread is harmless -- the inverse
@@ -129,11 +129,11 @@ export function useIngestFlow(
   sessionId: string,
   deps: UseIngestFlowDeps,
 ): UseIngestFlow {
-  const { intl, setLoading, setError, refreshServerState, pollPersistError, viewed } = deps;
+  const { intl, setMutationLoading, setError, refreshServerState, pollPersistError, viewed } = deps;
   // Pull the single stable viewed method out of the injected `viewed` object so
   // the handler dep arrays stay identity-stable: the parent rebuilds `viewed`
   // every render, but the method inside is useCallback-stable (issue #229).
-  // setLoading / setError are also listed in the dep arrays below -- both are
+  // setMutationLoading / setError are also listed in the dep arrays below -- both are
   // useState-dispatch-stable, but listing them satisfies exhaustive-deps now
   // that they arrive via injection (mirrors useTurnFlow, issue #230) and does
   // not change handler identity.
@@ -226,12 +226,12 @@ export function useIngestFlow(
       try {
         while (unattempted.length > 0) {
           const [path, ...rest] = unattempted;
-          setLoading(true);
+          setMutationLoading(true);
           let route: IngestRoute;
           try {
             route = routeIngestOutcome(await ingestFile(sessionId, path), path);
           } finally {
-            setLoading(false);
+            setMutationLoading(false);
           }
           unattempted = rest;
           if (route === "Loaded") {
@@ -286,7 +286,7 @@ export function useIngestFlow(
       }
       void pollPersistError();
     },
-    [sessionId, routeIngestOutcome, haltBatch, refreshServerState, pollPersistError, intl, setLoading, setError, clearForNewSource],
+    [sessionId, routeIngestOutcome, haltBatch, refreshServerState, pollPersistError, intl, setMutationLoading, setError, clearForNewSource],
   );
 
   // Load one source (PRD ingest entrypoint). Routes the LoadOutcome:
@@ -297,7 +297,7 @@ export function useIngestFlow(
     async (path: string) => {
       // A fresh ingest supersedes the previous batch's halt notice (#748).
       setHaltedRemaining(null);
-      setLoading(true);
+      setMutationLoading(true);
       setError(null);
       try {
         const route = routeIngestOutcome(await ingestFile(sessionId, path), path);
@@ -309,11 +309,11 @@ export function useIngestFlow(
       } catch (e) {
         setError(toAppError(e, intl, "load"));
       } finally {
-        setLoading(false);
+        setMutationLoading(false);
         void pollPersistError();
       }
     },
-    [sessionId, routeIngestOutcome, refreshServerState, pollPersistError, intl, setLoading, setError, clearForNewSource],
+    [sessionId, routeIngestOutcome, refreshServerState, pollPersistError, intl, setMutationLoading, setError, clearForNewSource],
   );
 
   // Load a multi-select batch (ADR-0083, issue #351; #748 auto-resume) -- see
@@ -355,7 +355,7 @@ export function useIngestFlow(
     async (sheetGuidance: SheetGuidance[]) => {
       if (!guidance) return;
       const { path } = guidance;
-      setLoading(true);
+      setMutationLoading(true);
       setError(null);
       setGuidanceError(null);
       let result: LoadOutcome;
@@ -363,7 +363,7 @@ export function useIngestFlow(
         result = await ingestFileGuided(sessionId, path, sheetGuidance);
       } catch (e) {
         setGuidanceError(toAppError(e, intl, "load"));
-        setLoading(false);
+        setMutationLoading(false);
         void pollPersistError();
         return;
       }
@@ -413,11 +413,11 @@ export function useIngestFlow(
         // of escaping into an unhandled rejection.
         setGuidanceError(toAppError(e, intl, "load"));
       } finally {
-        setLoading(false);
+        setMutationLoading(false);
         void pollPersistError();
       }
     },
-    [guidance, sessionId, runBatchSegment, refreshServerState, pollPersistError, intl, setLoading, setError, clearForNewSource],
+    [guidance, sessionId, runBatchSegment, refreshServerState, pollPersistError, intl, setMutationLoading, setError, clearForNewSource],
   );
 
   // Cancel the guidance dialog. With a parked batch this is the cancel-halt

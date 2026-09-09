@@ -75,19 +75,19 @@ const loadError: LoadOutcome = { kind: "Error", data: { kind: "Parse", data: { d
 function setup() {
   const refreshServerState = vi.fn(async () => {});
   const viewed = { clearForNewSource: vi.fn() };
-  const setLoading = vi.fn();
+  const setMutationLoading = vi.fn();
   const setError = vi.fn();
   const pollPersistError = vi.fn(async () => {});
   // formatMessage is a spy so the NeedsGuidance-recur test can assert the
   // canonical id; it returns a fixed "err" so loadErrorDisplay's message is
   // deterministic for the Error-branch assertion.
   const intl = { formatMessage: vi.fn(() => "err") } as unknown as IntlShape;
-  const deps = { intl, setLoading, setError, refreshServerState, pollPersistError, viewed };
+  const deps = { intl, setMutationLoading, setError, refreshServerState, pollPersistError, viewed };
   return {
     deps,
     refreshServerState,
     viewed,
-    setLoading,
+    setMutationLoading,
     setError,
     pollPersistError,
     intl,
@@ -226,7 +226,7 @@ describe("useIngestFlow", () => {
     });
 
     it("clears loading in the finally even on reject", async () => {
-      const { deps, setLoading } = setup();
+      const { deps, setMutationLoading } = setup();
       vi.mocked(ingestFile).mockRejectedValue(new Error("ipc down"));
       const { result } = renderHook(() => useIngestFlow(SID, deps));
 
@@ -234,7 +234,7 @@ describe("useIngestFlow", () => {
         await result.current.handleIngest("/x.csv");
       });
 
-      expect(setLoading).toHaveBeenLastCalledWith(false);
+      expect(setMutationLoading).toHaveBeenLastCalledWith(false);
     });
   });
 
@@ -297,7 +297,7 @@ describe("useIngestFlow", () => {
       expect(result.current.haltedRemaining).toBeNull();
       // The parked queue is invisible to loading state: the dialog is
       // interactive (submit / cancel enabled).
-      expect(deps.setLoading).toHaveBeenLastCalledWith(false);
+      expect(deps.setMutationLoading).toHaveBeenLastCalledWith(false);
     });
 
     it("a cancel during the post-park refresh halt-settles the parked batch (#748)", async () => {
@@ -448,7 +448,7 @@ describe("useIngestFlow", () => {
     });
 
     it("is a no-op for an empty path list", async () => {
-      const { deps, setLoading, refreshServerState } = setup();
+      const { deps, setMutationLoading, refreshServerState } = setup();
       const { result } = renderHook(() => useIngestFlow(SID, deps));
 
       let allLoaded = false;
@@ -462,11 +462,11 @@ describe("useIngestFlow", () => {
       expect(ingestFile).not.toHaveBeenCalled();
       expect(refreshServerState).not.toHaveBeenCalled();
       // No loading churn for a no-op batch.
-      expect(setLoading).not.toHaveBeenCalled();
+      expect(setMutationLoading).not.toHaveBeenCalled();
     });
 
     it("surfaces an IPC reject via toAppError tagged 'load' and clears loading", async () => {
-      const { deps, setError, setLoading } = setup();
+      const { deps, setError, setMutationLoading } = setup();
       vi.mocked(ingestFile).mockRejectedValue(new Error("ipc down"));
       const { result } = renderHook(() => useIngestFlow(SID, deps));
 
@@ -478,7 +478,7 @@ describe("useIngestFlow", () => {
       // #500: a reject resolves false (the error banner owns the same gate).
       expect(allLoaded).toBe(false);
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "load" }));
-      expect(setLoading).toHaveBeenLastCalledWith(false);
+      expect(setMutationLoading).toHaveBeenLastCalledWith(false);
       // The rejected file was the only one -> nothing remained.
       expect(result.current.haltedRemaining).toBeNull();
     });

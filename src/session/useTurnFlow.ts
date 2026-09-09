@@ -318,7 +318,7 @@ export function choiceToTurnRuntime(choice: SessionRuntimeChoice): TurnRuntime {
 export interface UseTurnFlowDeps {
   queryClient: QueryClient;
   intl: IntlShape;
-  setLoading: (loading: boolean) => void;
+  setTurnLoading: (loading: boolean) => void;
   setError: (error: AppError | null) => void;
   pollPersistError: () => Promise<void>;
   /** The two viewed methods a turn touches (issue #229). markProduced on a
@@ -513,7 +513,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   const {
     queryClient,
     intl,
-    setLoading,
+    setTurnLoading,
     setError,
     pollPersistError,
     viewed,
@@ -625,7 +625,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // single-turn state. liveRef reads without a re-render, so the guard
       // costs handleAsk nothing in identity stability.
       if (liveRef.current !== null) return;
-      setLoading(true);
+      setTurnLoading(true);
       setError(null);
       // ADR-0103 (issue #608): the ask timestamp, read at submit so the
       // optimistic record carries the user's ask time (the backend stamps its
@@ -687,7 +687,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         outcome = await askQuestion(sessionId, question);
       } catch (e) {
         setError(toAppError(e, intl, "ask"));
-        setLoading(false);
+        setTurnLoading(false);
         void pollPersistError();
         return;
       } finally {
@@ -789,7 +789,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
           queryKey: sessionKeys.modelConfig(sessionId),
         });
       } finally {
-        setLoading(false);
+        setTurnLoading(false);
         void pollPersistError();
       }
     },
@@ -798,7 +798,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       queryClient,
       pollPersistError,
       intl,
-      setLoading,
+      setTurnLoading,
       setError,
       markProduced,
       suppressInit,

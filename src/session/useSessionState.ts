@@ -79,6 +79,8 @@ export interface UseSessionState {
    *  one-shot is session-scoped (issue #771): a remount onto an
    *  already-materialized session does not re-arm it. */
   workspaceCollapsed: boolean;
+  /** Derived union (turnLoading || mutationLoading): the pane-consumption
+   *  ADR-0040 execution-window gate -- either domain in flight disables. */
   loading: boolean;
   /** The turn domain alone (ask/cancel in flight): what the shell-level bar
    *  keys off (Stop button + disabled input, ADR-0021). Dataset/ingest
@@ -337,7 +339,7 @@ export function useSessionState(
   const { phase, liveTurn, handleAsk, handleCancel } = useTurnFlow(sessionId, {
     queryClient,
     intl,
-    setLoading: setTurnLoading,
+    setTurnLoading,
     setError,
     pollPersistError,
     viewed: { markProduced: markProducedWithExpand, suppressInit },
@@ -397,7 +399,7 @@ export function useSessionState(
     sessionId,
     {
       intl,
-      setLoading: setMutationLoading,
+      setMutationLoading,
       setError,
       refreshServerState,
       pollPersistError,
@@ -502,7 +504,7 @@ export function useSessionState(
     (continueWith: string) => {
       const target = pendingActiveDelete;
       if (!target) return;
-      // Reuses runSimpleMutation (setLoading/setError/refresh/poll). The dialog
+      // Reuses runSimpleMutation (setMutationLoading/setError/refresh/poll). The dialog
       // is closed inside fn so a removal failure leaves it open for retry.
       void runSimpleMutation("delete", async () => {
         await removeActiveSource(sessionId, target.reference_name, continueWith);

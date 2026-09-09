@@ -209,7 +209,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // If the pane is replaced by the session-level error boundary (a render crash)
   // or removed on close/delete while a turn is mid-flight, the last-reported
   // `loading: true` would otherwise linger in the shell's composer-fields map —
-  // the in-flight handleAsk's setLoading(false) lands on an unmounted component
+  // the in-flight handleAsk's setTurnLoading(false) lands on an unmounted component
   // (a no-op), so nothing else clears it, and the shell bar would show a stuck
   // stop button for a session the user can no longer query. Unmount-only (empty
   // deps): the reporting effect above owns every in-life update.

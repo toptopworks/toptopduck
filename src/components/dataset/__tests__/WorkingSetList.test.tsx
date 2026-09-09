@@ -268,7 +268,7 @@ describe("WorkingSetList", () => {
 
   it("falls back to focusing the list when Save's loading gate disables the trigger (issue #759)", async () => {
     // The submit fires onRename before closing, and the parent's mutation runs
-    // setLoading(true) synchronously -- batched with the close into one commit,
+    // setMutationLoading(true) synchronously -- batched with the close into one commit,
     // so the deferred restore finds the row trigger disabled and focus() on a
     // disabled button is ignored. The restore must fall back to the list
     // container instead of dropping keyboard focus to <body>.
