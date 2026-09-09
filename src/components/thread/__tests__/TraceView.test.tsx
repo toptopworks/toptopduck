@@ -160,7 +160,7 @@ describe("LiveRow approval action row wrap (issue #862)", () => {
     );
     const hint = container.querySelector(".approval-pending-hint");
     expect(hint).not.toBeNull();
-    expect(hint?.parentElement).toHaveClass("flex-wrap");
+    expect(hint?.parentElement).toHaveClass("flex", "flex-wrap");
   });
 });
 

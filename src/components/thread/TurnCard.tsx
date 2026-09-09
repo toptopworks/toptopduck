@@ -346,7 +346,7 @@ interface TurnBodyProps {
 // Cancelled mutes it; only the tint utilities and the head content differ.
 // The card still hugs its content (the assistant stream is items-start),
 // but max-w-full caps the hug at the stream width: as a non-stretched
-// flex item its min-content (a long reason line) stretches it past the
+// flex item its min-content (its longest unbreakable run) stretches it past the
 // column and the rail's overflow-x crop makes the spill unreachable
 // (issue #862, the #860 cap's non-table twin).
 const OUTCOME_CARD_CLASS = "mt-1 max-w-full rounded-md border px-2.5 py-2 text-xs leading-snug";

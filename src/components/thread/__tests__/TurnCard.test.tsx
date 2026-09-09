@@ -205,9 +205,9 @@ describe("TurnCard outcome-card narrow-column caps (issue #862)", () => {
 
   it("caps the outcome card at the stream width", () => {
     // The outcome card rides the stream as a non-stretched flex item
-    // (flex-col items-start), so its min-content -- a long reason line --
-    // stretches it past the column and the rail's overflow-x crop makes
-    // the spill unreachable: the #860 cap's non-table twin, moved onto
+    // (flex-col items-start), so its min-content -- its longest unbreakable
+    // run -- stretches it past the column and the rail's overflow-x crop
+    // makes the spill unreachable: the #860 cap's non-table twin, moved onto
     // the Failed/Cancelled card from the prose containers.
     const failed = renderCard(failedRecord());
     expect(failed.container.querySelector(".turn-outcome.failed")).toHaveClass("max-w-full");
