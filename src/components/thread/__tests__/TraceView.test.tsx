@@ -164,6 +164,25 @@ describe("LiveRow approval action row wrap (issue #862)", () => {
   });
 });
 
+describe("LiveRow approval tool name shrink (issue #872)", () => {
+  it("lets the approval head's tool name truncate instead of shoving the row", () => {
+    // The tool name is the approval head's identity token, and an external
+    // tool rides a server prefix + tool name that can outrun the narrow
+    // column. shrink-0 refused to shrink at all, pushing the summary and
+    // badge out of the card (the card carries no overflow strategy, so the
+    // spill paints past the border). min-w-0 + truncate joins the same
+    // row's summary family (#826): single line, tail ellipsis, the row
+    // stays inside the card.
+    const TOOL_NAME = "some_extremely_long_server_prefix__tool_name";
+    const { container } = renderWithProviders(
+      <LiveRow row={rowWith({ name: TOOL_NAME })} onRespond={vi.fn()} />,
+    );
+    const tool = container.querySelector(".approval-tool");
+    expect(tool).toHaveTextContent(TOOL_NAME);
+    expect(tool).toHaveClass("min-w-0", "truncate");
+  });
+});
+
 describe("LiveRow approval card file values", () => {
   it("hides the file contents until the approver expands them", () => {
     renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);

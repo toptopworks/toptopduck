@@ -53,6 +53,24 @@ function recordWith(runtime: TurnRecord["provenance"]["runtime"]): TurnRecord {
   };
 }
 
+// The materialized-outcome family's shared dataset fixture: a complete,
+// type-clean descriptor so the link row and the preview card render off the
+// same shape (#860 introduced it; #872 reuses it for the link-row caps).
+const previewDataset: DatasetDescriptor = {
+  reference_name: "result_1",
+  display_name: "result_1",
+  source_path: "/x/r.csv",
+  row_count: 1,
+  fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
+  columns: [
+    { name: "平均HP", canonical_type: "DOUBLE" },
+    { name: "平均攻击", canonical_type: "DOUBLE" },
+  ],
+  sample: [["69.3", "79.0"]],
+  rectify: { kind: "NotApplicable" },
+  privacy: { send_samples: true, type_only_columns: [] },
+};
+
 describe("TurnCard runtime attribution marker (issue #818)", () => {
   it("opens the assistant stream with the marker naming the adapter", () => {
     const { container } = renderCard(
@@ -123,21 +141,6 @@ describe("TurnCard trace round width cap (issue #826)", () => {
 });
 
 describe("TurnCard narrow-column width caps (issue #860)", () => {
-  const previewDataset: DatasetDescriptor = {
-    reference_name: "result_1",
-    display_name: "result_1",
-    source_path: "/x/r.csv",
-    row_count: 1,
-    fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
-    columns: [
-      { name: "平均HP", canonical_type: "DOUBLE" },
-      { name: "平均攻击", canonical_type: "DOUBLE" },
-    ],
-    sample: [["69.3", "79.0"]],
-    rectify: { kind: "NotApplicable" },
-    privacy: { send_samples: true, type_only_columns: [] },
-  };
-
   function materializedRecord(body: string | null): TurnRecord {
     return {
       ...recordWith(undefined),
@@ -223,6 +226,48 @@ describe("TurnCard outcome-card narrow-column caps (issue #862)", () => {
     // string can actually wrap inside the capped card.
     const { container } = renderCard(failedRecord());
     expect(container.querySelector(".failed-reason")).toHaveClass("min-w-0", "break-words");
+  });
+});
+
+describe("TurnCard materialized link-row narrow-column caps (issue #872)", () => {
+  function namedDataset(reference_name: string): DatasetDescriptor {
+    return { ...previewDataset, reference_name, display_name: reference_name };
+  }
+
+  function linkRowRecord(): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: [
+            { dataset: namedDataset("intermediate_step_one_output_table"), sql: "SELECT 1" },
+            { dataset: namedDataset("final_result_with_a_long_unbroken_name"), sql: "SELECT 2" },
+          ],
+          viz: null,
+          body: null,
+          assumption: null,
+        },
+      },
+    };
+  }
+
+  it("caps the link-row paragraph at the stream width and lets long names break", () => {
+    // The link row's paragraph is the last stretch-prone stream item the
+    // earlier caps left uncovered: the antecedents line and the result-link
+    // button both ride it, and a long unbroken dataset name stretches the
+    // paragraph's min-content past the column, where the rail's overflow-x
+    // crop eats it with no scroll path (#860 capped the prose twin; #862 the
+    // outcome card -- this branch is #872's residue). The cap + break sit on
+    // the paragraph itself.
+    const { container } = renderCard(linkRowRecord());
+    expect(container.querySelector(".turn-outcome")).toHaveClass("max-w-full", "break-words");
+    // The result-link is an inline-block: break-words only joins the
+    // laid-out line, not the intrinsic-size math, so the button needs its
+    // own element-level cap before the cascaded break can engage inside it.
+    // inline-block joins the pin because the pair is what a rogue
+    // all-unset-style arbitrary property would clobber first.
+    expect(container.querySelector(".result-link")).toHaveClass("inline-block", "max-w-full");
   });
 });
 
