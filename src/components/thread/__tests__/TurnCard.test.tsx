@@ -195,6 +195,37 @@ describe("TurnCard narrow-column width caps (issue #860)", () => {
   });
 });
 
+describe("TurnCard outcome-card narrow-column caps (issue #862)", () => {
+  function failedRecord(): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } },
+    };
+  }
+
+  it("caps the outcome card at the stream width", () => {
+    // The outcome card rides the stream as a non-stretched flex item
+    // (flex-col items-start), so its min-content -- its longest unbreakable
+    // run -- stretches it past the column and the rail's overflow-x crop
+    // makes the spill unreachable: the #860 cap's non-table twin, moved onto
+    // the Failed/Cancelled card from the prose containers.
+    const failed = renderCard(failedRecord());
+    expect(failed.container.querySelector(".turn-outcome.failed")).toHaveClass("max-w-full");
+    const cancelled = renderCard({ ...recordWith(undefined), outcome: { kind: "Cancelled" } });
+    expect(cancelled.container.querySelector(".turn-outcome.cancelled")).toHaveClass("max-w-full");
+  });
+
+  it("lets a long reason token break inside the card head", () => {
+    // The reason span is a flex item of the card-head row: min-width:auto
+    // floors its shrink at the longest unbreakable run, and break-words
+    // only joins the laid-out line, not the intrinsic-size math -- min-w-0
+    // lifts the floor so a locale reason carrying a long unbroken detail
+    // string can actually wrap inside the capped card.
+    const { container } = renderCard(failedRecord());
+    expect(container.querySelector(".failed-reason")).toHaveClass("min-w-0", "break-words");
+  });
+});
+
 describe("TurnCard textual outcome markdown (issue #827)", () => {
   function textualRecord(
     text_kind: TextKind,

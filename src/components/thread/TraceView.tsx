@@ -209,7 +209,13 @@ export function LiveRow({
             </>
           )}
         />
-        <span className="mt-1.5 flex items-center gap-1.5">
+        {/* flex-wrap: the Button base class carries whitespace-nowrap, so
+            each button's min-content is its full label; three buttons plus
+            the ml-auto awaiting hint outrun the narrow rail's content box
+            and the overflow-x crop eats the tail -- the hint drops to a
+            second line, button pairs wrap if the labels alone still
+            outrun the column (issue #862). */}
+        <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <Button
             type="button"
             size="sm"

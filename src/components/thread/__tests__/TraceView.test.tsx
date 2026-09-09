@@ -147,6 +147,23 @@ describe("LiveRow caption tokens (issue #826)", () => {
   });
 });
 
+describe("LiveRow approval action row wrap (issue #862)", () => {
+  it("wraps the action row so the trailing hint stays reachable in a narrow column", () => {
+    // The Button base class carries whitespace-nowrap (button-variants.ts),
+    // so each action button's min-content is its full label; three buttons
+    // plus the ml-auto awaiting hint outrun the narrow rail's content box
+    // and the rail's overflow-x crop eats the tail. flex-wrap drops the
+    // hint to a second line and wraps button pairs if the labels alone
+    // still outrun the column.
+    const { container } = renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} />,
+    );
+    const hint = container.querySelector(".approval-pending-hint");
+    expect(hint).not.toBeNull();
+    expect(hint?.parentElement).toHaveClass("flex", "flex-wrap");
+  });
+});
+
 describe("LiveRow approval card file values", () => {
   it("hides the file contents until the approver expands them", () => {
     renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
