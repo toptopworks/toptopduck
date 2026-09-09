@@ -34,13 +34,13 @@ describe("WorkingSetList", () => {
     expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument();
   });
 
-  it("lifts the active select button via bg-accent + font-semibold (ADR-0067, issue #184)", () => {
-    // The active STATE drives the select button's own conditional className
-    // (cn(SELECT_BUTTON_BASE, isActive && "bg-accent font-semibold")), replacing the
-    // retired .working-set li.active button descendant selector. Since #793
-    // retired the " · current table" suffix, this className branch is the
-    // row's only in-list active marker -- this assertion pins it. An inactive
-    // row carries neither class.
+  it("marks the active row with a li-level bg-accent band + font-semibold label (ADR-0067, issue #184)", () => {
+    // The active STATE puts the accent band on the row <li> -- the same
+    // element that carries the hover band, so selected and hovered rows read
+    // at exactly the same height. The select button keeps only the
+    // font-semibold emphasis; since #793 retired the " · current table"
+    // suffix, the li className is the row's only in-list active marker. An
+    // inactive row carries neither.
     const { rerender } = renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -49,9 +49,13 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    const activeClasses = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
-    expect(activeClasses).toContain("bg-accent");
-    expect(activeClasses).toContain("font-semibold");
+    const activeRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    const activeRowClasses = activeRow.className.split(/\s+/);
+    expect(activeRowClasses).toContain("bg-accent");
+    expect(activeRowClasses).toContain("active");
+    const activeButton = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
+    expect(activeButton).toContain("font-semibold");
+    expect(activeButton).not.toContain("bg-accent");
 
     rerender(
       withIntl(
@@ -63,9 +67,12 @@ describe("WorkingSetList", () => {
         />,
       ),
     );
-    const inactiveClasses = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
-    expect(inactiveClasses).not.toContain("bg-accent");
-    expect(inactiveClasses).not.toContain("font-semibold");
+    const inactiveRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    expect(inactiveRow.className.split(/\s+/)).not.toContain("bg-accent");
+    expect(inactiveRow.className.split(/\s+/)).not.toContain("active");
+    expect(
+      screen.getByRole("button", { name: /^people/ }).className.split(/\s+/),
+    ).not.toContain("font-semibold");
   });
 
   // The empty-set face is no longer this list's concern: WorkspaceWorkingSet
@@ -108,7 +115,7 @@ describe("WorkingSetList", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /重命名/ }));
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent(/重命名显示名/);
+    expect(dialog).toHaveTextContent(/重命名/);
     // The input starts from the current display label so an edit builds on it.
     expect(screen.getByRole("textbox")).toHaveValue(mockDataset.display_name);
   });
@@ -688,12 +695,13 @@ describe("WorkingSetList", () => {
   });
 
   // --- Row layout (issue #790): each dataset renders as ONE horizontal row --
-  // the select button plus the rename/replace/delete icon actions side by
-  // side, retiring the #5-era stack of four full-width block buttons. Icons
-  // follow the #774 hit-area spec; their visibility form is the #865
-  // hover-reveal (retiring the #790/#251 weak-show).
+  // the select button plus the rename/replace/delete icon actions. The
+  // actions ride an absolutely-positioned pill that floats over the label's
+  // tail instead of reserving flow width. Icons follow the #774 hit-area
+  // spec; their visibility form is the #865 hover-reveal (retiring the
+  // #790/#251 weak-show).
 
-  it("lays each dataset out as one flex row with the three icon actions inline (issue #790)", () => {
+  it("lays each dataset out as one flex row with the three icon actions in an overlay pill (issue #790)", () => {
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -704,15 +712,19 @@ describe("WorkingSetList", () => {
         onDelete={() => {}}
       />,
     );
-    // The select button flexes to fill the row; the icon actions sit beside it.
+    // The select button flexes to fill the row; the icon actions float above
+    // its tail instead of sitting beside it in flow.
     const select = screen.getByRole("button", { name: /^people/ });
     const selectClasses = select.className.split(/\s+/);
     expect(selectClasses).toContain("flex-1");
     expect(selectClasses).toContain("min-w-0");
-    // All four controls share one row <li>, which is itself the flex container.
+    // All four controls share one row <li>, which is itself the flex container
+    // and the overlay pill's positioning anchor.
     const row = select.closest("li")!;
     expect(row.querySelectorAll("button")).toHaveLength(4);
-    expect(row.className.split(/\s+/)).toContain("flex");
+    const rowClasses = row.className.split(/\s+/);
+    expect(rowClasses).toContain("flex");
+    expect(rowClasses).toContain("relative");
   });
 
   it("renders lucide glyphs on 28px hit areas, retiring the text-character buttons (issue #790, #774 spec)", () => {
@@ -747,13 +759,16 @@ describe("WorkingSetList", () => {
     expect(screen.queryByText("✕")).not.toBeInTheDocument();
   });
 
-  it("hover-reveals the icon actions: hidden and unhoverable until row hover / focus (issue #865)", () => {
+  it("hover-reveals the action pill: hidden and unhoverable until row hover / focus-within (issue #865)", () => {
     // #865 retires the #790/#251 weak-visibility convention (opacity-60
     // always on) for the working-set rows: an un-hovered row reads as plain
-    // data, with the actions at opacity-0 + pointer-events-none. Row hover and
-    // keyboard focus-visible restore both display and hit area; `invisible`
-    // stays rejected (it would drop the buttons from the a11y tree), and the
-    // tab order / aria-labels are untouched.
+    // data, with the action pill at opacity-0 + pointer-events-none. Row
+    // hover and keyboard focus-within (any tabbed-into action) restore both
+    // display and hit area on the CONTAINER -- the pill owns the visibility
+    // form now that it floats over the label, since a button-level
+    // focus-visible class cannot light a parent; `invisible` stays rejected
+    // (it would drop the buttons from the a11y tree), and the tab order /
+    // aria-labels are untouched.
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -763,24 +778,37 @@ describe("WorkingSetList", () => {
       />,
     );
     const rename = screen.getByRole("button", { name: /重命名/ });
-    const classes = rename.className.split(/\s+/);
+    // Radix Tooltip renders no DOM wrapper, so the buttons' direct div parent
+    // is the overlay pill.
+    const pill = rename.closest("div")!;
+    const classes = pill.className.split(/\s+/);
+    expect(classes).toContain("absolute");
+    // The pill's ground is the row-hover tint itself (bg-accent) -- it reads
+    // as part of the row, not a floating widget; opaque, it also keeps the
+    // label underneath from bleeding through.
+    expect(classes).toContain("bg-accent");
+    expect(classes).not.toContain("bg-card");
+    expect(classes).not.toContain("shadow-md");
     expect(classes).toContain("opacity-0");
     expect(classes).toContain("pointer-events-none");
     expect(classes).toContain("group-hover:opacity-100");
     expect(classes).toContain("group-hover:pointer-events-auto");
-    expect(classes).toContain("focus-visible:opacity-100");
-    expect(classes).toContain("focus-visible:pointer-events-auto");
+    expect(classes).toContain("has-[:focus-visible]:opacity-100");
+    expect(classes).toContain("has-[:focus-visible]:pointer-events-auto");
     expect(classes).not.toContain("opacity-60");
+    // The buttons themselves carry no visibility form -- the pill owns it.
+    expect(rename.className.split(/\s+/)).not.toContain("opacity-0");
     // The row <li> carries the group hook the hover restore keys off.
     expect(rename.closest("li")!.className.split(/\s+/)).toContain("group");
   });
 
-  it("tints the select button on hover, with the color change transitioned (issue #865)", () => {
-    // The inactive select button used to give zero hover feedback (the active
-    // row's bg-accent was the only tint); #865 aligns it with the app-wide
-    // interaction-row convention -- hover:bg-accent, and transition-colors so
-    // the tint (and the icon actions' hover background) eases instead of
-    // snapping (transition-opacity alone did not cover background color).
+  it("tints the whole row on hover -- the li carries the band, switching instantly", () => {
+    // The hover tint lives on the row <li>, not on the select button: the
+    // pointer anywhere on the row (the floating action pill included) must
+    // light the same full-height band, and the pill's accent ground merges
+    // into it. The switch is intentionally NOT transitioned -- per-row 150ms
+    // fades cross-fade two bands on every row-to-row crossing, which reads
+    // as the strip flashing on a downward sweep.
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
@@ -789,9 +817,47 @@ describe("WorkingSetList", () => {
         onRename={() => {}}
       />,
     );
-    const classes = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
-    expect(classes).toContain("hover:bg-accent");
-    expect(classes).toContain("transition-colors");
+    const select = screen.getByRole("button", { name: /^people/ });
+    const rowClasses = select.closest("li")!.className.split(/\s+/);
+    expect(rowClasses).toContain("hover:bg-accent");
+    expect(rowClasses).not.toContain("transition-colors");
+    expect(rowClasses).toContain("rounded-md");
+    expect(select.className.split(/\s+/)).not.toContain("hover:bg-accent");
+  });
+
+  it("rests the icon glyphs muted, highlights the hot icon, and keeps the arrow cursor", () => {
+    // The icon strip reads like the reference session list: each glyph rests
+    // muted on the pill's accent ground and the hovered / keyboard-focused
+    // icon highlights to foreground -- color alone marks the hot icon (a
+    // background tint would be invisible on the pill's own accent). The hand
+    // cursor is retired on the strip (the highlight carries the affordance);
+    // the select button keeps it.
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onReplace={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    for (const name of [/重命名/, /换源/, /删除/]) {
+      const classes = screen.getByRole("button", { name }).className.split(/\s+/);
+      expect(classes).toContain("text-muted-foreground");
+      expect(classes).toContain("hover:text-foreground");
+      expect(classes).toContain("focus-visible:text-foreground");
+      expect(classes).toContain("transition-colors");
+      expect(classes).not.toContain("cursor-pointer");
+      expect(classes).not.toContain("hover:bg-accent");
+    }
+    // The whole row keeps the plain arrow -- the hand cursor is retired here
+    // entirely: on the select button it flapped against the pill's arrow
+    // across the exposed slivers, and on the label span it flipped once the
+    // name tooltip surfaced (text vs everywhere else).
+    const select = screen.getByRole("button", { name: /^people/ });
+    expect(select.className.split(/\s+/)).not.toContain("cursor-pointer");
+    expect(select.querySelector("span")!.className.split(/\s+/)).not.toContain("cursor-pointer");
   });
 
   it("truncates the label but not the row-count note; the full name rides the Radix tooltip (issue #790, #865)", async () => {
@@ -810,9 +876,12 @@ describe("WorkingSetList", () => {
     const select = screen.getByRole("button", { name: /^a-very-long/ });
     // The native title is retired (#865); the untruncated display name moves
     // to the app-standard Radix tooltip (the ADR-0050/0054 truncation-recovery
-    // mapping), surfaced on hover.
+    // mapping), surfaced on hover of the LABEL SPAN -- the trigger sits on the
+    // span, not the whole button, so the action pill's edges can never pop it.
+    // The span is controlled like the action hints (pointer-ENTER opens), and
+    // jsdom's pointer events need the pointerType the guard checks.
     expect(select).not.toHaveAttribute("title");
-    fireEvent.pointerMove(select);
+    fireEvent.pointerEnter(select.querySelector("span")!, { pointerType: "mouse" });
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "a-very-long-dataset-display-label",
     );
@@ -841,9 +910,15 @@ describe("WorkingSetList", () => {
       expect(screen.getByRole("button", { name })).not.toHaveAttribute("title");
     }
     // The hint copy moves into the theme-following Radix tooltip -- wire check
-    // on the rename action (its siblings share the same wiring).
-    fireEvent.pointerMove(screen.getByRole("button", { name: /重命名/ }));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名显示名");
+    // on the rename action (its siblings share the same wiring). The icon
+    // hints are controlled, so the pointer-ENTER on the button drives the
+    // open (the uncontrolled tooltips fire on pointer-move).
+    // jsdom fires pointer events with an empty pointerType; the real mouse
+    // carries "mouse", which the touch guard requires.
+    fireEvent.pointerEnter(screen.getByRole("button", { name: /重命名/ }), {
+      pointerType: "mouse",
+    });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
   });
 
   it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
@@ -866,22 +941,27 @@ describe("WorkingSetList", () => {
       />,
     );
     // jsdom has no layout engine, so the guard pins the DOM order and the
-    // class contract the single-line layout depends on: select + three icon
-    // actions, then the short chip last. The #790 shape (basis-full badge
-    // wrapping onto its own line via flex-wrap) is retired with #793 -- the
-    // chip is a shrink-0 inline peer that never compresses and never needs
-    // to wrap, so the row stays one flex line.
+    // class contract the single-line layout depends on: select button first,
+    // the overlay pill (holding the three icon actions) in the middle, then
+    // the short chip last. The #790 shape (basis-full badge wrapping onto its
+    // own line via flex-wrap) is retired with #793 -- the chip is a shrink-0
+    // inline peer that never compresses and never needs to wrap, so the row
+    // stays one flex line.
     const row = screen.getByRole("button", { name: /^people/ }).closest("li")!;
     const rowClasses = row.className.split(/\s+/);
     expect(rowClasses).toContain("flex");
     expect(rowClasses).not.toContain("flex-wrap");
     const children = [...row.children];
+    expect(children).toHaveLength(3);
+    expect(children[0].tagName).toBe("BUTTON");
+    const pill = children[1];
+    expect(pill.tagName).toBe("DIV");
+    expect(pill.querySelectorAll("button")).toHaveLength(3);
     const badge = children[children.length - 1];
     const badgeClasses = badge.className.split(/\s+/);
     expect(badgeClasses).toContain("stale-badge");
     expect(badgeClasses).toContain("shrink-0");
     expect(badgeClasses).not.toContain("basis-full");
-    expect(children.slice(1, -1).filter((el) => el.tagName === "BUTTON")).toHaveLength(3);
   });
 
   it("retires the ' · current table' suffix; the active fact rides the highlight alone (issue #793)", () => {
@@ -902,8 +982,13 @@ describe("WorkingSetList", () => {
     );
     const select = screen.getByRole("button", { name: /^people/ });
     expect(select.querySelector(".truncate")).toHaveTextContent(/^people$/);
+    // The highlight now lives on the row <li> (bg-accent, same band as the
+    // hover tint); the button keeps the font-semibold emphasis alone.
+    const rowClasses = select.closest("li")!.className.split(/\s+/);
+    expect(rowClasses).toContain("bg-accent");
+    expect(rowClasses).toContain("active");
     const classes = select.className.split(/\s+/);
-    expect(classes).toContain("bg-accent");
     expect(classes).toContain("font-semibold");
+    expect(classes).not.toContain("bg-accent");
   });
 });

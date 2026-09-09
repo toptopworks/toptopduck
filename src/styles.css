@@ -970,3 +970,12 @@
   width: 2px;
   background-color: var(--border);
 }
+
+/* Tooltip popper wrappers drop out of hit-testing: the tooltip content sets
+   pointer-events: none (pure hint layers -- no interactive content), but
+   Radix's positioning wrapper around it would still catch the pointer and
+   flip row :hover off for as long as the tooltip is up. Scoped to wrappers
+   containing a tooltip so menus / popovers keep their interactive wrappers. */
+[data-radix-popper-content-wrapper]:has(> [role='tooltip']) {
+  pointer-events: none;
+}
