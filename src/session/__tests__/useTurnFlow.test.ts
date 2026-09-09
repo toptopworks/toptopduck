@@ -84,19 +84,19 @@ function setup() {
   // triggering a refetch.
   const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   const viewed = { markProduced: vi.fn(), suppressInit: vi.fn() };
-  const setLoading = vi.fn();
+  const setTurnLoading = vi.fn();
   const setError = vi.fn();
   const pollPersistError = vi.fn(async () => {});
   const intl = { formatMessage: () => "err" } as unknown as IntlShape;
   const deps = {
     queryClient,
     intl,
-    setLoading,
+    setTurnLoading,
     setError,
     pollPersistError,
     viewed,
   };
-  return { queryClient, invalidateSpy, viewed, setLoading, setError, pollPersistError, deps };
+  return { queryClient, invalidateSpy, viewed, setTurnLoading, setError, pollPersistError, deps };
 }
 
 function emitProgress(sessionId: string, phase: TurnProgress["phase"]) {
@@ -953,7 +953,7 @@ describe("useTurnFlow", () => {
       // inside the tail try; the fire paths' log-only catches (#825) rest
       // on the tail finally clearing loading BEFORE the rejection escapes
       // -- pin the reopen directly, the safety story no other test observes.
-      const { deps, setLoading } = setup();
+      const { deps, setTurnLoading } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       // Once, not a plain override: clearAllMocks never restores a mock's
       // implementation, so a lingering resolved value would poison every
@@ -970,7 +970,7 @@ describe("useTurnFlow", () => {
       });
 
       expect((rejection as Error).message).toContain("unhandled runtime choice");
-      expect(setLoading).toHaveBeenLastCalledWith(false);
+      expect(setTurnLoading).toHaveBeenLastCalledWith(false);
     });
 
     it("invalidates workingSet + active on a Materialized outcome", async () => {
@@ -1025,8 +1025,8 @@ describe("useTurnFlow", () => {
       });
     });
 
-    it("surfaces a refresh failure via setError without skipping setLoading(false)", async () => {
-      const { queryClient, invalidateSpy, deps, setError, setLoading } = setup();
+    it("surfaces a refresh failure via setError without skipping setTurnLoading(false)", async () => {
+      const { queryClient, invalidateSpy, deps, setError, setTurnLoading } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
       invalidateSpy.mockRejectedValueOnce(new Error("refresh failed"));
@@ -1035,11 +1035,11 @@ describe("useTurnFlow", () => {
         await result.current.handleAsk("build it");
       });
 
-      // A refresh reject reaches setError (tagged ask) AND setLoading(false)
+      // A refresh reject reaches setError (tagged ask) AND setTurnLoading(false)
       // still runs -- QuestionBar is not left locked forever. setError(null)
       // ran at the ask start (clear), then the refresh reject set the error.
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
-      expect(setLoading).toHaveBeenLastCalledWith(false);
+      expect(setTurnLoading).toHaveBeenLastCalledWith(false);
       // Thread cache holds the optimistic append (a refresh failure does not
       // wipe it; thread is never invalidated, ADR-0051).
       const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
