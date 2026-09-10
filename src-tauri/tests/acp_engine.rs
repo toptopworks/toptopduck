@@ -112,15 +112,16 @@ fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>) {
 }
 
 /// Assert a cancel/step-cap test resolved via the intended path, not the 10s
-/// wall-clock watchdog. Both paths yield `Termination::Cancelled`, so the
-/// termination assertion alone cannot tell them apart (the original #356 bug:
-/// the suite silently fell back to the watchdog). The intended paths finish in
-/// well under 1s; a 2s bound turns any watchdog fallback into a loud failure.
+/// no-progress watchdog. The watchdog lands `Termination::NoProgress` since
+/// ADR-0115 (no longer collapsing into `Cancelled`), so the termination
+/// assertion alone can tell them apart; the bound additionally guards the
+/// freeze semantics' cost. The intended paths finish in well under 1s; a 2s
+/// bound turns any watchdog fallback into a loud failure.
 fn assert_not_via_watchdog(label: &str, start: std::time::Instant) {
     let elapsed = start.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "{label}: took {elapsed:?} -- resolved via the wall-clock watchdog, \
+        "{label}: took {elapsed:?} -- resolved via the no-progress watchdog, \
          not the intended cancel/step-cap path",
     );
 }
@@ -582,12 +583,14 @@ fn step_cap_overflow_trips_cancel_deterministically() {
     assert_not_via_watchdog("step_cap_overflow", start);
 }
 
-/// The wall-clock watchdog fires the shared token on a stuck agent (one that
-/// never reaches a prompt response); the pump sends session/cancel and the
-/// cooperative fixture responds Cancelled. Exercises the watchdog path no
-/// other scenario reaches.
+/// The no-progress watchdog fires the shared token on a stuck agent (one
+/// that never reaches a prompt response = a generation segment silent past
+/// the cap, ADR-0115); the pump sends session/cancel and the cooperative
+/// fixture responds Cancelled -- and the clock latches the reason, landing
+/// the turn NoProgress instead of a bare Cancelled. Exercises the watchdog
+/// path no other scenario reaches.
 #[test]
-fn wall_clock_watchdog_fires_cancel_on_a_stuck_agent() {
+fn no_progress_watchdog_fires_on_a_stuck_agent() {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel))
         .with_caps(24, Some(std::time::Duration::from_millis(200)));
@@ -596,9 +599,10 @@ fn wall_clock_watchdog_fires_cancel_on_a_stuck_agent() {
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("ACP_FAKE_SCENARIO", "stuck");
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
-    assert!(
-        matches!(outcome.termination, Termination::Cancelled),
-        "watchdog on a stuck agent -> Cancelled: {:?}",
+    assert_eq!(
+        outcome.termination,
+        Termination::NoProgress(std::time::Duration::from_millis(200)),
+        "watchdog on a stuck agent -> NoProgress: {:?}",
         outcome.termination
     );
 }
@@ -712,7 +716,7 @@ fn cli_death_during_stdin_write_settles_runtime() {
 /// lines consumed before the cancel are folded (backpressure throttles the
 /// flood at the source; it never changes the turn's termination or the folded
 /// trace). The cancel rides the shared token (the same token the wall-clock
-/// watchdog fires -- `wall_clock_watchdog_fires_cancel_on_a_stuck_agent` pins
+/// watchdog fires -- `no_progress_watchdog_fires_on_a_stuck_agent` pins
 /// that firing; the pump treats both identically), gated on the pre-prompt
 /// Thinking phase instead of a blind sleep: the phase fires only once the
 /// handshake is done and the prompt is about to go out, so a slow spawn

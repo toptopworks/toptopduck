@@ -658,11 +658,12 @@ fn step_cap_lands_the_configured_cap() {
     );
 }
 
-/// Wall clock (ADR-0021 timeout -> cancel): a per-turn delay past the cap
-/// fires the caller-thread watchdog, the token maps up, and the turn lands
-/// Cancelled.
+/// No-progress (ADR-0115): a generation segment silent past the cap fires
+/// the clock, and the turn lands NoProgress carrying the expired cap -- the
+/// same cancel landing as before, with the latched reason (the provider's
+/// per-turn stream delay keeps the segment silent past the 100 ms cap).
 #[test]
-fn wall_clock_fires_cancel() {
+fn generation_silence_fires_no_progress() {
     let mut h = Harness::new();
     h.seed_result_1();
     let script: Vec<Message> = (0..4)
@@ -689,7 +690,83 @@ fn wall_clock_fires_cancel() {
         &sink,
         Arc::new(CancelToken::new()),
     );
-    assert_eq!(outcome.termination, Termination::Cancelled);
+    assert_eq!(
+        outcome.termination,
+        Termination::NoProgress(Duration::from_millis(100))
+    );
+}
+
+/// The freeze (ADR-0115): an approval pending past the cap does NOT kill
+/// the turn -- the dispatch server freezes the clock across the gate's
+/// condvar wait, and the turn resumes when the responder answers (the Deny
+/// feeds back, the loop self-corrects, the terminal text lands).
+#[test]
+fn approval_pending_survives_past_the_cap() {
+    use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+    let mut h = Harness::new();
+    let cli_tool = CliToolConfig {
+        name: "pandoc".into(),
+        description: "convert".into(),
+        executable: "/bin/pandoc".into(),
+        argv_template: vec!["-o".into(), "{output}".into()],
+        params: vec![CliToolParam {
+            name: "output".into(),
+            description: "target".into(),
+            delivery: CliParamDelivery::Argv,
+            varargs: false,
+        }],
+        env: Default::default(),
+        enabled: true,
+        source: Default::default(),
+        baseline: None,
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        thinking_and_batch(
+            "",
+            None,
+            vec![call("tu_1", "pandoc", json!({"output": "out.pdf"}))],
+        ),
+        text_reply("denied, moving on."),
+    ]));
+    // The gate waits on the shared approval state while the responder
+    // thread parks PAST the cap, then drives the Deny -- if the freeze
+    // were missing, the no-progress clock would kill the turn mid-pending.
+    let approval = Arc::new(ApprovalState::new());
+    let sink = Arc::new(RecordingSink::default());
+    let responder = {
+        let approval = Arc::clone(&approval);
+        let sink = Arc::clone(&sink);
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(id) = sink.request_ids.lock().unwrap().first().copied() {
+                    // Park past the 100 ms cap before answering.
+                    std::thread::sleep(Duration::from_millis(300));
+                    approval.respond(id, ApprovalResponse::Deny).unwrap();
+                    return;
+                }
+                if start.elapsed() > Duration::from_secs(5) {
+                    panic!("no approval request arrived");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let outcome = h.run_with_cli(
+        &h.request_with_tools("call pandoc", &["pandoc"]),
+        offline_loop(Arc::clone(&provider)).with_caps(24, Some(Duration::from_millis(100))),
+        approval.as_ref(),
+        sink.as_ref(),
+        Arc::new(CancelToken::new()),
+        std::slice::from_ref(&cli_tool),
+    );
+    responder.join().unwrap();
+    assert!(
+        matches!(outcome.termination, Termination::Text(_)),
+        "the turn must survive a pending approval past the cap, got {:?}",
+        outcome.termination
+    );
+    assert_eq!(outcome.trace.len(), 1);
 }
 
 /// User cancel mid-run: the provider fires the app token on turn 2; the

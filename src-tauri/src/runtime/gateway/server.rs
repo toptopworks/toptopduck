@@ -574,6 +574,11 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         file_attachments,
         cli_tool,
     } = classify_with_cli_tool(ctx.cli, call, ctx.deps.temp_path);
+    // Freeze across the gate + dispatch (ADR-0115): an approval pending on
+    // the condvar, a CLI tool's run, and a builtin dispatch are waits on an
+    // external principal -- never billed to the turn's generation cap. The
+    // clock rides the shared token (None between turns: no freeze).
+    let _dispatch_freeze = ctx.cancel.progress_clock().map(|c| c.freeze());
     let gate_req = ApprovalRequest {
         key,
         operation_kind,

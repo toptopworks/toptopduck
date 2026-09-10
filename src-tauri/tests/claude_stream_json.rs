@@ -349,13 +349,14 @@ fn step_cap_overflow_yields_step_cap_termination() {
     );
 }
 
-/// A stuck agent (system{init}, then stdout held open in silence) under a
-/// short wall-clock: the watchdog fires the shared token and the pump's
-/// loop-top cancel check resolves the turn as Cancelled -- the only
-/// backstop when a real CLI hangs (the acp_engine.rs
-/// `wall_clock_watchdog_fires_cancel_on_a_stuck_agent` peer).
+/// A stuck agent (system{init}, then stdout held open in silence = a
+/// generation segment silent past the cap, ADR-0115) under a short cap: the
+/// no-progress watchdog fires the shared token, the pump's loop-top cancel
+/// check resolves the turn, and the latched reason lands NoProgress instead
+/// of a bare Cancelled (the acp_engine.rs
+/// `no_progress_watchdog_fires_on_a_stuck_agent` peer).
 #[test]
-fn wall_clock_watchdog_fires_cancel_on_a_silent_turn() {
+fn no_progress_watchdog_fires_on_a_silent_turn() {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(claude_code(), cancel)
         .with_caps(24, Some(std::time::Duration::from_millis(300)));
@@ -364,9 +365,10 @@ fn wall_clock_watchdog_fires_cancel_on_a_silent_turn() {
     std::env::set_var("CLAUDE_FAKE_SCENARIO", "turn_silent");
     let start = std::time::Instant::now();
     let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
-    assert!(
-        matches!(outcome.termination, Termination::Cancelled),
-        "watchdog on a stuck agent -> Cancelled: {:?}",
+    assert_eq!(
+        outcome.termination,
+        Termination::NoProgress(std::time::Duration::from_millis(300)),
+        "watchdog on a stuck agent -> NoProgress: {:?}",
         outcome.termination
     );
     // The watchdog resolves in ~300ms. A no-fire regression is caught by

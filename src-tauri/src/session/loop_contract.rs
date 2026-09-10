@@ -58,10 +58,17 @@ pub enum Termination {
     /// "did not converge in N steps" detail. Maps to `TurnOutcome::Failed`
     /// (ADR-0081 execution-level cap).
     StepCap(u32),
-    /// A cancel (user / close / wall-clock watchdog) aborted the turn
-    /// (ADR-0021). Maps to `TurnOutcome::Cancelled`. The watchdog is one cause
-    /// among several; it shares the cancel path (ADR-0021 timeout -> cancel).
+    /// A cancel (user / close) aborted the turn (ADR-0021). Maps to
+    /// `TurnOutcome::Cancelled`. The watchdog is NOT one of these causes
+    /// since ADR-0115: its kill lands [`Termination::NoProgress`].
     Cancelled,
+    /// The no-progress watchdog fired (ADR-0115): the generation segment
+    /// went silent past the cap with no freeze segment open. Carries the
+    /// expired cap. Maps to `TurnOutcome::Cancelled` too -- the ADR-0021
+    /// landing is unchanged -- but carries the technical "no-progress
+    /// timeout" fact at this layer; the cancelled-vs-timed-out presentation
+    /// split rides issue #883.
+    NoProgress(std::time::Duration),
     /// No LLM provider is wired / the key was refused (ADR-0044 permanent).
     /// Maps to `TurnOutcome::Failed(NotWired)`.
     NotWired,

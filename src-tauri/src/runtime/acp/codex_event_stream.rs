@@ -37,7 +37,7 @@ use crate::runtime::acp::wire::McpServer;
 use crate::session::loop_contract::{
     truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
-use crate::session::turn_dispatch::spawn_wall_clock_watchdog;
+use crate::session::progress::ProgressClock;
 
 // ---------------------------------------------------------------------------
 // Event parser (pure)
@@ -398,15 +398,14 @@ pub(super) fn run_codex_event_stream(
 ) -> LoopOutcome {
     let guard = cancel.begin_turn();
 
-    // Wall-clock watchdog (same as ACP): fire cancel on expiry.
-    if let Some(timeout) = wall_clock {
-        spawn_wall_clock_watchdog(
-            guard.generation(),
-            Arc::clone(&cancel),
-            timeout,
-            "toptopduck::acp",
-        );
-    }
+    // No-progress watchdog (same predicate as the ACP path, ADR-0115):
+    // inbound event lines re-arm the clock (touch below). The command /
+    // mcp_tool_call events are completion echoes with no observable
+    // in-flight window, so the only freeze segment this surface can see is
+    // the gateway serving its tool calls (the gateway freezes the shared
+    // clock itself); native codex execution stays timed.
+    let clock = wall_clock
+        .and_then(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
 
     // Spawn codex exec --json with the bridge injected via -c overrides +
     // the ADR-0095 model / thought-level selections: the model rides
@@ -487,6 +486,11 @@ pub(super) fn run_codex_event_stream(
 
         match rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
             Ok(line) => {
+                // Inbound stream activity (ADR-0115): re-arm the
+                // no-progress clock before anything else.
+                if let Some(clock) = clock.as_ref() {
+                    clock.touch();
+                }
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(_) => continue, // skip unparseable line
@@ -532,6 +536,12 @@ pub(super) fn run_codex_event_stream(
     // a call-less trailing round holding reasoning must survive the pop.
     // No pending-row drain here -- command events carry no result frame.
     pump.tracker.freeze_trailing_thinking(&mut on_phase);
+    // ADR-0115: a cancel landing after the clock latched is the watchdog's
+    // (generation silence past the cap), not a user cancel.
+    let term = match term {
+        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref(), wall_clock),
+        other => other,
+    };
     let rounds = pump.tracker.settle_rounds(&term);
     outcome(term, rounds)
 }

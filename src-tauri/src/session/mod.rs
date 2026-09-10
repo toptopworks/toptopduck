@@ -8,6 +8,7 @@ pub mod ingest;
 pub mod inline_materialize;
 pub mod loop_contract;
 pub mod materializer;
+pub(crate) mod progress;
 pub mod recipe_persister;
 pub mod resume;
 pub mod sandbox;
@@ -2339,6 +2340,17 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
             detail: format!("agent did not converge within {cap} steps"),
         }),
         Termination::Cancelled => TurnOutcome::Cancelled,
+        Termination::NoProgress(cap) => {
+            // The technical "no-progress timeout" fact rides the log (the
+            // cancelled-vs-timed-out UI split is issue #883); the landing
+            // stays a plain Cancelled (ADR-0115).
+            log::warn!(
+                target: "toptopduck::session",
+                "no-progress timeout: generation silent past the {:.1}s cap; aborting the turn",
+                cap.as_secs_f64()
+            );
+            TurnOutcome::Cancelled
+        }
         Termination::NotWired => TurnOutcome::Failed(TurnFailure::NotWired),
         Termination::InvalidConfig(detail) => {
             TurnOutcome::Failed(TurnFailure::InvalidConfig { detail })
