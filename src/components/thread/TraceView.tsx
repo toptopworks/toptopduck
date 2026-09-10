@@ -116,9 +116,10 @@ function TraceRow({
           head={(
             <>
               {/* Tool name truncates with the row's summary family
-                  (#826/#872): an external tool's server prefix + name can
-                  outrun the narrow column, and shrink-0 used to shove the
-                  summary and badges out. */}
+                  (#826) and the approval card's cap (#872): an external
+                  tool's server prefix + name can outrun the narrow column,
+                  and shrink-0 used to shove the summary and badges out
+                  (issue #874). */}
               <span className="trace-name font-medium min-w-0 truncate">{entry.name}</span>
               <OperationBadge kind={entry.operation_kind} />
               {afterName}
