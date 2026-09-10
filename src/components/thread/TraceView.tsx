@@ -301,11 +301,19 @@ export function LiveRow({
   // ADR-0083): the answer marker rides beside the name; the row otherwise
   // renders its running / completed state like any call.
   const resolvedResponse = row.approval !== null ? row.approval.response : null;
+  // The badge's label joins the row's truncate family (#876): negative
+  // space is absorbed by the shrinkable items in proportion to their base
+  // size, so the far wider summary and tool name collapse first and the
+  // badge truncates only near the narrowest columns (the unshrinkable
+  // chrome -- spinner, op-badge, chevron -- sets the row's min-content
+  // floor just past that column's line box). `shrink` overrides the Badge
+  // base class's own shrink-0 (twMerge keeps the later same-group class),
+  // which would otherwise pin the badge wide and silently defeat min-w-0.
   const resolvedBadge =
     resolvedResponse !== null ? (
       <Badge
         variant={resolvedResponse === "deny" ? "destructive" : "secondary"}
-        className="approval-resolved shrink-0 px-1 py-0 text-xs font-normal"
+        className="approval-resolved min-w-0 shrink truncate px-1 py-0 text-xs font-normal"
       >
         {resolvedLabel(intl, resolvedResponse)}
       </Badge>

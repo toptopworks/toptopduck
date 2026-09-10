@@ -221,6 +221,44 @@ describe("LiveRow trace name shrink (issue #874)", () => {
   });
 });
 
+describe("LiveRow approval resolved badge shrink (issue #876)", () => {
+  it("lets the resolved badge truncate as the row's last resort, in both row states", () => {
+    // The row's unshrinkable chrome (spinner, op-badge, chevron) caps the
+    // min-content near the narrowest column's line box, so a running row
+    // with a resolved approval paints its tail 2-16px into the rail gutter
+    // (#876). The badge's label joins the truncate family (#826): negative
+    // space is absorbed in proportion to base size, so the far wider
+    // summary and tool name collapse first and the badge truncates only
+    // near the narrowest columns. `shrink` overrides the Badge base
+    // class's own shrink-0 (twMerge keeps the later same-group class),
+    // which would otherwise pin the badge wide and silently defeat
+    // min-w-0. The remaining single-word chrome stays shrink-0 by the
+    // ticket's locked scope (rationale, not an assertion this test makes).
+    const approval = { requestId: "req-1", response: "deny" as const, fileAttachments: [] };
+    // Branch discriminator: each sub-case pins the branch it walks (the
+    // settled case renders the success glyph, the running case the
+    // spinner), so a fixture-state regression cannot silently swap sites
+    // and leave one render site unpinned.
+    const settled = renderWithProviders(
+      <LiveRow
+        row={rowWith({ approval, running: false, success: true })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(settled.container.querySelector(".trace-success")).not.toBeNull();
+    const settledBadge = settled.container.querySelector(".approval-resolved");
+    expect(settledBadge).not.toBeNull();
+    expect(settledBadge).toHaveClass("min-w-0", "shrink", "truncate");
+    const running = renderWithProviders(
+      <LiveRow row={rowWith({ approval, running: true })} onRespond={vi.fn()} />,
+    );
+    expect(running.container.querySelector(".animate-spin")).not.toBeNull();
+    const runningBadge = running.container.querySelector(".approval-resolved");
+    expect(runningBadge).not.toBeNull();
+    expect(runningBadge).toHaveClass("min-w-0", "shrink", "truncate");
+  });
+});
+
 describe("LiveRow approval card file values", () => {
   it("hides the file contents until the approver expands them", () => {
     renderWithProviders(<LiveRow row={rowWith()} onRespond={vi.fn()} />);
