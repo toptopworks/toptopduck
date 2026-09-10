@@ -42,9 +42,7 @@ describe("WorkingSetList", () => {
     // highlight stranded on the active one. The active dataset keeps the
     // in-list font-semibold label -- its authoritative identity is the tab
     // header's Targets chip, and since #793 retired the " · current table"
-    // suffix, bold is the row's only in-list active marker. The band lives
-    // on the row <li> -- the same element that carries the hover band, so a
-    // picked row and a hovered row read at exactly the same height.
+    // suffix, bold is the row's only in-list active marker.
     const orders: DatasetDescriptor = {
       ...mockDataset,
       reference_name: "orders",
@@ -956,10 +954,11 @@ describe("WorkingSetList", () => {
     );
     const select = screen.getByRole("button", { name: /^a-very-long/ });
     // The untruncated display name rides the OS-native title on the label
-    // span (the #793 fingerprint precedent): truncation recovery with no
-    // Radix machinery -- no mutex slot, no open/close handlers, and no
-    // cursor interference (a native title never touches the cursor, which
-    // the button's hand ruling depends on).
+    // span: truncation recovery with no Radix machinery -- no mutex slot, no
+    // open/close handlers, and no cursor interference (a native title never
+    // touches the cursor, which the button's hand ruling depends on; the
+    // action hints keep their Radix tooltips -- #865 rejected native chrome
+    // for those, the name only surfaces its own text).
     expect(select.querySelector("span")).toHaveAttribute(
       "title",
       "a-very-long-dataset-display-label",

@@ -151,6 +151,11 @@ describe("WorkspaceWorkingSet", () => {
       ),
     );
     expect(screen.getByText(/行数：9/)).toBeInTheDocument();
+    // The band rides the resolved pick on this fallback branch too: with
+    // both the pick and the active gone it lands on the first item -- the
+    // same row the detail pane shows.
+    const ordersRow = screen.getByRole("button", { name: /^orders/ }).closest("li")!;
+    expect(ordersRow.className.split(/\s+/)).toContain("bg-accent");
   });
 
   it("re-renders into the empty-state card when the last dataset is deleted (issue #792)", () => {

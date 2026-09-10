@@ -58,7 +58,8 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // areas). The wrapper spans exactly the row's bg-clip-content band (the li's
 // py frames it), so inset-y-0 puts name band, selected band and action strip
 // all at one height. The pill's ground is bg-accent -- the same tint a
-// hovered or selected row carries -- so the strip reads as part of the row rather than a
+// hovered or selected row carries -- so the strip reads as part of the row
+// rather than a
 // floating widget (a border/shadow card form would read as a separate widget
 // on this ground); being opaque, it still keeps the label underneath from
 // bleeding through. Visibility is the #865 hover-reveal contract moved one
@@ -229,7 +230,7 @@ function DatasetRow({
       className={cn(
         "group relative flex items-center gap-1 rounded-md py-[0.1rem] bg-clip-content hover:bg-accent",
         isActive && "active",
-        isSelected && "selected bg-accent bg-clip-content",
+        isSelected && "selected bg-accent",
         d.stale && "stale",
       )}
     >
@@ -245,10 +246,12 @@ function DatasetRow({
           className={cn(SELECT_BUTTON_BASE, isActive && "font-semibold")}
           onClick={() => onSelect(d.reference_name)}
         >
-          {/* The truncated label's full text rides the OS-native title -- the
-            #793 fingerprint precedent, brought to the name: truncation
-            recovery without any Radix machinery (no popper to keep
-            pointer-transparent, no mutex slot, no open/close handlers). The
+          {/* The truncated label's full text rides the OS-native title:
+            truncation recovery without any Radix machinery (no popper to
+            keep pointer-transparent, no mutex slot, no open/close handlers).
+            Unlike the action hints' theme-following Radix tooltips (#865
+            rejected native titles there -- chrome follows the OS), the name
+            surfaces only its own text, so the OS chrome costs nothing. The
             hand cursor on the button below no longer flips when the
             affordance surfaces -- a native title never touches the cursor. */}
           <span className="min-w-0 flex-1 truncate" title={d.display_name}>
@@ -663,9 +666,9 @@ export function WorkingSetList({
     // small visuals ride Tailwind utility on each element below + the
     // BUTTON_CHROME-derived constants above (select + icon actions, issue
     // #790). Two row states layer via cn(): the SELECTION puts the accent
-    // band on the row <li> (the same element as the hover band, so a picked
-    // row and a hovered one read at exactly the same height), and the ACTIVE
-    // dataset bolds the select button's label. The class hooks (.working-set
+    // band on the row <li> (see DatasetRow's isSelected for the band
+    // contract), and the ACTIVE dataset bolds the select button's label.
+    // The class hooks (.working-set
     // / .rename / .replace / .delete / .active / .selected / .stale) stay on
     // the elements as anchor points for selector queries and future
     // migration slices.
