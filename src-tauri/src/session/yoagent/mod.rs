@@ -8,8 +8,10 @@
 //! `None`; windowing is the app's, preventing double truncation), no skills
 //! loader, no MCP client, no sub-agents, no tool middleware (the app gateway
 //! is the single enforcement point). Safety net (Decision 4): the step cap
-//! (24) + wall clock (120s, ADR-0081) map onto `ExecutionLimits` and the
-//! caller-thread watchdog (ADR-0081 values); cancellation
+//! (24) maps onto `ExecutionLimits`; the 120s no-progress cap (ADR-0081 as
+//! redefined by ADR-0115) is the session watchdog clock
+//! (`crate::session::progress`) -- the upstream duration belt stays off;
+//! cancellation
 //! maps the app's `CancelToken` onto the upstream task token; loop detection
 //! is ON (consecutive identical calls steer, then stop). Retries for
 //! rate-limit / transient network faults ride the upstream backoff; a
@@ -178,7 +180,7 @@ impl YoagentLoop {
             // or NoProgress when the clock latched the reason (the
             // ADR-0021 timeout -> cancel mapping, reason split per
             // ADR-0115).
-            let clock = self.wall_clock.and_then(|timeout| {
+            let clock = self.wall_clock.map(|timeout| {
                 ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout)
             });
             // The driver: one scoped thread owning a dedicated single-thread
@@ -319,7 +321,7 @@ impl YoagentLoop {
                 // ADR-0115: the clock latches whether the cancel is the
                 // watchdog's (generation silence past the cap) or a user /
                 // close cancel -- same landing, different reason.
-                let termination = ProgressClock::cancel_landing(clock.as_ref(), self.wall_clock);
+                let termination = ProgressClock::cancel_landing(clock.as_ref());
                 return finish(fold, &state, termination);
             }
             if let Some(reason) = fold.loop_abort.clone() {

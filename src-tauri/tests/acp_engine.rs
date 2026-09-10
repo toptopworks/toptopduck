@@ -577,9 +577,11 @@ fn step_cap_overflow_trips_cancel_deterministically() {
         "step-cap trip + cooperative fixture -> Cancelled: {:?}",
         outcome.termination
     );
-    // The 10s wall-clock watchdog also collapses to Cancelled, so the
-    // termination match alone cannot tell the paths apart (the #356
-    // regression). The step-cap path resolves in well under 1s; pin it.
+    // Since ADR-0115 the watchdog no longer collapses to Cancelled (it
+    // lands NoProgress), so the termination match alone CAN tell the paths
+    // apart (the #356 regression is gone); the 2s bound now pins the freeze
+    // semantics' cost on top. The step-cap path resolves in well under 1s;
+    // pin it.
     assert_not_via_watchdog("step_cap_overflow", start);
 }
 

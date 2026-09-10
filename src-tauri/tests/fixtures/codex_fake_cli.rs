@@ -169,6 +169,33 @@ fn main() {
             emit(&mut out, &agent_message("item_2", "found 3 rows"));
             emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
         }
+        // The no-progress freeze window (ADR-0115): an execution item whose
+        // run outlasts the cap must NOT kill the turn -- the started/
+        // completed envelope pair freezes the clock across the command. With
+        // the freeze deleted, the watchdog fires mid-execution and the turn
+        // lands NoProgress instead of the reply.
+        "slow_exec" => {
+            emit(&mut out, &serde_json::json!({"type": "turn.started"}));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.started",
+                    "item": {
+                        "id": "item_1",
+                        "type": "command_execution",
+                        "command": "explore SELECT 1",
+                        "aggregated_output": "",
+                        "exit_code": null,
+                        "status": "in_progress"
+                    }
+                }),
+            );
+            // Outlast the test's 200ms cap: the freeze must hold.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            emit(&mut out, &command_execution("item_1", "explore SELECT 1"));
+            emit(&mut out, &agent_message("item_2", "found 3 rows"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
         "turn_failed" => {
             emit(
                 &mut out,

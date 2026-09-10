@@ -62,6 +62,7 @@ const SCENARIOS: &[&str] = &[
     "empty_stdout",
     "step_cap_overflow",
     "turn_silent",
+    "slow_drip",
     "cancel_with_prose",
     "no_stdin_hold",
     "die_before_stdin",
@@ -315,6 +316,26 @@ fn run_turn(scenario: &str) {
             // turn -- the stuck-agent shape the interrupt tests drive.
             emit(&mut out, &system_init());
             std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        "slow_drip" => {
+            // The survival half of ADR-0115: a generation segment that keeps
+            // producing past the cap. Frames land every 100ms for ~600ms
+            // while the test runs a 300ms cap -- each inbound frame must
+            // re-arm the clock, or the watchdog kills the turn mid-stream.
+            emit(&mut out, &system_init());
+            for i in 0..6u32 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                emit(
+                    &mut out,
+                    &serde_json::json!({
+                        "type": "assistant",
+                        "message": {"content": [
+                            {"type": "text", "text": format!("drip {i}")}
+                        ]}
+                    }),
+                );
+            }
+            emit(&mut out, &result_success("dripped to the end"));
         }
         "cancel_with_prose" => {
             // A native tool call, then assistant text, then hold stdout

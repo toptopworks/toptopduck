@@ -232,14 +232,13 @@ impl AcpEngine {
         let guard = cancel.begin_turn();
         // No-progress watchdog (ADR-0115): the cap times ONLY the generation
         // segment -- the pump's inbound lines re-arm it (touch), and the
-        // permission decision + the open tool-call windows freeze it. The
-        // handshake keeps timing (a CLI that cannot reach the prompt inside
-        // the cap is exactly the non-convergence the cap exists for); the
-        // pump notices a fired token via cancel.is_requested() and sends
-        // session/cancel.
-        let clock = self.wall_clock.and_then(|timeout| {
-            ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout)
-        });
+        // open tool-call windows freeze it. The handshake keeps timing (a
+        // CLI that cannot reach the prompt inside the cap is exactly the
+        // non-convergence the cap exists for); the pump notices a fired
+        // token via cancel.is_requested() and sends session/cancel.
+        let clock = self
+            .wall_clock
+            .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
         // Spawn the CLI. Any spawn failure lands as an external-runtime
         // failure (the engine never panics into the host).
         let mut child = match spawn(binary, &self.adapter) {
@@ -255,6 +254,15 @@ impl AcpEngine {
         let hs = match handshake(&mut io, &mut child, &self.cancel, input, &self.adapter) {
             Ok(hs) => hs,
             Err(term) => {
+                // ADR-0115: a cancel landing after the clock latched is the
+                // watchdog's (generation silence past the cap) -- the
+                // handshake keeps timing by design, so this window is
+                // exactly where the cap fires for a CLI that cannot reach
+                // the prompt.
+                let term = match term {
+                    Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+                    other => other,
+                };
                 let outcome = self.outcome(term, Vec::new(), None);
                 child.kill_and_wait();
                 return outcome;
@@ -307,6 +315,13 @@ impl AcpEngine {
                 req,
             ) {
                 Err(term) => {
+                    // ADR-0115: same pre-pump relabel as the handshake -- a
+                    // watchdog fire mid-roundtrip is generation silence
+                    // past the cap, not a user cancel.
+                    let term = match term {
+                        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+                        other => other,
+                    };
                     let outcome = self.outcome(term, Vec::new(), discovered);
                     child.kill_and_wait();
                     return outcome;
@@ -333,7 +348,11 @@ impl AcpEngine {
 
         // Loop-top cancel check (mirrors the built-in loop's pre-step check).
         if self.cancel.is_requested() {
-            let outcome = self.outcome(Termination::Cancelled, Vec::new(), discovered);
+            let outcome = self.outcome(
+                ProgressClock::cancel_landing(clock.as_ref()),
+                Vec::new(),
+                discovered,
+            );
             child.kill_and_wait();
             return outcome;
         }
@@ -369,7 +388,13 @@ impl AcpEngine {
                 return outcome;
             }
             super::process::StdinWriteOutcome::Cancelled => {
-                let outcome = self.outcome(Termination::Cancelled, Vec::new(), discovered);
+                // ADR-0115: the pre-pump relabel -- a watchdog fire during
+                // the stdin drain is generation silence past the cap.
+                let outcome = self.outcome(
+                    ProgressClock::cancel_landing(clock.as_ref()),
+                    Vec::new(),
+                    discovered,
+                );
                 child.kill_and_wait();
                 return outcome;
             }
@@ -423,9 +448,7 @@ impl AcpEngine {
         // ADR-0115: a cancel landing after the clock latched is the
         // watchdog's (generation silence past the cap), not a user cancel.
         let termination = match termination {
-            Termination::Cancelled => {
-                ProgressClock::cancel_landing(clock.as_ref(), self.wall_clock)
-            }
+            Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
             other => other,
         };
         let rounds = pump.tracker.settle_rounds(&termination);
@@ -743,10 +766,6 @@ impl AcpIo {
                                     continue;
                                 }
                             };
-                            // The permission decision waits on the user's
-                            // approval card (ADR-0080/0083) -- a freeze
-                            // segment (ADR-0115), never billed to the cap.
-                            let _decision_freeze = pump.clock.as_ref().map(|c| c.freeze());
                             let outcome =
                                 decide_permission(adapter, &params, approval, sink, cancel);
                             let _ = self.write_json_with_cancel(
@@ -1253,9 +1272,10 @@ impl Pump {
     /// take ends `pending`'s borrow so the loop can call back into
     /// `finalize_row` -- the single TraceEntry construction.
     fn drain_unobserved(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        let rows = std::mem::take(&mut self.pending);
         // The take empties `pending`: the open tool-call window closes here.
         self.reconcile_pending_freeze();
-        for row in std::mem::take(&mut self.pending) {
+        for row in rows {
             self.finalize_row(
                 row.round,
                 &row.tool_use_id,

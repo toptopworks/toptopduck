@@ -69,9 +69,18 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// lock-queue wait is not the engine's latency; the step-cap pin relies on
 /// this). Uses a short wall-clock (5s) so a stuck scenario fails fast.
 fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
+    run_with_cap(scenario, step_cap, std::time::Duration::from_secs(5))
+}
+
+/// [`run`] with a caller-chosen no-progress cap (the freeze-window tests
+/// drive caps the scenario's gaps must outlast).
+fn run_with_cap(
+    scenario: &str,
+    step_cap: u32,
+    wall: std::time::Duration,
+) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(codex(), cancel)
-        .with_caps(step_cap, Some(std::time::Duration::from_secs(5)));
+    let eng = AcpEngine::new(codex(), cancel).with_caps(step_cap, Some(wall));
     let approval = ApprovalState::new();
     let mut phases = Vec::new();
     let _g = ENV_LOCK.lock().unwrap();
@@ -160,6 +169,26 @@ fn tool_call_yields_trace_with_one_successful_entry() {
     assert!(phases
         .iter()
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
+}
+
+/// The execution freeze window (ADR-0115): a native codex command whose run
+/// outlasts the cap must NOT kill the turn -- the `item.started` window
+/// freezes the clock, the completion echo releases it, and the reply lands.
+/// This is the mis-kill shape ADR-0115 exists to eliminate, on the surface
+/// whose commands are silent between the envelope pair.
+#[test]
+fn slow_exec_survives_past_the_cap() {
+    let (outcome, _, _) = run_with_cap("slow_exec", 24, std::time::Duration::from_millis(200));
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "found 3 rows"),
+        other => panic!("the frozen execution must survive past the cap, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "the started/completed pair still lands exactly one row"
+    );
 }
 
 /// A failed command (non-zero exit) lands a failed trace row with the exit

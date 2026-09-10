@@ -963,6 +963,38 @@ mod tests {
         }
     }
 
+    /// A materializer that parks past a short no-progress cap, then lands a
+    /// normal result -- the freeze-window fixture: the tools/call serving it
+    /// must freeze the turn's clock for the whole gate + dispatch window
+    /// (ADR-0115), so a watchdog fire mid-dispatch (the ADR-0081 mis-kill
+    /// shape) is observable only by its absence.
+    struct SleepyMaterializer {
+        ms: u64,
+    }
+    impl Materializer for SleepyMaterializer {
+        fn try_materialize(
+            &self,
+            _sql: &str,
+            _cancel: &CancelToken,
+            result_name: String,
+            _deps: &mut TurnDeps,
+        ) -> Result<DatasetDescriptor, ExecError> {
+            thread::sleep(Duration::from_millis(self.ms));
+            Ok(DatasetDescriptor {
+                reference_name: result_name.clone(),
+                display_name: result_name,
+                source_path: String::new(),
+                columns: Vec::new(),
+                row_count: 0,
+                sample: Vec::new(),
+                fingerprint: String::new(),
+                rectify: RectifyProvenance::NotApplicable,
+                privacy: DatasetPrivacy::default(),
+                stale: None,
+            })
+        }
+    }
+
     /// A minimal in-process HTTP MCP server for the wire-level pins (issue
     /// #661): binds a localhost port and answers `initialize` / `tools/list`
     /// / `tools/call` POSTs with plain JSON bodies. The stdio fake-server
@@ -2336,6 +2368,63 @@ mod tests {
             1,
             "next_result_number back to 1 after the rollback"
         );
+    }
+
+    /// The dispatch freeze (ADR-0115): a tools/call whose dispatch runs past
+    /// the turn's no-progress cap must NOT fire the turn's clock -- the
+    /// serve-side freeze covers the whole gate + dispatch window, so the
+    /// watchdog stands down (the ADR-0081 mis-kill shape -- a >120s tool
+    /// execution killing the ACP turn -- is observable only by its absence).
+    /// Without the freeze the armed clock fires ~200ms into the 600ms
+    /// dispatch and the token carries the request.
+    #[test]
+    fn tools_call_running_past_the_cap_does_not_fire_the_clock() {
+        use crate::session::progress::ProgressClock;
+
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
+        let sleepy: &'static mut SleepyMaterializer =
+            Box::leak(Box::new(SleepyMaterializer { ms: 600 }));
+        let mut ctx = gate_ctx_with_materializer(
+            sleepy,
+            Vec::new(),
+            approval,
+            sink,
+            Box::leak(Box::new(
+                crate::session::skills::SkillActivationFixture::new(Vec::new()),
+            )),
+        );
+        // The serve must read the very token this test armed: alias the ctx's
+        // cancel to the Arc twin the clock publishes on (the same slot the
+        // production paths share, ADR-0115).
+        let token = Arc::new(CancelToken::new());
+        ctx.cancel = &**Box::leak(Box::new(Arc::clone(&token)));
+        let guard = token.begin_turn();
+        ProgressClock::arm_and_publish(guard.generation(), &token, Duration::from_millis(200));
+        let _guard = guard; // hold the generation alive for the serve
+
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "materialize", "arguments": {"sql": "SELECT 1 AS x"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "the dispatch completes normally");
+            }
+            Response::Error(code, m) => {
+                panic!("the frozen dispatch must complete, got error {code}: {m}")
+            }
+            Response::None => panic!("the frozen dispatch must complete, got None"),
+        }
+        assert!(
+            !token.is_requested(),
+            "the frozen dispatch must not fire the cap"
+        );
+        assert_eq!(outcome.trace.len(), 1, "the trace row lands");
+        assert!(outcome.trace[0].success, "the row records success");
     }
 
     /// Missing `params.name` is a JSON-RPC params error (-32602), not a dispatch.

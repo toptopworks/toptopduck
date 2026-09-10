@@ -2299,7 +2299,9 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 ///   (the adapter's HTTP retry already ran; blind retry is abolished), and an
 ///   external-runtime wiring / transport fault a `Runtime` failure (issue
 ///   #852 -- the ACP domain never lands the built-in transient kind).
-/// - Cancel (user / close / wall-clock watchdog) -> [`TurnOutcome::Cancelled`].
+/// - Cancel (user / close) -> [`TurnOutcome::Cancelled`]; the no-progress
+///   watchdog lands [`Termination::NoProgress`] -> `Cancelled` too, with the
+///   technical detail on the warn log (ADR-0115).
 ///
 /// Tool-level errors (SQL failure, approval denial) never land here -- the
 /// loop fed them back to the model for self-correction (ADR-0077); only a

@@ -345,7 +345,7 @@ pub(super) fn run_claude_stream_json(
     // calls execute gateway-side, so the gateway's own freeze covers the
     // only tool-execution waits this surface produces.
     let clock = wall_clock
-        .and_then(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
+        .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
 
     // Spawn claude --print with the bridge injected via --mcp-config +
     // --strict-mcp-config and the ADR-0095 selections on argv (`--model`
@@ -393,7 +393,13 @@ pub(super) fn run_claude_stream_json(
             )
         }
         super::process::StdinWriteOutcome::Cancelled => {
-            return outcome(Termination::Cancelled, Vec::new(), None)
+            // ADR-0115: the pre-pump relabel -- a watchdog fire during the
+            // stdin drain is generation silence past the cap.
+            return outcome(
+                ProgressClock::cancel_landing(clock.as_ref()),
+                Vec::new(),
+                None,
+            );
         }
     }
 
@@ -507,7 +513,7 @@ pub(super) fn run_claude_stream_json(
     // ADR-0115: a cancel landing after the clock latched is the watchdog's
     // (generation silence past the cap), not a user cancel.
     let term = match term {
-        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref(), wall_clock),
+        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
         other => other,
     };
     let rounds = pump.tracker.settle_rounds(&term);

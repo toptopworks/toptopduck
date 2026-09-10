@@ -121,7 +121,7 @@ impl CancelToken {
     /// Drop the no-progress clock slot. Called by [`InFlightGuard`]'s drop:
     /// the strong references die with the turn's scope, and the watchdog
     /// thread (holding only a `Weak`) exits on its next poll tick.
-    pub(crate) fn clear_progress_clock(&self) {
+    fn clear_progress_clock(&self) {
         *self.progress.lock().expect("progress clock lock poisoned") = None;
     }
 

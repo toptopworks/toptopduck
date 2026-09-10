@@ -26,9 +26,12 @@ use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 /// for a non-converging trajectory, not a target.
 pub(crate) const DEFAULT_STEP_CAP: u32 = 24;
 
-/// Default wall-clock ceiling (ADR-0081, aligned with ADR-0021
-/// `REQUEST_TIMEOUT`). The watchdog fires cancel on expiry; the loop lands as
-/// [`Termination::Cancelled`] (ADR-0021 timeout -> cancel mapping).
+/// Default no-progress cap (ADR-0081 as redefined by ADR-0115, aligned with
+/// ADR-0021 `REQUEST_TIMEOUT`). The watchdog fires cancel when the
+/// generation segment goes silent past the cap; the loop lands as
+/// [`Termination::NoProgress`] -- the ADR-0021 timeout -> cancel mapping
+/// survives at the `TurnOutcome` layer (the landing stays
+/// [`TurnOutcome::Cancelled`]).
 pub(crate) const DEFAULT_WALL_CLOCK: Duration = Duration::from_secs(120);
 
 /// Maximum length of a trace entry's result excerpt (ADR-0078). The full result
