@@ -56,13 +56,13 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // packed tight -- no gap, no inlay: the 28px squares butt together into one
 // compact bar (the glyphs keep ~7px of visual air inside their own hit
 // areas). The wrapper spans exactly the row's bg-clip-content band (the li's
-// py frames it), so inset-y-0 puts name band, selected band and action strip
-// all at one height. The pill's ground is bg-accent -- the same tint a
+// py frames it), so inset-y-0 puts hover band, selected band and action
+// strip all at one height. The pill's ground is bg-accent -- the same tint a
 // hovered or selected row carries -- so the strip reads as part of the row
-// rather than a
-// floating widget (a border/shadow card form would read as a separate widget
-// on this ground); being opaque, it still keeps the label underneath from
-// bleeding through. Visibility is the #865 hover-reveal contract moved one
+// rather than a floating widget (a border/shadow card form would read as a
+// separate widget on this ground); being opaque, it still keeps the label
+// underneath from bleeding through. Visibility is the #865 hover-reveal
+// contract moved one
 // level up: the CONTAINER owns opacity-0 + pointer-events-none, restored on
 // row hover (group-hover) or keyboard focus-visible -- any tabbed-into
 // action lights the whole pill. Keyboard recovery keys off
@@ -500,9 +500,10 @@ export function WorkingSetList({
   datasets: DatasetDescriptor[];
   // The ACTIVE dataset (server truth, ADR-0051): bolds the row's label. The
   // authoritative naming is the tab header's Targets chip; bold is the row's
-  // only in-list active marker (since #793 retired the " · current table"
-  // suffix, the label weight is the sole carrier of this state -- the accent
-  // band moved to the selection with it).
+  // only VISUAL in-list active marker (since #793 retired the " · current
+  // table" suffix, the label weight is the sole visual carrier -- the
+  // .active hook stays a pure selector anchor, and the accent band moved to
+  // the selection with it).
   activeName: string | null;
   // The detail pick (which row's detail the right pane shows): drives the
   // accent band. Passed as the RESOLVED pick (resolveWorkingSetDetail

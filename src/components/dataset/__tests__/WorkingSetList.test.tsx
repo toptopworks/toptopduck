@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { WorkingSetList } from "../WorkingSetList";
@@ -42,7 +42,8 @@ describe("WorkingSetList", () => {
     // highlight stranded on the active one. The active dataset keeps the
     // in-list font-semibold label -- its authoritative identity is the tab
     // header's Targets chip, and since #793 retired the " · current table"
-    // suffix, bold is the row's only in-list active marker.
+    // suffix, bold is the row's only visual in-list active marker (the
+    // .active hook stays a pure selector anchor).
     const orders: DatasetDescriptor = {
       ...mockDataset,
       reference_name: "orders",
@@ -931,9 +932,9 @@ describe("WorkingSetList", () => {
     // The select button carries the hand -- its click is the row's
     // selection, the honest affordance. The label's truncation-recovery
     // affordance is the OS-native title now, which never touches the cursor,
-    // so the old text-vs-everywhere flip on the span is gone; the one
-    // remaining cursor edge is where the pill meets the button's tail
-    // (hand -> arrow), accepted with the hand ruling.
+    // so the old text-vs-everywhere flip on the span is gone; the remaining
+    // cursor edges are the pill's two boundaries over the button's tail
+    // (hand -> arrow -> hand), accepted with the hand ruling.
     const select = screen.getByRole("button", { name: /^people/ });
     expect(select.className.split(/\s+/)).toContain("cursor-pointer");
   });
@@ -964,6 +965,11 @@ describe("WorkingSetList", () => {
       "a-very-long-dataset-display-label",
     );
     expect(select).not.toHaveAttribute("title");
+    // Negative anchor: the span's pointer-enter must not light any Radix
+    // tooltip -- the name's affordance is the OS title alone, so re-wrapping
+    // the span in a Tooltip (the retired shape) fails here.
+    fireEvent.pointerEnter(select.querySelector("span")!, { pointerType: "mouse" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
     // Truncation lives on the label span so the trailing row-count note stays
     // visible (shrink-0, never the elided part) at any column width.
     const label = select.querySelector(".truncate");
@@ -1013,6 +1019,52 @@ describe("WorkingSetList", () => {
   // broadcast closes mounted peers first), and the hints' direct opens are
   // leave-then-enter ordered. The guard and this test's mutant went
   // together.
+
+  it("releases a stale hint key when its row unmounts -- the next open takes the slot", async () => {
+    // The ghost-key shape the retired guard used to wedge: a row unmounting
+    // mid-hover never fires pointerleave, so its hint key stays in the mutex
+    // slot. Opens take the slot now (the retired guard rejected this
+    // different-key open forever, with nothing left to clear it), so the
+    // next row's hint shows. Re-adding a rejection branch flips this test
+    // back to the stale delete hint (the mutant this test pins).
+    const orders: DatasetDescriptor = {
+      ...mockDataset,
+      reference_name: "orders",
+      display_name: "orders",
+    };
+    const { rerender } = renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset, orders]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    fireEvent.pointerEnter(within(peopleRow).getByRole("button", { name: /删除/ }), {
+      pointerType: "mouse",
+    });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("删除");
+    // people (the delete-hint row) disappears mid-hover -- no pointerleave.
+    rerender(
+      withIntl(
+        <WorkingSetList
+          datasets={[orders]}
+          activeName={null}
+          selectedName={null}
+          onSelect={() => {}}
+          onRename={() => {}}
+          onDelete={() => {}}
+        />,
+      ),
+    );
+    fireEvent.pointerEnter(screen.getByRole("button", { name: /重命名/ }), {
+      pointerType: "mouse",
+    });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
+  });
 
   it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
     const stale: DatasetDescriptor = {

@@ -86,6 +86,7 @@ describe("WorkspaceWorkingSet", () => {
     // pane moved -- the two surfaces disagreed.
     const ordersRow = screen.getByRole("button", { name: /^orders/ }).closest("li")!;
     expect(ordersRow.className.split(/\s+/)).toContain("bg-accent");
+    expect(ordersRow.className.split(/\s+/)).toContain("selected");
     const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
     expect(peopleRow.className.split(/\s+/)).not.toContain("bg-accent");
     // The active dataset keeps its in-list marker: the bold label.
