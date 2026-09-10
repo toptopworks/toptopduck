@@ -115,7 +115,12 @@ function TraceRow({
           summaryClassName="trace-summary"
           head={(
             <>
-              <span className="trace-name font-medium shrink-0">{entry.name}</span>
+              {/* Tool name truncates with the row's summary family
+                  (#826) and the approval card's cap (#872): an external
+                  tool's server prefix + name can outrun the narrow column,
+                  and shrink-0 used to shove the summary and badges out
+                  (issue #874). */}
+              <span className="trace-name font-medium min-w-0 truncate">{entry.name}</span>
               <OperationBadge kind={entry.operation_kind} />
               {afterName}
             </>
@@ -317,7 +322,10 @@ export function LiveRow({
                 aria-hidden="true"
                 className="w-3.5 h-3.5 shrink-0 animate-spin text-muted-foreground"
               />
-              <span className="trace-name font-medium shrink-0">{row.name}</span>
+              {/* Same truncate family as the settled row's tool name
+                  (#874): shrink-0 used to shove the summary and badges out
+                  when an external tool name outruns the narrow column. */}
+              <span className="trace-name font-medium min-w-0 truncate">{row.name}</span>
               <OperationBadge kind={row.operationKind} />
               {resolvedBadge}
             </>
