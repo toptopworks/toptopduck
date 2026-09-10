@@ -63,6 +63,12 @@ pub struct CancelToken {
     /// interrupt. `Mutex` (not atomic) because `Arc<InterruptHandle>` is not
     /// `Copy`; the critical section is a single set/clear, never held long.
     interrupt: Mutex<Option<Arc<InterruptHandle>>>,
+    /// The turn's no-progress watchdog clock (ADR-0115), armed by the turn's
+    /// engine right after `begin_turn` and cleared by [`InFlightGuard`]'s
+    /// drop. Lives here -- not in the engine's locals -- so the gateway,
+    /// which serves bridge tool calls on its own thread with only the token
+    /// in hand, can freeze the clock across the calls it executes.
+    progress: Mutex<Option<Arc<crate::session::progress::ProgressClock>>>,
 }
 
 impl Default for CancelToken {
@@ -71,6 +77,7 @@ impl Default for CancelToken {
             state: AtomicU64::new(0),
             in_flight: AtomicBool::new(false),
             interrupt: Mutex::new(None),
+            progress: Mutex::new(None),
         }
     }
 }
@@ -94,6 +101,28 @@ impl CancelToken {
     /// drop; a later cancel then relies on the cooperative flag alone.
     pub fn clear_interrupt(&self) {
         *self.interrupt.lock().expect("interrupt lock poisoned") = None;
+    }
+
+    /// Publish the turn's no-progress watchdog clock (ADR-0115). Called by
+    /// the turn's engine right after arming; the gateway reads it via
+    /// [`Self::progress_clock`] to freeze across the tool calls it serves.
+    pub(crate) fn set_progress_clock(&self, clock: Arc<crate::session::progress::ProgressClock>) {
+        *self.progress.lock().expect("progress clock lock poisoned") = Some(clock);
+    }
+
+    /// The in-flight turn's no-progress clock, `None` between turns.
+    pub(crate) fn progress_clock(&self) -> Option<Arc<crate::session::progress::ProgressClock>> {
+        self.progress
+            .lock()
+            .expect("progress clock lock poisoned")
+            .clone()
+    }
+
+    /// Drop the no-progress clock slot. Called by [`InFlightGuard`]'s drop:
+    /// the strong references die with the turn's scope, and the watchdog
+    /// thread (holding only a `Weak`) exits on its next poll tick.
+    fn clear_progress_clock(&self) {
+        *self.progress.lock().expect("progress clock lock poisoned") = None;
     }
 
     /// Fire the cancel: set the cooperative flag AND interrupt the running
@@ -251,6 +280,7 @@ impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.token.in_flight.store(false, Ordering::SeqCst);
         self.token.clear_interrupt();
+        self.token.clear_progress_clock();
         self.token.retire_generation();
     }
 }

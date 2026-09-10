@@ -37,7 +37,7 @@ use crate::runtime::acp::wire::McpServer;
 use crate::session::loop_contract::{
     truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
-use crate::session::turn_dispatch::spawn_wall_clock_watchdog;
+use crate::session::progress::ProgressClock;
 
 // ---------------------------------------------------------------------------
 // Event parser (pure)
@@ -98,6 +98,12 @@ pub(crate) enum CodexEvent {
         /// The wire's `error.message`, when the call failed with one.
         error_message: Option<String>,
     },
+    /// An execution item opened (the `item.started` envelope of a
+    /// `command_execution` / `mcp_tool_call` item): the agent's own tool
+    /// execution begins -- a freeze segment for the no-progress clock
+    /// (ADR-0115). Only the execution item types parse here; generation
+    /// items (`agent_message`, `reasoning`) stay free activity.
+    ExecutionStarted,
     /// Any other event type (ignored by the engine).
     Other,
 }
@@ -112,10 +118,12 @@ pub(crate) enum CodexEvent {
 /// events and
 /// `item.completed` envelopes whose nested `item.type` discriminates the
 /// payload. `item.started` is the streaming variant of the same items —
-/// its output is not yet aggregated and folding it would double every
-/// row, so it stays [`CodexEvent::Other`] like every other unmeasured
-/// type (`thread.started`, ...); the reasoning item folds only its
-/// completed envelope (issue #807).
+/// its payload is not yet aggregated and folding it would double every
+/// row, so only its EXECUTION item types parse (into
+/// [`CodexEvent::ExecutionStarted`], the no-progress freeze window opener,
+/// ADR-0115); every other started item stays [`CodexEvent::Other`] like
+/// every other unmeasured type (`thread.started`, ...); the reasoning item
+/// folds only its completed envelope (issue #807).
 pub(crate) fn parse_event(value: &Value) -> CodexEvent {
     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match event_type {
@@ -130,13 +138,27 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
             error: extract_error_detail(value)
                 .unwrap_or_else(|| "turn aborted (no error detail)".to_string()),
         },
+        "item.started" => {
+            // The freeze-window opener: only the execution item types (the
+            // agent's own tool runs, an external wait) count -- generation
+            // items started here are free activity and stay ignored.
+            let item_type = value
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            match item_type {
+                "command_execution" | "mcp_tool_call" => CodexEvent::ExecutionStarted,
+                _ => CodexEvent::Other,
+            }
+        }
         "item.completed" => {
             // None = an item type the parser does not recognize, or a
             // recognized one with a degenerate payload (an empty
             // reasoning text, a missing agent_message text). Wire drift
             // lands here, so the drop stays observable at debug level;
             // the known-legitimate ignored kinds (thread.started,
-            // item.started) never reach this arm.
+            // non-execution item.started) never reach this arm.
             let event = parse_item(value.get("item"));
             if event.is_none() {
                 log::debug!(
@@ -398,15 +420,16 @@ pub(super) fn run_codex_event_stream(
 ) -> LoopOutcome {
     let guard = cancel.begin_turn();
 
-    // Wall-clock watchdog (same as ACP): fire cancel on expiry.
-    if let Some(timeout) = wall_clock {
-        spawn_wall_clock_watchdog(
-            guard.generation(),
-            Arc::clone(&cancel),
-            timeout,
-            "toptopduck::acp",
-        );
-    }
+    // No-progress watchdog (same predicate as the ACP path, ADR-0115):
+    // inbound event lines re-arm the clock (touch below), and the agent's
+    // own tool executions freeze it -- an `item.started` envelope for a
+    // `command_execution` / `mcp_tool_call` item opens a freeze window the
+    // matching completion echo closes (`reconcile_exec_freeze` below). A
+    // silent native codex command running past the cap is exactly the
+    // legal-wait shape the cap must not kill. Gateway-routed calls are
+    // additionally covered by the gateway's own serve-side freeze.
+    let clock = wall_clock
+        .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
 
     // Spawn codex exec --json with the bridge injected via -c overrides +
     // the ADR-0095 model / thought-level selections: the model rides
@@ -465,7 +488,7 @@ pub(super) fn run_codex_event_stream(
     // turn = one thinking wait).
     on_phase(TurnPhase::Thinking { attempt: 1 });
 
-    let mut pump = JsonPump::new(step_cap);
+    let mut pump = JsonPump::new(step_cap, clock.clone());
 
     let mut termination = None;
     let mut step_cap_tripped = false;
@@ -487,6 +510,11 @@ pub(super) fn run_codex_event_stream(
 
         match rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
             Ok(line) => {
+                // Inbound stream activity (ADR-0115): re-arm the
+                // no-progress clock before anything else.
+                if let Some(clock) = clock.as_ref() {
+                    clock.touch();
+                }
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(_) => continue, // skip unparseable line
@@ -532,6 +560,12 @@ pub(super) fn run_codex_event_stream(
     // a call-less trailing round holding reasoning must survive the pop.
     // No pending-row drain here -- command events carry no result frame.
     pump.tracker.freeze_trailing_thinking(&mut on_phase);
+    // ADR-0115: a cancel landing after the clock latched is the watchdog's
+    // (generation silence past the cap), not a user cancel.
+    let term = match term {
+        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+        other => other,
+    };
     let rounds = pump.tracker.settle_rounds(&term);
     outcome(term, rounds)
 }
@@ -545,14 +579,42 @@ struct JsonPump {
     /// Count of command/tool executions observed (step-cap counter).
     tool_call_count: u32,
     step_cap: u32,
+    /// The turn's no-progress clock (ADR-0115): open execution windows
+    /// freeze it -- a silent native codex command running past the cap is
+    /// a legal external wait, not generation silence.
+    clock: Option<Arc<ProgressClock>>,
+    /// In-flight execution items (`item.started` seen, completion echo not
+    /// yet). Started/completed are envelope pairs for the same item, so a
+    /// saturating depth pairs them; a stream that dies mid-execution ends
+    /// the pump, and the guard dies with it (the ACP pending-window
+    /// lifecycle).
+    exec_depth: u32,
+    /// Held while `exec_depth` > 0 (the open execution window).
+    exec_freeze: Option<crate::session::progress::FreezeGuard>,
 }
 
 impl JsonPump {
-    fn new(step_cap: u32) -> Self {
+    fn new(step_cap: u32, clock: Option<Arc<ProgressClock>>) -> Self {
         Self {
             tracker: RoundTracker::new(),
             tool_call_count: 0,
             step_cap,
+            clock,
+            exec_depth: 0,
+            exec_freeze: None,
+        }
+    }
+
+    /// Reconcile the execution freeze with the in-flight depth (ADR-0115):
+    /// an open window holds a freeze; the last completion releases it.
+    /// Idempotent; call after every depth mutation.
+    fn reconcile_exec_freeze(&mut self) {
+        match (self.exec_freeze.is_some(), self.exec_depth == 0) {
+            (false, false) => {
+                self.exec_freeze = self.clock.as_ref().map(|c| c.freeze());
+            }
+            (true, true) => self.exec_freeze = None,
+            _ => {}
         }
     }
 
@@ -568,6 +630,13 @@ impl JsonPump {
             // Already signaled Thinking before the pump; a redundant signal
             // would confuse the UI. No-op.
             CodexEvent::TurnStarted => None,
+            CodexEvent::ExecutionStarted => {
+                // The execution window opens: freeze the clock for the
+                // agent's own tool run (ADR-0115).
+                self.exec_depth += 1;
+                self.reconcile_exec_freeze();
+                None
+            }
             CodexEvent::TurnCompleted => Some(Termination::Text(self.tracker.terminal_text())),
             CodexEvent::TurnFailed { error } => Some(Termination::Runtime(error)),
             CodexEvent::AgentMessage { text } => {
@@ -585,6 +654,9 @@ impl JsonPump {
                 command,
                 exit_code,
             } => {
+                // The completion echo closes the execution window.
+                self.exec_depth = self.exec_depth.saturating_sub(1);
+                self.reconcile_exec_freeze();
                 self.tool_call_count += 1;
                 // exit_code maps the row's success (issue #804): zero (or
                 // absent -- an unknown outcome) succeeds, non-zero fails
@@ -633,6 +705,9 @@ impl JsonPump {
                 failed,
                 error_message,
             } => {
+                // The completion echo closes the execution window.
+                self.exec_depth = self.exec_depth.saturating_sub(1);
+                self.reconcile_exec_freeze();
                 self.tool_call_count += 1;
                 // The badge + digest replay the gateway's dispatch row
                 // where the stream layer can (issue #816). The settle-time
@@ -1004,11 +1079,22 @@ mod tests {
         }
     }
 
-    /// The streaming variant never folds: its aggregated_output is empty and
-    /// its exit_code is null — folding it would double every trace row.
+    /// The streaming variant never folds a row: its aggregated_output is
+    /// empty and its exit_code is null — folding it would double every
+    /// trace row. An EXECUTION started item does open the no-progress
+    /// freeze window (ADR-0115); a GENERATION started item stays ignored.
     #[test]
-    fn parse_item_started_command_execution_is_other() {
-        assert_eq!(fixture_event(MEASURED_TURN_NDJSON[3]), CodexEvent::Other);
+    fn parse_item_started_command_execution_opens_the_freeze_window() {
+        assert_eq!(
+            fixture_event(MEASURED_TURN_NDJSON[3]),
+            CodexEvent::ExecutionStarted
+        );
+        // A generation item's started envelope stays Other (never folded).
+        let v: Value = serde_json::json!({
+            "type": "item.started",
+            "item": {"id": "item_9", "type": "agent_message", "text": ""}
+        });
+        assert_eq!(parse_event(&v), CodexEvent::Other);
     }
 
     #[test]
@@ -1278,7 +1364,7 @@ mod tests {
     /// the terminal text, not a round of its own.
     #[test]
     fn rounds_carry_prose_and_calls() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         // Round 1: prose + one command (its result implicit -- success
         // defaults to true).
@@ -1318,7 +1404,7 @@ mod tests {
     /// live RoundText fires once, with the merged text, at the batch seal.
     #[test]
     fn same_round_fragments_merge_into_one_prose() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1356,7 +1442,7 @@ mod tests {
     /// RoundText.
     #[test]
     fn call_without_prose_keeps_round_text_empty() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::CommandExecution {
@@ -1382,7 +1468,7 @@ mod tests {
     /// the terminal text.
     #[test]
     fn live_order_round_text_then_call_then_round_pointer() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1427,7 +1513,7 @@ mod tests {
     /// one batch round under a single prelude.
     #[test]
     fn mcp_tool_call_fold_fires_round_prelude_before_phase_pair() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1489,7 +1575,7 @@ mod tests {
     /// controlled excerpt.
     #[test]
     fn failed_mcp_tool_call_anchor_truncates_at_trace_excerpt_max() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         pump.fold(
             CodexEvent::McpToolCall {
                 call_id: "item_1".into(),
@@ -1515,7 +1601,7 @@ mod tests {
     /// not blend, and each round's seal fires its own prose prelude.
     #[test]
     fn cross_round_prose_stays_in_its_round() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         for (text, call) in [("checking", "call_1"), ("verifying", "call_2")] {
             pump.fold(CodexEvent::AgentMessage { text: text.into() }, &mut |p| {
@@ -1550,7 +1636,7 @@ mod tests {
     /// records no round.
     #[test]
     fn call_less_turn_answers_with_all_prose() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         pump.fold(
             CodexEvent::AgentMessage {
                 text: "part one ".into(),
@@ -1575,7 +1661,7 @@ mod tests {
     /// degrade shape the answer path already returns.
     #[test]
     fn turn_completed_without_prose_yields_empty_text() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let end = pump.fold(CodexEvent::TurnCompleted, &mut |_| {});
         assert_eq!(end, Some(Termination::Text(String::new())));
     }
@@ -1585,7 +1671,7 @@ mod tests {
     /// semantics, the claude path's EOF precedent).
     #[test]
     fn eof_after_batch_answers_with_trailing_stretch_only() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1631,7 +1717,7 @@ mod tests {
     /// push_prose).
     #[test]
     fn empty_agent_message_opens_no_round() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1672,7 +1758,7 @@ mod tests {
     /// still sits in its round slot.
     #[test]
     fn eof_after_batch_without_trailing_falls_back_to_full_text() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         pump.fold(
             CodexEvent::AgentMessage {
                 text: "checking".into(),
@@ -1704,7 +1790,7 @@ mod tests {
     /// round pointer appears mid-batch.
     #[test]
     fn consecutive_commands_share_one_round() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1759,7 +1845,7 @@ mod tests {
     /// ONE round (issue #807's attribution ruling).
     #[test]
     fn reasoning_folds_into_round_thinking_pinned_zero() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::Reasoning {
@@ -1818,7 +1904,7 @@ mod tests {
     fn reasoning_after_last_batch_survives_turn_end_freeze() {
         // Shape A: reasoning -> closing prose. The prose rides the terminal
         // text; the thinking stays on the round.
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::CommandExecution {
@@ -1856,7 +1942,7 @@ mod tests {
         );
 
         // Shape B: reasoning-only trailing round -- no prose follows.
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::CommandExecution {
@@ -1888,7 +1974,7 @@ mod tests {
     /// to Other at the boundary (issue #807 acceptance criteria 6).
     #[test]
     fn reasoning_started_variant_never_doubles() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
             fixture_event(
@@ -1915,7 +2001,7 @@ mod tests {
     /// behavior, not an observed shape.
     #[test]
     fn two_reasoning_items_in_one_round_concatenate_verbatim() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         for text in ["block one", "block two"] {
             pump.fold(CodexEvent::Reasoning { text: text.into() }, &mut |p| {
@@ -1935,7 +2021,7 @@ mod tests {
     /// keeps the code (the cross-turn retrospection surface renders it).
     #[test]
     fn nonzero_exit_lands_failed_trace_row() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         pump.fold(
             CodexEvent::CommandExecution {
                 call_id: "item_7".into(),
@@ -1956,7 +2042,7 @@ mod tests {
     /// succeeded row (the pre-#804 default-true behavior).
     #[test]
     fn unknown_exit_stays_succeeded() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         pump.fold(
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
@@ -1981,7 +2067,7 @@ mod tests {
     /// could fire (issue #804 acceptance criteria 1-4).
     #[test]
     fn measured_turn_sequence_settles_as_text() {
-        let mut pump = JsonPump::new(24);
+        let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         let mut termination = None;
         for line in MEASURED_TURN_NDJSON {

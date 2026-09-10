@@ -2,6 +2,8 @@
 
 > 本 ADR「内置运行时 = Rust 原生 agent 循环」的实现形态决策**被 ADR-0107 取代**为 yoagent 进程内 agent 循环 crate；本 ADR「外部运行时 = 数据定义适配器引擎」、执行级兜底帽值（24 步 / 120s / 整轮取消）与对「借壳第三方 agent 进程」的否决**保留**——该否决的理由（key 过界、二进制依赖、他进程自觉）对第三方进程仍然成立，yoagent 是进程内 crate、非第三方进程。见 ADR-0107。
 
+> 部分被 [ADR-0115](./0115-turn-watchdog-no-progress-replaces-whole-turn-wall-clock.md) 取代：Decision「墙钟 watchdog（默认 120s，对齐 ADR-0021 `REQUEST_TIMEOUT`）」**重写**为无进展看门狗——仅对 agent 自由活动段（生成）计时，轮次等待外部主体的段冻结；步数上限（24）、cancel = 整轮中止与 ADR-0021 对齐**保留**。详见 ADR-0115。
+
 ## Decision
 
 **内置运行时 = Rust 原生 agent 循环**，驱动现有 Provider 层（ADR-0064 anthropic/openai 协议，用各协议**原生 tool-calling**）；key 永不出进程（ADR-0029 不变量完整）。**外部运行时 = 数据定义适配器引擎**：每 CLI 一个纯数据定义（bin / argv builder / 流格式 / MCP 注入方式），通用引擎统一做检测 / 启动 / 解析；传输**优先 ACP**（stdio JSON-RPC；MCP server 描述符经 `session/new` 注入；`session/update` 的 tool_call 系列天然映射执行轨迹）；**每轮恒 `session/new` + 喂全量窗口化上下文**，不持 upstream session handle（运行时无状态，ADR-0076）。v1 验证 ACP 三件套 claude-code / gemini-cli / codex；qwen-code 列二批。**执行级兜底**：步数上限（默认 24）+ 墙钟 watchdog（默认 120s，对齐 ADR-0021 `REQUEST_TIMEOUT`），触顶该轮 failed/cancelled；cancel = 整轮中止（内置：interrupt token 扩至循环；外部：ACP `session/cancel` + SIGTERM fallback）。
@@ -36,3 +38,4 @@ ADR-0076 定双运行时；本 ADR 定两运行时的实现形态。内置循环
 - **被 ADR-0095 校准**：wire 类型扩展（`NewSessionResult.config_options`）与 `AdapterSpec` 新增字段（`model_arg` / `effort_config_key`）均为纯数据增量；ACP 路径握手后追加的 `session/set_config_option` 是握手扩展步骤，不引入 upstream session 状态——「每轮恒 `session/new` + 不持 upstream session handle」的无状态语义不变。
 - **被 ADR-0094 / ADR-0097 校准**：初版 v1 三件套中的 codex 经实测无原生 ACP 模式，改经原生 `exec --json` JSON 事件流直连（ADR-0094）；claude-code 的 `--acp` flag 经实测不存在，自 ACP 适配器集合移除，改经 stream-json 直连接入（ADR-0097）。ACP 适配器集合现为 gemini-cli / qwen-code / opencode；「传输优先 ACP」由 ADR-0094 的流格式数据字段分派取代，零 per-CLI 代码不变量不变。
 - **外部 CLI 权限层对网关桥接工具放行**：网关工具不得在到达网关前被 CLI 自身权限层预先拒绝——claude-code 以 `--allowedTools` 开放网关 server（deny 清单并存时 deny 优先，原生工具仍封死）、ACP 权限握手将携带网关 server 名前缀的工具名按内置信任面自动放行（对齐 ADR-0080 Decision 1 的四件套零审批）、codex 以 server 级 `default_tools_approval_mode="approve"` 豁免 exec 审批门（不动 shell 审批与 read-only 沙箱姿势，ADR-0094）；各 CLI 自身工具的 fail-fast 语义不变，网关 gate 仍是调用时唯一强制点。
+- **被 ADR-0115 校准**：墙钟 watchdog 重定义为无进展看门狗——仅对 agent 自由活动段（生成）计时；网关工具执行、审批挂起与外部适配器自身工具执行段冻结；帽值 120s 与 ADR-0021 对齐保留，判据由「整轮 120s」改为「生成段无进展 120s」。未决项「ACP `session/request_permission` 与网关审批对应」的墙钟相斥面随之闭合：审批挂起是冻结相位、无超时上界。

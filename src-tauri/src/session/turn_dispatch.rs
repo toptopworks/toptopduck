@@ -15,9 +15,10 @@
 //! block) -- the cannot-drift claim covers the classification / resolution
 //! / numbering, not those two per-side shapes (issue #696).
 //!
-//! The wall-clock watchdog and the panic-detail helpers are runtime-agnostic
-//! (ADR-0107's replaceability review): they hold no loop-specific state and
-//! survive a runtime swap as-is.
+//! The panic-detail helpers are runtime-agnostic (ADR-0107's replaceability
+//! review): they hold no loop-specific state and survive a runtime swap
+//! as-is. (The wall-clock watchdog that once lived here was replaced by the
+//! no-progress clock, `crate::session::progress` -- ADR-0115.)
 //!
 //! Migrated out of the retired built-in loop by the retirement slice
 //! (ADR-0107 Decision 1, issue #670); the loop is gone, the shared core
@@ -25,9 +26,6 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -50,36 +48,6 @@ use crate::session::skills::SkillActivationCtx;
 use crate::skills::activation;
 use crate::tools;
 use crate::tools::definitions;
-
-/// Arm the wall-clock watchdog (ADR-0081): a DETACHED thread (sleeping out
-/// the full timeout inside the caller's scope would hold the join) that
-/// fires the app token on expiry, guarded by the turn's generation. Shared
-/// by the yoagent runner and the three ACP turn paths (issue #668) so the
-/// posture lives once. The generation is the watchdog's turn identity: a
-/// timeout that expires after its turn ended (its generation retired at
-/// the guard's drop, or a successor begun) stands down via
-/// [`CancelToken::request_if`] instead of cancelling a successor turn
-/// -- there is no check-then-act window, because the generation and the
-/// request flag share one atomic word (issue #696; the retired `alive` flag
-/// left this race open). catch_unwind keeps the detached thread
-/// self-sufficient (the issue #321 posture): a panicking cancel is logged,
-/// never silently eaten.
-pub(crate) fn spawn_wall_clock_watchdog(
-    generation: crate::cancel::TurnGeneration,
-    token: Arc<CancelToken>,
-    timeout: Duration,
-    log_target: &'static str,
-) {
-    thread::spawn(move || {
-        thread::sleep(timeout);
-        if catch_unwind(AssertUnwindSafe(|| token.request_if(generation))).is_err() {
-            log::error!(
-                target: log_target,
-                "wall-clock watchdog panicked firing cancel; timeout path may be impaired"
-            );
-        }
-    });
-}
 
 /// Extract a human-readable message from a panic payload (the `Err` variant of
 /// `catch_unwind`, issue #321). Covers `&str` and `String` — the two common
@@ -814,7 +782,7 @@ mod tests {
     use crate::workingset::WorkingSet;
     use serde_json::json;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     /// Shared engine setup: a materialized in-memory admin engine + a temp

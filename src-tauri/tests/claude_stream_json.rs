@@ -60,9 +60,18 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// lock-queue wait is not the engine's latency; the step-cap pin relies on
 /// this). Uses a short wall-clock (5s) so a stuck scenario fails fast.
 fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
+    run_with_cap(scenario, step_cap, std::time::Duration::from_secs(5))
+}
+
+/// [`run`] with a caller-chosen no-progress cap (the freeze-window tests
+/// drive caps the scenario's frame gaps must stay inside).
+fn run_with_cap(
+    scenario: &str,
+    step_cap: u32,
+    wall: std::time::Duration,
+) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(claude_code(), cancel)
-        .with_caps(step_cap, Some(std::time::Duration::from_secs(5)));
+    let eng = AcpEngine::new(claude_code(), cancel).with_caps(step_cap, Some(wall));
     let approval = ApprovalState::new();
     let mut phases = Vec::new();
     let _g = ENV_LOCK.lock().unwrap();
@@ -154,6 +163,20 @@ fn gateway_tool_call_emits_phases_keeps_prose_round() {
     assert!(phases
         .iter()
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
+}
+
+/// The survival half of ADR-0115: a generation segment that keeps producing
+/// past the cap must NOT kill the turn -- every inbound frame re-arms the
+/// clock, and the reply lands. Without the pump's touch seam the watchdog
+/// fires mid-stream (a 300ms cap against a 100ms drip = six touches from
+/// death).
+#[test]
+fn slow_drip_survives_past_the_cap() {
+    let (outcome, _, _) = run_with_cap("slow_drip", 24, std::time::Duration::from_millis(300));
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "dripped to the end"),
+        other => panic!("steady stream activity must survive the cap, got {other:?}"),
+    }
 }
 
 /// Headless thinking blocks riding the assistant frames, end-to-end (issue
@@ -349,13 +372,14 @@ fn step_cap_overflow_yields_step_cap_termination() {
     );
 }
 
-/// A stuck agent (system{init}, then stdout held open in silence) under a
-/// short wall-clock: the watchdog fires the shared token and the pump's
-/// loop-top cancel check resolves the turn as Cancelled -- the only
-/// backstop when a real CLI hangs (the acp_engine.rs
-/// `wall_clock_watchdog_fires_cancel_on_a_stuck_agent` peer).
+/// A stuck agent (system{init}, then stdout held open in silence = a
+/// generation segment silent past the cap, ADR-0115) under a short cap: the
+/// no-progress watchdog fires the shared token, the pump's loop-top cancel
+/// check resolves the turn, and the latched reason lands NoProgress instead
+/// of a bare Cancelled (the acp_engine.rs
+/// `no_progress_watchdog_fires_on_a_stuck_agent` peer).
 #[test]
-fn wall_clock_watchdog_fires_cancel_on_a_silent_turn() {
+fn no_progress_watchdog_fires_on_a_silent_turn() {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(claude_code(), cancel)
         .with_caps(24, Some(std::time::Duration::from_millis(300)));
@@ -364,9 +388,10 @@ fn wall_clock_watchdog_fires_cancel_on_a_silent_turn() {
     std::env::set_var("CLAUDE_FAKE_SCENARIO", "turn_silent");
     let start = std::time::Instant::now();
     let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
-    assert!(
-        matches!(outcome.termination, Termination::Cancelled),
-        "watchdog on a stuck agent -> Cancelled: {:?}",
+    assert_eq!(
+        outcome.termination,
+        Termination::NoProgress(std::time::Duration::from_millis(300)),
+        "watchdog on a stuck agent -> NoProgress: {:?}",
         outcome.termination
     );
     // The watchdog resolves in ~300ms. A no-fire regression is caught by

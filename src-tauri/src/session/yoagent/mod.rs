@@ -8,8 +8,10 @@
 //! `None`; windowing is the app's, preventing double truncation), no skills
 //! loader, no MCP client, no sub-agents, no tool middleware (the app gateway
 //! is the single enforcement point). Safety net (Decision 4): the step cap
-//! (24) + wall clock (120s, ADR-0081) map onto `ExecutionLimits` and the
-//! caller-thread watchdog (ADR-0081 values); cancellation
+//! (24) maps onto `ExecutionLimits`; the 120s no-progress cap (ADR-0081 as
+//! redefined by ADR-0115) is the session watchdog clock
+//! (`crate::session::progress`) -- the upstream duration belt stays off;
+//! cancellation
 //! maps the app's `CancelToken` onto the upstream task token; loop detection
 //! is ON (consecutive identical calls steer, then stop). Retries for
 //! rate-limit / transient network faults ride the upstream backoff; a
@@ -54,9 +56,10 @@ use crate::session::loop_contract::{
     retain_landed_rounds, LoopOutcome, Termination, DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::progress::ProgressClock;
 use crate::session::skills::SkillActivationCtx;
 use crate::session::turn_dispatch::{
-    dispatch_gated_call, panic_to_transient, spawn_wall_clock_watchdog, DispatchAbort, GateCtx,
+    dispatch_gated_call, panic_to_transient, DispatchAbort, GateCtx,
 };
 
 use adapter::{DispatchOutcome, DispatchRequest, GatewayToolAdapter, PhaseSink, SharedTurnState};
@@ -168,18 +171,18 @@ impl YoagentLoop {
                     }
                 });
             }
-            // Wall-clock watchdog (ADR-0081): the shared shape (the built-in
-            // loop's own helper). The watcher above maps the fired token up,
-            // and the termination derivation below lands the turn as
-            // Cancelled (the ADR-0021 timeout -> cancel mapping).
-            if let Some(timeout) = self.wall_clock {
-                spawn_wall_clock_watchdog(
-                    guard.generation(),
-                    Arc::clone(&cancel),
-                    timeout,
-                    "toptopduck::yoagent",
-                );
-            }
+            // No-progress watchdog (ADR-0115): the cap times ONLY the
+            // generation segment -- the fold's stream activity re-arms it
+            // (touch), and the dispatch server below freezes it across
+            // gateway tool executions / CLI tool runs / approval pendings.
+            // The watcher above maps the fired token up, and the
+            // termination derivation below lands the turn as Cancelled --
+            // or NoProgress when the clock latched the reason (the
+            // ADR-0021 timeout -> cancel mapping, reason split per
+            // ADR-0115).
+            let clock = self.wall_clock.map(|timeout| {
+                ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout)
+            });
             // The driver: one scoped thread owning a dedicated single-thread
             // runtime. The dispatch server below outlives it -- its request
             // channel closes when the driver's context (and with it every
@@ -195,7 +198,7 @@ impl YoagentLoop {
                 let req_tx = req_tx.clone();
                 let request = request.clone();
                 let step_cap = self.step_cap;
-                let wall_clock = self.wall_clock;
+                let clock = clock.clone();
                 scope.spawn(move || {
                     let runtime = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -222,7 +225,7 @@ impl YoagentLoop {
                         upstream,
                         req_tx,
                         step_cap,
-                        wall_clock,
+                        clock,
                     }))
                 })
             };
@@ -264,6 +267,11 @@ impl YoagentLoop {
                 }
                 let phases = Arc::clone(&phases);
                 let mut forward = |phase: TurnPhase| adapter::emit_phase(&phases, phase);
+                // Freeze across the dispatch (ADR-0115): a gateway tool
+                // execution, a CLI tool's run, or an approval pending on the
+                // condvar is a wait on an external principal -- never billed
+                // to the generation cap.
+                let _frozen = clock.as_ref().map(|c| c.freeze());
                 let outcome = match dispatch_gated_call(
                     &call,
                     deps,
@@ -310,7 +318,11 @@ impl YoagentLoop {
                 return finish(fold, &state, termination);
             }
             if cancel.is_requested() || state.gate_cancelled.load(Ordering::SeqCst) {
-                return finish(fold, &state, Termination::Cancelled);
+                // ADR-0115: the clock latches whether the cancel is the
+                // watchdog's (generation silence past the cap) or a user /
+                // close cancel -- same landing, different reason.
+                let termination = ProgressClock::cancel_landing(clock.as_ref());
+                return finish(fold, &state, termination);
             }
             if let Some(reason) = fold.loop_abort.clone() {
                 return finish(fold, &state, Termination::Transient(reason));
@@ -334,7 +346,9 @@ struct DriveInputs {
     upstream: CancellationToken,
     req_tx: mpsc::Sender<DispatchRequest>,
     step_cap: u32,
-    wall_clock: Option<Duration>,
+    /// The turn's no-progress clock (ADR-0115): the fold touches it on every
+    /// inbound stream event -- the generation segment's liveness signal.
+    clock: Option<Arc<ProgressClock>>,
 }
 
 /// Drive the upstream loop: build the per-turn context + config, spawn
@@ -364,15 +378,18 @@ async fn drive_turn(inputs: DriveInputs) -> EventFold {
     // `max_turns` (both count LLM round-trips -- 24 turns are permitted and
     // the 25th loop-top check stops, the same boundary `AgentLoop`'s
     // `for step in 1..=cap` draws); the token cap has no app counterpart
-    // and is disabled; the wall clock mirrors the caller-thread watchdog as
-    // a boundary race belt (the watchdog's cancel normally lands first);
-    // loop detection stays at the upstream default (steer at 3 consecutive
+    // and is disabled; the upstream duration belt is DISABLED -- it is a
+    // whole-turn cap, and under ADR-0115 a turn's legal freeze segments
+    // (approvals, tool runs) have no upper bound, so a whole-turn belt
+    // would punch through the freeze semantics the no-progress clock
+    // defines (the clock is the only wall the turn answers to); loop
+    // detection stays at the upstream default (steer at 3 consecutive
     // identical calls, abort on the second trip). `ExecutionLimits` is
     // `#[non_exhaustive]` upstream -- constructed via Default + mutation.
     let mut limits = ExecutionLimits::default();
     limits.max_turns = inputs.step_cap as usize;
     limits.max_total_tokens = usize::MAX;
-    limits.max_duration = inputs.wall_clock.unwrap_or(Duration::MAX);
+    limits.max_duration = Duration::MAX;
     limits.max_consecutive_identical_tool_calls = Some(3);
     // Wire parity with the built-in adapters (which never sent cache
     // hints): caching disabled so the request payload the upstream builds
@@ -416,6 +433,10 @@ async fn drive_turn(inputs: DriveInputs) -> EventFold {
     let mut fold = EventFold::new();
     while let Some(event) = rx.recv().await {
         fold.event(&event, &inputs.state, &inputs.phases);
+        // Inbound stream activity (ADR-0115): re-arm the no-progress clock.
+        if let Some(clock) = &inputs.clock {
+            clock.touch();
+        }
     }
     // The channel closes only when the loop task finished; propagate its
     // panic (if any) as an honest transient -- the fold's rounds survive.

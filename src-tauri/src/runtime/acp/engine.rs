@@ -19,12 +19,15 @@
 //! 5. the prompt response's [`StopReason`] terminates the turn and maps onto
 //!    [`Termination`].
 //!
-//! Execution-level safety net (ADR-0081): a step cap (tool-call count, default
-//! [`DEFAULT_STEP_CAP`]) + a wall-clock watchdog (default
-//! [`DEFAULT_WALL_CLOCK`]) fire `session/cancel`; a stuck agent that does not
-//! return within [`CANCEL_GRACE`] is killed (cancel = 整轮中止, ADR-0081).
-//! Cancel is responsive via a stdout-reader thread + a recv-timeout pump (a
-//! blocking `read_line` would not notice cancel).
+//! Execution-level safety net (ADR-0081 as redefined by ADR-0115): a step
+//! cap (tool-call count, default [`DEFAULT_STEP_CAP`]) + a NO-PROGRESS
+//! watchdog (default [`DEFAULT_WALL_CLOCK`]) fire `session/cancel`; a stuck
+//! agent that does not return within [`CANCEL_GRACE`] is killed (cancel =
+//! 整轮中止, ADR-0081). The watchdog times only the generation segment --
+//! inbound stream lines re-arm it, external-wait segments freeze it
+//! (`crate::session::progress`). Cancel is responsive via a stdout-reader
+//! thread + a recv-timeout pump (a blocking `read_line` would not notice
+//! cancel).
 //!
 //! Promotions are always empty here: a `materialize` promotion is created
 //! gateway-side (the bridge → the app's MCP gateway →
@@ -57,7 +60,7 @@ use crate::session::loop_contract::{
     truncate_trace_excerpt, DiscoveredRuntime, LoopOutcome, LoopRound, Termination, TraceEntry,
     DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
 };
-use crate::session::turn_dispatch::spawn_wall_clock_watchdog;
+use crate::session::progress::ProgressClock;
 
 /// Grace period after the engine sends `session/cancel` for the agent to return
 /// the prompt response before the engine kills the process. Generous for a
@@ -227,16 +230,15 @@ impl AcpEngine {
     ) -> LoopOutcome {
         let cancel = Arc::clone(&self.cancel);
         let guard = cancel.begin_turn();
-        // Wall-clock watchdog (ADR-0081): fires the shared token on expiry; the
-        // pump notices via cancel.is_requested() and sends session/cancel.
-        if let Some(timeout) = self.wall_clock {
-            spawn_wall_clock_watchdog(
-                guard.generation(),
-                Arc::clone(&cancel),
-                timeout,
-                "toptopduck::acp",
-            );
-        }
+        // No-progress watchdog (ADR-0115): the cap times ONLY the generation
+        // segment -- the pump's inbound lines re-arm it (touch), and the
+        // open tool-call windows freeze it. The handshake keeps timing (a
+        // CLI that cannot reach the prompt inside the cap is exactly the
+        // non-convergence the cap exists for); the pump notices a fired
+        // token via cancel.is_requested() and sends session/cancel.
+        let clock = self
+            .wall_clock
+            .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
         // Spawn the CLI. Any spawn failure lands as an external-runtime
         // failure (the engine never panics into the host).
         let mut child = match spawn(binary, &self.adapter) {
@@ -252,6 +254,15 @@ impl AcpEngine {
         let hs = match handshake(&mut io, &mut child, &self.cancel, input, &self.adapter) {
             Ok(hs) => hs,
             Err(term) => {
+                // ADR-0115: a cancel landing after the clock latched is the
+                // watchdog's (generation silence past the cap) -- the
+                // handshake keeps timing by design, so this window is
+                // exactly where the cap fires for a CLI that cannot reach
+                // the prompt.
+                let term = match term {
+                    Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+                    other => other,
+                };
                 let outcome = self.outcome(term, Vec::new(), None);
                 child.kill_and_wait();
                 return outcome;
@@ -304,6 +315,13 @@ impl AcpEngine {
                 req,
             ) {
                 Err(term) => {
+                    // ADR-0115: same pre-pump relabel as the handshake -- a
+                    // watchdog fire mid-roundtrip is generation silence
+                    // past the cap, not a user cancel.
+                    let term = match term {
+                        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+                        other => other,
+                    };
                     let outcome = self.outcome(term, Vec::new(), discovered);
                     child.kill_and_wait();
                     return outcome;
@@ -330,7 +348,11 @@ impl AcpEngine {
 
         // Loop-top cancel check (mirrors the built-in loop's pre-step check).
         if self.cancel.is_requested() {
-            let outcome = self.outcome(Termination::Cancelled, Vec::new(), discovered);
+            let outcome = self.outcome(
+                ProgressClock::cancel_landing(clock.as_ref()),
+                Vec::new(),
+                discovered,
+            );
             child.kill_and_wait();
             return outcome;
         }
@@ -366,7 +388,13 @@ impl AcpEngine {
                 return outcome;
             }
             super::process::StdinWriteOutcome::Cancelled => {
-                let outcome = self.outcome(Termination::Cancelled, Vec::new(), discovered);
+                // ADR-0115: the pre-pump relabel -- a watchdog fire during
+                // the stdin drain is generation silence past the cap.
+                let outcome = self.outcome(
+                    ProgressClock::cancel_landing(clock.as_ref()),
+                    Vec::new(),
+                    discovered,
+                );
                 child.kill_and_wait();
                 return outcome;
             }
@@ -378,6 +406,8 @@ impl AcpEngine {
             tool_call_count: 0,
             cancel_sent_at: None,
             step_cap: self.step_cap,
+            clock: clock.clone(),
+            open_freeze: None,
         };
         let end = io.pump_until_prompt_response(
             &self.cancel,
@@ -414,6 +444,12 @@ impl AcpEngine {
             // The agent answered with a parse failure / RPC error / empty
             // result -- surface the real diagnostic, NOT "closed stdout".
             PromptEnd::Failed(reason) => Termination::Runtime(reason),
+        };
+        // ADR-0115: a cancel landing after the clock latched is the
+        // watchdog's (generation silence past the cap), not a user cancel.
+        let termination = match termination {
+            Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+            other => other,
         };
         let rounds = pump.tracker.settle_rounds(&termination);
         let outcome = self.outcome(termination, rounds, discovered);
@@ -672,6 +708,11 @@ impl AcpIo {
             }
             match self.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
                 Ok(line) => {
+                    // Inbound stream activity (ADR-0115): re-arm the
+                    // no-progress clock before anything else.
+                    if let Some(clock) = pump.clock.as_ref() {
+                        clock.touch();
+                    }
                     let v: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
                         Err(_) => continue,
@@ -861,6 +902,12 @@ struct Pump {
     /// When `session/cancel` was sent, if it has been (grace tracking).
     cancel_sent_at: Option<Instant>,
     step_cap: u32,
+    /// The turn's no-progress clock (ADR-0115): the agent's own tool
+    /// executions are freeze segments (an open `pending` window), invisible
+    /// to the gateway's freeze.
+    clock: Option<Arc<ProgressClock>>,
+    /// Held while `pending` is non-empty (the open tool-call window).
+    open_freeze: Option<crate::session::progress::FreezeGuard>,
 }
 
 /// One round's in-flight accumulation: the thought + prose streams the model
@@ -1154,6 +1201,7 @@ impl Pump {
                         summary,
                         content: content.clone(),
                     });
+                    self.reconcile_pending_freeze();
                 }
             }
             SessionUpdate::ToolCallUpdate {
@@ -1190,10 +1238,12 @@ impl Pump {
                                 end,
                                 on_phase,
                             );
+                            self.reconcile_pending_freeze();
                             return;
                         }
                     }
                     self.pending.insert(i, row);
+                    self.reconcile_pending_freeze();
                 }
                 // An update with no matching pending row (missed the start) is
                 // dropped -- the trace stays consistent with the starts seen.
@@ -1202,12 +1252,30 @@ impl Pump {
         }
     }
 
+    /// Reconcile the freeze guard with `pending` (ADR-0115): an open
+    /// tool-call window (non-empty `pending`) holds a freeze -- the agent's
+    /// own tool execution is a wait on an external principal, invisible to
+    /// the gateway's dispatch-side freeze. Idempotent; call after every
+    /// `pending` mutation.
+    fn reconcile_pending_freeze(&mut self) {
+        match (self.open_freeze.is_some(), self.pending.is_empty()) {
+            (false, false) => {
+                self.open_freeze = self.clock.as_ref().map(|c| c.freeze());
+            }
+            (true, true) => self.open_freeze = None,
+            _ => {}
+        }
+    }
+
     /// Close every still-open row at turn end with the honest unobserved
     /// marker (issue #630), each landing on the round it opened in. The
     /// take ends `pending`'s borrow so the loop can call back into
     /// `finalize_row` -- the single TraceEntry construction.
     fn drain_unobserved(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
-        for row in std::mem::take(&mut self.pending) {
+        let rows = std::mem::take(&mut self.pending);
+        // The take empties `pending`: the open tool-call window closes here.
+        self.reconcile_pending_freeze();
+        for row in rows {
             self.finalize_row(
                 row.round,
                 &row.tool_use_id,
