@@ -91,6 +91,7 @@ vi.mock("../api", async (importOriginal) => {
 
 import App from "../App";
 import { getAppConfig, setAppConfig } from "../api";
+import { BOOT_SEED_GLOBAL } from "../shell/bootSeed";
 
 // jsdom has no matchMedia; install a controllable stub so tests can both fix
 // the initial OS preference AND dispatch a live change after mount. Mirrors the
@@ -220,6 +221,39 @@ describe("App theme (ADR-0050 black-box)", () => {
     await waitFor(() =>
       expect(document.documentElement.classList.contains("dark")).toBe(false),
     );
+  });
+
+  describe("boot seed (issue #814, ADR-0113)", () => {
+    afterEach(() => {
+      // The never-resolving IPC override below must not leak into later
+      // tests -- re-pin the file's factory default (system).
+      vi.mocked(getAppConfig).mockImplementation(async () => appConfigWith("system"));
+    });
+
+    it("seeds the persisted dark theme before the IPC resolves (no first-paint flash)", async () => {
+      // Seed says dark, OS says light, and the full IPC never resolves --
+      // the pre-#814 shell rendered light here and flipped only when
+      // getAppConfig landed. The seed paints dark from the first render.
+      installMatchMedia(false);
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      vi.mocked(getAppConfig).mockImplementation(() => new Promise<AppConfig>(() => {}));
+      render(<App />);
+      expect(document.documentElement.classList.contains("dark")).toBe(true);
+    });
+
+    it("overwrites the seed once the IPC config resolves (IPC stays authoritative)", async () => {
+      installMatchMedia(false);
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("light"));
+      render(<App />);
+      // Seed painted dark on the first render; the resolved full config
+      // flips it to light (the seed is only the null-period fallback).
+      expect(document.documentElement.classList.contains("dark")).toBe(true);
+      await waitFor(() =>
+        expect(document.documentElement.classList.contains("dark")).toBe(false),
+      );
+      expect(document.documentElement.style.colorScheme).toBe("light");
+    });
   });
 
   it("follows a live OS flip while in system mode after the shell settles", async () => {

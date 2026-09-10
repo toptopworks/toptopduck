@@ -204,6 +204,7 @@ export default function App() {
     toggleSidebarCollapse,
     sidebarGrouping,
     switchSidebarGrouping,
+    bootSeed,
   } = useAppConfigState({ setShellError });
 
   // --- Draggable sidebar + rail widths ------------------------------------
@@ -837,11 +838,12 @@ export default function App() {
   }, []);
 
   // Theme (ADR-0050): applied to <html>, follows the persisted three-state
-  // preference (defaulting to system before app-config resolves). The Vega
+  // preference (boot-seeded pre-paint, defaulting to system only when both
+  // the seed and app-config are absent). The Vega
   // bridge listens to the theme-change event this fires. effectiveLocale +
   // intl are resolved inside useAppConfigState (where the owned appConfig
   // lives); the IntlProvider subtree + document.lang consume them here.
-  useTheme(appConfig?.theme ?? "system");
+  useTheme(appConfig?.theme ?? bootSeed?.theme ?? "system");
 
   useEffect(() => {
     if (typeof document !== "undefined") {

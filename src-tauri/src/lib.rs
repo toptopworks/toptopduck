@@ -279,6 +279,34 @@ pub fn run() {
 
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
+            // First-paint boot seed (issue #814, ADR-0113): ONE honest-degrade
+            // load serves the whole setup -- the sessions_dir resolution below
+            // and the seed script share it, so app-config is read exactly
+            // once per boot.
+            let boot_cfg = live.load();
+
+            // Main window creation (issue #814, ADR-0113): `create: false`
+            // in tauri.conf.json leaves `windows[0]` a declarative template;
+            // setup builds it here so the seed injection script -- the only
+            // step between the app-config read and the webview's first
+            // paint -- carries the persisted theme/locale past the flash.
+            // Window params stay in tauri.conf.json (single source of
+            // truth); the label lookup (not index) survives future window
+            // additions, and a build failure propagates -- the same
+            // boot-failure mode the framework's own config-window creation
+            // had. Created early so everything later in setup sees the main
+            // window (the 2s visibility watchdog, the single-instance focus
+            // path).
+            let main_window_cfg = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .ok_or("main window config missing from tauri.conf.json")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_cfg)?
+                .initialization_script(app_config::boot_seed::boot_seed_script(&boot_cfg))
+                .build()?;
             // ADR-0089 + issue #452: managed sessions directory. Default root
             // is `<Documents>/toptopduck/sessions/` (platform-conventions
             // Documents, not hidden app-data). When app-config carries a
@@ -287,8 +315,7 @@ pub fn run() {
             // WITHOUT clearing the config (the path might be temporarily
             // unavailable, e.g. an unmounted external drive).
             let sessions_root = {
-                let cfg = live.load();
-                match cfg.sessions_dir.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                match boot_cfg.sessions_dir.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     Some(p) => {
                         let path = PathBuf::from(p);
                         if path.is_dir() {
