@@ -279,24 +279,25 @@ pub fn run() {
 
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
-            // First-paint boot seed (issue #814, ADR-0113): ONE honest-degrade
-            // load serves the whole setup -- the sessions_dir resolution below
-            // and the seed script share it, so app-config is read exactly
-            // once per boot.
+            // First-paint boot seed (issue #814, ADR-0113): one direct
+            // honest-degrade load serves both live.load() consumers in
+            // setup -- the sessions_dir resolution below and the seed
+            // script share it (startup_register reads app-config through
+            // its own path).
             let boot_cfg = live.load();
 
             // Main window creation (issue #814, ADR-0113): `create: false`
             // in tauri.conf.json leaves `windows[0]` a declarative template;
             // setup builds it here so the seed injection script -- the only
-            // step between the app-config read and the webview's first
-            // paint -- carries the persisted theme/locale past the flash.
-            // Window params stay in tauri.conf.json (single source of
-            // truth); the label lookup (not index) survives future window
-            // additions, and a build failure propagates -- the same
+            // carrier of the persisted theme/locale between the app-config
+            // read and the webview's first paint -- delivers them past the
+            // flash. Window params stay in tauri.conf.json (single source
+            // of truth); the label lookup (not index) survives future
+            // window additions, and a build failure propagates -- the same
             // boot-failure mode the framework's own config-window creation
             // had. Created early so everything later in setup sees the main
-            // window (the 2s visibility watchdog, the single-instance focus
-            // path).
+            // window (the 2s visibility watchdog), as does the
+            // single-instance focus path registered before setup.
             let main_window_cfg = app
                 .config()
                 .app

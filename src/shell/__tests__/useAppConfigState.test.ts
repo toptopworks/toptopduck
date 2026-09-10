@@ -368,7 +368,9 @@ describe("useAppConfigState", () => {
     });
 
     it("drops an invalid seed wholesale (whitelist) and keeps the null behavior", () => {
-      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "klingon" });
+      // Both halves invalid ("DARK" is case-illegal, "klingon" out of enum):
+      // the composition seam pins the wholesale drop for either half.
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "DARK", locale: "klingon" });
       const { result } = renderAppConfigState();
       expect(result.current.bootSeed).toBeNull();
       expect(result.current.appConfig).toBeNull();

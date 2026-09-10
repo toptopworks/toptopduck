@@ -16,7 +16,18 @@ export interface BootSeed {
   locale: LocalePreference;
 }
 
-const THEMES: readonly string[] = ["system", "light", "dark"];
+// The satisfies clause keeps the list in lockstep with the Theme union --
+// a typo here would compile against a plain string list and silently
+// reject every valid seed.
+const THEMES: readonly string[] = [
+  "system",
+  "light",
+  "dark",
+] satisfies readonly Theme[];
+
+function isTheme(value: unknown): value is Theme {
+  return typeof value === "string" && THEMES.includes(value);
+}
 
 /** Whitelist the seed global: BOTH enum fields must validate or the whole
  * seed is dropped. Rust serializes typed enums, so an invalid variant can
@@ -27,11 +38,11 @@ const THEMES: readonly string[] = ["system", "light", "dark"];
 export function parseBootSeed(raw: unknown): BootSeed | null {
   if (typeof raw !== "object" || raw === null) return null;
   const { theme, locale } = raw as Record<string, unknown>;
-  if (typeof theme !== "string" || !THEMES.includes(theme)) return null;
+  if (!isTheme(theme)) return null;
   // The locale half reuses the IPC boundary guard so the seed whitelist and
   // the persisted-value whitelist can never drift apart (ADR-0113 Decision 3).
   if (!isLocalePreference(locale)) return null;
-  return { theme: theme as Theme, locale };
+  return { theme, locale };
 }
 
 /** Read + validate the injected global. Null when the initialization script

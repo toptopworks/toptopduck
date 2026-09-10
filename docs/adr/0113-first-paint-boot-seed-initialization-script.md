@@ -30,7 +30,7 @@ Rust 侧 `setup` 启动时已读 app-config（ADR-0038 honest-degrade 读路径�
 ## Consequences
 
 - 主窗口创建从「框架按 config 自动建」变为「setup 内显式建」：`setup` 后半段起才可见 main 窗口（2s 可见性兜底、single-instance 聚焦路径等在创建点之后，不受影响）；后续 setup 内新增代码若引用 main 窗口，须排在创建点之后。
-- setup 对 app-config 的读取收敛为一次（`live.load()` 单调，sessions_dir 解析与种子脚本共享）。
-- 前端 `useAppConfigState` 返回面新增 `bootSeed` 字段（null 期为种子、否则为 null）；`theme` 派生链变为「IPC 全量 > 种子 > system」三级，locale 链同形。
+- setup 内 `live.load()` 收敛为一次（单调读，sessions_dir 解析与种子脚本共享；`startup_register` 的注册扫描走其自身的读取路径）。
+- 前端 `useAppConfigState` 返回面新增 `bootSeed` 字段（null 期为种子或 null——白名单裁决；IPC 到达后字段值不变，仅角色让位）；`theme` 派生链变为「IPC 全量 > 种子 > system」三级，locale 链同形。
 - 首绘时序（脚本注入 → 首帧）在 jsdom 与单测面不可观测；外观首绘、目录语言、window-state 几何恢复的验收面在真机。
 - CONTEXT.md 不动：boot seed 是投递通道，非领域概念，无领域词增减。

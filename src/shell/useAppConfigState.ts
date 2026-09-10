@@ -80,8 +80,8 @@ export function useAppConfigState({
 
   // First-paint seed (issue #814, ADR-0113): read once per mount from the
   // global the initialization script assigned pre-paint. It only ever acts
-  // as the null-period fallback for the two derivations below -- never a
-  // second source of truth.
+  // as the null-period fallback for the locale chain below and the theme
+  // chain in App -- never a second source of truth.
   const [bootSeed] = useState<BootSeed | null>(() => readBootSeed());
 
   // Locale (ADR-0052): resolved once from the persisted three-state preference
@@ -120,7 +120,8 @@ export function useAppConfigState({
         setAppConfigState(cfg);
       })
       .catch(() => {
-        // Keep null; theme defaults to "system".
+        // Keep null: the boot seed (if any) keeps carrying the persisted
+        // theme/locale; with no seed the system defaults apply.
       });
     return () => {
       cancelled = true;

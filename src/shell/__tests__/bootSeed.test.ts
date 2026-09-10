@@ -58,6 +58,13 @@ describe("readBootSeed", () => {
     vi.unstubAllGlobals();
   });
 
+  it("pins the global name the Rust writer assigns", () => {
+    // The Rust side pins this literal byte-for-byte in boot_seed.rs; this
+    // is the TS half of the cross-language agreement -- a one-sided rename
+    // here would silently disable first-paint seeding with every gate green.
+    expect(BOOT_SEED_GLOBAL).toBe("__TOPTOPDUCK_BOOT_SEED__");
+  });
+
   it("parses the injected global when present", () => {
     vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
     expect(readBootSeed()).toEqual({ theme: "dark", locale: "zh-CN" });
