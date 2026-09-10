@@ -34,6 +34,8 @@ import { log } from "../lib/log";
 import type { AppConfig } from "../types/app-config";
 import type { SidebarGrouping } from "../types/app-config";
 import type { AppError } from "../types/error";
+import { readBootSeed } from "./bootSeed";
+import type { BootSeed } from "./bootSeed";
 
 export interface UseAppConfigStateDeps {
   /** From useShellError: surfaces a shell-layer AppError (kind "shell") for a
@@ -66,16 +68,31 @@ export function useAppConfigState({
   toggleSidebarCollapse: () => void;
   sidebarGrouping: SidebarGrouping;
   switchSidebarGrouping: (mode: SidebarGrouping) => void;
+  /** The parsed first-paint seed (issue #814, ADR-0113): theme/locale-only
+   * initial values injected by the main window's initialization script
+   * before any frontend script runs. Null when the channel did not run or
+   * its payload failed the whitelist; the IPC full appConfig stays the
+   * authority once it resolves. */
+  bootSeed: BootSeed | null;
 } {
   const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
   const appConfigRef = useRef<AppConfig | null>(null);
 
+  // First-paint seed (issue #814, ADR-0113): read once per mount from the
+  // global the initialization script assigned pre-paint. It only ever acts
+  // as the null-period fallback for the locale chain below and the theme
+  // chain in App -- never a second source of truth.
+  const [bootSeed] = useState<BootSeed | null>(() => readBootSeed());
+
   // Locale (ADR-0052): resolved once from the persisted three-state preference
-  // (defaulting to system before app-config resolves). The IntlShape is built
-  // from the same catalog so switchActiveProfile can localize a reject at the
-  // shell layer (issue #119); App also feeds this intl to the downstream shell
-  // hooks + the IntlProvider subtree.
-  const effectiveLocale = useLocale(coerceLocalePreference(appConfig?.locale));
+  // (seeded pre-paint, defaulting to system only when both the seed and
+  // app-config are absent). The IntlShape is built from the same catalog so
+  // switchActiveProfile can localize a reject at the shell layer (issue
+  // #119); App also feeds this intl to the downstream shell hooks + the
+  // IntlProvider subtree.
+  const effectiveLocale = useLocale(
+    coerceLocalePreference(appConfig?.locale ?? bootSeed?.locale),
+  );
   const intl = useMemo(
     () => createIntl({ locale: effectiveLocale, messages: catalogFor(effectiveLocale) }),
     [effectiveLocale],
@@ -103,7 +120,8 @@ export function useAppConfigState({
         setAppConfigState(cfg);
       })
       .catch(() => {
-        // Keep null; theme defaults to "system".
+        // Keep null: the boot seed (if any) keeps carrying the persisted
+        // theme/locale; with no seed the system defaults apply.
       });
     return () => {
       cancelled = true;
@@ -229,5 +247,6 @@ export function useAppConfigState({
     toggleSidebarCollapse,
     sidebarGrouping,
     switchSidebarGrouping,
+    bootSeed,
   };
 }

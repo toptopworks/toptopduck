@@ -10,6 +10,7 @@
 //!   missing / version-mismatched / secret-carrying file all yield built-in
 //!   defaults, never a crash).
 
+pub mod boot_seed;
 pub mod io;
 pub mod model;
 

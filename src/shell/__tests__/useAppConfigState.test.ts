@@ -1,6 +1,11 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../../types/app-config";
+
+// Issue #814: the boot-seed tests stub the injected global the way the
+// initialization script would assign it pre-paint; unstubAllGlobals keeps
+// the stub from leaking into the sibling describes above.
+import { BOOT_SEED_GLOBAL } from "../bootSeed";
 
 // Issue #196: useAppConfigState owns the AppConfig advisory state + every
 // mutating action (commitAppConfig, switchActiveProfile, commitShellPrefs via
@@ -333,5 +338,42 @@ describe("useAppConfigState", () => {
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
     await waitFor(() => expect(result.current.sidebarGrouping).toBe("time"));
+  });
+
+  describe("boot seed (issue #814, ADR-0113)", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("seeds the locale while appConfig is null and exposes the parsed seed", () => {
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      const { result } = renderAppConfigState();
+      // IPC still pending: the seed wins over the OS-locale resolution --
+      // the first paint renders the persisted catalog, not the system one.
+      expect(result.current.appConfig).toBeNull();
+      expect(result.current.bootSeed).toEqual({ theme: "dark", locale: "zh-CN" });
+      expect(result.current.effectiveLocale).toBe("zh-CN");
+    });
+
+    it("the IPC full config overwrites the seed once it resolves", async () => {
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      const cfg: AppConfig = {
+        ...baseAppConfig({ sidebar_collapsed: false }),
+        locale: "en-US",
+      };
+      vi.mocked(getAppConfig).mockResolvedValue(cfg);
+      const { result } = renderAppConfigState();
+      await waitFor(() => expect(result.current.appConfig).toBe(cfg));
+      expect(result.current.effectiveLocale).toBe("en-US");
+    });
+
+    it("drops an invalid seed wholesale (whitelist) and keeps the null behavior", () => {
+      // Both halves invalid ("DARK" is case-illegal, "klingon" out of enum):
+      // the composition seam pins the wholesale drop for either half.
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "DARK", locale: "klingon" });
+      const { result } = renderAppConfigState();
+      expect(result.current.bootSeed).toBeNull();
+      expect(result.current.appConfig).toBeNull();
+    });
   });
 });
