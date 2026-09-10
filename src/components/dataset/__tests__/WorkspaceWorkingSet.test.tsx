@@ -68,7 +68,7 @@ describe("WorkspaceWorkingSet", () => {
     expect(screen.getByText(/行数：9/)).toBeInTheDocument();
   });
 
-  it("shows the picked dataset's detail over the active one", () => {
+  it("shows the picked dataset's detail over the active one, with the band following the pick", () => {
     renderI18n(
       <WorkspaceWorkingSet
         datasets={[mockDataset, orders]}
@@ -80,6 +80,19 @@ describe("WorkspaceWorkingSet", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /^orders/ }));
     expect(screen.getByText(/行数：9/)).toBeInTheDocument();
+    // The row band follows the click (the pick), NOT the active dataset:
+    // before the split the band was keyed to activeName, so a management
+    // pick left the highlight stranded on the active row while the detail
+    // pane moved -- the two surfaces disagreed.
+    const ordersRow = screen.getByRole("button", { name: /^orders/ }).closest("li")!;
+    expect(ordersRow.className.split(/\s+/)).toContain("bg-accent");
+    expect(ordersRow.className.split(/\s+/)).toContain("selected");
+    const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    expect(peopleRow.className.split(/\s+/)).not.toContain("bg-accent");
+    // The active dataset keeps its in-list marker: the bold label.
+    expect(
+      screen.getByRole("button", { name: /^people/ }).className.split(/\s+/),
+    ).toContain("font-semibold");
   });
 
   it("falls back to the active dataset's detail after the pick is deleted (issue #792)", () => {
@@ -109,6 +122,10 @@ describe("WorkspaceWorkingSet", () => {
     );
     expect(screen.getByText(/行数：5/)).toBeInTheDocument();
     expect(screen.queryByText(/选择一个数据集/)).not.toBeInTheDocument();
+    // The band rides the RESOLVED pick: after the fallback it sits on the
+    // active row (what the pane shows), never on the deleted pick's name.
+    const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    expect(peopleRow.className.split(/\s+/)).toContain("bg-accent");
   });
 
   it("falls back to the first list item when the active is absent too (issue #792)", () => {
@@ -135,6 +152,11 @@ describe("WorkspaceWorkingSet", () => {
       ),
     );
     expect(screen.getByText(/行数：9/)).toBeInTheDocument();
+    // The band rides the resolved pick on this fallback branch too: with
+    // both the pick and the active gone it lands on the first item -- the
+    // same row the detail pane shows.
+    const ordersRow = screen.getByRole("button", { name: /^orders/ }).closest("li")!;
+    expect(ordersRow.className.split(/\s+/)).toContain("bg-accent");
   });
 
   it("re-renders into the empty-state card when the last dataset is deleted (issue #792)", () => {

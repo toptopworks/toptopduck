@@ -53,6 +53,8 @@ export function WorkspaceWorkingSet({
   // The 工作集 tab's own selection (which dataset's detail to show). Kept local
   // and separate from viewedResult: picking a dataset here is a management
   // action, not a workspace view selection (ADR-0051 active/viewed split).
+  // Drives both the detail pane and the list's selection band, so the
+  // highlight follows the pick (and the deleted-pick fallbacks below).
   const [selected, setSelected] = useState<string | null>(
     viewedDescriptor?.reference_name ?? activeName ?? null,
   );
@@ -93,6 +95,10 @@ export function WorkspaceWorkingSet({
         <WorkingSetList
           datasets={datasets}
           activeName={activeName}
+          // The band rides the RESOLVED pick, not the raw state: after a
+          // delete the pane falls back (active, then first) and the band
+          // follows the pane, never a name that is no longer in the list.
+          selectedName={shown?.reference_name ?? null}
           onSelect={setSelected}
           onRename={onRename}
           onReplace={onReplace}

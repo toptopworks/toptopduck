@@ -29,19 +29,21 @@ import type { DatasetDescriptor } from "../../types/dataset";
 // residual visual contract is re-stated here: strip the native border +
 // appearance and set the var(--radius) corner. Issue #790 splits the former
 // single full-width constant into the two row shapes below (select + icon).
-// The cursor is the default arrow across the whole row -- select button,
-// label span and the icon strip alike: the pill floats over the button's
-// tail, so a hand cursor on any part would flap against the arrow on the
-// exposed slivers as the pointer crosses them; the hover band alone carries
-// the affordance.
+// The cursor splits with them: the select button carries the hand (its click
+// IS the row's selection -- the honest affordance), while the icon strip
+// keeps the default arrow (the #790 decision: the pill's glyphs signal by
+// color, not cursor). The pointer does switch cursors where the pill meets
+// the button's tail -- accepted with the hand ruling; the button's body is
+// one continuous hand either side of that edge (the label's native title
+// never touches the cursor, so the old text-vs-everywhere flip is gone).
 const BUTTON_CHROME = "appearance-none border-0 rounded-md";
 // The select button: fills the row's leftover width (flex-1 + min-w-0 so the
 // label can truncate inside), compact padding, left alignment (UA button text
-// is centered). Active state (bg-accent + font-semibold) layers on via cn()
-// at the call site. The hover tint is NOT here: it lives on the row <li> (see
-// DatasetRow) so the pointer anywhere on the row -- the action pill included
-// -- lights the same full-height band.
-const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left`;
+// is centered). The active dataset's font-semibold emphasis layers on via
+// cn() at the call site. The selection band and the hover tint are NOT here:
+// both live on the row <li> (see DatasetRow) so the pointer anywhere on the
+// row -- the action pill included -- lights the same full-height band.
+const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer`;
 // The row-actions overlay: the rename/replace/delete actions sit in an
 // absolutely-positioned pill anchored inside the label-tail wrapper (the
 // flow child holding the select button, see DatasetRow), floating ABOVE the
@@ -54,12 +56,13 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // packed tight -- no gap, no inlay: the 28px squares butt together into one
 // compact bar (the glyphs keep ~7px of visual air inside their own hit
 // areas). The wrapper spans exactly the row's bg-clip-content band (the li's
-// py frames it), so inset-y-0 puts name band, active band and action strip
-// all at one height. The pill's ground is bg-accent -- the same tint a
-// hovered row carries -- so the strip reads as part of the row rather than a
-// floating widget (a border/shadow card form would read as a separate widget
-// on this ground); being opaque, it still keeps the label underneath from
-// bleeding through. Visibility is the #865 hover-reveal contract moved one
+// py frames it), so inset-y-0 puts hover band, selected band and action
+// strip all at one height. The pill's ground is bg-accent -- the same tint a
+// hovered or selected row carries -- so the strip reads as part of the row
+// rather than a floating widget (a border/shadow card form would read as a
+// separate widget on this ground); being opaque, it still keeps the label
+// underneath from bleeding through. Visibility is the #865 hover-reveal
+// contract moved one
 // level up: the CONTAINER owns opacity-0 + pointer-events-none, restored on
 // row hover (group-hover) or keyboard focus-visible -- any tabbed-into
 // action lights the whole pill. Keyboard recovery keys off
@@ -87,16 +90,12 @@ const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center g
 // row's mid-load state.
 const ICON_BUTTON_BASE = `${BUTTON_CHROME} h-7 w-7 flex items-center justify-center text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
 // The row-tooltip slot identity (which tooltip on which row owns the mutex).
-type RowTipKind = "name" | "rename" | "replace" | "delete" | "stale";
+type RowTipKind = "rename" | "replace" | "delete" | "stale";
 interface TipKey {
   row: string;
   kind: RowTipKind;
 }
 const sameTipKey = (a: TipKey, b: TipKey) => a.row === b.row && a.kind === b.kind;
-// The pointer-driven action hints (see setTip): while one of these owns the
-// slot, a late open request from a hoverable trigger's leftover timer is
-// rejected.
-const HINT_KINDS: ReadonlySet<RowTipKind> = new Set(["rename", "replace", "delete"]);
 
 // The row-tooltip mutex plumbing, passed down from WorkingSetList to each row
 // (see the openTip state there): the single-source open key, its setter, and
@@ -198,6 +197,7 @@ function RowActionButton({
 function DatasetRow({
   d,
   isActive,
+  isSelected,
   loading,
   tip,
   onSelect,
@@ -206,7 +206,14 @@ function DatasetRow({
   onPickReplace,
 }: {
   d: DatasetDescriptor;
+  // The ACTIVE dataset (server truth): bolds the label. The accent band is
+  // NOT this state's -- it follows the selection (see isSelected), since a
+  // management click must move the highlight with the detail pane.
   isActive: boolean;
+  // The detail pick: which row's detail the right pane shows. Puts the
+  // accent band on the row -- the same element that carries the hover band,
+  // so a picked row and a hovered row read at exactly the same height.
+  isSelected: boolean;
   loading: boolean;
   tip: RowTipControls;
   onSelect: (referenceName: string) => void;
@@ -214,7 +221,7 @@ function DatasetRow({
   onOpenDelete?: (d: DatasetDescriptor, trigger: HTMLButtonElement) => void;
   onPickReplace?: (d: DatasetDescriptor) => void;
 }) {
-  const { openKey, setTip, dialogClosedAtRef } = tip;
+  const { openKey, setTip } = tip;
   const intl = useIntl();
   const key = (kind: RowTipKind): TipKey => ({ row: d.reference_name, kind });
   const isTipOpen = (kind: RowTipKind) => openKey !== null && sameTipKey(openKey, key(kind));
@@ -222,7 +229,8 @@ function DatasetRow({
     <li
       className={cn(
         "group relative flex items-center gap-1 rounded-md py-[0.1rem] bg-clip-content hover:bg-accent",
-        isActive && "active bg-accent bg-clip-content",
+        isActive && "active",
+        isSelected && "selected bg-accent",
         d.stale && "stale",
       )}
     >
@@ -238,50 +246,17 @@ function DatasetRow({
           className={cn(SELECT_BUTTON_BASE, isActive && "font-semibold")}
           onClick={() => onSelect(d.reference_name)}
         >
-          {/* The truncated label's full text rides the app-standard Radix
-            tooltip (the ADR-0050/0054 truncation-recovery mapping), with the
-            trigger on the LABEL SPAN rather than the whole button: the action
-            pill floats over the button's tail, and a pointer crossing the
-            pill's edges / the button's exposed slivers would otherwise pop
-            the name tooltip. On the span, the tooltip fires on the name text
-            alone and stays mutually exclusive with the action strip. */}
-          <Tooltip open={isTipOpen("name")} onOpenChange={(next) => setTip(key("name"), next)} disableHoverableContent>
-            <TooltipTrigger asChild>
-              <span
-                className="min-w-0 flex-1 truncate"
-                // Same controlled pattern as the action hints: our pointer
-                // handlers open/close directly, enter keeping the same 300ms
-                // post-dialog-close guard. Radix's own trigger path (it has no
-                // internal pointerenter -- it opens on pointermove and closes
-                // on pointerleave) stays live beside them: its open requests
-                // rejoin this same controlled state, and its leave handler is
-                // what cancels a pending delayed open when a sweep exits the
-                // span fast, so nothing here preventDefaults it away.
-                onPointerEnter={(e) => {
-                  if (
-                    e.pointerType === "mouse" &&
-                    Date.now() - dialogClosedAtRef.current > 300
-                  )
-                    setTip(key("name"), true);
-                }}
-                onPointerLeave={() => setTip(key("name"), false)}
-              >
-                {d.display_name}
-              </span>
-            </TooltipTrigger>
-            {/* sideOffset is visual clearance only: the content and its popper
-              wrapper are pointer-transparent (pointer-events-none here, the
-              data-hit-transparent scope in styles.css there), so hit-testing
-              can never flip row :hover at any offset -- at 0 the tooltip
-              would just sit flush on the span's edge. */}
-            <TooltipContent
-              data-hit-transparent
-              sideOffset={8}
-              className="pointer-events-none data-[state=closed]:animate-none!"
-            >
-              {d.display_name}
-            </TooltipContent>
-          </Tooltip>
+          {/* The truncated label's full text rides the OS-native title:
+            truncation recovery without any Radix machinery (no popper to
+            keep pointer-transparent, no mutex slot, no open/close handlers).
+            Unlike the action hints' theme-following Radix tooltips (#865
+            rejected native titles there -- chrome follows the OS), the name
+            surfaces only its own text, so the OS chrome costs nothing. The
+            hand cursor on the button below no longer flips when the
+            affordance surfaces -- a native title never touches the cursor. */}
+          <span className="min-w-0 flex-1 truncate" title={d.display_name}>
+            {d.display_name}
+          </span>
           {/* font-normal overrides the active button's font-semibold so the
             row-count annotation stays muted-weight in either state;
             shrink-0 + nowrap keep truncation from ever eliding the note.
@@ -515,6 +490,7 @@ function WorkingSetDeleteDialog({
 export function WorkingSetList({
   datasets,
   activeName,
+  selectedName,
   onSelect,
   onRename,
   onReplace,
@@ -522,7 +498,18 @@ export function WorkingSetList({
   loading = false,
 }: {
   datasets: DatasetDescriptor[];
+  // The ACTIVE dataset (server truth, ADR-0051): bolds the row's label. The
+  // authoritative naming is the tab header's Targets chip; bold is the row's
+  // only VISUAL in-list active marker (since #793 retired the " · current
+  // table" suffix, the label weight is the sole visual carrier -- the
+  // .active hook stays a pure selector anchor, and the accent band moved to
+  // the selection with it).
   activeName: string | null;
+  // The detail pick (which row's detail the right pane shows): drives the
+  // accent band. Passed as the RESOLVED pick (resolveWorkingSetDetail
+  // output), so the band rides the deleted-pick fallbacks (active, then
+  // first) with the pane and never diverges from what is shown.
+  selectedName: string | null;
   onSelect: (referenceName: string) => void;
   // Display-only rename (ADR-0037, issue #8): the reference name is never
   // touched, so selection / SQL / active references all stay valid.
@@ -552,25 +539,25 @@ export function WorkingSetList({
   // mount/unmount on these targets, so each open starts from fresh draft state.
   const [renameTarget, setRenameTarget] = useState<DatasetDescriptor | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DatasetDescriptor | null>(null);
-  // SINGLE-SOURCE tooltip mutex for a row: every tooltip on the row (name,
-  // the three action hints, stale) is controlled off this one value, so a
-  // second tooltip opening necessarily closes the first. Two mechanisms
-  // share the job. Radix-internal opens (the pointermove path every trigger
-  // carries; the stale chip is the only row tooltip without our own handlers)
+  // SINGLE-SOURCE tooltip mutex for a row: every tooltip on the row (the
+  // three action hints, stale) is controlled off this one value, so a second
+  // tooltip opening necessarily closes the first. Two mechanisms share the
+  // job. Radix-internal opens (the pointermove path every trigger carries;
+  // the stale chip is the only row tooltip without our own handlers)
   // broadcast a document tooltip.open event that every MOUNTED TooltipContent
   // answers by closing itself -- peers are gone before the opener's
-  // onOpenChange reaches this state. Our direct opens (the name span's and
-  // the hints' pointer handlers) set this state without broadcasting (the
-  // dispatch sits inside Radix's own state setter, so a prop-driven open
-  // never emits it), and the single-source key is what excludes those. The
-  // pointermove path is also transit-gated by the provider (isPointerInTransit,
-  // set while the pointer crosses a HOVERABLE tooltip's exit grace area --
-  // the stale chip's, the one row tooltip without disableHoverableContent),
-  // so a sweep can silently swallow a Radix-side open; the direct handlers
-  // are what actually open the name and the hints. Each Tooltip bridges
-  // Radix's internal open/close intent (delayed-open timers, grace-area
-  // keeps) through onOpenChange into this state; the action hints keep their
-  // direct pointer-enter/-leave/focus/-blur handlers on top of it.
+  // onOpenChange reaches this state. Our direct opens (the hints' pointer
+  // handlers) set this state without broadcasting (the dispatch sits inside
+  // Radix's own state setter, so a prop-driven open never emits it), and the
+  // single-source key is what excludes those. The pointermove path is also
+  // transit-gated by the provider (isPointerInTransit, set while the pointer
+  // crosses a HOVERABLE tooltip's exit grace area -- the stale chip's, the
+  // one row tooltip without disableHoverableContent), so a sweep can
+  // silently swallow a Radix-side open; the direct handlers are what
+  // actually open the hints. Each Tooltip bridges Radix's internal
+  // open/close intent (delayed-open timers, grace-area keeps) through
+  // onOpenChange into this state; the action hints keep their direct
+  // pointer-enter/-leave/focus/-blur handlers on top of it.
   const [openTip, setOpenTip] = useState<TipKey | null>(null);
   // Closing a dialog lifts Radix's modal pointer-events lock on <body>, and
   // Chromium answers that by re-dispatching a pointer enter at the pointer's
@@ -584,22 +571,15 @@ export function WorkingSetList({
   const focusRestoreRef = useRef(false);
   const setTip = (key: TipKey, next: boolean) =>
     setOpenTip((current) => {
+      // Closes are keyed: a stale-timer close for another tooltip must not
+      // clear the one that is open now. Opens just take the slot -- Radix's
+      // own opens arrive on an empty slot anyway (their tooltip.open
+      // broadcast has already closed the mounted peers, see the openTip
+      // comment above), and our direct opens (the action hints' pointer
+      // handlers) are ordered pointer-leave-then-enter by the event
+      // sequence, so a moving pointer releases the old hint before the next
+      // one asks.
       if (!next) return current !== null && sameTipKey(current, key) ? null : current;
-      // A DIRECT non-hint open (the name span's pointer-enter) arriving
-      // while an action hint owns the slot must not steal it: the pointer is
-      // on (or just off) the icon it lit, and flipping the row back to the
-      // name tooltip underneath it reads as a flicker. Radix late-timer
-      // leftovers do NOT come through here -- their tooltip.open broadcast
-      // closes the mounted hint first, so they land on an empty slot --
-      // which is why this guard is one arm of the mutex, not its whole story
-      // (see the openTip comment above).
-      if (
-        current !== null &&
-        !sameTipKey(current, key) &&
-        HINT_KINDS.has(current.kind)
-      ) {
-        return current;
-      }
       return key;
     });
   // The row button that opened the dialog. Radix's close-time focus restore
@@ -686,10 +666,13 @@ export function WorkingSetList({
     // ADR-0067 (issue #184): the working-set list / button / active-state /
     // small visuals ride Tailwind utility on each element below + the
     // BUTTON_CHROME-derived constants above (select + icon actions, issue
-    // #790). The active STATE drives the select button's own conditional
-    // className (bg-accent + font-semibold). The class hooks (.working-set /
-    // .rename / .replace / .delete / .active / .stale) stay on the elements as
-    // anchor points for selector queries and future migration slices.
+    // #790). Two row states layer via cn(): the SELECTION puts the accent
+    // band on the row <li> (see DatasetRow's isSelected for the band
+    // contract), and the ACTIVE dataset bolds the select button's label.
+    // The class hooks (.working-set
+    // / .rename / .replace / .delete / .active / .selected / .stale) stay on
+    // the elements as anchor points for selector queries and future
+    // migration slices.
     <>
       <ul ref={listRef} tabIndex={-1} className="working-set list-none m-0 p-0 outline-none">
         {datasets.map((d) => (
@@ -697,6 +680,7 @@ export function WorkingSetList({
             key={d.reference_name}
             d={d}
             isActive={d.reference_name === activeName}
+            isSelected={d.reference_name === selectedName}
             loading={loading}
             tip={tip}
             onSelect={onSelect}
