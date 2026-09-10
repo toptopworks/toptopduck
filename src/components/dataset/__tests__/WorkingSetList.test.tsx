@@ -22,6 +22,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName="people"
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
@@ -34,45 +35,74 @@ describe("WorkingSetList", () => {
     expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument();
   });
 
-  it("marks the active row with a li-level bg-accent band + font-semibold label (ADR-0067, issue #184)", () => {
-    // The active STATE puts the accent band on the row <li> -- the same
-    // element that carries the hover band, so selected and hovered rows read
-    // at exactly the same height. The select button keeps only the
-    // font-semibold emphasis; since #793 retired the " · current table"
-    // suffix, the li className is the row's only in-list active marker. An
-    // inactive row carries neither.
+  it("bands the selected row and bolds the active row -- the band follows the pick, not the active dataset", () => {
+    // The accent band is the SELECTION state (which row's detail the right
+    // pane shows) and must move with a management click; before this split
+    // it was keyed to the active dataset, so picking another row left the
+    // highlight stranded on the active one. The active dataset keeps the
+    // in-list font-semibold label -- its authoritative identity is the tab
+    // header's Targets chip, and since #793 retired the " · current table"
+    // suffix, bold is the row's only in-list active marker. The band lives
+    // on the row <li> -- the same element that carries the hover band, so a
+    // picked row and a hovered row read at exactly the same height.
+    const orders: DatasetDescriptor = {
+      ...mockDataset,
+      reference_name: "orders",
+      display_name: "orders",
+    };
     const { rerender } = renderI18n(
       <WorkingSetList
-        datasets={[mockDataset]}
+        datasets={[mockDataset, orders]}
         activeName="people"
+        selectedName="orders"
         onSelect={() => {}}
         onRename={() => {}}
       />,
     );
-    const activeRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
-    const activeRowClasses = activeRow.className.split(/\s+/);
-    expect(activeRowClasses).toContain("bg-accent");
-    expect(activeRowClasses).toContain("active");
-    const activeButton = screen.getByRole("button", { name: /^people/ }).className.split(/\s+/);
-    expect(activeButton).toContain("font-semibold");
-    expect(activeButton).not.toContain("bg-accent");
+    const ordersRow = screen.getByRole("button", { name: /^orders/ }).closest("li")!;
+    expect(ordersRow.className.split(/\s+/)).toContain("bg-accent");
+    expect(ordersRow.className.split(/\s+/)).toContain("selected");
+    expect(
+      screen.getByRole("button", { name: /^orders/ }).className.split(/\s+/),
+    ).not.toContain("font-semibold");
+    const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    expect(peopleRow.className.split(/\s+/)).not.toContain("bg-accent");
+    expect(peopleRow.className.split(/\s+/)).toContain("active");
+    expect(
+      screen.getByRole("button", { name: /^people/ }).className.split(/\s+/),
+    ).toContain("font-semibold");
 
+    // The band follows the pick across rerenders (rows keep their keys, so
+    // the li references stay live).
     rerender(
       withIntl(
         <WorkingSetList
-          datasets={[mockDataset]}
-          activeName={null}
+          datasets={[mockDataset, orders]}
+          activeName="people"
+          selectedName="people"
           onSelect={() => {}}
           onRename={() => {}}
         />,
       ),
     );
-    const inactiveRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
-    expect(inactiveRow.className.split(/\s+/)).not.toContain("bg-accent");
-    expect(inactiveRow.className.split(/\s+/)).not.toContain("active");
-    expect(
-      screen.getByRole("button", { name: /^people/ }).className.split(/\s+/),
-    ).not.toContain("font-semibold");
+    expect(peopleRow.className.split(/\s+/)).toContain("bg-accent");
+    expect(ordersRow.className.split(/\s+/)).not.toContain("bg-accent");
+
+    // No selection -> no band anywhere, even with an active dataset: the
+    // active state never carries the band.
+    rerender(
+      withIntl(
+        <WorkingSetList
+          datasets={[mockDataset, orders]}
+          activeName="people"
+          selectedName={null}
+          onSelect={() => {}}
+          onRename={() => {}}
+        />,
+      ),
+    );
+    expect(peopleRow.className.split(/\s+/)).not.toContain("bg-accent");
+    expect(peopleRow.className.split(/\s+/)).toContain("active");
   });
 
   // The empty-set face is no longer this list's concern: WorkspaceWorkingSet
@@ -89,6 +119,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName="people"
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
@@ -109,6 +140,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
@@ -126,6 +158,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -152,6 +185,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[diverged]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -168,6 +202,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -192,6 +227,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -213,6 +249,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -230,6 +267,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -250,6 +288,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -277,6 +316,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={onRename}
       />,
@@ -288,6 +328,7 @@ describe("WorkingSetList", () => {
           <WorkingSetList
             datasets={[mockDataset]}
             activeName={null}
+            selectedName={null}
             onSelect={() => {}}
             onRename={onRename}
             loading={true}
@@ -311,6 +352,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         loading={true}
@@ -329,6 +371,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={onReplace}
@@ -345,6 +388,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={onReplace}
@@ -360,6 +404,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={() => {}}
@@ -379,6 +424,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={() => {}}
@@ -398,6 +444,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={onDelete}
@@ -422,6 +469,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[diverged]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={onDelete}
@@ -444,6 +492,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset, orders]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={onDelete}
@@ -466,6 +515,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={onDelete}
@@ -492,6 +542,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={onDelete}
@@ -503,6 +554,7 @@ describe("WorkingSetList", () => {
           <WorkingSetList
             datasets={[mockDataset]}
             activeName={null}
+            selectedName={null}
             onSelect={() => {}}
             onRename={() => {}}
             onDelete={onDelete}
@@ -527,6 +579,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={onDelete}
@@ -547,6 +600,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={onDelete}
@@ -572,6 +626,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onDelete={() => {}}
@@ -603,6 +658,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[stale]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
@@ -627,6 +683,7 @@ describe("WorkingSetList", () => {
           <WorkingSetList
             datasets={[{ ...mockDataset, row_count: 1 }]}
             activeName={null}
+            selectedName={null}
             onSelect={() => {}}
             onRename={() => {}}
           />
@@ -644,6 +701,7 @@ describe("WorkingSetList", () => {
           <WorkingSetList
             datasets={[{ ...mockDataset, row_count: 5 }]}
             activeName={null}
+            selectedName={null}
             onSelect={() => {}}
             onRename={() => {}}
           />
@@ -672,6 +730,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[stale]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
@@ -706,6 +765,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName="people"
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={() => {}}
@@ -732,6 +792,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={() => {}}
@@ -775,6 +836,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
@@ -820,6 +882,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
@@ -835,17 +898,18 @@ describe("WorkingSetList", () => {
     expect(select.className.split(/\s+/)).not.toContain("hover:bg-accent");
   });
 
-  it("rests the icon glyphs muted, highlights the hot icon, and keeps the arrow cursor", () => {
+  it("rests the icon glyphs muted, highlights the hot icon, and splits the cursor: strip arrow, select hand", () => {
     // The icon strip reads like the reference session list: each glyph rests
     // muted on the pill's accent ground and the hovered / keyboard-focused
     // icon highlights to foreground -- color alone marks the hot icon (a
-    // background tint would be invisible on the pill's own accent). The hand
-    // cursor is retired on the strip (the highlight carries the affordance);
-    // the select button keeps it.
+    // background tint would be invisible on the pill's own accent). The
+    // strip keeps the default arrow (the highlight carries the affordance);
+    // the select button's hand is pinned at the tail of this test.
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={() => {}}
@@ -866,16 +930,17 @@ describe("WorkingSetList", () => {
       expect(classes).not.toContain("cursor-pointer");
       expect(classes).not.toContain("hover:bg-accent");
     }
-    // The whole row keeps the plain arrow -- the hand cursor is retired here
-    // entirely: on the select button it flapped against the pill's arrow
-    // across the exposed slivers, and on the label span it flipped once the
-    // name tooltip surfaced (text vs everywhere else).
+    // The select button carries the hand -- its click is the row's
+    // selection, the honest affordance. The label's truncation-recovery
+    // affordance is the OS-native title now, which never touches the cursor,
+    // so the old text-vs-everywhere flip on the span is gone; the one
+    // remaining cursor edge is where the pill meets the button's tail
+    // (hand -> arrow), accepted with the hand ruling.
     const select = screen.getByRole("button", { name: /^people/ });
-    expect(select.className.split(/\s+/)).not.toContain("cursor-pointer");
-    expect(select.querySelector("span")!.className.split(/\s+/)).not.toContain("cursor-pointer");
+    expect(select.className.split(/\s+/)).toContain("cursor-pointer");
   });
 
-  it("truncates the label but not the row-count note; the full name rides the Radix tooltip (issue #790, #865)", async () => {
+  it("truncates the label but not the row-count note; the full name rides the native title (issue #790)", () => {
     const long: DatasetDescriptor = {
       ...mockDataset,
       display_name: "a-very-long-dataset-display-label",
@@ -884,22 +949,22 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[long]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
     );
     const select = screen.getByRole("button", { name: /^a-very-long/ });
-    // The native title is retired (#865); the untruncated display name moves
-    // to the app-standard Radix tooltip (the ADR-0050/0054 truncation-recovery
-    // mapping), surfaced on hover of the LABEL SPAN -- the trigger sits on the
-    // span, not the whole button, so the action pill's edges can never pop it.
-    // The span is controlled like the action hints (pointer-ENTER opens), and
-    // jsdom's pointer events need the pointerType the guard checks.
-    expect(select).not.toHaveAttribute("title");
-    fireEvent.pointerEnter(select.querySelector("span")!, { pointerType: "mouse" });
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+    // The untruncated display name rides the OS-native title on the label
+    // span (the #793 fingerprint precedent): truncation recovery with no
+    // Radix machinery -- no mutex slot, no open/close handlers, and no
+    // cursor interference (a native title never touches the cursor, which
+    // the button's hand ruling depends on).
+    expect(select.querySelector("span")).toHaveAttribute(
+      "title",
       "a-very-long-dataset-display-label",
     );
+    expect(select).not.toHaveAttribute("title");
     // Truncation lives on the label span so the trailing row-count note stays
     // visible (shrink-0, never the elided part) at any column width.
     const label = select.querySelector(".truncate");
@@ -908,19 +973,23 @@ describe("WorkingSetList", () => {
     expect(note!.className.split(/\s+/)).toContain("shrink-0");
   });
 
-  it("retires the native titles on the row controls; the action hints ride Radix tooltips (issue #865)", async () => {
+  it("keeps the native titles off the row controls; the action hints ride Radix tooltips (issue #865)", async () => {
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={() => {}}
         onDelete={() => {}}
       />,
     );
-    // All four row controls drop the OS-native title (its chrome follows the
-    // OS, not the theme tokens).
+    // All four row control BUTTONS stay free of the OS-native title (its
+    // chrome follows the OS, not the theme tokens) -- their affordances ride
+    // the theme-following Radix tooltips. The label span's title above is
+    // the one deliberate native exception: the name's truncation recovery
+    // went native with the hand-cursor ruling.
     for (const name of [/^people/, /重命名/, /换源/, /删除/]) {
       expect(screen.getByRole("button", { name })).not.toHaveAttribute("title");
     }
@@ -937,33 +1006,14 @@ describe("WorkingSetList", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
   });
 
-  it("keeps an open action hint owning the slot against a direct non-hint open (issue #865)", async () => {
-    // The mutex's guard arm: a non-hint open driven through setTip -- the
-    // name span's pointer-enter, which sets the state directly, unlike
-    // Radix-internal opens whose tooltip.open broadcast closes mounted peers
-    // before the request lands -- is rejected while an action hint owns the
-    // slot, so the tooltip keeps showing the hint under the pointer. Deleting
-    // the guard flips the tooltip to the display name (the mutant this test
-    // pins).
-    renderI18n(
-      <WorkingSetList
-        datasets={[mockDataset]}
-        activeName={null}
-        onSelect={() => {}}
-        onRename={() => {}}
-        onDelete={() => {}}
-      />,
-    );
-    const select = screen.getByRole("button", { name: /^people/ });
-    fireEvent.pointerEnter(screen.getByRole("button", { name: /删除/ }), {
-      pointerType: "mouse",
-    });
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("删除");
-    fireEvent.pointerEnter(select.querySelector("span")!, { pointerType: "mouse" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(screen.getByRole("tooltip")).toHaveTextContent("删除");
-    expect(screen.getByRole("tooltip")).not.toHaveTextContent("people");
-  });
+  // The mutex's guard arm ("an open action hint owns the slot against a
+  // direct non-hint open", issue #865) retired with its only client: the
+  // name span's direct pointer-enter open. The name's affordance is the
+  // OS-native title now, so no direct non-hint open reaches setTip anymore
+  // -- Radix-internal opens arrive on an empty slot (their tooltip.open
+  // broadcast closes mounted peers first), and the hints' direct opens are
+  // leave-then-enter ordered. The guard and this test's mutant went
+  // together.
 
   it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
     const stale: DatasetDescriptor = {
@@ -978,6 +1028,7 @@ describe("WorkingSetList", () => {
       <WorkingSetList
         datasets={[stale]}
         activeName={null}
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
         onReplace={() => {}}
@@ -1013,29 +1064,32 @@ describe("WorkingSetList", () => {
     expect(badgeClasses).not.toContain("basis-full");
   });
 
-  it("retires the ' · current table' suffix; the active fact rides the highlight alone (issue #793)", () => {
+  it("retires the ' · current table' suffix; the active fact rides the bold label alone (issue #793)", () => {
     // AC2: active was stated three ways (row suffix + tab-row Targets badge +
-    // row highlight). The suffix is deleted; the highlight (bg-accent +
-    // font-semibold) and the Targets badge keep the two remaining surfaces.
-    // The label pins to exactly the display name so a restored suffix fails
-    // in either locale: the zh catalog supplies the zh word when the key
-    // exists, and the en defaultMessage covers the partial revert where only
-    // the source hunk comes back and the catalog keys stay deleted.
+    // row highlight). The suffix is deleted, and since the band moved to the
+    // selection, the bold label and the Targets badge keep the two remaining
+    // surfaces. The label pins to exactly the display name so a restored
+    // suffix fails in either locale: the zh catalog supplies the zh word when
+    // the key exists, and the en defaultMessage covers the partial revert
+    // where only the source hunk comes back and the catalog keys stay
+    // deleted.
     renderI18n(
       <WorkingSetList
         datasets={[mockDataset]}
         activeName="people"
+        selectedName={null}
         onSelect={() => {}}
         onRename={() => {}}
       />,
     );
     const select = screen.getByRole("button", { name: /^people/ });
     expect(select.querySelector(".truncate")).toHaveTextContent(/^people$/);
-    // The highlight now lives on the row <li> (bg-accent, same band as the
-    // hover tint); the button keeps the font-semibold emphasis alone.
+    // No selection here, so no band: active alone carries NO accent -- the
+    // in-list active fact is the font-semibold label (+ the li's .active
+    // hook), the band is the selection's.
     const rowClasses = select.closest("li")!.className.split(/\s+/);
-    expect(rowClasses).toContain("bg-accent");
     expect(rowClasses).toContain("active");
+    expect(rowClasses).not.toContain("bg-accent");
     const classes = select.className.split(/\s+/);
     expect(classes).toContain("font-semibold");
     expect(classes).not.toContain("bg-accent");
