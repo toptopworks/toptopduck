@@ -475,7 +475,9 @@ pub(super) fn run_codex_event_stream(
             )
         }
         super::process::StdinWriteOutcome::Cancelled => {
-            return outcome(Termination::Cancelled, Vec::new())
+            // ADR-0115: the pre-pump relabel -- a watchdog fire during
+            // the stdin drain is generation silence past the cap.
+            return outcome(ProgressClock::cancel_landing(clock.as_ref()), Vec::new());
         }
     }
 
