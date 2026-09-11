@@ -299,7 +299,8 @@ fn route_to_unknown_slug_surfaces_unknown_server_error() {
 #[test]
 fn connect_one_injects_secrets_into_the_child_env() {
     // The gateway resolves `keychain_env_keys` at spawn (ADR-0029) and injects
-    // each value into the child env via `StdioClient::connect`. `connect_one`
+    // each value into the child env via `StdioClient::connect_with_kill`.
+    // `connect_one`
     // takes the already-resolved `SecretEnv` pairs (the keychain READ is
     // exercised by the slice B unit tests); this test verifies the INJECTION --
     // a declared secret reaches the spawned child, an undeclared key stays
@@ -694,21 +695,35 @@ fn handle_sse_stream(stream: &mut TcpStream, state: &ServerState, base_url: &str
     }
 }
 
-/// POST handler for SSE transport: process JSON-RPC, push response to the
-/// shared queue (the GET thread writes it as an SSE event), return 202.
-fn handle_sse_post(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
-    let req: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
+/// Parse one SSE POST body as JSON-RPC: a malformed body is answered with a
+/// 400 and yields `None` (shared by both SSE POST handlers).
+fn parse_sse_post(stream: &mut TcpStream, body: &[u8]) -> Option<Value> {
+    match serde_json::from_slice(body) {
+        Ok(v) => Some(v),
         Err(_) => {
             write_response(stream, 400, "text/plain", "bad json");
-            return;
+            None
         }
-    };
-    let resp = build_rpc_response(&req, "sse-fake");
+    }
+}
+
+/// The shared tail of both SSE POST handlers: push the response onto the
+/// shared queue (the GET thread writes it as an SSE event), return 202.
+fn enqueue_and_ack_sse_response(stream: &mut TcpStream, req: &Value, state: &ServerState) {
+    let resp = build_rpc_response(req, "sse-fake");
     if resp != Value::Null {
         state.sse_queue.lock().unwrap().push_back(resp.to_string());
     }
     write_response(stream, 202, "application/json", "");
+}
+
+/// POST handler for SSE transport: process JSON-RPC, push response to the
+/// shared queue (the GET thread writes it as an SSE event), return 202.
+fn handle_sse_post(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
+    let Some(req) = parse_sse_post(stream, body) else {
+        return;
+    };
+    enqueue_and_ack_sse_response(stream, &req, state);
 }
 
 /// POST handler for the silent-SSE fixture (issue #889): the handshake
@@ -717,22 +732,14 @@ fn handle_sse_post(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
 /// the GET stream -- the client's `recv` parks on a live-but-silent
 /// connection, the SSE half of the deadline shape.
 fn handle_sse_post_silent(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
-    let req: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(_) => {
-            write_response(stream, 400, "text/plain", "bad json");
-            return;
-        }
+    let Some(req) = parse_sse_post(stream, body) else {
+        return;
     };
     if req.get("method").and_then(Value::as_str) == Some("tools/call") {
         write_response(stream, 202, "application/json", "");
         return;
     }
-    let resp = build_rpc_response(&req, "sse-fake");
-    if resp != Value::Null {
-        state.sse_queue.lock().unwrap().push_back(resp.to_string());
-    }
-    write_response(stream, 202, "application/json", "");
+    enqueue_and_ack_sse_response(stream, &req, state);
 }
 
 // --- Shared JSON-RPC response builder --------------------------------------
@@ -1048,7 +1055,7 @@ fn with_tool_output_injects_env_var_into_child() {
     // `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at spawn.
     // The fake server's `echo_env` tool reflects the child process's env, so
     // routing a call to it verifies the full chain: aggregator field ->
-    // connect_transport -> StdioClient::connect -> stdio_command env injection
+    // connect_transport -> StdioClient::connect_with_kill -> stdio_command env injection
     // -> spawned child sees the var.
     use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
     let dir = "/tmp/toptopduck-test-tool-output-432";
@@ -1503,6 +1510,61 @@ fn route_after_a_server_death_fails_fast_with_server_closed() {
         matches!(err, ClientError::ServerClosed),
         "the latch normalizes every subsequent call to ServerClosed, got {err:?}"
     );
+}
+
+/// Issue #892: the connect-phase cancel gap -- the kill registry only ever
+/// held COMPLETED connects' handles and the watcher's arming ran after
+/// `connect_all`, so a token fire during the connect phase waited out each
+/// hung server's own budget sequentially (N hung servers stacked N budgets;
+/// three under the default cap held the session lock ~6 minutes). The fixed
+/// shape: each connect's kill slot is pre-registered before its handshake,
+/// the arming runs before the connects, and the gap between attempts checks
+/// the token -- the hung read is killed immediately and the not-yet-attempted
+/// servers are skipped outright.
+#[test]
+fn connect_phase_cancel_unblocks_hung_servers_without_stacking() {
+    use std::time::Instant;
+    use toptopduck_lib::cancel::CancelToken;
+
+    let cancel = Arc::new(CancelToken::new());
+    let turn_done = Arc::new(AtomicBool::new(false));
+    let mut agg = McpAggregator::empty();
+    // The post-#892 arming posture: the watcher is live BEFORE the connects
+    // (the session paths arm ahead of `connect_all`).
+    agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
+
+    let firer = Arc::clone(&cancel);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        firer.request();
+    });
+
+    // Three never-responding servers under a 60s budget each: only the
+    // CANCEL path can return inside the assertion bound (stacked deadlines
+    // would take 3+ minutes; a single unblocked-but-continuing shape still
+    // takes one full budget for every remaining server).
+    let started = Instant::now();
+    let results = agg.connect_all(
+        &[
+            hang_config("stack-1", "StackOne", 60_000),
+            hang_config("stack-2", "StackTwo", 60_000),
+            hang_config("stack-3", "StackThree", 60_000),
+        ],
+        &KeychainStore::new(),
+    );
+
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "a token fire mid-connect unblocks the hung server and skips the rest"
+    );
+    assert_eq!(results.len(), 3, "every attempt still reports an outcome");
+    for r in &results {
+        assert!(
+            !r.connected,
+            "no server connects once the fire landed: {:?}",
+            r.error
+        );
+    }
 }
 
 /// Issue #889 review H: the tools/list half of the connect-phase park --

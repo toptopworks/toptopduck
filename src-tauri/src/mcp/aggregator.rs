@@ -40,12 +40,14 @@ use crate::mcp::secrets::get_mcp_secret;
 use crate::mcp::McpClient;
 use crate::provider::keychain::KeychainStore;
 
-/// The gateway's default per-call timeout (issue #889): every MCP protocol
-/// round trip (initialize handshake, tools/list, tools/call) is bounded by
-/// this unless [`McpServerConfig::timeout_ms`] overrides it. Same order as
-/// the whole-turn wall clock ADR-0115 retired -- under the freeze semantics
-/// this bounds ONE call, not the turn, so a legitimately slow minutes-long
-/// tool still fits.
+/// The gateway's default per-call timeout (issue #889): the connect phase
+/// (initialize handshake + tools/list) shares ONE budget per server, and
+/// each `tools/call` gets its own, unless [`McpServerConfig::timeout_ms`]
+/// overrides either. Same order as the whole-turn wall clock ADR-0115
+/// retired -- under the freeze semantics this bounds ONE phase or call, not
+/// the turn: a call that outlives its budget is killed and the server is
+/// disconnected for the rest of the turn (a minutes-long single call does
+/// NOT fit under the default cap).
 pub(crate) const DEFAULT_MCP_TIMEOUT_MS: u32 = 120_000;
 
 /// How often the cancel-teardown watcher polls the token (issue #889). Same
@@ -100,9 +102,34 @@ struct AggregatedServer {
     kill: TransportKill,
     /// Latched when a deadline expired (issue #889): the transport is dead,
     /// so subsequent calls fail fast instead of re-parking for the full
-    /// deadline. Reset only by the next turn's `connect_all` (no
-    /// cross-turn health memory).
+    /// deadline. Never cleared in place -- the reset is the per-turn
+    /// aggregator itself (a fresh entry starts `dead: false`); there is no
+    /// cross-turn health memory.
     dead: bool,
+}
+
+impl AggregatedServer {
+    /// The single construction site (issue #892): `kill` always derives from
+    /// the live client's handle, so the kill/client pair cannot drift
+    /// between the aggregator's connect path and the test fixtures.
+    fn new(
+        slug: String,
+        display_name: String,
+        client: TransportClient,
+        tools: Vec<Value>,
+        timeout: Duration,
+    ) -> Self {
+        let kill = client.kill_handle();
+        Self {
+            slug,
+            display_name,
+            client: Some(client),
+            tools,
+            timeout,
+            kill,
+            dead: false,
+        }
+    }
 }
 
 /// One attempted connect this turn, retained for `mcp_list_servers`
@@ -212,12 +239,22 @@ pub struct McpAggregator {
     /// as `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at
     /// spawn. `None` in tests (no file output expected).
     tool_output_dir: Option<String>,
-    /// Every connected server's [`TransportKill`], shared with the
-    /// cancel-teardown watcher (issue #889): a token fire terminates all
-    /// transports so reads parked inside the dispatch freeze return and the
-    /// turn's scope can end. Entries for already-dead servers are harmless
-    /// (`TransportKill::kill` is idempotent).
-    kills: Arc<Mutex<Vec<TransportKill>>>,
+    /// The kill slot of every connect attempt this turn, shared with the
+    /// cancel-teardown watcher (issue #889 + #892): the slot is
+    /// pre-registered BEFORE the handshake, so a token fire terminates the
+    /// connect in flight (the parked initialize read) as well as every
+    /// completed transport -- reads parked inside the dispatch freeze or the
+    /// connect phase return and the turn's scope can end. Entries for
+    /// finished connects are harmless (`ConnectKill::expire` on a published
+    /// slot kills the same handle the client owns; `TransportKill::kill` is
+    /// idempotent).
+    kill_slots: Arc<Mutex<Vec<KillSlot>>>,
+    /// The token `arm_cancel_teardown` was called with (issue #892): lets
+    /// `connect_all` check the fire between attempts instead of spawning a
+    /// child whose connect would only be killed one budget later. `None`
+    /// until armed -- the pre-#892 arm-after-connect posture stays
+    /// behavior-free when the watcher is never armed ahead of the connects.
+    cancel: Option<Arc<CancelToken>>,
 }
 
 impl McpAggregator {
@@ -230,7 +267,8 @@ impl McpAggregator {
             servers: vec![],
             connect_records: vec![],
             tool_output_dir: None,
-            kills: Arc::new(Mutex::new(Vec::new())),
+            kill_slots: Arc::new(Mutex::new(Vec::new())),
+            cancel: None,
         }
     }
 
@@ -243,7 +281,8 @@ impl McpAggregator {
             servers: vec![],
             connect_records: vec![],
             tool_output_dir: Some(tool_output_dir),
-            kills: Arc::new(Mutex::new(Vec::new())),
+            kill_slots: Arc::new(Mutex::new(Vec::new())),
+            cancel: None,
         }
     }
 
@@ -263,6 +302,15 @@ impl McpAggregator {
     ) -> ConnectResult {
         let timeout = effective_timeout(config);
         let kill_slot: KillSlot = Arc::new(ConnectKill::default());
+        // Pre-register the slot BEFORE the handshake (issue #892): the
+        // cancel-teardown watcher expires it on a token fire mid-connect, so
+        // the parked initialize read is killed instead of waiting out this
+        // server's budget while the watcher sits on a registry that would
+        // only hold handles for COMPLETED connects.
+        self.kill_slots
+            .lock()
+            .expect("kill registry poisoned")
+            .push(Arc::clone(&kill_slot));
         let slot_for_kill = Arc::clone(&kill_slot);
         let tool_output_dir = self.tool_output_dir.clone();
         // The deadline covers connect + initialize + tools/list as one phase:
@@ -335,20 +383,13 @@ impl McpAggregator {
         let tool_count = tool_infos.len();
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
-        let kill = client.kill_handle();
-        self.kills
-            .lock()
-            .expect("kill registry poisoned")
-            .push(kill.clone());
-        self.servers.push(AggregatedServer {
+        self.servers.push(AggregatedServer::new(
             slug,
-            display_name: config.display_name.clone(),
-            client: Some(client),
+            config.display_name.clone(),
+            client,
             tools,
             timeout,
-            kill,
-            dead: false,
-        });
+        ));
         self.record_outcome(
             &config.display_name,
             &config.id,
@@ -432,6 +473,27 @@ impl McpAggregator {
                 }
             })
             .map(|server| {
+                // The between-attempts gap check (issue #892): once the
+                // token has fired, spawning the next child would only park
+                // for that server's budget (the one-shot watcher already
+                // returned after expiring the in-flight slots). Skip
+                // outright -- the skipped attempt still reports an outcome
+                // for the manifest.
+                if self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.is_requested())
+                {
+                    return self.record_outcome(
+                        &server.display_name,
+                        &server.id,
+                        ConnectOutcome::Failed {
+                            error: "skipped: the turn's cancel fired before this \
+                                    server's connect attempt"
+                                .into(),
+                        },
+                    );
+                }
                 let secrets = collect_secrets(keychain, server);
                 self.connect_one(server, &secrets)
             })
@@ -578,15 +640,13 @@ impl McpAggregator {
             "http://127.0.0.1:{port}"
         ));
         let mut agg = Self::empty();
-        agg.servers.push(AggregatedServer {
-            slug: slugify(display_name, &id),
-            display_name: display_name.to_string(),
-            client: Some(TransportClient::Http(client)),
+        agg.servers.push(AggregatedServer::new(
+            slugify(display_name, &id),
+            display_name.to_string(),
+            TransportClient::Http(client),
             tools,
-            timeout: Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
-            kill: TransportKill::Http,
-            dead: false,
-        });
+            Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
+        ));
         agg
     }
 
@@ -612,8 +672,6 @@ impl McpAggregator {
         }
         let timeout = server.timeout;
         let kill = server.kill.clone();
-        let display_name = server.display_name.clone();
-        let tool_for_error = tool.clone();
         // The worker OWNS the client for the call's duration (issue #889
         // review): a kill-resistant server shape leaves the worker parked
         // past the grace, and the client leaks with it -- which is what
@@ -663,6 +721,14 @@ impl McpAggregator {
                 // an unwound-proof worker (the client slot stays `None`
                 // either way -- a leaked worker owns it).
                 server.dead = true;
+                // Cold-branch attribution (issue #892): the error path is
+                // the expiry arm's only consumer of these names, so the
+                // clones moved here off the hot path (the tool re-derives
+                // from the handle this route already validated).
+                let display_name = server.display_name.clone();
+                let tool_for_error = parse_namespaced(namespaced)
+                    .expect("route validated the handle before dispatching")
+                    .1;
                 log::warn!(
                     target: "toptopduck::mcp",
                     "MCP server {} tools/call `{}` timed out after {}ms; \
@@ -680,36 +746,39 @@ impl McpAggregator {
         }
     }
 
-    /// Arm the turn's cancel-aware teardown (issue #889). The spawned watcher
-    /// polls the shared token; when it fires (user stop or a watchdog kill --
-    /// under ADR-0115 both are a token fire) while the turn is still live,
-    /// every connected transport is terminated so blocking reads parked
-    /// inside the dispatch freeze return, the engine's `thread::scope` can
-    /// end, and the session lock is released. `turn_done` is the watcher's
-    /// stand-down signal: a turn that finished normally owns its teardown
-    /// through the aggregator's `Drop`, so the watcher exits without
-    /// killing.
-    pub fn arm_cancel_teardown(&self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
-        let kills = Arc::clone(&self.kills);
+    /// Arm the turn's cancel-aware teardown (issue #889; connect phase added
+    /// by #892). The spawned watcher polls the shared token; when it fires
+    /// (user stop or a watchdog kill -- under ADR-0115 both are a token
+    /// fire) while the turn is still live, every registry slot is expired --
+    /// a completed transport's kill fires, an in-flight connect's parked
+    /// handshake read is killed -- so blocking reads parked inside the
+    /// dispatch freeze OR the connect phase return, the engine's
+    /// `thread::scope` can end, and the session lock is released. Arming
+    /// BEFORE `connect_all` additionally activates the between-attempts gap
+    /// check there. `turn_done` is the watcher's stand-down signal: a turn
+    /// that finished normally owns its teardown through the aggregator's
+    /// `Drop`, so the watcher exits without killing.
+    pub fn arm_cancel_teardown(&mut self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
+        self.cancel = Some(Arc::clone(&cancel));
+        let kill_slots = Arc::clone(&self.kill_slots);
         let spawned = thread::Builder::new()
             .name("mcp-cancel-teardown".into())
             .spawn(move || loop {
-                if cancel.is_requested() {
-                    if !turn_done.load(Ordering::SeqCst) {
-                        eprintln!(
-                            "[WATCHDOG-PROBE] fire seen, killing {} transports",
-                            kills.lock().expect("kill registry poisoned").len()
-                        );
-                        for kill in kills.lock().expect("kill registry poisoned").iter() {
-                            kill.kill();
-                        }
-                        eprintln!("[WATCHDOG-PROBE] kills issued");
-                    } else {
-                        eprintln!("[WATCHDOG-PROBE] fire seen but turn_done, standing down");
-                    }
+                // Stand-down check first (issue #892 fold): a finished turn
+                // owns its teardown through the aggregator's `Drop` -- the
+                // two turn_done reads collapse into this one early return.
+                if turn_done.load(Ordering::SeqCst) {
                     return;
                 }
-                if turn_done.load(Ordering::SeqCst) {
+                if cancel.is_requested() {
+                    eprintln!(
+                        "[WATCHDOG-PROBE] fire seen, expiring {} kill slots",
+                        kill_slots.lock().expect("kill registry poisoned").len()
+                    );
+                    for slot in kill_slots.lock().expect("kill registry poisoned").iter() {
+                        slot.expire();
+                    }
+                    eprintln!("[WATCHDOG-PROBE] kills issued");
                     return;
                 }
                 thread::sleep(CANCEL_TEARDOWN_POLL);
@@ -783,9 +852,10 @@ impl Drop for TurnDoneFlag {
 /// Resolve a server's per-call deadline (issue #889):
 /// [`McpServerConfig::timeout_ms`] overrides the gateway default; `None`
 /// (or a config written before the field existed) falls back to
-/// [`DEFAULT_MCP_TIMEOUT_MS`]. The value is NOT validated here -- the
-/// config-layer contract routes 0 / huge values to a gateway fault at call
-/// time, not a config reject.
+/// [`DEFAULT_MCP_TIMEOUT_MS`]. The value is NOT validated here -- a 0
+/// surfaces as an immediate gateway fault at call time (a 0 ms budget
+/// expires at once), while a huge value simply removes the cap; neither is
+/// a config reject.
 fn effective_timeout(config: &McpServerConfig) -> Duration {
     Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_MCP_TIMEOUT_MS) as u64)
 }
