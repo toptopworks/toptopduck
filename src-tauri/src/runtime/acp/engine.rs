@@ -21,7 +21,7 @@
 //!
 //! Execution-level safety net (ADR-0081 as redefined by ADR-0115): a step
 //! cap (tool-call count, default [`DEFAULT_STEP_CAP`]) + a NO-PROGRESS
-//! watchdog (default [`DEFAULT_WALL_CLOCK`]) fire `session/cancel`; a stuck
+//! watchdog (default [`DEFAULT_NO_PROGRESS_CAP`]) fire `session/cancel`; a stuck
 //! agent that does not return within [`CANCEL_GRACE`] is killed (cancel =
 //! 整轮中止, ADR-0081). The watchdog times only the generation segment --
 //! inbound stream lines re-arm it, external-wait segments freeze it
@@ -58,7 +58,7 @@ use crate::runtime::acp::wire::{
 };
 use crate::session::loop_contract::{
     truncate_trace_excerpt, DiscoveredRuntime, LoopOutcome, LoopRound, Termination, TraceEntry,
-    DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK, TRACE_EXCERPT_MAX,
+    DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, TRACE_EXCERPT_MAX,
 };
 use crate::session::progress::ProgressClock;
 
@@ -150,27 +150,27 @@ pub struct AcpEngine {
     adapter: AdapterSpec,
     cancel: Arc<CancelToken>,
     step_cap: u32,
-    wall_clock: Option<Duration>,
+    no_progress_cap: Option<Duration>,
 }
 
 impl AcpEngine {
-    /// Build an engine with the ADR-0081 defaults (step cap 24, wall-clock
-    /// 120s) -- the SAME defaults as the built-in loop, so the two runtimes
+    /// Build an engine with the ADR-0081 defaults (step cap 24, no-progress
+    /// cap 120s) -- the SAME defaults as the built-in loop, so the two runtimes
     /// share one execution-level safety net.
     pub fn new(adapter: AdapterSpec, cancel: Arc<CancelToken>) -> Self {
         Self {
             adapter,
             cancel,
             step_cap: DEFAULT_STEP_CAP,
-            wall_clock: Some(DEFAULT_WALL_CLOCK),
+            no_progress_cap: Some(DEFAULT_NO_PROGRESS_CAP),
         }
     }
 
     /// Override the default caps (test seam: the step-cap test drives the step
-    /// cap deterministically; the watchdog test drives a short wall-clock).
-    pub fn with_caps(mut self, step_cap: u32, wall_clock: Option<Duration>) -> Self {
+    /// cap deterministically; the watchdog test drives a short cap).
+    pub fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
         self.step_cap = step_cap;
-        self.wall_clock = wall_clock;
+        self.no_progress_cap = no_progress_cap;
         self
     }
 
@@ -197,7 +197,7 @@ impl AcpEngine {
                 &self.adapter,
                 Arc::clone(&self.cancel),
                 self.step_cap,
-                self.wall_clock,
+                self.no_progress_cap,
                 input,
                 binary,
                 approval,
@@ -208,7 +208,7 @@ impl AcpEngine {
                 &self.adapter,
                 Arc::clone(&self.cancel),
                 self.step_cap,
-                self.wall_clock,
+                self.no_progress_cap,
                 input,
                 binary,
                 approval,
@@ -237,7 +237,7 @@ impl AcpEngine {
         // non-convergence the cap exists for); the pump notices a fired
         // token via cancel.is_requested() and sends session/cancel.
         let clock = self
-            .wall_clock
+            .no_progress_cap
             .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
         // Spawn the CLI. Any spawn failure lands as an external-runtime
         // failure (the engine never panics into the host).

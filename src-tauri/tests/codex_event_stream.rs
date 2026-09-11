@@ -67,7 +67,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// outcome, the phase stream, and the turn's elapsed time (measured AFTER the
 /// scenario lock is held -- the harness runs tests in parallel, and the
 /// lock-queue wait is not the engine's latency; the step-cap pin relies on
-/// this). Uses a short wall-clock (5s) so a stuck scenario fails fast.
+/// this). Uses a short no-progress cap (5s) so a stuck scenario fails fast.
 fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     run_with_cap(scenario, step_cap, std::time::Duration::from_secs(5))
 }
@@ -77,10 +77,10 @@ fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time
 fn run_with_cap(
     scenario: &str,
     step_cap: u32,
-    wall: std::time::Duration,
+    cap: std::time::Duration,
 ) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(codex(), cancel).with_caps(step_cap, Some(wall));
+    let eng = AcpEngine::new(codex(), cancel).with_caps(step_cap, Some(cap));
     let approval = ApprovalState::new();
     let mut phases = Vec::new();
     let _g = ENV_LOCK.lock().unwrap();
@@ -531,7 +531,7 @@ fn empty_stdout_lands_as_runtime() {
 #[test]
 fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the user-cancel path alone (the acp_engine.rs
+    // No no-progress cap: the user-cancel path alone (the acp_engine.rs
     // `user_cancel_aborts_the_whole_turn` peer's rationale); the fixture's
     // 30s hold fails loudly if the cancel misses.
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
@@ -598,7 +598,7 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
 #[test]
 fn cancel_during_blocked_stdin_write_settles_the_turn() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the user cancel alone must break the blocked write (the
+    // No no-progress cap: the user cancel alone must break the blocked write (the
     // `user_cancel_mid_prose_keeps_partial_prose_in_trace` peer's rationale);
     // the fixture's 30s hold fails loudly if the cancel cannot.
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);

@@ -2167,7 +2167,7 @@ pub async fn open_duck(
         // Stamp the resumed session's identity (#886): a resumed Session
         // reopens under the SAME id, so its no-progress kill log attributes
         // to the session the file belongs to.
-        new_session.set_session_id(sid.clone());
+        stamp_resumed_identity(&mut new_session, &sid);
         // ADR-0063: re-arm the close-and-wait-release drop signal for the
         // resumed session. Install a fresh (sender, receiver) pair: the sender
         // goes into the NEW session (its Drop will fire it after the canonical
@@ -2884,6 +2884,16 @@ fn resume_runtime_choice(
             Some(spec)
         }
     }
+}
+
+/// Stamp the resumed session's identity (#886, the seam split of #890): a
+/// reopened Session keeps the SAME id, so its no-progress kill log
+/// attributes to the session the file belongs to. Extracted from the resume
+/// closure so the wiring is testable without an AppHandle (the
+/// [`apply_resumed_postures`] precedent); the closure's CALL of this seam
+/// stays an accepted blind spot, same as the postures seam.
+fn stamp_resumed_identity(session: &mut Session, sid: &SessionId) {
+    session.set_session_id(sid.clone());
 }
 
 /// Apply the resumed session's postures to the handle after the swap
@@ -3858,6 +3868,35 @@ mod tests {
                 detected_ids(&["gemini-cli", "codex"])
             ),
             None
+        );
+    }
+
+    /// #890: the resume seam stamps the SAME id onto the reopened Session
+    /// -- the kill log's session attribution on a resumed turn rides this
+    /// stamp (#886), and nothing else would catch its deletion (the store's
+    /// create half is pinned in session_store; this is the resume half).
+    /// The closure's CALL of the seam is the accepted blind spot declared
+    /// on the seam (the `apply_resumed_postures` precedent).
+    #[test]
+    fn resume_stamp_carries_the_sessions_id_onto_the_reopened_session() {
+        let mut session = Session::with_provider_and_cancel(
+            Box::new(crate::UnwiredProvider),
+            Arc::new(CancelToken::new()),
+            Default::default(),
+        )
+        .expect("a bare session wires without a store");
+        assert_eq!(
+            session.session_id(),
+            None,
+            "a store-less Session is unstamped before the resume seam runs"
+        );
+        let id = SessionId::parse("550e8400-e29b-41d4-a716-446655440000")
+            .expect("well-formed id parses");
+        stamp_resumed_identity(&mut session, &id);
+        assert_eq!(
+            session.session_id(),
+            Some(&id),
+            "the reopened Session carries the SAME id the handle knows"
         );
     }
 

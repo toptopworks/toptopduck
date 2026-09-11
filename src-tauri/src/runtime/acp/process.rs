@@ -40,7 +40,7 @@ pub(super) const PUMP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// blocks until the child is reaped; on Linux the stdio bridge (spawned by the
 /// agent as its MCP server) inherits the agent's stdout write-end, so the
 /// engine's reader pipe does not EOF and the inherited-stderr chain can keep
-/// the process tree alive long enough to wedge `wait` past the wall-clock
+/// the process tree alive long enough to wedge `wait` past the no-progress
 /// watchdog. Poll `try_wait` under this grace instead: on POSIX the kill is
 /// delivered immediately (SIGKILL) so the agent is normally reaped on the first
 /// poll, and a wedged reap cannot hang the turn — on POSIX the resulting
@@ -422,19 +422,32 @@ impl DiscardLog {
 /// shape; the tail adds nothing.
 const DISCARD_EXCERPT_CHARS: usize = 80;
 
+/// The warn line for one stride-warranted discard (#890): face + running
+/// count + the excerpted line, separated from [`note_discard`] as a pure
+/// function so the wording is unit-pinnable (the crate has no log-capture
+/// harness; the pump loops' CALL wiring itself stays an accepted blind
+/// spot -- deleting a call site is log-silent by construction).
+pub(super) fn discard_warn_line(face: &str, count: u64, line: &str) -> String {
+    format!(
+        "{face}: discarded unparseable stdout line #{count}: {}",
+        crate::util::truncate_chars_with_ellipsis(line, DISCARD_EXCERPT_CHARS)
+    )
+}
+
 /// Record one discarded line and, when the stride warrants it, warn --
 /// the pump loops' one call for a top-level parse discard (#886): a
 /// garbage stream otherwise reads as healthy turn activity (every
 /// inbound line re-arms the no-progress clock), so the discard stays
 /// answerable in logs without flooding them. ONE shape for all three
 /// pump loops so the wording cannot drift; the counting stays inside
-/// [`DiscardLog::record`] so the stride is unit-pinnable.
+/// [`DiscardLog::record`] so the stride is unit-pinnable, and the line
+/// shape inside [`discard_warn_line`] for the same reason.
 pub(super) fn note_discard(discards: &mut DiscardLog, face: &str, line: &str) {
     if let Some(count) = discards.record() {
         log::warn!(
             target: "toptopduck::acp",
-            "{face}: discarded unparseable stdout line #{count}: {}",
-            crate::util::truncate_chars_with_ellipsis(line, DISCARD_EXCERPT_CHARS)
+            "{}",
+            discard_warn_line(face, count, line)
         );
     }
 }
@@ -457,6 +470,36 @@ mod tests {
             log.record(),
             Some(DISCARD_WARN_STRIDE + 1),
             "the stride boundary warns"
+        );
+    }
+
+    /// #890: the stride-warranted warn line names the face, the running
+    /// count, and an excerpted head of the discarded line -- the pure
+    /// shape `note_discard` logs, pinned here because the crate has no
+    /// log-capture harness (the pump-loop call wiring stays an accepted
+    /// blind spot).
+    #[test]
+    fn discard_warn_line_names_face_count_and_excerpt() {
+        let short = discard_warn_line("codex", 1, "not json");
+        assert_eq!(
+            short, "codex: discarded unparseable stdout line #1: not json",
+            "a short line rides the warn verbatim"
+        );
+        // A firehose-length line is excerpted to the budget (head chars +
+        // ellipsis), so the warn stays bounded no matter what the CLI emits.
+        let head = "x".repeat(DISCARD_EXCERPT_CHARS * 2);
+        let excerpted = discard_warn_line("claude", 42, &head);
+        let tail = excerpted
+            .strip_prefix("claude: discarded unparseable stdout line #42: ")
+            .expect("the prefix anchors face + count");
+        assert_eq!(
+            tail.chars().count(),
+            DISCARD_EXCERPT_CHARS,
+            "the excerpt fills exactly the budget: {excerpted}"
+        );
+        assert!(
+            tail.ends_with('…'),
+            "the budget's last char is the ellipsis"
         );
     }
 

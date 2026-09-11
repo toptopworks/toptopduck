@@ -411,7 +411,7 @@ pub(super) fn run_codex_event_stream(
     adapter: &AdapterSpec,
     cancel: Arc<CancelToken>,
     step_cap: u32,
-    wall_clock: Option<Duration>,
+    no_progress_cap: Option<Duration>,
     input: &super::engine::AcpTurnInput,
     binary: &Path,
     _approval: &crate::approval::ApprovalState,
@@ -428,7 +428,7 @@ pub(super) fn run_codex_event_stream(
     // silent native codex command running past the cap is exactly the
     // legal-wait shape the cap must not kill. Gateway-routed calls are
     // additionally covered by the gateway's own serve-side freeze.
-    let clock = wall_clock
+    let clock = no_progress_cap
         .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
 
     // Spawn codex exec --json with the bridge injected via -c overrides +
