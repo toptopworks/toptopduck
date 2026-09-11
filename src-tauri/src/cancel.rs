@@ -135,6 +135,19 @@ impl CancelToken {
         self.fire_interrupt();
     }
 
+    /// Consume a request flag that belongs to no turn: the MCP aggregator's
+    /// arming calls this ahead of the turn's connects (which run before
+    /// [`Self::begin_turn`]), so its gap check and watcher do not act on a
+    /// flag the coming turn never owned -- a stop clicked while idle is
+    /// documented as a no-op. `begin_turn` would clear the flag anyway (its
+    /// swap wipes the request bit); this moves the clear ahead of the
+    /// connect phase. A request racing this clear lands after it and is
+    /// wiped by `begin_turn` exactly as before (ADR-0021: the
+    /// nondeterminism is unchanged).
+    pub(crate) fn clear_stale_request(&self) {
+        self.state.fetch_and(!1, Ordering::SeqCst);
+    }
+
     /// Fire the cancel only when `generation` is still the current turn's:
     /// the no-progress watchdog's turn identity (issue #696). The generation
     /// and the request flag share one atomic word, so a turn boundary

@@ -1565,6 +1565,61 @@ fn connect_phase_cancel_unblocks_hung_servers_without_stacking() {
             r.error
         );
     }
+    // The direction and wording pins (issue #892 review): the parked server
+    // died a transport death (the watcher expired its in-flight handshake),
+    // NOT a skip -- while the unstarted ones carry the skip reason, which is
+    // also the manifest-source string. An inverted gap check (armed -> skip
+    // everything unconditionally) turns the first assertion red at 0s.
+    assert!(
+        !results[0]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("skipped"),
+        "the parked server's failure is the killed transport, not a skip: {:?}",
+        results[0].error
+    );
+    for r in &results[1..] {
+        assert!(
+            r.error.as_deref().is_some_and(|e| e.contains("skipped")),
+            "unstarted servers must record the skip reason: {:?}",
+            r.error
+        );
+    }
+}
+
+/// Issue #892 review (the stale-request half): a stop clicked while no turn
+/// is in flight is documented as a no-op besides the flag ("which the next
+/// `ask` resets before it starts") -- but the gap check reads the flag
+/// before the turn's `begin_turn` clears it, so without the arming consuming
+/// the stale flag, every enabled server of the next turn would be skipped
+/// outright while the turn itself runs on. The arming clears it; the
+/// connect proceeds normally.
+#[test]
+fn arming_consumes_a_stale_cancel_request_before_the_connects() {
+    use toptopduck_lib::cancel::CancelToken;
+
+    let cancel = Arc::new(CancelToken::new());
+    // A stop while idle: the flag latches, no turn ever claims it.
+    cancel.request();
+    assert!(cancel.is_requested(), "precondition: the stale flag is set");
+
+    let turn_done = Arc::new(AtomicBool::new(false));
+    let mut agg = McpAggregator::empty();
+    // The post-#892 arming posture (ahead of the connects, as both session
+    // paths do) -- this is the call that must consume the stale flag.
+    agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
+
+    // A healthy fake server: the stale request must not skip it. Under the
+    // mutant (arming does not clear), this lands as the gap check's
+    // "skipped" outcome and connected=false.
+    let results = agg.connect_all(&[fake_config("stale-1", "StaleOne")], &KeychainStore::new());
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].connected,
+        "a stale idle-time stop must not skip the next turn's connects: {:?}",
+        results[0].error
+    );
 }
 
 /// Issue #889 review H: the tools/list half of the connect-phase park --

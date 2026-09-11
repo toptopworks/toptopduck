@@ -1706,8 +1706,10 @@ impl Session {
             // alongside the built-in table and routes namespaced tools/call
             // back through the aggregator. A failed connect logs + skips that
             // server rather than failing the turn (McpAggregator::connect_all
-            // / connect_one); the spawned children die with the aggregator at
-            // scope end. The per-server connect outcomes are discarded (the
+            // / connect_one); the spawned children die with the aggregator
+            // when the `GatewayCtx` that owns it returns from
+            // `serve_connection`, below. The per-server connect outcomes are
+            // discarded (the
             // per-session status IPC that consumed them is retired, ADR-0106;
             // a failed connect logs + skips inside connect_one).
             let mut mcp =

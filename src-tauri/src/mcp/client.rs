@@ -34,8 +34,9 @@
 //! cross-turn state, no session-level handle. Per-call timeouts are NOT
 //! enforced per-read here: the transports carry no per-call deadline of
 //! their own (a stdio read ends only at the child's stdout EOF, an SSE
-//! channel recv ends only when the reader exits -- at most one
-//! [`SSE_READ_TIMEOUT`] wake after the stop flag -- and an HTTP read ends
+//! channel recv ends only when the reader exits -- within one
+//! [`SSE_READ_TIMEOUT`] wake of the stop flag while parked in an idle
+//! read -- and an HTTP read ends
 //! at its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
 //! layer up -- the aggregator parks the blocking call on a worker thread
 //! and enforces
@@ -96,9 +97,12 @@ pub enum TransportKill {
     /// Terminate the spawned stdio child. Shared with the client's `Drop`
     /// (kill + reap stay single-owner through the mutex).
     StdioChild(Arc<Mutex<Child>>),
-    /// Signal the SSE reader thread to stop. The reader sits in a blocking
-    /// read that only notices the flag on its next wake -- at most one
-    /// `SSE_READ_TIMEOUT` away -- so the stop lands within that bound.
+    /// Signal the SSE reader thread to stop. While parked in an idle read
+    /// the reader notices the flag on its next wake -- at most one
+    /// `SSE_READ_TIMEOUT` away. The kill-resistant shapes exceed that
+    /// bound (absorbed by the caller's grace, not by the stop): a
+    /// slow-drip stream that keeps the reader inside `read_sse_event`, and
+    /// a reader blocked in a full-channel send.
     SseStop(Arc<AtomicBool>),
     /// Nothing to terminate (HTTP is per-read bounded).
     Http,
@@ -136,8 +140,8 @@ impl TransportKill {
 }
 
 /// The shared deadline-vs-spawn rendezvous for one connect (issue #889).
-/// The transport [`publish`](ConnectKill::publish)es its [`TransportKill`]
-/// the moment the killable resource exists; the deadline side `expire`s on
+/// The transport `publish`es its [`TransportKill`] the moment the killable
+/// resource exists; the deadline side `expire`s on
 /// timeout. The two directions race:
 /// expiry may land before spawn finishes (the handle is not published yet),
 /// so publish re-checks the expired flag and self-terminates -- otherwise
@@ -155,7 +159,7 @@ impl ConnectKill {
     /// in practice -- a second publish would silently overwrite the slot,
     /// dropping the first handle without killing it (no current caller
     /// publishes twice).
-    pub fn publish(&self, kill: TransportKill) {
+    pub(crate) fn publish(&self, kill: TransportKill) {
         *self.handle.lock().expect("kill slot poisoned") = Some(kill.clone());
         if self.expired.load(Ordering::SeqCst) {
             kill.kill();
@@ -552,8 +556,9 @@ fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
 /// Only the stdio transport is constructed here; SSE / HTTP transports have
 /// their own client types ([`SseClient`], [`HttpClient`]). The dispatcher
 /// [`connect_transport`] routes by transport variant; a non-stdio config
-/// fails loudly in `stdio_command`'s `UnsupportedTransport` guard rather
-/// than silently spawning a bogus child.
+/// handed straight to `connect_with_kill` still fails loudly in
+/// `stdio_command`'s `UnsupportedTransport` guard rather than silently
+/// spawning a bogus child.
 pub struct StdioClient {
     inner: FramedClient<BufReader<ChildStdout>, ChildStdin>,
     /// Shared so the deadline / cancel-kill paths can terminate the child
@@ -1273,7 +1278,8 @@ pub enum ClientError {
     Http(String),
     /// The per-call deadline expired (issue #889): `server` names the
     /// configured server, `call` the protocol step that hung
-    /// (`initialize` / `tools/list` / the `tools/call` tool name), and
+    /// (`connect (initialize/tools/list)` for the connect phase -- one
+    /// shared budget, issue #892 -- or the `tools/call` tool name), and
     /// `timeout_ms` the effective budget (per-server override or gateway
     /// default). The transport was terminated -- subsequent calls to this
     /// server fail fast for the rest of the turn.

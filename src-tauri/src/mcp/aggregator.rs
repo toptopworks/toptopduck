@@ -447,7 +447,11 @@ impl McpAggregator {
     /// [`env`](McpServerConfig::env). A server that fails to connect is logged
     /// and skipped via [`Self::connect_one`] -- a misconfigured server does
     /// not brick the turn -- and surfaces as `connected: false` in the
-    /// returned slice. ADR-0106 defense-in-depth: entries with
+    /// returned slice. A token fire between attempts (issue #892, active
+    /// only when armed ahead of the connects) skips the remaining servers
+    /// outright -- no spawn, no keychain read -- each still surfacing as
+    /// `connected: false` with the skip reason. ADR-0106 defense-in-depth:
+    /// entries with
     /// `enabled: false` are skipped here outright -- the semantic axis is
     /// [`LiveProviderConfig::enabled_mcp_servers`](crate::provider::LiveProviderConfig::enabled_mcp_servers),
     /// but this guard holds the dormancy line (no connect, no spawn, no
@@ -484,6 +488,18 @@ impl McpAggregator {
                     .as_ref()
                     .is_some_and(|cancel| cancel.is_requested())
                 {
+                    // Every sibling skip path logs (disabled at config
+                    // level, connect fault, phase timeout); the cancelled
+                    // skip must too -- it is the only trace the dying turn
+                    // leaves (the session paths discard the returned slice,
+                    // and no agent lists servers against a dying turn's
+                    // aggregator).
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} skipped: the turn's cancel fired before \
+                         its connect attempt",
+                        server.id
+                    );
                     return self.record_outcome(
                         &server.display_name,
                         &server.id,
@@ -760,6 +776,13 @@ impl McpAggregator {
     /// `Drop`, so the watcher exits without killing.
     pub fn arm_cancel_teardown(&mut self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
         self.cancel = Some(Arc::clone(&cancel));
+        // Consume any stale request before the connects (issue #892
+        // review): arming runs before the turn's `begin_turn` (which would
+        // clear the flag anyway), and the gap check below must not act on a
+        // flag this coming turn never owned -- a stop clicked while idle is
+        // documented as a no-op, so the next turn must not skip its entire
+        // MCP fleet over it.
+        cancel.clear_stale_request();
         let kill_slots = Arc::clone(&self.kill_slots);
         let spawned = thread::Builder::new()
             .name("mcp-cancel-teardown".into())
@@ -771,14 +794,22 @@ impl McpAggregator {
                     return;
                 }
                 if cancel.is_requested() {
-                    eprintln!(
-                        "[WATCHDOG-PROBE] fire seen, expiring {} kill slots",
-                        kill_slots.lock().expect("kill registry poisoned").len()
+                    // One lock-and-snapshot: the count and the expiry pass
+                    // share it. Through the log facade (issue #892 review):
+                    // raw stderr is dropped in release builds (the windows
+                    // subsystem has no console), and cancel-teardown events
+                    // are exactly the diagnostics a stuck-session report
+                    // needs.
+                    let slots = kill_slots.lock().expect("kill registry poisoned");
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "cancel fired mid-turn; expiring {} MCP kill slots \
+                         (in-flight connects and completed transports)",
+                        slots.len()
                     );
-                    for slot in kill_slots.lock().expect("kill registry poisoned").iter() {
+                    for slot in slots.iter() {
                         slot.expire();
                     }
-                    eprintln!("[WATCHDOG-PROBE] kills issued");
                     return;
                 }
                 thread::sleep(CANCEL_TEARDOWN_POLL);
@@ -1090,8 +1121,9 @@ mod tests {
     }
 
     /// `None` (unset / pre-field legacy config) falls back to the gateway
-    /// default; `Some` overrides verbatim -- the config contract routes 0 /
-    /// huge values to a gateway fault at call time, NOT a config reject, so
+    /// default; `Some` overrides verbatim -- a 0 surfaces as an immediate
+    /// gateway fault at call time (a 0 ms budget expires at once) and a
+    /// huge value simply removes the cap; neither is a config reject, so
     /// 0 resolves to a 0 ms budget unparsed.
     #[test]
     fn effective_timeout_none_defaults_some_overrides_verbatim() {
