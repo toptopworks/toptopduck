@@ -1375,18 +1375,24 @@ impl Session {
                     let mut mcp = crate::mcp::aggregator::McpAggregator::with_tool_output(
                         self.tool_output_path(),
                     );
-                    mcp.connect_all(inputs.mcp_servers, inputs.keychain);
-                    // Cancel-aware teardown (issue #889): a token fire while
-                    // the loop is live terminates every connected transport,
-                    // unblocking a tools/call parked inside the dispatch
-                    // freeze. The flag is RAII ([`TurnDoneFlag`]): dropping
-                    // it at block end stands the watcher down whatever way
-                    // the block exits -- normal return or a panicking turn
-                    // -- so a normally finished turn tears down through the
+                    // Cancel-aware teardown (issue #889; connect phase added
+                    // by #892): a token fire while the loop is live
+                    // terminates every connected transport, unblocking a
+                    // tools/call parked inside the dispatch freeze. Arming
+                    // runs BEFORE `connect_all` (#892): the watcher expires
+                    // each pre-registered connect slot, so a token fire
+                    // during the connect phase kills the parked handshake
+                    // read instead of waiting out each hung server's budget
+                    // (the between-attempts gap check rides the same token).
+                    // The flag is RAII ([`TurnDoneFlag`]): dropping it at
+                    // block end stands the watcher down whatever way the
+                    // block exits -- normal return or a panicking turn -- so
+                    // a normally finished turn tears down through the
                     // aggregator's own `Drop` and a panicking turn cannot
                     // leak its poller.
                     let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
                     mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
+                    mcp.connect_all(inputs.mcp_servers, inputs.keychain);
                     request.tools.extend(mcp.meta_tool_definitions());
                     // ADR-0108 Decision 6: the enabled CLI registrations are
                     // DIRECT-LISTED into the tool table (never via the
@@ -1700,22 +1706,30 @@ impl Session {
             // alongside the built-in table and routes namespaced tools/call
             // back through the aggregator. A failed connect logs + skips that
             // server rather than failing the turn (McpAggregator::connect_all
-            // / connect_one); the spawned children die with the aggregator at
-            // scope end. The per-server connect outcomes are discarded (the
+            // / connect_one); the spawned children die with the aggregator
+            // when the `GatewayCtx` that owns it returns from
+            // `serve_connection`, below. The per-server connect outcomes are
+            // discarded (the
             // per-session status IPC that consumed them is retired, ADR-0106;
             // a failed connect logs + skips inside connect_one).
             let mut mcp =
                 crate::mcp::aggregator::McpAggregator::with_tool_output(self.tool_output_path());
-            mcp.connect_all(inputs.mcp_servers, inputs.keychain);
-            // Cancel-aware teardown (issue #889): `engine_done` doubles as
-            // the stand-down signal -- the engine pump returning means the
-            // turn is unwinding through its own path (serve's loop-top check
-            // exits it; the aggregator drops at scope end). A token fire
-            // while the pump is still parked (the whole CLI -> bridge ->
-            // serve chain waits on a frozen MCP call) kills the transports,
-            // the parked read returns `ServerClosed`, serve unwinds, and the
-            // scope can end -- the session lock is released.
+            // Cancel-aware teardown (issue #889; connect phase added by
+            // #892): `engine_done` doubles as the stand-down signal -- the
+            // engine pump returning means the turn is unwinding through its
+            // own path (serve's loop-top check exits it; the aggregator
+            // drops when the `GatewayCtx` that owns it returns from
+            // `serve_connection`, below). Arming runs BEFORE `connect_all`
+            // (#892): the watcher expires each pre-registered connect slot,
+            // so a token fire during the connect phase kills the parked
+            // handshake read instead of waiting out each hung server's
+            // budget (the between-attempts gap check rides the same token).
+            // A token fire while the pump is still parked (the whole CLI ->
+            // bridge -> serve chain waits on a frozen MCP call) kills the
+            // transports, the parked read returns `ServerClosed`, serve
+            // unwinds, and the scope can end -- the session lock is released.
             mcp.arm_cancel_teardown(Arc::clone(&self.cancel), Arc::clone(&engine_done));
+            mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,

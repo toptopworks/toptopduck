@@ -34,8 +34,9 @@
 //! cross-turn state, no session-level handle. Per-call timeouts are NOT
 //! enforced per-read here: the transports carry no per-call deadline of
 //! their own (a stdio read ends only at the child's stdout EOF, an SSE
-//! channel recv ends only when the reader exits -- at most one
-//! [`SSE_READ_TIMEOUT`] wake after the stop flag -- and an HTTP read ends
+//! channel recv ends only when the reader exits -- within one
+//! [`SSE_READ_TIMEOUT`] wake of the stop flag while parked in an idle
+//! read -- and an HTTP read ends
 //! at its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
 //! layer up -- the aggregator parks the blocking call on a worker thread
 //! and enforces
@@ -96,7 +97,12 @@ pub enum TransportKill {
     /// Terminate the spawned stdio child. Shared with the client's `Drop`
     /// (kill + reap stay single-owner through the mutex).
     StdioChild(Arc<Mutex<Child>>),
-    /// Signal the SSE reader thread to stop.
+    /// Signal the SSE reader thread to stop. While parked in an idle read
+    /// the reader notices the flag on its next wake -- at most one
+    /// `SSE_READ_TIMEOUT` away. The kill-resistant shapes exceed that
+    /// bound (absorbed by the caller's grace, not by the stop): a
+    /// slow-drip stream that keeps the reader inside `read_sse_event`, and
+    /// a reader blocked in a full-channel send.
     SseStop(Arc<AtomicBool>),
     /// Nothing to terminate (HTTP is per-read bounded).
     Http,
@@ -134,9 +140,9 @@ impl TransportKill {
 }
 
 /// The shared deadline-vs-spawn rendezvous for one connect (issue #889).
-/// The transport [`publish`](ConnectKill::publish)es its [`TransportKill`]
-/// the moment the killable resource exists; the deadline side
-/// [`expire`](ConnectKill::expire)s on timeout. The two directions race:
+/// The transport `publish`es its [`TransportKill`] the moment the killable
+/// resource exists; the deadline side `expire`s on
+/// timeout. The two directions race:
 /// expiry may land before spawn finishes (the handle is not published yet),
 /// so publish re-checks the expired flag and self-terminates -- otherwise
 /// the worker would park on the handshake read after the deadline with
@@ -149,8 +155,11 @@ pub struct ConnectKill {
 
 impl ConnectKill {
     /// The transport side: publish the kill handle; if the deadline already
-    /// expired during the spawn, kill immediately.
-    pub fn publish(&self, kill: TransportKill) {
+    /// expired during the spawn, kill immediately. Single-shot per connect
+    /// in practice -- a second publish would silently overwrite the slot,
+    /// dropping the first handle without killing it (no current caller
+    /// publishes twice).
+    pub(crate) fn publish(&self, kill: TransportKill) {
         *self.handle.lock().expect("kill slot poisoned") = Some(kill.clone());
         if self.expired.load(Ordering::SeqCst) {
             kill.kill();
@@ -159,7 +168,7 @@ impl ConnectKill {
 
     /// The deadline side: mark the connect expired and kill whatever is
     /// published (a later [`Self::publish`] honors the flag).
-    pub fn expire(&self) {
+    pub(crate) fn expire(&self) {
         self.expired.store(true, Ordering::SeqCst);
         if let Some(kill) = self.handle.lock().expect("kill slot poisoned").as_ref() {
             kill.kill();
@@ -546,9 +555,10 @@ fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
 ///
 /// Only the stdio transport is constructed here; SSE / HTTP transports have
 /// their own client types ([`SseClient`], [`HttpClient`]). The dispatcher
-/// [`connect_transport`] routes by transport variant. `StdioClient::connect`
-/// retains its `UnsupportedTransport` guard so a direct call with a non-stdio
-/// config fails loudly rather than silently spawning a bogus child.
+/// [`connect_transport`] routes by transport variant; a non-stdio config
+/// handed straight to `connect_with_kill` still fails loudly in
+/// `stdio_command`'s `UnsupportedTransport` guard rather than silently
+/// spawning a bogus child.
 pub struct StdioClient {
     inner: FramedClient<BufReader<ChildStdout>, ChildStdin>,
     /// Shared so the deadline / cancel-kill paths can terminate the child
@@ -557,23 +567,14 @@ pub struct StdioClient {
 }
 
 impl StdioClient {
-    /// Spawn the configured stdio server, perform the MCP initialize handshake,
-    /// and return the connected client. `secrets` are the keychain-resolved
-    /// `(env_key, value)` pairs (from
+    /// Spawn the configured stdio server, perform the MCP initialize
+    /// handshake, and return the connected client. `secrets` are the
+    /// keychain-resolved `(env_key, value)` pairs (from
     /// [`McpServerConfig::keychain_env_keys`]); they are injected into the
     /// child env alongside [`McpServerConfig::env`] (the non-secret values).
-    pub fn connect(
-        config: &McpServerConfig,
-        secrets: &[SecretEnv],
-        tool_output_dir: Option<&str>,
-    ) -> Result<Self, ClientError> {
-        Self::connect_with_kill(config, secrets, tool_output_dir, &empty_kill_slot())
-    }
-
-    /// [`Self::connect`] with a [`KillSlot`]: the child handle is published
-    /// there the moment it is spawned, so a deadline hit during the
-    /// initialize handshake (whose blocking read has no native timeout)
-    /// can terminate it (issue #889).
+    /// The child handle is published to the [`KillSlot`] the moment it is
+    /// spawned, so a deadline hit during the initialize handshake (whose
+    /// blocking read has no native timeout) can terminate it (issue #889).
     pub fn connect_with_kill(
         config: &McpServerConfig,
         secrets: &[SecretEnv],
@@ -653,7 +654,7 @@ impl Drop for StdioClient {
 pub const TOOL_OUTPUT_ENV: &str = "TOPTOPDUCK_TOOL_OUTPUT_DIR";
 
 /// Build the [`Command`] for a stdio MCP server from the config (shared by
-/// [`StdioClient::connect`] and [`spawn_stdio_child`]). Extracts the command +
+/// [`StdioClient::connect_with_kill`] and [`spawn_stdio_child`]). Extracts the command +
 /// args from the transport, injects env + keychain secrets, and configures
 /// piped stdin/stdout. Keeping this in one place prevents the two spawn paths
 /// (aggregator's per-turn connect vs the probe's timeout-bounded connect)
@@ -706,8 +707,8 @@ fn stdio_command(
 /// the process. The caller passes the child's stdin/stdout to
 /// [`stdio_handshake`] inside a blocking task.
 ///
-/// This is split from [`StdioClient::connect`] (which couples spawn +
-/// initialize in one call) because `spawn_blocking` tasks are NOT
+/// This is split from [`StdioClient::connect_with_kill`] (which couples
+/// spawn + initialize in one call) because `spawn_blocking` tasks are NOT
 /// cancellable — if the handshake hangs inside the task, the only way to
 /// guarantee the child is killed is to keep the Child handle outside.
 pub fn spawn_stdio_child(
@@ -1277,7 +1278,8 @@ pub enum ClientError {
     Http(String),
     /// The per-call deadline expired (issue #889): `server` names the
     /// configured server, `call` the protocol step that hung
-    /// (`initialize` / `tools/list` / the `tools/call` tool name), and
+    /// (`connect (initialize/tools/list)` for the connect phase -- one
+    /// shared budget, issue #892 -- or the `tools/call` tool name), and
     /// `timeout_ms` the effective budget (per-server override or gateway
     /// default). The transport was terminated -- subsequent calls to this
     /// server fail fast for the rest of the turn.
