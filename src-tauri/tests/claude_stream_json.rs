@@ -420,7 +420,7 @@ fn no_progress_watchdog_fires_on_a_silent_turn() {
 #[test]
 fn user_cancel_aborts_the_whole_turn() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the watchdog must stay out of the way so the test
+    // No no-progress cap: the watchdog must stay out of the way so the test
     // observes the user-cancel path alone.
     let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
@@ -462,7 +462,7 @@ fn user_cancel_aborts_the_whole_turn() {
 #[test]
 fn cancel_during_blocked_stdin_write_settles_the_turn() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the user cancel alone must break the blocked write; the
+    // No no-progress cap: the user cancel alone must break the blocked write; the
     // fixture's 30s hold fails loudly if the cancel cannot.
     let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
@@ -539,7 +539,7 @@ fn cli_death_during_stdin_write_settles_runtime() {
 #[test]
 fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the user-cancel path alone (the
+    // No no-progress cap: the user-cancel path alone (the
     // `user_cancel_aborts_the_whole_turn` peer's rationale).
     let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();

@@ -531,7 +531,7 @@ fn empty_stdout_lands_as_runtime() {
 #[test]
 fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the user-cancel path alone (the acp_engine.rs
+    // No no-progress cap: the user-cancel path alone (the acp_engine.rs
     // `user_cancel_aborts_the_whole_turn` peer's rationale); the fixture's
     // 30s hold fails loudly if the cancel misses.
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
@@ -598,7 +598,7 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
 #[test]
 fn cancel_during_blocked_stdin_write_settles_the_turn() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the user cancel alone must break the blocked write (the
+    // No no-progress cap: the user cancel alone must break the blocked write (the
     // `user_cancel_mid_prose_keeps_partial_prose_in_trace` peer's rationale);
     // the fixture's 30s hold fails loudly if the cancel cannot.
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);

@@ -266,15 +266,18 @@ impl Drop for FreezeGuard {
 mod tests {
     use super::*;
 
-    /// Timing budget (#886): every cadence-sensitive watchdog test keeps its
-    /// duration-to-cap ratio at >= 3x, so a single scheduler hiccup cannot
-    /// flip the pin. The two formerly narrow rows (30 ms touches vs a 100 ms
-    /// cap; a 100 ms drip vs a 300 ms cap) were re-margined above the floor:
+    /// Timing budget (#886): every cap-relative row keeps its duration-to-cap
+    /// ratio at >= 3x, so a single scheduler hiccup cannot flip the pin; the
+    /// trip-silence row is the structural exception -- its pre-touch segment
+    /// must stay under the cap, so its flip margin is the CAP/4
+    /// premature-trip window stated in the row. The two formerly narrow rows
+    /// (30 ms touches vs a 100 ms cap; a 100 ms drip vs a 300 ms cap) were
+    /// re-margined above the floor:
     ///
     /// | Test | Cadence / wait | Cap | Ratio |
     /// |---|---|---|---|
     /// | `touch_defers_expiry_while_activity_continues` (here) | 30 ms touch cadence | 250 ms | 8.3x |
-    /// | `trip_silence_is_measured_from_the_last_re_arm` (here) | 3x-CAP/4 pre-touch segment | 250 ms | 3x (vs the CAP/4 pin floor) |
+    /// | `trip_silence_is_measured_from_the_last_re_arm` (here) | CAP*3/4 pre-touch segment | 250 ms | 1.33x (flip margin: the CAP/4 premature-trip window; the gap asserted at 3x its floor) |
     /// | `freeze_survives_a_segment_far_past_the_cap` (here) | 3x CAP frozen | CAP | 3x |
     /// | `slow_drip_survives_past_the_cap` (claude_stream_json) | 100 ms frame drip | 400 ms | 4x |
     /// | `generation_silence_fires_no_progress` (yoagent) | 400 ms stream delay | 100 ms | 4x |

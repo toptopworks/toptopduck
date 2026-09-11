@@ -40,7 +40,7 @@ pub(super) const PUMP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// blocks until the child is reaped; on Linux the stdio bridge (spawned by the
 /// agent as its MCP server) inherits the agent's stdout write-end, so the
 /// engine's reader pipe does not EOF and the inherited-stderr chain can keep
-/// the process tree alive long enough to wedge `wait` past the wall-clock
+/// the process tree alive long enough to wedge `wait` past the no-progress
 /// watchdog. Poll `try_wait` under this grace instead: on POSIX the kill is
 /// delivered immediately (SIGKILL) so the agent is normally reaped on the first
 /// poll, and a wedged reap cannot hang the turn — on POSIX the resulting
@@ -481,9 +481,9 @@ mod tests {
     #[test]
     fn discard_warn_line_names_face_count_and_excerpt() {
         let short = discard_warn_line("codex", 1, "not json");
-        assert!(
-            short.starts_with("codex: discarded unparseable stdout line #1: not json"),
-            "a short line rides the warn verbatim: {short}"
+        assert_eq!(
+            short, "codex: discarded unparseable stdout line #1: not json",
+            "a short line rides the warn verbatim"
         );
         // A firehose-length line is excerpted to the budget (head chars +
         // ellipsis), so the warn stays bounded no matter what the CLI emits.

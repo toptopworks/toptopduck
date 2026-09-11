@@ -43,8 +43,8 @@ fn input() -> AcpTurnInput {
     }
 }
 
-/// Build an engine with a short wall-clock (so a stuck scenario fails the test
-/// fast, not the 120s production default) + a tunable step cap.
+/// Build an engine with a short no-progress cap (so a stuck scenario fails
+/// the test fast, not the 120s production default) + a tunable step cap.
 fn engine(cancel: Arc<CancelToken>, step_cap: u32) -> AcpEngine {
     AcpEngine::new(gemini_cli(), cancel)
         .with_caps(step_cap, Some(std::time::Duration::from_secs(10)))
@@ -626,7 +626,7 @@ fn no_progress_watchdog_fires_on_a_stuck_agent() {
 #[test]
 fn cancel_during_blocked_stdin_write_settles_the_turn() {
     let cancel = Arc::new(CancelToken::new());
-    // No wall-clock: the user cancel alone must break the blocked write (the
+    // No no-progress cap: the user cancel alone must break the blocked write (the
     // fixture's 30s hold fails loudly if the cancel cannot).
     let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
@@ -725,7 +725,7 @@ fn cli_death_during_stdin_write_settles_runtime() {
 /// it -- the cancel fires, the cooperative fixture answers Cancelled, and the
 /// lines consumed before the cancel are folded (backpressure throttles the
 /// flood at the source; it never changes the turn's termination or the folded
-/// trace). The cancel rides the shared token (the same token the wall-clock
+/// trace). The cancel rides the shared token (the same token the no-progress
 /// watchdog fires -- `no_progress_watchdog_fires_on_a_stuck_agent` pins
 /// that firing; the pump treats both identically), gated on the pre-prompt
 /// Thinking phase instead of a blind sleep: the phase fires only once the
@@ -781,7 +781,7 @@ fn runaway_output_cancel_keeps_termination_and_partial_prose() {
     let elapsed = start.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(5),
-        "runaway_output_cancel: took {elapsed:?} -- resolved via the wall-clock \
+        "runaway_output_cancel: took {elapsed:?} -- resolved via the no-progress \
          watchdog, not the phase-gated cancel"
     );
 }
@@ -1136,7 +1136,7 @@ fn engine_runs_against_the_gemini_cli_spec() {
 /// not apply to either.
 ///
 /// What this does NOT prove: behavioral isomorphism of the REAL CLIs (cancel /
-/// step-cap / wall-clock fallback, the rest of AC #3). The fixture erases the
+/// step-cap / no-progress fallback, the rest of AC #3). The fixture erases the
 /// very dimension (argv) a per-CLI branch would consume, so it cannot observe
 /// real-CLI divergence by design; that coverage is manual E2E per the PRD. The
 /// no-progress fallback path across specs is also not exercised here (only the
