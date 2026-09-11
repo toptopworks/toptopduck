@@ -174,7 +174,7 @@ export function outcomeVisual(
       const reason = outcome.data;
       switch (reason) {
         case "NoProgress":
-          Icon = Ban;
+          Icon = TimerOff;
           label = intl.formatMessage({
             id: "thread.outcome.noProgress",
             defaultMessage: "No-progress timeout",
