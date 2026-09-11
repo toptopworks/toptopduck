@@ -330,7 +330,7 @@ pub(super) fn run_claude_stream_json(
     adapter: &AdapterSpec,
     cancel: Arc<CancelToken>,
     step_cap: u32,
-    wall_clock: Option<Duration>,
+    no_progress_cap: Option<Duration>,
     input: &super::engine::AcpTurnInput,
     binary: &Path,
     _approval: &crate::approval::ApprovalState,
@@ -344,7 +344,7 @@ pub(super) fn run_claude_stream_json(
     // plane is blocked wholesale (ADR-0097 Decision 3) and gateway-routed
     // calls execute gateway-side, so the gateway's own freeze covers the
     // only tool-execution waits this surface produces.
-    let clock = wall_clock
+    let clock = no_progress_cap
         .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
 
     // Spawn claude --print with the bridge injected via --mcp-config +

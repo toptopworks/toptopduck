@@ -1139,8 +1139,8 @@ fn engine_runs_against_the_gemini_cli_spec() {
 /// step-cap / wall-clock fallback, the rest of AC #3). The fixture erases the
 /// very dimension (argv) a per-CLI branch would consume, so it cannot observe
 /// real-CLI divergence by design; that coverage is manual E2E per the PRD. The
-/// wall-clock fallback path across specs is also not exercised here (only the
-/// gemini-cli `wall_clock_watchdog_*` test drives it). The real-CLI E2E for
+/// no-progress fallback path across specs is also not exercised here (only the
+/// gemini-cli `no_progress_watchdog_*` test drives it). The real-CLI E2E for
 /// AC #1-3 is tracked by #342.
 #[test]
 fn engine_outcome_is_identical_across_all_v1_specs() {

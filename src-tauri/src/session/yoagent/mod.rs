@@ -53,7 +53,7 @@ use crate::mcp::aggregator::McpAggregator;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::{ThinkingBlock, ToolTurnMessage, ToolTurnRequest};
 use crate::session::loop_contract::{
-    retain_landed_rounds, LoopOutcome, Termination, DEFAULT_STEP_CAP, DEFAULT_WALL_CLOCK,
+    retain_landed_rounds, LoopOutcome, Termination, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::session::progress::ProgressClock;
@@ -95,26 +95,26 @@ pub(crate) struct YoagentLoop {
     provider: Arc<dyn StreamProvider>,
     model: ResolvedYoagentModel,
     step_cap: u32,
-    wall_clock: Option<Duration>,
+    no_progress_cap: Option<Duration>,
 }
 
 impl YoagentLoop {
-    /// Default caps (step cap 24, wall clock 120s, ADR-0081).
+    /// Default caps (step cap 24, no-progress cap 120s, ADR-0081).
     pub(crate) fn new(provider: Arc<dyn StreamProvider>, model: ResolvedYoagentModel) -> Self {
         Self {
             provider,
             model,
             step_cap: DEFAULT_STEP_CAP,
-            wall_clock: Some(DEFAULT_WALL_CLOCK),
+            no_progress_cap: Some(DEFAULT_NO_PROGRESS_CAP),
         }
     }
 
     /// Override the caps (the test seam). Test-only at the call sites: the
     /// production wiring always runs the ADR-0081 defaults.
     #[allow(dead_code)]
-    pub(crate) fn with_caps(mut self, step_cap: u32, wall_clock: Option<Duration>) -> Self {
+    pub(crate) fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
         self.step_cap = step_cap;
-        self.wall_clock = wall_clock;
+        self.no_progress_cap = no_progress_cap;
         self
     }
 
@@ -180,7 +180,7 @@ impl YoagentLoop {
             // or NoProgress when the clock latched the reason (the
             // ADR-0021 timeout -> cancel mapping, reason split per
             // ADR-0115).
-            let clock = self.wall_clock.map(|timeout| {
+            let clock = self.no_progress_cap.map(|timeout| {
                 ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout)
             });
             // The driver: one scoped thread owning a dedicated single-thread

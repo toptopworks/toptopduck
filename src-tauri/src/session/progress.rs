@@ -274,6 +274,7 @@ mod tests {
     /// | Test | Cadence / wait | Cap | Ratio |
     /// |---|---|---|---|
     /// | `touch_defers_expiry_while_activity_continues` (here) | 30 ms touch cadence | 250 ms | 8.3x |
+    /// | `trip_silence_is_measured_from_the_last_re_arm` (here) | 3x-CAP/4 pre-touch segment | 250 ms | 3x (vs the CAP/4 pin floor) |
     /// | `freeze_survives_a_segment_far_past_the_cap` (here) | 3x CAP frozen | CAP | 3x |
     /// | `slow_drip_survives_past_the_cap` (claude_stream_json) | 100 ms frame drip | 400 ms | 4x |
     /// | `generation_silence_fires_no_progress` (yoagent) | 400 ms stream delay | 100 ms | 4x |
@@ -330,6 +331,41 @@ mod tests {
             other => panic!("the latched clock must land NoProgress, got {other:?}"),
         }
         assert!(token.is_requested());
+    }
+
+    /// The silence is measured from the LAST re-arm, not from arm: one
+    /// touch at ~3*CAP/4 re-anchors the deadline, so the latched silence
+    /// covers only the post-touch silence while `turn_elapsed` covers the
+    /// whole run. The elapsed-minus-silence gap pins the since-last-re-arm
+    /// semantics -- the no-touch pins above cannot tell the two apart
+    /// (silence == turn_elapsed there degenerates to an identity, so a
+    /// silence computed from arm alone would pass them).
+    #[test]
+    fn trip_silence_is_measured_from_the_last_re_arm() {
+        let (token, clock, _generation) = armed(CAP);
+        thread::sleep(CAP * 3 / 4); // pre-touch segment: billed to the turn only
+        clock.touch(); // the deadline re-arms from NOW
+        thread::sleep(CAP + PROGRESS_POLL_INTERVAL * 4);
+        assert!(clock.is_timed_out());
+        assert!(token.is_requested());
+        match ProgressClock::cancel_landing(Some(&clock)) {
+            Termination::NoProgress(detail) => {
+                assert!(
+                    detail.silence >= CAP,
+                    "the post-touch silence must cover the cap: {detail:?}"
+                );
+                assert!(
+                    detail.silence < CAP + PROGRESS_POLL_INTERVAL * 8,
+                    "the silence stays within cap + poll-overshoot headroom: {detail:?}"
+                );
+                assert!(
+                    detail.turn_elapsed - detail.silence >= CAP / 4,
+                    "the pre-touch segment must ride turn_elapsed but NOT the \
+                     silence: {detail:?}"
+                );
+            }
+            other => panic!("the latched clock must land NoProgress, got {other:?}"),
+        }
     }
 
     /// Stream activity re-arms the deadline: touches every 30 ms keep a

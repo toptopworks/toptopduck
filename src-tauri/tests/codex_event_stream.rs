@@ -67,7 +67,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// outcome, the phase stream, and the turn's elapsed time (measured AFTER the
 /// scenario lock is held -- the harness runs tests in parallel, and the
 /// lock-queue wait is not the engine's latency; the step-cap pin relies on
-/// this). Uses a short wall-clock (5s) so a stuck scenario fails fast.
+/// this). Uses a short no-progress cap (5s) so a stuck scenario fails fast.
 fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     run_with_cap(scenario, step_cap, std::time::Duration::from_secs(5))
 }
@@ -77,10 +77,10 @@ fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time
 fn run_with_cap(
     scenario: &str,
     step_cap: u32,
-    wall: std::time::Duration,
+    cap: std::time::Duration,
 ) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
     let cancel = Arc::new(CancelToken::new());
-    let eng = AcpEngine::new(codex(), cancel).with_caps(step_cap, Some(wall));
+    let eng = AcpEngine::new(codex(), cancel).with_caps(step_cap, Some(cap));
     let approval = ApprovalState::new();
     let mut phases = Vec::new();
     let _g = ENV_LOCK.lock().unwrap();

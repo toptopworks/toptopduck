@@ -32,7 +32,7 @@ pub(crate) const DEFAULT_STEP_CAP: u32 = 24;
 /// [`Termination::NoProgress`] -- the ADR-0021 timeout -> cancel mapping
 /// survives at the `TurnOutcome` layer (the landing stays
 /// [`TurnOutcome::Cancelled`]).
-pub(crate) const DEFAULT_WALL_CLOCK: Duration = Duration::from_secs(120);
+pub(crate) const DEFAULT_NO_PROGRESS_CAP: Duration = Duration::from_secs(120);
 
 /// Maximum length of a trace entry's result excerpt (ADR-0078). The full result
 /// rides the trace; the far window carries only a summary, so an excerpt is all

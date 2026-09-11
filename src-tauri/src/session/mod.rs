@@ -2379,6 +2379,10 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 /// The built-in runtime's kill-log face (#886): what the projection names
 /// when the silenced turn ran on the built-in loop (the external branches
 /// pass their adapter id). A named const so the wording stays greppable.
+/// Deliberately spelled with a hyphen while its wire counterpart is
+/// `TurnRuntime::BuiltIn`'s snake_case `"built_in"` (model/turn.rs): the
+/// face is log prose, the wire tag is a persisted enum -- correlating a
+/// kill log against persisted turns needs to know both spellings (#890).
 const BUILT_IN_RUNTIME_FACE: &str = "built-in";
 
 /// The NoProgress kill-log line (#886): the session + runtime face
