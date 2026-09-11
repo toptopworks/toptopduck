@@ -1142,7 +1142,7 @@ mod tests {
     use super::*;
     use crate::cancel::CancelToken;
     use crate::guardrail::{ExecError, ExecErrorKind};
-    use crate::model::{StaleAnchor, StaleReason, TextKind};
+    use crate::model::{CancelledReason, StaleAnchor, StaleReason, TextKind};
     use crate::persistence::recipe::{
         RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef, TurnTimestamps,
     };
@@ -1215,6 +1215,47 @@ mod tests {
                 assumption: None,
             },
         ))
+    }
+
+    /// Issue #883: the recipe-to-live mapping carries the cancel reason -- a
+    /// silent drop here would degrade a resumed watchdog kill to the user's
+    /// own stop (the serde round-trip pin tests the codec, not this mapping;
+    /// the live-to-recipe half is pinned in recipe_persister).
+    #[test]
+    fn rebuild_timeline_keeps_the_cancelled_reason_on_the_wire() {
+        let cancelled = |reason: Option<CancelledReason>| {
+            RecipeEntry::Turn(RecipeTurn::without_audit(
+                "stalled".to_string(),
+                RecipeOutcome::Cancelled(reason),
+            ))
+        };
+        let recipe = recipe_with(
+            vec![
+                cancelled(Some(CancelledReason::NoProgress)),
+                cancelled(None),
+            ],
+            None,
+        );
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let timeline = resumer.rebuild_timeline(&mut ws, None).unwrap();
+        let reasons: Vec<Option<CancelledReason>> = timeline
+            .iter()
+            .map(|entry| match entry {
+                TimelineEntry::Turn { record, .. } => match &record.outcome {
+                    TurnOutcome::Cancelled(reason) => *reason,
+                    other => panic!("expected Cancelled, got {other:?}"),
+                },
+                other => panic!("expected Turn, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![Some(CancelledReason::NoProgress), None],
+            "a resumed watchdog kill still carries its reason; a manual stop stays bare"
+        );
     }
 
     /// A stale (cascade-invalidated) Materialized recipe entry -- the

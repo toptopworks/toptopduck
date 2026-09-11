@@ -166,6 +166,11 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
             TurnOutcome::Failed(failure) => ResponsePayload::Failed {
                 reason: failure.to_string(),
             },
+            // The cancel reason is presentation-only (#883): the prompt
+            // window has no consumer that acts differently on a system-side
+            // timeout vs. the user's own stop -- a watchdog-killed turn
+            // produced no model output to reference, so the plain cancelled
+            // text is the honest summary for the next turn's history.
             TurnOutcome::Cancelled(_) => ResponsePayload::Cancelled,
         }
     }

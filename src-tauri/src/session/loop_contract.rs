@@ -70,7 +70,7 @@ pub enum Termination {
     /// expired cap. Maps to `TurnOutcome::Cancelled` too -- the ADR-0021
     /// landing is unchanged -- but carries the technical "no-progress
     /// timeout" fact at this layer; the cancelled-vs-timed-out presentation
-    /// split rides issue #883.
+    /// split rides the outcome's cancel-reason payload (#883).
     NoProgress(std::time::Duration),
     /// No LLM provider is wired / the key was refused (ADR-0044 permanent).
     /// Maps to `TurnOutcome::Failed(NotWired)`.

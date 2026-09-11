@@ -231,7 +231,7 @@ describe("TurnCard outcome-card narrow-column caps (issue #862)", () => {
 
 describe("TurnCard cancelled reason split (issue #883)", () => {
   it("presents a watchdog kill as the no-progress timeout, not a plain cancel", () => {
-    // The honest reaction to a system-side abort is retry or report (ADR-0115)
+    // The honest reaction to a system-side abort is retry or report
     // -- "已取消" alone hides which landing happened, so the reason rides the
     // outcome payload and the card head splits on it.
     const { getByText, queryByText, container } = renderCard({

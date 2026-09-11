@@ -165,21 +165,39 @@ export function outcomeVisual(
       // watchdog sub-case splits D by cause instead, glyph included -- the
       // wording split alone hid the system-side timeout from a glance. The
       // tone mapping is untouched, so 0047's D hue still holds.
-      const timedOut = outcome.data === "NoProgress";
+      // Exhaustiveness guard: a future CancelledReason member must add a
+      // branch here -- the outer switch's never-check cannot see the nested
+      // union, and a ternary fallthrough would mislabel the new reason as a
+      // manual cancel in the glyph's aria-label.
+      let Icon: LucideIcon;
+      let label: string;
+      const reason = outcome.data;
+      switch (reason) {
+        case "NoProgress":
+          Icon = Ban;
+          label = intl.formatMessage({
+            id: "thread.outcome.noProgress",
+            defaultMessage: "No-progress timeout",
+          });
+          break;
+        case null:
+          Icon = Ban;
+          label = intl.formatMessage({
+            id: "thread.outcome.cancelled",
+            defaultMessage: "Cancelled",
+          });
+          break;
+        default: {
+          const unhandled: never = reason;
+          throw new Error(`unhandled cancel reason: ${JSON.stringify(unhandled)}`);
+        }
+      }
       return {
-        Icon: timedOut ? TimerOff : Ban,
+        Icon,
         // D cancelled round = weakened grey (ADR-0047 D hue); the card also
         // dims via opacity-60 (TurnCard) per ADR-0028 Why 2.
         tone: "text-muted-foreground",
-        label: timedOut
-          ? intl.formatMessage({
-              id: "thread.outcome.noProgress",
-              defaultMessage: "No-progress timeout",
-            })
-          : intl.formatMessage({
-              id: "thread.outcome.cancelled",
-              defaultMessage: "Cancelled",
-            }),
+        label,
       };
     }
     default: {
