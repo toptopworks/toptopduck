@@ -634,6 +634,50 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
     );
 }
 
+/// ADR-0115: a watchdog firing while the oversized prompt write is still
+/// blocked in the pipe (the fixture reads no stdin, so the drain leg's
+/// Cancelled arm is the one that resolves the turn) must land NoProgress
+/// carrying the armed cap, not a bare user Cancelled -- the codex drain
+/// arm's pre-pump relabel, the claude_stream_json.rs peer's semantics on
+/// the codex path (issue #894).
+#[test]
+fn no_progress_watchdog_fires_during_blocked_stdin_write() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_millis(300)));
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("CODEX_FAKE_SCENARIO", "no_stdin_hold");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
+    // in the pipe once the fixture stops reading (the #808 cancel peer's
+    // shape -- only the cancel source differs: the watchdog, not a user).
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    match outcome.termination {
+        Termination::NoProgress(detail) => {
+            assert_eq!(
+                detail.cap,
+                std::time::Duration::from_millis(300),
+                "the armed cap rides the payload"
+            );
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
+        }
+        other => panic!("watchdog during the blocked write -> NoProgress, got {other:?}"),
+    }
+    // Same window pin as the #808 cancel peer: the watchdog fires at ~300ms
+    // and the cancel poll + kill + reap must resolve well inside it.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- a slow drain-leg watchdog resolution"
+    );
+}
+
 /// A CLI that dies before draining stdin breaks the oversized prompt write
 /// mid-pipe: the turn settles as a Runtime carrying the stdin write
 /// failure -- the pre-#808-fix behavior's main path, now pinned (the
