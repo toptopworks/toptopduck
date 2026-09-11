@@ -1600,7 +1600,10 @@ fn cancelling_an_in_flight_turn_lands_as_cancelled_with_working_set_unchanged() 
     cancel.request();
 
     let outcome = handle.join().expect("ask thread");
-    assert!(matches!(outcome, TurnOutcome::Cancelled), "got {outcome:?}");
+    assert!(
+        matches!(outcome, TurnOutcome::Cancelled(_)),
+        "got {outcome:?}"
+    );
     // Working set unchanged: no result promoted, source intact.
     let s = session.lock().unwrap();
     assert!(s.get("result_1").is_none());
@@ -1634,7 +1637,7 @@ fn a_cancelled_turn_is_recorded_in_the_thread_but_advances_no_result_number() {
     await_in_flight(&cancel, Duration::from_secs(2));
     cancel.request();
     let cancelled = handle.join().expect("ask thread");
-    assert!(matches!(cancelled, TurnOutcome::Cancelled));
+    assert!(matches!(cancelled, TurnOutcome::Cancelled(_)));
 
     // The cancelled turn is in the thread, labeled by its verbatim question.
     // (Source lifecycle events share the timeline but are filtered out by the
@@ -1646,7 +1649,7 @@ fn a_cancelled_turn_is_recorded_in_the_thread_but_advances_no_result_number() {
     };
     assert_eq!(thread.len(), 1);
     assert_eq!(thread[0].question, "慢查询");
-    assert!(matches!(thread[0].outcome, TurnOutcome::Cancelled));
+    assert!(matches!(thread[0].outcome, TurnOutcome::Cancelled(_)));
 
     // A subsequent result is result_1 -- the cancelled turn consumed no number.
     let (name, _, _) = materialized(session.lock().unwrap().ask("再查"));
@@ -1681,7 +1684,7 @@ fn a_turn_after_a_cancelled_turn_starts_clean_with_no_stale_request() {
     cancel.request();
     assert!(matches!(
         handle.join().expect("ask thread"),
-        TurnOutcome::Cancelled
+        TurnOutcome::Cancelled(_)
     ));
     // The cancelled turn's guard drop already consumed the flag (issue
     // #849: it must not sit between turns, where the external serve path
@@ -1754,7 +1757,7 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
 
     let outcome = handle.join().expect("ask thread");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "DuckDB interrupt should land Cancelled, got {outcome:?}"
     );
     let s = session.lock().unwrap();

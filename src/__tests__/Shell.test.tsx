@@ -1157,7 +1157,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
     await waitFor(() => expect(within(bar()).getByText("执行中…")).toBeInTheDocument());
 
     // Outcome lands -> phase clears (ADR-0059 handleAsk finally).
-    resolve({ kind: "Cancelled" });
+    resolve({ kind: "Cancelled", data: null });
     await waitFor(() =>
       expect(within(bar()).queryByText(/执行中/)).not.toBeInTheDocument(),
     );
@@ -1190,7 +1190,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
       phase: { Thinking: { attempt: 1 } },
     });
     await waitFor(() => expect(within(bar()).getByText("思考中…")).toBeInTheDocument());
-    resolve({ kind: "Cancelled" });
+    resolve({ kind: "Cancelled", data: null });
   });
 });
 
@@ -1216,7 +1216,7 @@ describe("App single in-flight + cancel (issue #82 / ADR-0021/0028)", () => {
     );
     expect(input).toBeDisabled();
     expect(screen.queryByRole("button", { name: "提问" })).not.toBeInTheDocument();
-    resolve({ kind: "Cancelled" });
+    resolve({ kind: "Cancelled", data: null });
   });
 
   it("stop fires cancelQuery on the session (ADR-0021)", async () => {
@@ -1231,7 +1231,7 @@ describe("App single in-flight + cancel (issue #82 / ADR-0021/0028)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "停止" }));
     await waitFor(() => expect(cancelQuery).toHaveBeenCalledWith("sess-1"));
-    resolve({ kind: "Cancelled" });
+    resolve({ kind: "Cancelled", data: null });
   });
 });
 
@@ -1302,7 +1302,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     );
     // Fix the data source, then retry.
     threadData = [
-      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } } },
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } } },
     ];
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
@@ -1330,7 +1330,7 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     );
     // Fix the data, then retry.
     threadData = [
-      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } } },
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } } },
     ];
     const conversationCallsBefore = vi.mocked(conversation).mock.calls.length;
     removeSpy.mockClear(); // isolate retry's own removeQueries call
@@ -2123,7 +2123,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     state.thread = [
       {
         entry: "Turn",
-        data: { question: longQuestion, outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+        data: { question: longQuestion, outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
       },
     ];
     render(<App />);

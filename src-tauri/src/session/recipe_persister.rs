@@ -220,7 +220,9 @@ impl RecipePersister {
                         crate::model::TurnOutcome::Failed(failure) => {
                             RecipeOutcome::Failed(failure.clone())
                         }
-                        crate::model::TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
+                        crate::model::TurnOutcome::Cancelled(reason) => {
+                            RecipeOutcome::Cancelled(*reason)
+                        }
                     };
                     // The turn's recorded audit (ADR-0078, issue #319).
                     // Construction routes through the audit-bearing

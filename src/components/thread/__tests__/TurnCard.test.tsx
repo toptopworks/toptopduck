@@ -214,7 +214,7 @@ describe("TurnCard outcome-card narrow-column caps (issue #862)", () => {
     // the Failed/Cancelled card from the prose containers.
     const failed = renderCard(failedRecord());
     expect(failed.container.querySelector(".turn-outcome.failed")).toHaveClass("max-w-full");
-    const cancelled = renderCard({ ...recordWith(undefined), outcome: { kind: "Cancelled" } });
+    const cancelled = renderCard({ ...recordWith(undefined), outcome: { kind: "Cancelled", data: null } });
     expect(cancelled.container.querySelector(".turn-outcome.cancelled")).toHaveClass("max-w-full");
   });
 
@@ -226,6 +226,31 @@ describe("TurnCard outcome-card narrow-column caps (issue #862)", () => {
     // string can actually wrap inside the capped card.
     const { container } = renderCard(failedRecord());
     expect(container.querySelector(".failed-reason")).toHaveClass("min-w-0", "break-words");
+  });
+});
+
+describe("TurnCard cancelled reason split (issue #883)", () => {
+  it("presents a watchdog kill as the no-progress timeout, not a plain cancel", () => {
+    // The honest reaction to a system-side abort is retry or report (ADR-0115)
+    // -- "已取消" alone hides which landing happened, so the reason rides the
+    // outcome payload and the card head splits on it.
+    const { getByText, queryByText, container } = renderCard({
+      ...recordWith(undefined),
+      outcome: { kind: "Cancelled", data: "NoProgress" },
+    });
+    expect(getByText("无进展超时")).toBeInTheDocument();
+    expect(queryByText("已取消")).not.toBeInTheDocument();
+    // The longer watchdog copy wraps like the Failed reason (#862), not
+    // stretch past the capped card.
+    expect(container.querySelector(".cancelled-reason")).toHaveClass("min-w-0", "break-words");
+  });
+
+  it("keeps a manual stop presenting as cancelled", () => {
+    const { getByText } = renderCard({
+      ...recordWith(undefined),
+      outcome: { kind: "Cancelled", data: null },
+    });
+    expect(getByText("已取消")).toBeInTheDocument();
   });
 });
 

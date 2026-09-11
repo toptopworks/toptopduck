@@ -166,7 +166,7 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
             TurnOutcome::Failed(failure) => ResponsePayload::Failed {
                 reason: failure.to_string(),
             },
-            TurnOutcome::Cancelled => ResponsePayload::Cancelled,
+            TurnOutcome::Cancelled(_) => ResponsePayload::Cancelled,
         }
     }
 }

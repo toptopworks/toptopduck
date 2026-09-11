@@ -516,7 +516,7 @@ impl<'a> Resumer<'a> {
                             assumption: assumption.clone(),
                         },
                         RecipeOutcome::Failed(failure) => TurnOutcome::Failed(failure.clone()),
-                        RecipeOutcome::Cancelled => TurnOutcome::Cancelled,
+                        RecipeOutcome::Cancelled(reason) => TurnOutcome::Cancelled(*reason),
                     };
                     Ok(TimelineEntry::Turn {
                         record: TurnRecord {

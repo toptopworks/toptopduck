@@ -9,6 +9,7 @@ import {
   CircleOff,
   MessageCircleQuestion,
   Table2,
+  TimerOff,
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
@@ -152,17 +153,35 @@ export function outcomeVisual(
         tone: "text-destructive",
         label: intl.formatMessage({ id: "thread.outcome.failed", defaultMessage: "Failed" }),
       };
-    case "Cancelled":
+    case "Cancelled": {
+      // #883: a watchdog kill (ADR-0115) presents the timeout, not a plain
+      // cancel -- the honest reaction to a system-side abort is retry or
+      // report, which "Cancelled" alone hides. TimerOff names the cause at a
+      // glance; the tone stays the weakened grey (ADR-0047 D hue): a timeout
+      // is still not a failure.
+      //
+      // Deliberate DEVIATION from ADR-0050 (as with the B branch above):
+      // 0050 pins outcome D to `Ban` with one glyph per outcome class; the
+      // watchdog sub-case splits D by cause instead, glyph included -- the
+      // wording split alone hid the system-side timeout from a glance. The
+      // tone mapping is untouched, so 0047's D hue still holds.
+      const timedOut = outcome.data === "NoProgress";
       return {
-        Icon: Ban,
+        Icon: timedOut ? TimerOff : Ban,
         // D cancelled round = weakened grey (ADR-0047 D hue); the card also
         // dims via opacity-60 (TurnCard) per ADR-0028 Why 2.
         tone: "text-muted-foreground",
-        label: intl.formatMessage({
-          id: "thread.outcome.cancelled",
-          defaultMessage: "Cancelled",
-        }),
+        label: timedOut
+          ? intl.formatMessage({
+              id: "thread.outcome.noProgress",
+              defaultMessage: "No-progress timeout",
+            })
+          : intl.formatMessage({
+              id: "thread.outcome.cancelled",
+              defaultMessage: "Cancelled",
+            }),
       };
+    }
     default: {
       const unhandled: never = outcome;
       throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);

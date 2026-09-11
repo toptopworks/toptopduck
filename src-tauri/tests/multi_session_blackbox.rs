@@ -246,7 +246,7 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
 
     let outcome = ask.join().expect("ask thread");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "in-flight turn lands as Cancelled after close fires cancel, got {outcome:?}"
     );
 
@@ -415,7 +415,7 @@ fn close_wait_release_waits_for_inflight_ask_then_releases_canonical_key() {
 
     let outcome = ask.join().expect("ask thread");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "in-flight turn lands as Cancelled after detach fired cancel, got {outcome:?}"
     );
 
@@ -599,7 +599,7 @@ fn store_lock_not_held_during_a_long_turn() {
     cancel_a.request();
     let outcome = ask.join().expect("ask thread");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "A's turn lands as Cancelled after release, got {outcome:?}"
     );
 }
@@ -804,7 +804,7 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
 
     let outcome = ask.join().expect("ask thread");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "resumed session's in-flight turn must land Cancelled after close, got {outcome:?}"
     );
 
@@ -1016,7 +1016,7 @@ fn list_live_marks_an_in_flight_session_unadoptable() {
     store.close(&id).expect("close");
     let outcome = ask.join().expect("ask thread");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "in-flight turn lands as Cancelled after close fires cancel, got {outcome:?}"
     );
 }

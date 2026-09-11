@@ -176,6 +176,20 @@ pub struct Promotion {
 /// adjacently-tagged wire shape (`kind`/`data`) is pinned by tests/ipc_contract
 /// and mirrored by src/types.ts -- adding a variant here requires the frontend
 /// match to follow.
+/// Why a turn landed cancelled (#883). The no-progress watchdog kill
+/// (ADR-0115) shares the cancelled landing with the user's own stop (ADR-0021:
+/// cancel = whole-turn abort), but the two demand opposite user reactions --
+/// retry-or-report vs. nothing -- so the reason rides the wire payload and the
+/// presentation splits on it. `None` is the manual / close cancel and the
+/// pre-#883 recorded shape. Default serde naming (the variant ident) keeps the
+/// wire string stable for the hand-mirrored `src/types/thread.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelledReason {
+    /// The no-progress watchdog fired (ADR-0115): generation stayed silent
+    /// past the cap, so the turn was aborted system-side.
+    NoProgress,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum TurnOutcome {
@@ -237,12 +251,14 @@ pub enum TurnOutcome {
     /// Display string (issue #125). Occupies a thread slot but does NOT
     /// advance result_N.
     Failed(TurnFailure),
-    /// Outcome D -- a cancelled turn (placeholder): abort via user cancel /
-    /// resource cap / statement timeout (ADR-0021). The cancel mechanism lands
-    /// in #28; this variant exists now so the four-way classification is
-    /// complete and the frontend can render it, but no code path produces it
-    /// yet.
-    Cancelled,
+    /// Outcome D -- a cancelled turn (ADR-0021/0028): the user's stop /
+    /// window close, or the no-progress watchdog kill (ADR-0115). The
+    /// optional-reason newtype carries the presentation split (#883) without
+    /// adding a fifth outcome primitive. A `null` `data` is the manual
+    /// cancel; the key-less pre-#883 form (then a bare unit variant)
+    /// deserializes as `None` via serde's missing-newtype-content path.
+    /// Occupies a thread slot but does NOT advance result_N.
+    Cancelled(Option<CancelledReason>),
 }
 
 impl TurnOutcome {
