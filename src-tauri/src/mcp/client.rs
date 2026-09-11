@@ -32,8 +32,10 @@
 //! Turn-local (issue #301 Q2): the gateway constructs one client per
 //! configured server at turn start and drops it at turn end -- no
 //! cross-turn state, no session-level handle. Per-call timeout is NOT
-//! enforced per-read here: blocking reads have no native deadline, so the
-//! turn-level watchdog (ADR-0021) bounds a hung server. `timeout_ms` stays
+//! enforced per-read here: blocking reads have no native deadline, and
+//! under ADR-0115 a gateway-served MCP call waits inside the dispatch
+//! freeze, so the no-progress clock never fires mid-wait -- a hung server
+//! parks the turn with no kill log. `timeout_ms` stays
 //! on [`crate::mcp::config::McpServerConfig`] as a forward-compat contract.
 
 use std::io::{BufRead, BufReader, Write};

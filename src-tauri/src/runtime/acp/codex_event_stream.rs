@@ -519,12 +519,8 @@ pub(super) fn run_codex_event_stream(
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(_) => {
-                        // Top-level discard, answerable in logs (#886): a
-                        // garbage stream otherwise reads as healthy turn
-                        // activity (every line re-arms the clock).
-                        if let Some(count) = discards.record() {
-                            super::process::warn_discarded(adapter.id.as_str(), count, &line);
-                        }
+                        // Top-level discard, answerable in logs (#886).
+                        super::process::note_discard(&mut discards, adapter.id.as_str(), &line);
                         continue; // skip unparseable line
                     }
                 };

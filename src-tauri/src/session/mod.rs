@@ -54,7 +54,9 @@ use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx
 // parameter type rides the same public path (the gateway module itself is
 // crate-private).
 pub use crate::runtime::gateway::server::GatewayOutcome;
-use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination, TraceEntry};
+use crate::session::loop_contract::{
+    LoopOutcome, LoopRound, NoProgressDetail, Termination, TraceEntry,
+};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
 use crate::session::skills::SkillActivationCtx;
 use crate::session_store::ClosingFlag;
@@ -1043,6 +1045,14 @@ impl Session {
         self.session_id = Some(id);
     }
 
+    /// The stamped identity, for tests pinning the store / resume wiring
+    /// (#886): `None` until one of the two production stampers runs.
+    /// Test-only -- production reads the attribution through the kill log.
+    #[cfg(test)]
+    pub(crate) fn session_id(&self) -> Option<&SessionId> {
+        self.session_id.as_ref()
+    }
+
     /// Whether `close_session` has marked this session closing (ADR-0055). Read
     /// by [`Self::ask`]'s post-turn check to discard an in-flight turn that
     /// finished after close fired cancel.
@@ -1651,11 +1661,12 @@ impl Session {
             // without waiting for the bridge to close the TCP connection. On
             // Linux the stdio-spawned bridge inherits a leaked stdin write-end
             // (Rust std limitation) and never EOFs, so without this flag serve
-            // would park on the bridge socket with no bounded exit: the
-            // no-progress clock retires with the turn (ADR-0115), so nothing
-            // left would cancel the read. Production Node-spawned bridges do
-            // not leak the fd, but relying on
-            // the bridge to close promptly is a correctness gap the flag closes.
+            // would park on the bridge socket until the armed no-progress
+            // clock fired on the silent generation and the serve's loop-top
+            // cancel check exited -- a cap-bounded exit, but a slow one that
+            // mislabels a finished turn as a watchdog kill. Production
+            // Node-spawned bridges do not leak the fd, but relying on the
+            // bridge to close promptly is a correctness gap the flag closes.
             // The engine thread sets the flag when its prompt pump returns. The
             // flag is an `Arc<AtomicBool>` (not a borrowed `&AtomicBool`) because
             // `thread::scope`'s `spawn` requires the closure's captures to be
@@ -2347,6 +2358,27 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 /// pass their adapter id). A named const so the wording stays greppable.
 const BUILT_IN_RUNTIME_FACE: &str = "built-in";
 
+/// The NoProgress kill-log line (#886): the session + runtime face
+/// attribution and the three trip-side measurements in one shape. A pure
+/// function so the attribution is unit-pinnable without a log-capture
+/// harness (the same counting-split-from-logging seam the `DiscardLog`
+/// family uses); the projection is its only caller.
+fn no_progress_kill_summary(
+    session_id: Option<&SessionId>,
+    runtime_face: &str,
+    detail: &NoProgressDetail,
+) -> String {
+    let session = session_id
+        .map(|id| format!("session {id}, "))
+        .unwrap_or_default();
+    format!(
+        "no-progress timeout: {session}runtime `{runtime_face}` silent for {:.1}s (cap {:.1}s, turn ran {:.1}s); aborting the turn",
+        detail.silence.as_secs_f64(),
+        detail.cap.as_secs_f64(),
+        detail.turn_elapsed.as_secs_f64()
+    )
+}
+
 /// `session_id` + `runtime_face` attribute the NoProgress kill log (#886):
 /// the projection is the one point all four turn paths share, so the warn
 /// names its victim here. `None` = a store-less Session (tests,
@@ -2397,15 +2429,10 @@ fn turn_outcome_from_loop(
             // (ADR-0115), but one the frontend can present as a timeout. The
             // warn carries the attribution + trip-side measurements (#886):
             // the cap alone is a production constant and attributes nothing.
-            let session = session_id
-                .map(|id| format!("session {id}, "))
-                .unwrap_or_default();
             log::warn!(
                 target: "toptopduck::session",
-                "no-progress timeout: {session}runtime `{runtime_face}` silent for {:.1}s (cap {:.1}s, turn ran {:.1}s); aborting the turn",
-                detail.silence.as_secs_f64(),
-                detail.cap.as_secs_f64(),
-                detail.turn_elapsed.as_secs_f64()
+                "{}",
+                no_progress_kill_summary(session_id, runtime_face, &detail)
             );
             TurnOutcome::Cancelled(Some(CancelledReason::NoProgress))
         }
@@ -2791,7 +2818,10 @@ fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_
 
 #[cfg(test)]
 mod tests {
-    use super::{turn_outcome_from_loop, Session, BUILT_IN_RUNTIME_FACE, TOOL_OUTPUT_DIR_NAME};
+    use super::{
+        no_progress_kill_summary, turn_outcome_from_loop, Session, BUILT_IN_RUNTIME_FACE,
+        TOOL_OUTPUT_DIR_NAME,
+    };
     use crate::model::{CancelledReason, DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
@@ -3024,6 +3054,36 @@ mod tests {
             }
             other => panic!("expected Cancelled(Some(NoProgress)), got {other:?}"),
         }
+    }
+
+    /// The kill-log line attributes the session and the runtime face
+    /// (#886): the summary is a pure function so the attribution is
+    /// pinnable without a log-capture harness -- stripping either leg
+    /// from the warn is exactly what the projection tests above (which
+    /// pass None) cannot catch.
+    #[test]
+    fn no_progress_kill_summary_names_session_and_runtime_face() {
+        let detail = NoProgressDetail {
+            cap: std::time::Duration::from_secs(120),
+            silence: std::time::Duration::from_millis(120_400),
+            turn_elapsed: std::time::Duration::from_secs(180),
+        };
+        let id = crate::SessionId::parse("0f0e0d0c-0b0a-4900-8000-000000000001")
+            .expect("fixed v4 uuid parses");
+        assert_eq!(
+            no_progress_kill_summary(Some(&id), BUILT_IN_RUNTIME_FACE, &detail),
+            format!(
+                "no-progress timeout: session {id}, runtime `built-in` silent for 120.4s \
+                 (cap 120.0s, turn ran 180.0s); aborting the turn"
+            ),
+            "the built-in kill names the session and the built-in face"
+        );
+        assert_eq!(
+            no_progress_kill_summary(None, "cli-a", &detail),
+            "no-progress timeout: runtime `cli-a` silent for 120.4s \
+             (cap 120.0s, turn ran 180.0s); aborting the turn",
+            "a store-less session omits the attribution with no leftover artifacts"
+        );
     }
 
     /// A whitespace-only terminal text carries no prose at all -- neither

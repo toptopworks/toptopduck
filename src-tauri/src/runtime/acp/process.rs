@@ -418,21 +418,25 @@ impl DiscardLog {
     }
 }
 
-/// The warn leg of a discard whose `record` returned a count -- ONE shape
-/// for all three pump loops so the wording cannot drift between them.
-pub(super) fn warn_discarded(face: &str, count: u64, line: &str) {
-    log::warn!(
-        target: "toptopduck::acp",
-        "{face}: discarded unparseable stdout line #{count}: {}",
-        line_excerpt(line)
-    );
-}
+/// The discard warn's excerpt budget: the head of the line carries the
+/// shape; the tail adds nothing.
+const DISCARD_EXCERPT_CHARS: usize = 80;
 
-/// A bounded excerpt of a discarded line for the warn: the head of the
-/// line, UTF-8-safe (a frame's first bytes carry the shape; the tail adds
-/// nothing).
-pub(super) fn line_excerpt(line: &str) -> String {
-    line.chars().take(80).collect()
+/// Record one discarded line and, when the stride warrants it, warn --
+/// the pump loops' one call for a top-level parse discard (#886): a
+/// garbage stream otherwise reads as healthy turn activity (every
+/// inbound line re-arms the no-progress clock), so the discard stays
+/// answerable in logs without flooding them. ONE shape for all three
+/// pump loops so the wording cannot drift; the counting stays inside
+/// [`DiscardLog::record`] so the stride is unit-pinnable.
+pub(super) fn note_discard(discards: &mut DiscardLog, face: &str, line: &str) {
+    if let Some(count) = discards.record() {
+        log::warn!(
+            target: "toptopduck::acp",
+            "{face}: discarded unparseable stdout line #{count}: {}",
+            crate::util::truncate_chars_with_ellipsis(line, DISCARD_EXCERPT_CHARS)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -201,7 +201,10 @@ impl ProgressClock {
     /// trip-side measurements when the free segment ran silent past the
     /// deadline. ONE deadline load both judges and measures (#886), so a
     /// touch racing the latch cannot skew the numbers (saturating math
-    /// keeps a post-check re-arm from underflowing the silence).
+    /// keeps a post-check re-arm from underflowing the silence, and the
+    /// clamp keeps a raced re-arm reporting the cap rather than a
+    /// self-contradictory sub-cap silence -- the trip was judged against
+    /// the loaded deadline, so the cap is the truthful floor).
     fn trip_if_expired(&self, timeout: Duration) -> bool {
         let deadline = self.deadline_ms.load(Ordering::SeqCst);
         let now = self.elapsed_ms();
@@ -210,7 +213,9 @@ impl ProgressClock {
         }
         let cap_ms = timeout.as_millis() as u64;
         self.trip_silence_ms.store(
-            now.saturating_add(cap_ms).saturating_sub(deadline),
+            now.saturating_add(cap_ms)
+                .saturating_sub(deadline)
+                .max(cap_ms),
             Ordering::SeqCst,
         );
         self.trip_elapsed_ms.store(now, Ordering::SeqCst);

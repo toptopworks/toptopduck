@@ -1452,10 +1452,13 @@ mod tests {
     /// The deterministic terminator (issue #357): with the bridge socket held
     /// OPEN (no EOF), serve_connection still returns promptly when
     /// `engine_done` is set -- it does not wait for the bridge to disconnect.
-    /// Without this flag the serve would block on `read_message` with no
-    /// bounded exit: the no-progress clock retires with the turn (ADR-0115),
-    /// so no watchdog cancels a post-engine park. The flag is what makes
-    /// serve's return depend on the engine, not the bridge. Drives initialize +
+    /// Without this flag the serve would block on `read_message` until the
+    /// armed no-progress clock fired on generation silence and the serve's
+    /// loop-top cancel check exited -- a ~cap-bounded exit, but a slow one
+    /// that mislabels a finished turn as a watchdog kill. The flag makes
+    /// serve's return prompt and independent of the watchdog. (This test
+    /// arms no clock, so without the flag its park would be truly
+    /// unbounded.) Drives initialize +
     /// tools/list first so the outcome reflects requests served BEFORE the flag
     /// fired (the "no in-flight request dropped" invariant).
     ///

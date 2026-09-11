@@ -56,9 +56,10 @@ pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 pub struct NoProgressDetail {
     /// The cap the clock was armed with.
     pub cap: Duration,
-    /// The silence observed at expiry: the cap plus up to one poll tick of
-    /// scheduling overshoot. A much larger value means a starved poll
-    /// thread, not a slower agent.
+    /// The silence observed at expiry: at least the cap, normally the cap
+    /// plus up to one poll tick of scheduling overshoot (a touch racing
+    /// the latch clamps to the cap rather than underflowing below it). A
+    /// much larger value means a starved poll thread, not a slower agent.
     pub silence: Duration,
     /// The turn's runtime since the clock armed -- separates a turn that
     /// went silent immediately from one that worked (frozen waits

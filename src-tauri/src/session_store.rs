@@ -672,6 +672,12 @@ impl SessionStore {
         // stays on the handle for the wait variant to take.
         let (drop_tx, drop_rx) = std::sync::mpsc::channel();
         session.set_drop_signal(drop_tx);
+        // Generate the id only after the resource exists (ADR-0056), and
+        // stamp the minted identity onto the Session (#886) -- the same
+        // pre-wrap wiring as the closing flag / drop signal above, so the
+        // no-progress kill log can attribute a silenced turn to its session.
+        let id = SessionId::new();
+        session.set_session_id(id.clone());
         let handle = Arc::new(SessionHandle {
             session: Arc::new(Mutex::new(session)),
             cancel,
@@ -688,18 +694,8 @@ impl SessionStore {
             runtime_posture: Mutex::new(RuntimePosture::default()),
             cached_discovered: Mutex::new(None),
         });
-        // Generate the id only after the resource exists; insert under the
-        // write lock; return the id only after the insert lands.
-        let id = SessionId::new();
-        // Stamp the minted identity onto the Session (#886) -- the same
-        // post-construction wiring as the closing flag / drop signal, applied
-        // before the handle becomes reachable, so the no-progress kill log can
-        // attribute a silenced turn to its session.
-        handle
-            .session
-            .lock()
-            .map_err(|_| SessionError::Engine("session lock poisoned".into()))?
-            .set_session_id(id.clone());
+        // Insert under the write lock; return the id only after the insert
+        // lands.
         let mut map = self
             .sessions
             .write()
@@ -896,6 +892,28 @@ mod tests {
         let parsed = SessionId::parse(&wire).expect("valid id parses");
         assert_eq!(parsed, id, "parsed id equals the minted id");
         assert_eq!(parsed.to_string(), wire, "Display is the wire form");
+    }
+
+    /// The create wiring stamps the minted id onto the Session (#886):
+    /// the kill log's session attribution rides this stamp, and nothing
+    /// else would catch its deletion (the projection tests pass None).
+    #[test]
+    fn create_stamps_the_session_id_onto_the_session() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create session");
+        let handle = store.get(&id).expect("handle for the minted id");
+        let session = handle.session.lock().expect("session lock");
+        assert_eq!(
+            session.session_id(),
+            Some(&id),
+            "the Session carries the id the store returned"
+        );
     }
 
     /// A malformed id is `InvalidId`, distinct from `NotFound` (review H1).
