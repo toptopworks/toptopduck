@@ -691,6 +691,15 @@ impl SessionStore {
         // Generate the id only after the resource exists; insert under the
         // write lock; return the id only after the insert lands.
         let id = SessionId::new();
+        // Stamp the minted identity onto the Session (#886) -- the same
+        // post-construction wiring as the closing flag / drop signal, applied
+        // before the handle becomes reachable, so the no-progress kill log can
+        // attribute a silenced turn to its session.
+        handle
+            .session
+            .lock()
+            .map_err(|_| SessionError::Engine("session lock poisoned".into()))?
+            .set_session_id(id.clone());
         let mut map = self
             .sessions
             .write()

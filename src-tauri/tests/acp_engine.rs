@@ -601,12 +601,20 @@ fn no_progress_watchdog_fires_on_a_stuck_agent() {
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("ACP_FAKE_SCENARIO", "stuck");
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
-    assert_eq!(
-        outcome.termination,
-        Termination::NoProgress(std::time::Duration::from_millis(200)),
-        "watchdog on a stuck agent -> NoProgress: {:?}",
-        outcome.termination
-    );
+    match outcome.termination {
+        Termination::NoProgress(detail) => {
+            assert_eq!(
+                detail.cap,
+                std::time::Duration::from_millis(200),
+                "the armed cap rides the payload"
+            );
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
+        }
+        other => panic!("watchdog on a stuck agent -> NoProgress, got {other:?}"),
+    }
 }
 
 /// Issue #813: an agent that stalls before draining the oversized

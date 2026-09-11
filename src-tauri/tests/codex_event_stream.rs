@@ -362,10 +362,10 @@ fn mcp_tool_call_counts_toward_step_cap() {
         Termination::StepCap(n) => assert_eq!(n, 0),
         other => panic!("expected StepCap, got {other:?}"),
     }
-    // The step-cap path resolves well under the 5s wall-clock watchdog.
+    // The step-cap path resolves well under the 5s no-progress cap.
     assert!(
         elapsed < std::time::Duration::from_secs(3),
-        "took {elapsed:?} -- resolved via the wall-clock watchdog, not the step-cap path"
+        "took {elapsed:?} -- resolved via the no-progress watchdog, not the step-cap path"
     );
 }
 
@@ -466,7 +466,7 @@ fn step_cap_overflow_yields_step_cap_termination() {
     // parallel tests' lock-queue wait does not pollute the pin.
     assert!(
         elapsed < std::time::Duration::from_secs(3),
-        "took {elapsed:?} -- resolved via the wall-clock watchdog, not the step-cap path"
+        "took {elapsed:?} -- resolved via the no-progress watchdog, not the step-cap path"
     );
 }
 

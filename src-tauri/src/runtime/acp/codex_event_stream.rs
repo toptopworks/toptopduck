@@ -492,6 +492,7 @@ pub(super) fn run_codex_event_stream(
 
     let mut termination = None;
     let mut step_cap_tripped = false;
+    let mut discards = super::process::DiscardLog::new();
 
     loop {
         // Cancel check (mirrors the ACP loop-top check).
@@ -517,7 +518,15 @@ pub(super) fn run_codex_event_stream(
                 }
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
-                    Err(_) => continue, // skip unparseable line
+                    Err(_) => {
+                        // Top-level discard, answerable in logs (#886): a
+                        // garbage stream otherwise reads as healthy turn
+                        // activity (every line re-arms the clock).
+                        if let Some(count) = discards.record() {
+                            super::process::warn_discarded(adapter.id.as_str(), count, &line);
+                        }
+                        continue; // skip unparseable line
+                    }
                 };
                 if let Some(term) = pump.fold(parse_event(&value), &mut on_phase) {
                     termination = Some(term);

@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use duckdb::InterruptHandle;
 
-/// A turn's identity for the wall-clock watchdog: minted per
+/// A turn's identity for the no-progress watchdog: minted per
 /// [`CancelToken::begin_turn`], retired when the turn's [`InFlightGuard`]
 /// drops. Opaque -- compared only through [`CancelToken::request_if`] -- so a
 /// raw counter cannot stand in for it (the same pairing-as-type posture as
@@ -136,7 +136,7 @@ impl CancelToken {
     }
 
     /// Fire the cancel only when `generation` is still the current turn's:
-    /// the wall-clock watchdog's turn identity (issue #696). The generation
+    /// the no-progress watchdog's turn identity (issue #696). The generation
     /// and the request flag share one atomic word, so a turn boundary
     /// (`begin_turn` or `retire_generation` swaps in the next generation)
     /// and a late watchdog decision cannot interleave -- the watchdog either fires inside its own
@@ -231,7 +231,7 @@ impl CancelToken {
     /// full-pull paths' start (issue #779). A pull is not a turn, so the
     /// call both consumes a leftover request (a stop that landed after the
     /// last turn or pull must not kill this pull on its first row) and retires
-    /// any still-sleeping wall-clock watchdog from the last turn: the watchdog
+    /// any still-sleeping no-progress watchdog from the last turn: the watchdog
     /// fires `request_if(old_generation)` into a generation that no longer
     /// exists and stands down, instead of cancelling a pull the user never
     /// stopped. A racing `request()` has the same nondeterminism `begin_turn`
@@ -256,7 +256,7 @@ impl CancelToken {
 /// RAII guard for the in-flight flag. Created by
 /// [`CancelToken::begin_turn`]; dropping it (at every exit from `ask`) clears
 /// in-flight + the interrupt slot and retires the turn's generation, so a
-/// wall-clock watchdog still holding it stands down instead of parking a
+/// no-progress watchdog still holding it stands down instead of parking a
 /// stale cancel flag between turns (issue #849). Holds an `Arc<CancelToken>`
 /// (not a borrow) so it coexists with `&mut self` method calls on the Session
 /// within `ask`.
@@ -266,7 +266,7 @@ pub struct InFlightGuard {
 }
 
 impl InFlightGuard {
-    /// The turn's generation -- the wall-clock watchdog's turn identity.
+    /// The turn's generation -- the no-progress watchdog's turn identity.
     /// Pass to [`CancelToken::request_if`]; the token retires the
     /// generation when this guard drops, so a watchdog firing after its
     /// turn ended stands down instead of cancelling the successor turn (the
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn dropping_the_guard_retires_the_generation() {
-        // Issue #849: a wall-clock watchdog that wakes after its turn ended --
+        // Issue #849: a no-progress watchdog that wakes after its turn ended --
         // but before any successor began -- must stand down on the retired
         // generation instead of parking a stale cancel flag between turns.
         // External runtimes serve the gateway before the next `begin_turn`

@@ -150,7 +150,8 @@ fn handshake(
 /// but under the gateway's request/response interleaving (each `tools/call`
 /// reply must land before the next message is read) the deferred drain
 /// deadlocks the turn (issue #357: the Linux CI suite parked for the full
-/// wall-clock watchdog). Flushing per forwarded chunk drains the pipe promptly
+/// whole-turn wall-clock timeout, the semantics retired by ADR-0115).
+/// Flushing per forwarded chunk drains the pipe promptly
 /// regardless of how the kernel segments the stream.
 ///
 /// Pump I/O errors are swallowed (`Err(_) => break`, `let _ = flush`): the

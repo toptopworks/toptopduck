@@ -17,8 +17,8 @@
 //!
 //! The panic-detail helpers are runtime-agnostic (ADR-0107's replaceability
 //! review): they hold no loop-specific state and survive a runtime swap
-//! as-is. (The wall-clock watchdog that once lived here was replaced by the
-//! no-progress clock, `crate::session::progress` -- ADR-0115.)
+//! as-is. (The whole-turn wall-clock timeout helper that once lived here was
+//! replaced by the no-progress clock, `crate::session::progress` -- ADR-0115.)
 //!
 //! Migrated out of the retired built-in loop by the retirement slice
 //! (ADR-0107 Decision 1, issue #670); the loop is gone, the shared core

@@ -458,6 +458,15 @@ pub struct Session {
     /// Session itself (not inside the loop, which is built per turn) so the
     /// resume borrow and the live-turn borrow share one object.
     materializer: Box<dyn Materializer>,
+    /// The store-minted session identity (#886): stamped by
+    /// [`SessionStore::create`] right after the id is minted (the same
+    /// post-construction wiring as the closing flag and the drop signal),
+    /// and re-stamped by the resume path (`commands::open_duck`) so a
+    /// reopened session keeps its id -- the projection's no-progress kill
+    /// log attributes the silenced turn to its session. `None` on
+    /// store-less Sessions (tests, non-command paths); the warn omits the
+    /// attribution then.
+    session_id: Option<SessionId>,
     /// The conversation thread (ADR-0028/0039/0040): a unified timeline of turns
     /// AND source/skill lifecycle events, in order. The source of truth the
     /// frontend renders (via [`Self::conversation`]); the window assembler reads
@@ -966,6 +975,7 @@ impl Session {
             temp_path,
             provider,
             materializer: Box::new(RealMaterializer),
+            session_id: None,
             timeline: Vec::new(),
             result_row_cap: engine_defaults.row_cap,
             result_count_cap: DEFAULT_RESULT_COUNT_CAP,
@@ -1022,6 +1032,15 @@ impl Session {
     /// Drop fires the old sender into a closed receiver, a harmless no-op).
     pub fn set_drop_signal(&mut self, tx: std::sync::mpsc::Sender<()>) {
         self.drop_signal = Some(tx);
+    }
+
+    /// Stamp the session identity (#886). Two production stampers:
+    /// [`SessionStore::create`] (fresh sessions, before the handle becomes
+    /// reachable) and the resume path in `commands::open_duck` (a reopened
+    /// session keeps the SAME id). A store-less Session keeps `None` and
+    /// its no-progress kill log simply omits the session attribution.
+    pub fn set_session_id(&mut self, id: SessionId) {
+        self.session_id = Some(id);
     }
 
     /// Whether `close_session` has marked this session closing (ADR-0055). Read
@@ -1462,7 +1481,14 @@ impl Session {
                     // is mapped (no clone on the per-turn record path);
                     // `mem::take` leaves an empty Vec the mapper ignores.
                     let trace = std::mem::take(&mut loop_outcome.trace);
-                    (turn_outcome_from_loop(loop_outcome), trace)
+                    (
+                        turn_outcome_from_loop(
+                            loop_outcome,
+                            self.session_id.as_ref(),
+                            BUILT_IN_RUNTIME_FACE,
+                        ),
+                        trace,
+                    )
                 };
                 (outcome, trace)
             }
@@ -1612,6 +1638,9 @@ impl Session {
         // the `Send`-bounded `on_phase`, so it crosses cleanly; the serve loop
         // keeps the session's live resources on the thread that owns them
         // (ADR-0085: serve borrows in place, engine drives in parallel).
+        // The kill-log face (#886): captured before the engine takes
+        // ownership of the spec below.
+        let runtime_face = adapter.id.as_str();
         let (acp_outcome, gateway_result) = std::thread::scope(|s| {
             let engine = AcpEngine::new(adapter, Arc::clone(&self.cancel));
             // Deterministic serve terminator (issue #357 / ADR-0085): a one-shot
@@ -1622,8 +1651,10 @@ impl Session {
             // without waiting for the bridge to close the TCP connection. On
             // Linux the stdio-spawned bridge inherits a leaked stdin write-end
             // (Rust std limitation) and never EOFs, so without this flag serve
-            // would park until the 120s wall-clock watchdog cancelled it.
-            // Production Node-spawned bridges do not leak the fd, but relying on
+            // would park on the bridge socket with no bounded exit: the
+            // no-progress clock retires with the turn (ADR-0115), so nothing
+            // left would cancel the read. Production Node-spawned bridges do
+            // not leak the fd, but relying on
             // the bridge to close promptly is a correctness gap the flag closes.
             // The engine thread sets the flag when its prompt pump returns. The
             // flag is an `Arc<AtomicBool>` (not a borrowed `&AtomicBool`) because
@@ -1732,7 +1763,10 @@ impl Session {
         self.snapshot_discovered_runtime(&acp_outcome);
         let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);
-        (turn_outcome_from_loop(merged), trace)
+        (
+            turn_outcome_from_loop(merged, self.session_id.as_ref(), runtime_face),
+            trace,
+        )
     }
 
     /// Append a turn to the conversation thread and return its outcome. Every
@@ -2055,7 +2089,7 @@ impl Session {
     /// outside-the-lock cancel path), so the export's own lock hold cannot
     /// shield it from the cancel command. The pull's start retires the
     /// token's generation (see [`Self::start_full_pull`]), so a past stop or
-    /// a still-sleeping wall-clock watchdog from the last turn never kills
+    /// a still-sleeping no-progress watchdog from the last turn never kills
     /// the pull. A cancelled export leaves no artifact: the destination is a
     /// temp sibling until success, and the failed-write cleanup below removes
     /// it -- a pre-existing file at the user-chosen path stays untouched.
@@ -2159,7 +2193,7 @@ impl Session {
     /// cancel observed mid-scan stops it with `RowReadError::Cancelled`
     /// (the [`CancelToken`] fires without the session lock, ADR-0021; the
     /// pull's start retires the token's generation -- consuming a leftover
-    /// request and standing down a still-sleeping wall-clock watchdog from
+    /// request and standing down a still-sleeping no-progress watchdog from
     /// the last turn -- see [`Self::start_full_pull`]).
     pub fn read_rows_tsv(
         &self,
@@ -2307,7 +2341,21 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 /// Tool-level errors (SQL failure, approval denial) never land here -- the
 /// loop fed them back to the model for self-correction (ADR-0077); only a
 /// trajectory that never converges exhausts the step cap.
-fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
+///
+/// The built-in runtime's kill-log face (#886): what the projection names
+/// when the silenced turn ran on the built-in loop (the external branches
+/// pass their adapter id). A named const so the wording stays greppable.
+const BUILT_IN_RUNTIME_FACE: &str = "built-in";
+
+/// `session_id` + `runtime_face` attribute the NoProgress kill log (#886):
+/// the projection is the one point all four turn paths share, so the warn
+/// names its victim here. `None` = a store-less Session (tests,
+/// non-command paths); the warn omits the session then.
+fn turn_outcome_from_loop(
+    outcome: LoopOutcome,
+    session_id: Option<&SessionId>,
+    runtime_face: &str,
+) -> TurnOutcome {
     match outcome.termination {
         Termination::Text(text) => {
             if outcome.promotions.is_empty() {
@@ -2343,14 +2391,21 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
             detail: format!("agent did not converge within {cap} steps"),
         }),
         Termination::Cancelled => TurnOutcome::Cancelled(None),
-        Termination::NoProgress(cap) => {
+        Termination::NoProgress(detail) => {
             // The technical "no-progress timeout" fact rides the log AND the
             // cancel reason payload (#883) -- the landing stays a Cancelled
-            // (ADR-0115), but one the frontend can present as a timeout.
+            // (ADR-0115), but one the frontend can present as a timeout. The
+            // warn carries the attribution + trip-side measurements (#886):
+            // the cap alone is a production constant and attributes nothing.
+            let session = session_id
+                .map(|id| format!("session {id}, "))
+                .unwrap_or_default();
             log::warn!(
                 target: "toptopduck::session",
-                "no-progress timeout: generation silent past the {:.1}s cap; aborting the turn",
-                cap.as_secs_f64()
+                "no-progress timeout: {session}runtime `{runtime_face}` silent for {:.1}s (cap {:.1}s, turn ran {:.1}s); aborting the turn",
+                detail.silence.as_secs_f64(),
+                detail.cap.as_secs_f64(),
+                detail.turn_elapsed.as_secs_f64()
             );
             TurnOutcome::Cancelled(Some(CancelledReason::NoProgress))
         }
@@ -2736,7 +2791,7 @@ fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_
 
 #[cfg(test)]
 mod tests {
-    use super::{turn_outcome_from_loop, Session, TOOL_OUTPUT_DIR_NAME};
+    use super::{turn_outcome_from_loop, Session, BUILT_IN_RUNTIME_FACE, TOOL_OUTPUT_DIR_NAME};
     use crate::model::{CancelledReason, DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
@@ -2752,7 +2807,9 @@ mod tests {
     use crate::approval::OperationKind;
     use crate::model::ThinkingTrace;
     use crate::runtime::gateway::server::GatewayOutcome;
-    use crate::session::loop_contract::{LoopOutcome, LoopRound, Termination, TraceEntry};
+    use crate::session::loop_contract::{
+        LoopOutcome, LoopRound, NoProgressDetail, Termination, TraceEntry,
+    };
 
     // Issue #617: the settle stamp reads the wall clock a second time after
     // the ask stamp, so a backward clock correction (NTP, a manual change)
@@ -2912,7 +2969,7 @@ mod tests {
             trace: Vec::new(),
             discovered_runtime: None,
         };
-        match turn_outcome_from_loop(outcome) {
+        match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
             TurnOutcome::Materialized {
                 body, assumption, ..
             } => {
@@ -2936,7 +2993,7 @@ mod tests {
             trace: Vec::new(),
             discovered_runtime: None,
         };
-        match turn_outcome_from_loop(outcome) {
+        match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
             TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
                 assert_eq!(detail, "external runtime `cli-a` not found on PATH");
             }
@@ -2952,12 +3009,16 @@ mod tests {
     #[test]
     fn turn_outcome_maps_no_progress_termination_to_cancelled_with_reason() {
         let outcome = LoopOutcome {
-            termination: Termination::NoProgress(std::time::Duration::from_secs(120)),
+            termination: Termination::NoProgress(NoProgressDetail {
+                cap: std::time::Duration::from_secs(120),
+                silence: std::time::Duration::from_secs(120),
+                turn_elapsed: std::time::Duration::from_secs(180),
+            }),
             promotions: Vec::new(),
             trace: Vec::new(),
             discovered_runtime: None,
         };
-        match turn_outcome_from_loop(outcome) {
+        match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
             TurnOutcome::Cancelled(reason) => {
                 assert_eq!(reason, Some(CancelledReason::NoProgress));
             }
@@ -2979,7 +3040,7 @@ mod tests {
             trace: Vec::new(),
             discovered_runtime: None,
         };
-        match turn_outcome_from_loop(outcome) {
+        match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
             TurnOutcome::Materialized {
                 body, assumption, ..
             } => {

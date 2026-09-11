@@ -270,7 +270,7 @@ pub enum StopReason {
 /// `session/cancel` notification params. The agent SHOULD abort in-flight work
 /// and respond to the original `session/prompt` with
 /// [`StopReason::Cancelled`]. The engine sends this on user cancel, the
-/// wall-clock watchdog, or its own step-cap trip, then SIGTERMs the agent if it
+/// no-progress watchdog kill, or its own step-cap trip, then SIGTERMs the agent if it
 /// does not return promptly (ADR-0081 cancel = 整轮中止).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

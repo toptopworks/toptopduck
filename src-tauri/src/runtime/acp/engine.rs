@@ -610,7 +610,7 @@ fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
 
 /// The turn engine's thin wrapper over the shared
 /// [`super::ndjson::NdjsonIo`]: cancel-driven (a round-trip aborts on the
-/// shared token; the wall-clock watchdog fires it) and mapped onto
+/// shared token; the no-progress watchdog fires it) and mapped onto
 /// [`Termination`]. The multiplexing prompt pump below keeps its own line
 /// loop -- it folds `session/update` and services `session/request_permission`
 /// -- and shares the reader channel via [`Self::recv_timeout`] and the writer
@@ -682,6 +682,7 @@ impl AcpIo {
         on_phase: &mut impl FnMut(TurnPhase),
     ) -> PromptEnd {
         let prompt_id_value = serde_json::to_value(RequestId::Num(3)).unwrap_or(Value::Null);
+        let mut discards = super::process::DiscardLog::new();
         loop {
             // Cancel / step-cap trip: send session/cancel once, record when.
             let user_cancelled = cancel.is_requested();
@@ -715,7 +716,15 @@ impl AcpIo {
                     }
                     let v: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
-                        Err(_) => continue,
+                        Err(_) => {
+                            // Top-level discard, answerable in logs (#886):
+                            // a garbage stream otherwise reads as healthy
+                            // turn activity (every line re-arms the clock).
+                            if let Some(count) = discards.record() {
+                                super::process::warn_discarded(adapter.id.as_str(), count, &line);
+                            }
+                            continue;
+                        }
                     };
                     // Response to the prompt?
                     if v.get("id") == Some(&prompt_id_value) && v.get("method").is_none() {

@@ -27,8 +27,9 @@ use crate::bounded_line::{BoundedLineReader, LineRead, LINE_MAX_BYTES};
 /// over-long line is drained and fails the read with `InvalidData` -- the
 /// connection drops. This is an id-correlated request/response stream, not an
 /// event stream: a silently dropped frame would leave its pending id
-/// unresolved (the reader parks until the wall-clock watchdog cancels the
-/// turn with the wrong attribution), so over-long input must fail fast and
+/// unresolved (the reader would park with no exit at all -- the serving
+/// segment is frozen under ADR-0115, so the no-progress clock never fires
+/// mid-wait), so over-long input must fail fast and
 /// visibly. (The ACP readers keep drop-and-warn on a different safety net:
 /// their event streams carry no pending id, and a dropped terminator frame
 /// still settles at EOF through the fallback outcome -- a degraded but

@@ -45,6 +45,27 @@ pub(crate) const DEFAULT_WALL_CLOCK: Duration = Duration::from_secs(120);
 /// 512 -- an arm asymmetry, recorded rather than converged.
 pub(crate) const TRACE_EXCERPT_MAX: usize = 240;
 
+/// The no-progress kill's measured detail (#886): the armed cap plus the
+/// trip-side observables -- the silence actually observed at expiry and the
+/// turn's whole runtime since arm. The cap alone is a production constant
+/// (the ADR-0021-aligned 120 s), so the measurements are what make each
+/// kill attributable in the projection's warn. Internal to the loop
+/// vocabulary: the projection reduces this to the `NoProgress` cancel
+/// reason (the IPC shape is unchanged, #883) and logs the numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoProgressDetail {
+    /// The cap the clock was armed with.
+    pub cap: Duration,
+    /// The silence observed at expiry: the cap plus up to one poll tick of
+    /// scheduling overshoot. A much larger value means a starved poll
+    /// thread, not a slower agent.
+    pub silence: Duration,
+    /// The turn's runtime since the clock armed -- separates a turn that
+    /// went silent immediately from one that worked (frozen waits
+    /// included) before falling silent.
+    pub turn_elapsed: Duration,
+}
+
 /// Why the loop terminated (ADR-0081). Maps onto the four-way `TurnOutcome`
 /// (ADR-0028) at the wiring seam; kept as a distinct enum here so the loop is
 /// unit-testable without committing to `TurnOutcome`'s single-promotion shape
@@ -67,11 +88,12 @@ pub enum Termination {
     Cancelled,
     /// The no-progress watchdog fired (ADR-0115): the generation segment
     /// went silent past the cap with no freeze segment open. Carries the
-    /// expired cap. Maps to `TurnOutcome::Cancelled` too -- the ADR-0021
+    /// armed cap plus the trip-side measurements ([`NoProgressDetail`]).
+    /// Maps to `TurnOutcome::Cancelled` too -- the ADR-0021
     /// landing is unchanged -- but carries the technical "no-progress
     /// timeout" fact at this layer; the cancelled-vs-timed-out presentation
     /// split rides the outcome's cancel-reason payload (#883).
-    NoProgress(std::time::Duration),
+    NoProgress(NoProgressDetail),
     /// No LLM provider is wired / the key was refused (ADR-0044 permanent).
     /// Maps to `TurnOutcome::Failed(NotWired)`.
     NotWired,

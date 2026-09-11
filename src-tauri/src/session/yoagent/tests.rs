@@ -690,10 +690,16 @@ fn generation_silence_fires_no_progress() {
         &sink,
         Arc::new(CancelToken::new()),
     );
-    assert_eq!(
-        outcome.termination,
-        Termination::NoProgress(Duration::from_millis(100))
-    );
+    match outcome.termination {
+        Termination::NoProgress(detail) => {
+            assert_eq!(detail.cap, Duration::from_millis(100));
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
+        }
+        other => panic!("generation silence -> NoProgress, got {other:?}"),
+    }
 }
 
 /// The freeze (ADR-0115): an approval pending past the cap does NOT kill

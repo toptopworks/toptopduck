@@ -320,7 +320,7 @@ fn run_turn(scenario: &str) {
         "slow_drip" => {
             // The survival half of ADR-0115: a generation segment that keeps
             // producing past the cap. Frames land every 100ms for ~600ms
-            // while the test runs a 300ms cap -- each inbound frame must
+            // while the test runs a 400ms cap -- each inbound frame must
             // re-arm the clock, or the watchdog kills the turn mid-stream.
             emit(&mut out, &system_init());
             for i in 0..6u32 {
