@@ -52,6 +52,18 @@ pub(crate) const DEFAULT_MCP_TIMEOUT_MS: u32 = 120_000;
 /// order as the cancel watcher's 25 ms loop (the UI cancel round-trip).
 const CANCEL_TEARDOWN_POLL: Duration = Duration::from_millis(25);
 
+/// How long the deadline side waits after the kill for the worker's read to
+/// unwind before leaking the worker (issue #889 review). The kill unwinds a
+/// single-process stdio child immediately, an SSE reader within one reader
+/// wake (at most the client's `SSE_READ_TIMEOUT`), and an HTTP read at its
+/// 30 s per-read bound -- but shapes the kill cannot reach (a wrapper stdio
+/// shim whose grandchild inherits the stdout pipe, an SSE slow-drip under
+/// the wake interval) would otherwise park the worker forever, and waiting
+/// for it would re-wedge the turn on the join, the exact state this
+/// deadline exists to close. Leaking the worker (and the client it owns)
+/// trades one thread for a bounded turn.
+const KILL_JOIN_GRACE: Duration = Duration::from_secs(5);
+
 /// The prefix marking a gateway-aggregated external tool name. The bridge /
 /// built-in LLM sees `mcp__<server_slug>__<tool>`; the gateway parses the
 /// prefix to route, then forwards the bare `<tool>` to the server. Pinned here
@@ -71,7 +83,13 @@ const NAMESPACED_SEP: &str = "__";
 struct AggregatedServer {
     slug: String,
     display_name: String,
-    client: TransportClient,
+    /// Present between calls. A route TAKES it into the deadline worker and
+    /// restores it on return (issue #889 review): a kill-resistant server
+    /// shape leaves the worker -- and the client with it -- leaked past the
+    /// grace, which is exactly what keeps the calling thread from joining
+    /// it forever; the server then latches `dead` for the turn's remaining
+    /// calls.
+    client: Option<TransportClient>,
     tools: Vec<Value>,
     /// The per-call deadline resolved from the config (issue #889); every
     /// `tools/call` routed to this server runs under it.
@@ -252,14 +270,18 @@ impl McpAggregator {
         // (issue #889). `expire` races the worker's `publish` -- whichever
         // lands second performs the kill, so a spawn that outlasts the
         // budget still self-terminates the moment its handle exists (a 0 ms
-        // budget surfaces as this gateway fault, the config contract).
+        // budget surfaces as this gateway fault, the config contract). The
+        // worker captures owned copies (the deadline runner parks it on a
+        // detached thread, which demands `'static`).
+        let config_for_worker = config.clone();
+        let secrets_for_worker = secrets.to_vec();
         let outcome = run_with_deadline(
             timeout,
             move || slot_for_kill.expire(),
             move || {
                 let mut client = connect_transport_with_kill(
-                    config,
-                    secrets,
+                    &config_for_worker,
+                    &secrets_for_worker,
                     tool_output_dir.as_deref(),
                     &kill_slot,
                 )?;
@@ -321,7 +343,7 @@ impl McpAggregator {
         self.servers.push(AggregatedServer {
             slug,
             display_name: config.display_name.clone(),
-            client,
+            client: Some(client),
             tools,
             timeout,
             kill,
@@ -559,7 +581,7 @@ impl McpAggregator {
         agg.servers.push(AggregatedServer {
             slug: slugify(display_name, &id),
             display_name: display_name.to_string(),
-            client: TransportClient::Http(client),
+            client: Some(TransportClient::Http(client)),
             tools,
             timeout: Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
             kill: TransportKill::Http,
@@ -592,16 +614,29 @@ impl McpAggregator {
         let kill = server.kill.clone();
         let display_name = server.display_name.clone();
         let tool_for_error = tool.clone();
-        let outcome = {
-            let client = &mut server.client;
-            run_with_deadline(
-                timeout,
-                move || kill.kill(),
-                move || client.call(&tool, arguments),
-            )
+        // The worker OWNS the client for the call's duration (issue #889
+        // review): a kill-resistant server shape leaves the worker parked
+        // past the grace, and the client leaks with it -- which is what
+        // keeps this thread from joining that worker forever. `None` here is
+        // the leaked-worker aftermath (route is the only taker and restores
+        // or latches on every other path), so it degrades to the same
+        // fast-fail shape as `dead`.
+        let Some(client) = server.client.take() else {
+            return Err(RouteError::Client(ClientError::ServerClosed));
         };
+        let arguments = arguments.clone();
+        let outcome = run_with_deadline(
+            timeout,
+            move || kill.kill(),
+            move || {
+                let mut client = client;
+                let result = client.call(&tool, &arguments);
+                (client, result)
+            },
+        );
         match outcome {
-            Some(result) => {
+            Some((client, result)) => {
+                server.client = Some(client);
                 // A `ServerClosed` (EOF / disconnected channel) means the
                 // transport is gone regardless of WHO ended it -- deadline,
                 // cancel teardown, or the server dying on its own. Latch
@@ -613,6 +648,9 @@ impl McpAggregator {
                 result.map_err(RouteError::Client)
             }
             None => {
+                // The deadline expired: the transport is dead OR leaked with
+                // an unwound-proof worker (the client slot stays `None`
+                // either way -- a leaked worker owns it).
                 server.dead = true;
                 log::warn!(
                     target: "toptopduck::mcp",
@@ -647,9 +685,16 @@ impl McpAggregator {
             .spawn(move || loop {
                 if cancel.is_requested() {
                     if !turn_done.load(Ordering::SeqCst) {
+                        eprintln!(
+                            "[WATCHDOG-PROBE] fire seen, killing {} transports",
+                            kills.lock().expect("kill registry poisoned").len()
+                        );
                         for kill in kills.lock().expect("kill registry poisoned").iter() {
                             kill.kill();
                         }
+                        eprintln!("[WATCHDOG-PROBE] kills issued");
+                    } else {
+                        eprintln!("[WATCHDOG-PROBE] fire seen but turn_done, standing down");
                     }
                     return;
                 }
@@ -692,6 +737,38 @@ impl Default for McpAggregator {
     }
 }
 
+/// The RAII stand-down flag for one turn's cancel-teardown watcher (issue
+/// #889 review): stores the flag on drop, so a turn that unwinds ANY way --
+/// normal return, early return, panic unwind -- stands its watcher down,
+/// mirroring the repo's closing-flag precedent (ADR-0055). Without it, a
+/// panicking turn skips the manual store and its watcher keeps polling at
+/// [`CANCEL_TEARDOWN_POLL`] until some future turn's token fire.
+pub struct TurnDoneFlag(Arc<AtomicBool>);
+
+impl TurnDoneFlag {
+    /// A live turn's flag (`false` until drop).
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// The shared flag form [`McpAggregator::arm_cancel_teardown`] polls.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl Default for TurnDoneFlag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TurnDoneFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Resolve a server's per-call deadline (issue #889):
 /// [`McpServerConfig::timeout_ms`] overrides the gateway default; `None`
 /// (or a config written before the field existed) falls back to
@@ -702,39 +779,66 @@ fn effective_timeout(config: &McpServerConfig) -> Duration {
     Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_MCP_TIMEOUT_MS) as u64)
 }
 
-/// Park `f` on a scoped worker thread and enforce `timeout` from this
+/// Park `f` on a detached worker thread and enforce `timeout` from this
 /// thread (issue #889). The transports are synchronous blocking reads with
-/// no native deadline; this wrapper races the call against `recv_timeout`.
-/// On expiry `kill` terminates the transport, which is what makes the
-/// worker's blocking read RETURN -- without it a timed-out park would just
-/// leak a thread and block the scope join forever. Returns `None` on
-/// expiry (after the kill), `Some` with the call's result otherwise.
-fn run_with_deadline<T: Send>(
+/// no per-call deadline of their own; this wrapper races the call against
+/// `recv_timeout`. On expiry `kill` terminates the transport, which USUALLY
+/// makes the worker's blocking read return -- but a kill-resistant server
+/// shape (a wrapper stdio shim whose grandchild inherits the stdout pipe, an
+/// SSE slow-drip under the reader's wake interval) can outlive the kill, and
+/// waiting for such a worker would block this thread forever. So after the
+/// kill the wrapper waits [`KILL_JOIN_GRACE`] for the worker to unwind and
+/// then deliberately LEAKS it: the worker owns the call's resources (a
+/// `'static` capture -- a `TransportClient` on the route path), so a leaked
+/// worker costs one thread + one transport, while the caller still gets its
+/// expiry `None` and the turn stays bounded. A worker panic is caught on the
+/// worker and resumed on this thread (the scoped predecessor's propagation
+/// semantics, preserved).
+fn run_with_deadline<T: Send + 'static>(
     timeout: Duration,
     kill: impl FnOnce(),
-    f: impl FnOnce() -> T + Send,
+    f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
-    std::thread::scope(|scope| {
-        let (tx, rx) = std::sync::mpsc::channel();
-        scope.spawn(move || {
-            let _ = tx.send(f());
-        });
-        match rx.recv_timeout(timeout) {
-            Ok(value) => Some(value),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                kill();
-                None
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // The worker dropped its sender without sending: it panicked.
-                // Kill for symmetry, then let the scope's join resume the
-                // panic on this thread -- the expiry `None` is never
-                // observed by the caller.
-                kill();
-                None
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(payload)) => {
+            kill();
+            std::panic::resume_unwind(payload);
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            kill();
+            // Bounded unwind wait: a kill that lands returns the worker well
+            // inside the grace (a stdio EOF is immediate, the SSE reader
+            // wakes at most every `SSE_READ_TIMEOUT`); one that cannot land
+            // leaves it parked, and leaking it beats re-wedging the turn.
+            match rx.recv_timeout(KILL_JOIN_GRACE) {
+                // The call's result landed after expiry: discarded -- an
+                // in-flight response is invalidated by the kill
+                // (deadline-abort convention, see `route`).
+                Ok(_) => None,
+                Err(_) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "deadline kill failed to unwind the MCP call worker within \
+                         {KILL_JOIN_GRACE:?}; leaking the worker and its transport \
+                         (a server shape defeated the kill)"
+                    );
+                    None
+                }
             }
         }
-    })
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The worker dropped its sender without sending (a panic before
+            // the catch_unwind send): unreachable in practice; the kill for
+            // symmetry keeps a transport from outliving the unwinding turn.
+            kill();
+            None
+        }
+    }
 }
 
 /// Read every secret env value for one server from the keychain (ADR-0029). A
@@ -924,6 +1028,25 @@ mod tests {
             effective_timeout(&timeout_config(Some(0))),
             Duration::from_millis(0),
             "0 passes through as the gateway-fault budget (no config-layer reject)"
+        );
+    }
+
+    /// Issue #889 review: the stand-down flag is RAII -- the watcher's exit
+    /// must not depend on a manual store a panicking turn skips. Dropping
+    /// the flag (however the turn unwinds) sets the shared bit the watcher
+    /// polls.
+    #[test]
+    fn turn_done_flag_stands_down_on_drop() {
+        let flag_holder = TurnDoneFlag::new();
+        let watched = flag_holder.flag();
+        assert!(
+            !watched.load(Ordering::SeqCst),
+            "the flag starts live (false)"
+        );
+        drop(flag_holder);
+        assert!(
+            watched.load(Ordering::SeqCst),
+            "drop stands the watcher down whatever way the turn unwound"
         );
     }
 

@@ -12,6 +12,7 @@
 //! these tests pin the WIRING -- the scoped-thread serve, the bridge
 //! spawn/connect, and the parallel engine drive rejoin without deadlock.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -20,6 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use toptopduck_lib::cli_tools::config::{
     CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
 };
+use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use toptopduck_lib::model::SkillProvenance;
 use toptopduck_lib::persistence::recipe::{RecipeEntry, RuntimeKind};
 use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
@@ -667,4 +669,104 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
         Some(&catalog),
         "the recipe-header cache must survive the no-discovery turn"
     );
+}
+
+/// Issue #889 (review I4): the ACP-branch cancel-teardown wiring, end to
+/// end at the session layer. The scenario's gateway tool call targets a
+/// hung external MCP server (`FAKE_HANG_ON_CALL`, a 60 s budget -- only the
+/// cancel path can unstick it), the call parks inside the dispatch freeze,
+/// a token fire 500 ms in arms the session's teardown watcher, the
+/// transports die, the parked read returns, the bridge chain unblocks, and
+/// `ask` settles a BOUNDED terminal turn instead of wedging until the
+/// per-call budget. Without the arming at the ACP branch this turn holds
+/// the session lock for the full 60 s and the bound below fails.
+///
+/// The outcome shape follows the race the cancel lands in: with the unblock
+/// arriving promptly the CLI settles its prompt normally (an `EndTurn`), and
+/// content emitted AFTER the cancel is not folded into the prose (#628
+/// semantics -- the scenario's agent message lands post-cancel, so the
+/// terminal body is the empty pre-cancel prose); a slower settle rides the
+/// engine's cancel-grace path into `Cancelled`. Both are the bounded
+/// unwinding this wiring exists to guarantee; what must NOT happen is the
+/// turn resting on the parked read.
+#[test]
+fn external_cancel_unblocks_a_turn_parked_on_a_hung_mcp_call() {
+    use std::time::{Duration, Instant};
+
+    let (mut session, old_path, _guard) = external_session("gateway_mcp_call");
+    // Route the scenario's gateway tools/call at the hung server: display
+    // "HungMCP" slugifies to `hungmcp`, so the handle the fixture addresses
+    // is `mcp__hungmcp__echo`.
+    std::env::set_var("ACP_FAKE_GATEWAY_TOOL", "mcp__hungmcp__echo");
+    let mut env = BTreeMap::new();
+    env.insert("FAKE_HANG_ON_CALL".to_string(), "1".to_string());
+    let hang = McpServerConfig {
+        id: McpServerId("hung-wiring".into()),
+        display_name: "HungMCP".into(),
+        transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-fake-server"), Vec::new()),
+        env,
+        keychain_env_keys: Vec::new(),
+        timeout_ms: Some(60_000),
+        enabled: true,
+    };
+    let keychain = KeychainStore::new();
+    let inputs = TurnInputs {
+        mcp_servers: &[hang],
+        keychain: &keychain,
+        skills: &[],
+        skills_root: Path::new(""),
+        activated: &[],
+        cli_tools: &[],
+    };
+    // An external MCP call gates (ADR-0108 classify) -- answer the card so
+    // the turn reaches the MCP park instead of resting on the approval.
+    struct AllowSink<'a> {
+        state: &'a ApprovalState,
+    }
+    impl ApprovalSink for AllowSink<'_> {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            let id: uuid::Uuid = body.request_id.parse().expect("uuid");
+            self.state
+                .respond(id, ApprovalResponse::AllowOnce)
+                .expect("respond");
+        }
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+    let approval = ApprovalState::new();
+    let sink = AllowSink { state: &approval };
+    // Fire the app token shortly in: begin_turn (inside ask) has long
+    // cleared by then, so the fire survives to the watcher.
+    let token = session.cancel_token();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        token.request();
+    });
+    let started = Instant::now();
+    let outcome = session.ask_with_phase(
+        "call the hung gateway tool",
+        &approval,
+        &sink,
+        |_| {},
+        &inputs,
+    );
+    std::env::set_var("PATH", old_path);
+    std::env::remove_var("ACP_FAKE_GATEWAY_TOOL");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "cancel ends the frozen MCP wait bounded, well under the 60s budget"
+    );
+    match outcome {
+        TurnOutcome::Cancelled(_) => {}
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                !body.contains("done via gateway"),
+                "content emitted after the cancel must not fold into the \
+                 terminal prose (#628 semantics): {body:?}"
+            );
+        }
+        other => panic!(
+            "a token fire on a parked MCP call settles a terminal turn, \
+             got {other:?}"
+        ),
+    }
 }

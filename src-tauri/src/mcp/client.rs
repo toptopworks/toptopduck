@@ -32,9 +32,13 @@
 //! Turn-local (issue #301 Q2): the gateway constructs one client per
 //! configured server at turn start and drops it at turn end -- no
 //! cross-turn state, no session-level handle. Per-call timeouts are NOT
-//! enforced per-read here: blocking reads have no native deadline, so the
-//! deadline lives one layer up -- the aggregator parks the blocking call on
-//! a scoped worker thread and enforces
+//! enforced per-read here: the transports carry no per-call deadline of
+//! their own (a stdio read ends only at the child's stdout EOF, an SSE
+//! channel recv ends only when the reader exits -- at most one
+//! [`SSE_READ_TIMEOUT`] wake after the stop flag -- and an HTTP read ends
+//! at its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
+//! layer up -- the aggregator parks the blocking call on a worker thread
+//! and enforces
 //! [`McpServerConfig::timeout_ms`](crate::mcp::config::McpServerConfig::timeout_ms)
 //! / the gateway default via `recv_timeout`, terminating the transport
 //! through [`TransportKill`] on expiry (issue #889). The transports stay
@@ -104,11 +108,25 @@ impl TransportKill {
     /// deadline expiry and cancel teardown may both fire it.
     pub fn kill(&self) {
         match self {
-            Self::StdioChild(child) => {
-                if let Ok(mut child) = child.lock() {
-                    let _ = child.kill();
+            Self::StdioChild(child) => match child.lock() {
+                Ok(mut child) => {
+                    // Log the failure (issue #889 review): this kill is what
+                    // the deadline/cancel unwind rides on, so a failed kill
+                    // must be diagnosable in the field, not silent.
+                    if let Err(e) = child.kill() {
+                        log::warn!(
+                            target: "toptopduck::mcp",
+                            "stdio transport kill failed: {e}"
+                        );
+                    }
                 }
-            }
+                Err(_) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "stdio transport kill skipped: the child lock is poisoned"
+                    );
+                }
+            },
             Self::SseStop(stop) => stop.store(true, Ordering::SeqCst),
             Self::Http => {}
         }
@@ -603,9 +621,22 @@ impl Drop for StdioClient {
         // The lock only contends while a deadline / cancel kill is mid-flight
         // (both return without holding it, issue #889).
         let _ = self.inner.writer.flush();
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
+        match self.child.lock() {
+            Ok(mut child) => {
+                if let Err(e) = child.kill() {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "stdio child kill at drop failed: {e}"
+                    );
+                }
+                let _ = child.wait();
+            }
+            Err(_) => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "stdio child kill at drop skipped: the child lock is poisoned"
+                );
+            }
         }
     }
 }
@@ -853,10 +884,13 @@ impl SseClient {
         Self::connect_with_kill(url, &empty_kill_slot())
     }
 
-    /// [`Self::connect`] with a [`KillSlot`] (issue #889). The connect read
-    /// itself is bounded by the agent's `timeout_read`, so the slot mainly
-    /// serves uniformity -- but the stop flag is published as soon as it
-    /// exists so the slot is always accurate.
+    /// [`Self::connect`] with a [`KillSlot`] (issue #889). The stop flag is
+    /// published the moment it exists -- it is the ONLY thing that breaks a
+    /// deadline or cancel during the initialize handshake: the handshake
+    /// parks on an unbounded channel `recv` (the agent's `timeout_read`
+    /// bounds the reader's socket reads, not the channel), so without the
+    /// slot a spawn that outlives its budget would park with nobody left to
+    /// kill it.
     pub fn connect_with_kill(url: &str, kill_slot: &KillSlot) -> Result<Self, ClientError> {
         // The GET agent carries a read timeout so the reader thread can
         // periodically check the stop flag (the stream is otherwise blocking
@@ -1443,6 +1477,46 @@ mod tests {
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         client.list_tools().expect("first call (id=1)");
         client.call("x", &json!({})).expect("second call (id=2)");
+    }
+
+    // --- ConnectKill rendezvous (issue #889) ----------------------------------
+
+    /// The publish-after-expire ordering: `expire` may land before the
+    /// transport has published its kill handle (a spawn that outlasts the
+    /// budget), and the re-check inside `publish` is what kills the LATE
+    /// handle -- without it the worker parks on the handshake read after
+    /// the deadline with nobody left to kill it. The stop-flag variant
+    /// makes the kill observable without a process: a `publish` that
+    /// merely stores the handle leaves the flag unset and fails this pin.
+    #[test]
+    fn connect_kill_publish_after_expire_self_terminates_the_handle() {
+        let slot = ConnectKill::default();
+        slot.expire();
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "publish after expire must kill the late handle, not just store it"
+        );
+    }
+
+    /// The forward ordering for contrast: publishing BEFORE expiry stores
+    /// the handle without firing it (the transport is healthy); the later
+    /// `expire` performs the kill itself.
+    #[test]
+    fn connect_kill_expire_after_publish_fires_the_stored_handle() {
+        let slot = ConnectKill::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "a healthy connect's publish does not fire its own kill"
+        );
+        slot.expire();
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "expire kills whatever is published"
+        );
     }
 
     // --- SSE event parsing (issue #389) --------------------------------------

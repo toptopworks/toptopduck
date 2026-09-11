@@ -1379,11 +1379,14 @@ impl Session {
                     // Cancel-aware teardown (issue #889): a token fire while
                     // the loop is live terminates every connected transport,
                     // unblocking a tools/call parked inside the dispatch
-                    // freeze. The flag stands the watcher down once `run`
-                    // returns -- a normally finished turn tears down through
-                    // the aggregator's own `Drop`.
-                    let mcp_turn_done = Arc::new(AtomicBool::new(false));
-                    mcp.arm_cancel_teardown(Arc::clone(&self.cancel), Arc::clone(&mcp_turn_done));
+                    // freeze. The flag is RAII ([`TurnDoneFlag`]): dropping
+                    // it at block end stands the watcher down whatever way
+                    // the block exits -- normal return or a panicking turn
+                    // -- so a normally finished turn tears down through the
+                    // aggregator's own `Drop` and a panicking turn cannot
+                    // leak its poller.
+                    let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
+                    mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
                     request.tools.extend(mcp.meta_tool_definitions());
                     // ADR-0108 Decision 6: the enabled CLI registrations are
                     // DIRECT-LISTED into the tool table (never via the
@@ -1487,10 +1490,9 @@ impl Session {
                             on_phase,
                         ),
                     };
-                    // Stand the MCP cancel-teardown watcher down (issue
-                    // #889): the loop returned, so the turn's teardown now
-                    // runs through the aggregator's `Drop` at block end.
-                    mcp_turn_done.store(true, Ordering::SeqCst);
+                    // The MCP cancel-teardown watcher stands down through
+                    // `mcp_turn_done`'s Drop at block end (issue #889) --
+                    // no manual store to skip on an unwinding path.
                     // The loop's real multi-call trace rides alongside the
                     // mapped outcome to record_turn (ADR-0078, issue #319): the
                     // mapper stays focused on the four-way classification, so

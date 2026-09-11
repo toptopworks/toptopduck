@@ -1155,6 +1155,41 @@ fn hang_call_config(id: &str, display: &str, timeout_ms: u32) -> McpServerConfig
     }
 }
 
+/// A fake-server config that answers `initialize` but swallows `tools/list`
+/// (`FAKE_HANG_ON_LIST=1` in the child env), under a short per-call
+/// deadline -- the tools/list half of the connect-phase park (issue #889
+/// review H).
+fn hang_list_config(id: &str, display: &str, timeout_ms: u32) -> McpServerConfig {
+    let mut env = BTreeMap::new();
+    env.insert("FAKE_HANG_ON_LIST".to_string(), "1".to_string());
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: display.into(),
+        transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
+        env,
+        keychain_env_keys: Vec::new(),
+        timeout_ms: Some(timeout_ms),
+        enabled: true,
+    }
+}
+
+/// A fake-server config that answers exactly ONE `tools/call` and then exits
+/// (`FAKE_DIE_AFTER_CALL=1` in the child env) -- the server-death shape the
+/// aggregator's dead latch normalizes (issue #889 review I3).
+fn die_call_config(id: &str, display: &str) -> McpServerConfig {
+    let mut env = BTreeMap::new();
+    env.insert("FAKE_DIE_AFTER_CALL".to_string(), "1".to_string());
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: display.into(),
+        transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
+        env,
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+        enabled: true,
+    }
+}
+
 /// A stdio child that spawns but never responds parks the connect phase on
 /// a blocking read (issue #889): the per-call deadline bounds it, the server
 /// is skipped with a timeout attribution naming it, and the turn is not
@@ -1285,7 +1320,13 @@ fn cancel_teardown_unblocks_a_parked_call_and_stands_down_when_done() {
     let cancel = Arc::new(CancelToken::new());
     let turn_done = Arc::new(AtomicBool::new(true));
     let mut agg = McpAggregator::empty();
-    agg.connect_all(&[fake_config("live-1", "LiveMCP")], &KeychainStore::new());
+    let results = agg.connect_all(&[fake_config("live-1", "LiveMCP")], &KeychainStore::new());
+    assert!(
+        results[0].connected,
+        "the live server connected -- otherwise the route below fails for a \
+         connect reason, not the stand-down contract (an environment flake \
+         must surface HERE, self-diagnosing)"
+    );
     agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
 
     cancel.request();
@@ -1393,5 +1434,76 @@ fn cancel_teardown_unblocks_a_silent_sse_park() {
     assert!(
         matches!(err, ClientError::ServerClosed),
         "a stop-flagged reader disconnects the channel into ServerClosed, got {err:?}"
+    );
+}
+
+/// Issue #889 review I3: the dead latch's NON-deadline half -- a server
+/// that dies on its own mid-turn. `FAKE_DIE_AFTER_CALL` answers one
+/// `tools/call` then exits; the SECOND route must report `ServerClosed`
+/// (the corpse's broken pipe normalized), and it must come from the latch's
+/// fast-fail arm, not a re-park against the corpse. Deleting the latch
+/// degrades the second route to the raw `Framing(BrokenPipe)` error -- the
+/// shape assertion is the mutant's discriminant.
+#[test]
+fn route_after_a_server_death_fails_fast_with_server_closed() {
+    use std::time::Instant;
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(
+        &[die_call_config("die-1", "DieAfterCall")],
+        &KeychainStore::new(),
+    );
+    assert!(
+        results[0].connected,
+        "the handshake + listing answered normally before the death"
+    );
+
+    // The first call is answered, then the fixture exits.
+    let result = agg
+        .route("mcp__dieaftercall__echo", &json!({"message": "x"}))
+        .expect("the one pre-death call succeeds");
+    assert_eq!(first_text(&result), "Echo: x");
+
+    let started = Instant::now();
+    let err = match agg.route("mcp__dieaftercall__echo", &json!({"message": "x"})) {
+        Err(RouteError::Client(e)) => e,
+        other => panic!("expected RouteError::Client, got {other:?}"),
+    };
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "a dead server fails fast, no re-park for the deadline"
+    );
+    assert!(
+        matches!(err, ClientError::ServerClosed),
+        "server death normalizes to ServerClosed via the latch, got {err:?}"
+    );
+}
+
+/// Issue #889 review H: the tools/list half of the connect-phase park --
+/// `initialize` answered, the listing swallows. Same budget, same timeout
+/// attribution as the never-responds shape, but the park lands AFTER the
+/// handshake (the fixture half the deadline family never modeled alone).
+#[test]
+fn connect_deadline_bounds_a_tools_list_hang() {
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(
+        &[hang_list_config("hang-list-1", "HangListMCP", 250)],
+        &KeychainStore::new(),
+    );
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the tools/list park is bounded by the deadline"
+    );
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].connected, "a hung listing skips the server");
+    let error = results[0].error.as_deref().expect("the timeout reason");
+    assert!(
+        error.contains("timed out") && error.contains("HangListMCP"),
+        "attribution names the server + the timeout, got: {error}"
     );
 }
