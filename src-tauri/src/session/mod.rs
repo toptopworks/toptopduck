@@ -2737,7 +2737,7 @@ fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_
 #[cfg(test)]
 mod tests {
     use super::{turn_outcome_from_loop, Session, TOOL_OUTPUT_DIR_NAME};
-    use crate::model::{DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
+    use crate::model::{CancelledReason, DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
     use crate::provider::ProviderError;
@@ -2941,6 +2941,27 @@ mod tests {
                 assert_eq!(detail, "external runtime `cli-a` not found on PATH");
             }
             other => panic!("expected Failed(Runtime), got {other:?}"),
+        }
+    }
+
+    /// Issue #883: the projection arms the NoProgress landing with the cancel
+    /// reason -- a silent revert to a bare cancelled would leave every
+    /// watchdog kill presenting as the user's own stop with the suite green
+    /// (the #882 watchdog tests assert the pre-projection `Termination`;
+    /// this pins the projection itself, like the #852 peer above).
+    #[test]
+    fn turn_outcome_maps_no_progress_termination_to_cancelled_with_reason() {
+        let outcome = LoopOutcome {
+            termination: Termination::NoProgress(std::time::Duration::from_secs(120)),
+            promotions: Vec::new(),
+            trace: Vec::new(),
+            discovered_runtime: None,
+        };
+        match turn_outcome_from_loop(outcome) {
+            TurnOutcome::Cancelled(reason) => {
+                assert_eq!(reason, Some(CancelledReason::NoProgress));
+            }
+            other => panic!("expected Cancelled(Some(NoProgress)), got {other:?}"),
         }
     }
 
