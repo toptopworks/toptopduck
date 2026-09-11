@@ -639,10 +639,21 @@ impl McpAggregator {
                 server.client = Some(client);
                 // A `ServerClosed` (EOF / disconnected channel) means the
                 // transport is gone regardless of WHO ended it -- deadline,
-                // cancel teardown, or the server dying on its own. Latch
-                // `dead` so the turn's remaining calls fail fast instead of
-                // re-parking against a corpse for the full budget.
-                if matches!(result, Err(ClientError::ServerClosed)) {
+                // cancel teardown, or the server dying on its own -- and a
+                // `Framing(BrokenPipe)` is the SAME death on a platform
+                // whose pipe write fails before the read can EOF (Linux
+                // EPIPE vs the Windows buffered write + EOF read). Latch
+                // `dead` on either so the turn's remaining calls fail fast
+                // instead of re-parking against a corpse (and so the
+                // error shape normalizes to ServerClosed from the NEXT
+                // call on, instead of leaking the platform's raw framing
+                // error to the agent).
+                let transport_gone = matches!(result, Err(ClientError::ServerClosed))
+                    || matches!(
+                        &result,
+                        Err(ClientError::Framing(e)) if e.kind() == std::io::ErrorKind::BrokenPipe
+                    );
+                if transport_gone {
                     server.dead = true;
                 }
                 result.map_err(RouteError::Client)

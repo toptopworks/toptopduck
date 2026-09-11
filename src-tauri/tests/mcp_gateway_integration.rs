@@ -1439,11 +1439,13 @@ fn cancel_teardown_unblocks_a_silent_sse_park() {
 
 /// Issue #889 review I3: the dead latch's NON-deadline half -- a server
 /// that dies on its own mid-turn. `FAKE_DIE_AFTER_CALL` answers one
-/// `tools/call` then exits; the SECOND route must report `ServerClosed`
-/// (the corpse's broken pipe normalized), and it must come from the latch's
-/// fast-fail arm, not a re-park against the corpse. Deleting the latch
-/// degrades the second route to the raw `Framing(BrokenPipe)` error -- the
-/// shape assertion is the mutant's discriminant.
+/// `tools/call` then exits; the SECOND route meets the corpse (the raw
+/// death shape is platform-dependent, so it is pinned only as a fast
+/// error), and the THIRD route must report `ServerClosed` from the latch's
+/// fast-fail arm -- the normalization the latch exists for. Deleting the
+/// latch degrades the third route to the platform's raw error on Linux
+/// (`Framing(BrokenPipe)`) -- the shape assertion is the mutant's
+/// discriminant there.
 #[test]
 fn route_after_a_server_death_fails_fast_with_server_closed() {
     use std::time::Instant;
@@ -1465,6 +1467,29 @@ fn route_after_a_server_death_fails_fast_with_server_closed() {
         .expect("the one pre-death call succeeds");
     assert_eq!(first_text(&result), "Echo: x");
 
+    // The SECOND route meets the corpse: the raw error is platform-shaped
+    // (Linux fails the pipe write with EPIPE -> Framing(BrokenPipe); Windows
+    // buffers the write and the read EOFs -> ServerClosed) -- either is the
+    // death signal that latches `dead`, so only speed + failure are pinned
+    // here; the latch's normalization is what the THIRD route pins.
+    let started = Instant::now();
+    let second = agg
+        .route("mcp__dieaftercall__echo", &json!({"message": "x"}))
+        .expect_err("a corpse returns an error, fast");
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "a dead server fails fast, no re-park for the deadline"
+    );
+    assert!(
+        matches!(second, RouteError::Client(_)),
+        "the corpse error is a client error, got {second:?}"
+    );
+
+    // The third route rides the latch's fast-fail arm -- the ServerClosed
+    // normalization holds regardless of which raw death shape the platform
+    // surfaced on the second call. Deleting the latch degrades this to the
+    // platform's raw error on Linux (Framing(BrokenPipe)) -- the shape
+    // assertion is the mutant's discriminant there.
     let started = Instant::now();
     let err = match agg.route("mcp__dieaftercall__echo", &json!({"message": "x"})) {
         Err(RouteError::Client(e)) => e,
@@ -1472,11 +1497,11 @@ fn route_after_a_server_death_fails_fast_with_server_closed() {
     };
     assert!(
         started.elapsed() < Duration::from_millis(500),
-        "a dead server fails fast, no re-park for the deadline"
+        "the latched corpse fails fast"
     );
     assert!(
         matches!(err, ClientError::ServerClosed),
-        "server death normalizes to ServerClosed via the latch, got {err:?}"
+        "the latch normalizes every subsequent call to ServerClosed, got {err:?}"
     );
 }
 
