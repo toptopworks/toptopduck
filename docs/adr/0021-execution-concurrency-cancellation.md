@@ -31,4 +31,6 @@ ADR-0009 定"一轮一条 SQL"，但未定执行层：长查询（大表 + 复�
 - **被 ADR-0040 延伸**：禁用口径从「查询进行时禁输入框」扩为「**执行窗口**（提问已提交、outcome 未达）期间禁源管理 UI」；消歧 B 轮已达终态、其间隙源管理允许。源操作与创作新轮会话内**互斥**。见 ADR-0040。
 - **真实 LLM 路径的取消是软取消（同步 client 约束）**：本 ADR 的 query interrupt 针对 DuckDB 引擎查询（`try_materialize` 注册 `InterruptHandle`，HTTP 调用期间该槽为空）；真实 provider 的 HTTP 调用走同步阻塞 ureq，**阻塞期间 cancel 仅置 cooperative flag——HTTP 仍跑完（≤ `REQUEST_TIMEOUT`=120s），`generate()` 返回后 post-call 检查丢弃结果、落 Cancelled**。即时 HTTP 中断需 async client / SSE streaming 增量检查，defer 到 v2（不在本 ADR v1 范围）。
 - **被 ADR-0055 延伸（关 tab 场景复用软取消）**：关一个正有 in-flight ask 的 tab 复用本 ADR 软取消路径——前端 fire cancel（不等），in-flight HTTP 仍跑完 ≤120s、post-check 发现 session closing 即丢弃、不追加 thread / 不进 recipe；DuckDB 在 cancel 释放后立即卸（HTTP 阶段不占 DuckDB、SQL 阶段 interrupt 即时）。关 tab 复用、不新增软取消债。见 ADR-0055。
+- **被 ADR-0081 延伸**：cancel token 从单 SQL 中断扩至整轮中止，`REQUEST_TIMEOUT` 升为执行级兜底墙钟默认值（步数上限 24 + 墙钟 120s）。见 ADR-0081。
 - **被 ADR-0107 校准**：内置运行时路径移交 async yoagent 循环后，取消经 `CancellationToken` 任务级即时生效，HTTP / SSE 流可中途中断——「同步阻塞期间仅置 cooperative flag、跑完再丢弃」的软取消约束不再适用于内置路径；「当前轮作废」语义不变。见 ADR-0107。
+- **被 ADR-0115 延伸**：`REQUEST_TIMEOUT` 的对齐语义保留，对齐对象由「整轮时长」改为「生成段无进展时长」（无进展看门狗：仅生成段计时，等待外部主体的段冻结）。见 ADR-0115。
