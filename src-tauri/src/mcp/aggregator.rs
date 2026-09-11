@@ -22,14 +22,35 @@
 //! servers; the failed attempts stay visible through `mcp_list_servers`
 //! (ADR-0105 Decision 3: no placeholder entries in the catalog).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
 use serde_json::Value;
 
-use crate::mcp::client::{connect_transport, ClientError, SecretEnv, TransportClient};
+use crate::cancel::CancelToken;
+use crate::mcp::client::{
+    connect_transport_with_kill, ClientError, ConnectKill, KillSlot, SecretEnv, TransportClient,
+    TransportKill,
+};
 use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::mcp::meta_tools;
 use crate::mcp::secrets::get_mcp_secret;
 use crate::mcp::McpClient;
 use crate::provider::keychain::KeychainStore;
+
+/// The gateway's default per-call timeout (issue #889): every MCP protocol
+/// round trip (initialize handshake, tools/list, tools/call) is bounded by
+/// this unless [`McpServerConfig::timeout_ms`] overrides it. Same order as
+/// the whole-turn wall clock ADR-0115 retired -- under the freeze semantics
+/// this bounds ONE call, not the turn, so a legitimately slow minutes-long
+/// tool still fits.
+pub(crate) const DEFAULT_MCP_TIMEOUT_MS: u32 = 120_000;
+
+/// How often the cancel-teardown watcher polls the token (issue #889). Same
+/// order as the cancel watcher's 25 ms loop (the UI cancel round-trip).
+const CANCEL_TEARDOWN_POLL: Duration = Duration::from_millis(25);
 
 /// The prefix marking a gateway-aggregated external tool name. The bridge /
 /// built-in LLM sees `mcp__<server_slug>__<tool>`; the gateway parses the
@@ -52,6 +73,18 @@ struct AggregatedServer {
     display_name: String,
     client: TransportClient,
     tools: Vec<Value>,
+    /// The per-call deadline resolved from the config (issue #889); every
+    /// `tools/call` routed to this server runs under it.
+    timeout: Duration,
+    /// The transport's kill handle (issue #889): fired on deadline expiry
+    /// (disconnecting the server for the rest of the turn) or cancel
+    /// teardown (via the aggregator's shared registry).
+    kill: TransportKill,
+    /// Latched when a deadline expired (issue #889): the transport is dead,
+    /// so subsequent calls fail fast instead of re-parking for the full
+    /// deadline. Reset only by the next turn's `connect_all` (no
+    /// cross-turn health memory).
+    dead: bool,
 }
 
 /// One attempted connect this turn, retained for `mcp_list_servers`
@@ -161,6 +194,12 @@ pub struct McpAggregator {
     /// as `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at
     /// spawn. `None` in tests (no file output expected).
     tool_output_dir: Option<String>,
+    /// Every connected server's [`TransportKill`], shared with the
+    /// cancel-teardown watcher (issue #889): a token fire terminates all
+    /// transports so reads parked inside the dispatch freeze return and the
+    /// turn's scope can end. Entries for already-dead servers are harmless
+    /// (`TransportKill::kill` is idempotent).
+    kills: Arc<Mutex<Vec<TransportKill>>>,
 }
 
 impl McpAggregator {
@@ -173,6 +212,7 @@ impl McpAggregator {
             servers: vec![],
             connect_records: vec![],
             tool_output_dir: None,
+            kills: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -185,23 +225,51 @@ impl McpAggregator {
             servers: vec![],
             connect_records: vec![],
             tool_output_dir: Some(tool_output_dir),
+            kills: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Connect + initialize one server (any transport), list its tools, and
     /// add it under a unique slug derived from its display name (issue #301
     /// slice D + issue #389 SSE/HTTP). A failure (connect fault, tools/list
-    /// fault) logs + skips the server -- the turn is not failed by a
-    /// misconfigured server -- and the returned [`ConnectResult`] carries
-    /// `connected: false` + the reason.
+    /// fault, per-call deadline expiry -- issue #889) logs + skips the
+    /// server -- the turn is not failed by a misconfigured server -- and the
+    /// returned [`ConnectResult`] carries `connected: false` + the reason.
+    /// The whole connect phase runs under the server's deadline; on expiry
+    /// the transport is terminated through its kill handle so the parked
+    /// handshake read returns.
     pub fn connect_one(
         &mut self,
         config: &McpServerConfig,
         secrets: &[SecretEnv],
     ) -> ConnectResult {
-        let mut client = match connect_transport(config, secrets, self.tool_output_dir.as_deref()) {
-            Ok(c) => c,
-            Err(e) => {
+        let timeout = effective_timeout(config);
+        let kill_slot: KillSlot = Arc::new(ConnectKill::default());
+        let slot_for_kill = Arc::clone(&kill_slot);
+        let tool_output_dir = self.tool_output_dir.clone();
+        // The deadline covers connect + initialize + tools/list as one phase:
+        // a stdio child that spawns but never responds parks exactly here
+        // (issue #889). `expire` races the worker's `publish` -- whichever
+        // lands second performs the kill, so a spawn that outlasts the
+        // budget still self-terminates the moment its handle exists (a 0 ms
+        // budget surfaces as this gateway fault, the config contract).
+        let outcome = run_with_deadline(
+            timeout,
+            move || slot_for_kill.expire(),
+            move || {
+                let mut client = connect_transport_with_kill(
+                    config,
+                    secrets,
+                    tool_output_dir.as_deref(),
+                    &kill_slot,
+                )?;
+                let tools = client.list_tools()?;
+                Ok::<(TransportClient, Vec<Value>), ClientError>((client, tools))
+            },
+        );
+        let (client, tools) = match outcome {
+            Some(Ok(pair)) => pair,
+            Some(Err(e)) => {
                 log::warn!(
                     target: "toptopduck::mcp",
                     "MCP server {} connect failed, skipping: {e}",
@@ -215,25 +283,23 @@ impl McpAggregator {
                     },
                 );
             }
-        };
-        let tools = match client.list_tools() {
-            Ok(t) => t,
-            Err(e) => {
+            None => {
+                let error = ClientError::Timeout {
+                    server: config.display_name.clone(),
+                    call: "connect (initialize/tools/list)".into(),
+                    timeout_ms: timeout.as_millis() as u64,
+                };
                 log::warn!(
                     target: "toptopduck::mcp",
-                    "MCP server {} tools/list failed, skipping server: {e}",
-                    config.id
+                    "MCP server {} connect timed out after {}ms; killing and skipping: {error}",
+                    config.id,
+                    timeout.as_millis()
                 );
-                // Dropping `client` tears down the transport (kills the child
-                // for stdio, stops the reader thread for SSE, etc.);
-                // a server whose tools/list is broken contributes nothing to the
-                // discovery catalog, so it is not kept around for the turn
-                // (matching the connect-failure skip above).
                 return self.record_outcome(
                     &config.display_name,
                     &config.id,
                     ConnectOutcome::Failed {
-                        error: format!("tools/list failed: {e}"),
+                        error: error.to_string(),
                     },
                 );
             }
@@ -247,11 +313,19 @@ impl McpAggregator {
         let tool_count = tool_infos.len();
         let base = slugify(&config.display_name, &config.id);
         let slug = self.unique_slug(&base);
+        let kill = client.kill_handle();
+        self.kills
+            .lock()
+            .expect("kill registry poisoned")
+            .push(kill.clone());
         self.servers.push(AggregatedServer {
             slug,
             display_name: config.display_name.clone(),
             client,
             tools,
+            timeout,
+            kill,
+            dead: false,
         });
         self.record_outcome(
             &config.display_name,
@@ -487,13 +561,20 @@ impl McpAggregator {
             display_name: display_name.to_string(),
             client: TransportClient::Http(client),
             tools,
+            timeout: Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
+            kill: TransportKill::Http,
+            dead: false,
         });
         agg
     }
 
     /// Route a `tools/call` whose name is `mcp__<slug>__<tool>` to the matching
     /// server, stripping the prefix so the server sees its native tool name.
-    /// Returns the server's tools/call result for the gateway to relay.
+    /// Returns the server's tools/call result for the gateway to relay. The
+    /// call runs under the server's per-call deadline (issue #889): on
+    /// expiry the transport is killed, the server is marked dead for the
+    /// rest of the turn (subsequent calls fail fast), and the error carries
+    /// the server + tool attribution.
     pub fn route(&mut self, namespaced: &str, arguments: &Value) -> Result<Value, RouteError> {
         let (slug, tool) = parse_namespaced(namespaced)
             .ok_or_else(|| RouteError::NotNamespaced(namespaced.to_string()))?;
@@ -502,10 +583,88 @@ impl McpAggregator {
             .iter_mut()
             .find(|s| s.slug == slug)
             .ok_or(RouteError::UnknownServer(slug))?;
-        server
-            .client
-            .call(&tool, arguments)
-            .map_err(RouteError::Client)
+        if server.dead {
+            // A prior call's deadline already terminated this transport
+            // (issue #889); re-parking would re-wait the full budget.
+            return Err(RouteError::Client(ClientError::ServerClosed));
+        }
+        let timeout = server.timeout;
+        let kill = server.kill.clone();
+        let display_name = server.display_name.clone();
+        let tool_for_error = tool.clone();
+        let outcome = {
+            let client = &mut server.client;
+            run_with_deadline(
+                timeout,
+                move || kill.kill(),
+                move || client.call(&tool, arguments),
+            )
+        };
+        match outcome {
+            Some(result) => {
+                // A `ServerClosed` (EOF / disconnected channel) means the
+                // transport is gone regardless of WHO ended it -- deadline,
+                // cancel teardown, or the server dying on its own. Latch
+                // `dead` so the turn's remaining calls fail fast instead of
+                // re-parking against a corpse for the full budget.
+                if matches!(result, Err(ClientError::ServerClosed)) {
+                    server.dead = true;
+                }
+                result.map_err(RouteError::Client)
+            }
+            None => {
+                server.dead = true;
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "MCP server {} tools/call `{}` timed out after {}ms; \
+                     disconnected for the rest of the turn",
+                    display_name,
+                    tool_for_error,
+                    timeout.as_millis()
+                );
+                Err(RouteError::Client(ClientError::Timeout {
+                    server: display_name,
+                    call: tool_for_error,
+                    timeout_ms: timeout.as_millis() as u64,
+                }))
+            }
+        }
+    }
+
+    /// Arm the turn's cancel-aware teardown (issue #889). The spawned watcher
+    /// polls the shared token; when it fires (user stop or a watchdog kill --
+    /// under ADR-0115 both are a token fire) while the turn is still live,
+    /// every connected transport is terminated so blocking reads parked
+    /// inside the dispatch freeze return, the engine's `thread::scope` can
+    /// end, and the session lock is released. `turn_done` is the watcher's
+    /// stand-down signal: a turn that finished normally owns its teardown
+    /// through the aggregator's `Drop`, so the watcher exits without
+    /// killing.
+    pub fn arm_cancel_teardown(&self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
+        let kills = Arc::clone(&self.kills);
+        let spawned = thread::Builder::new()
+            .name("mcp-cancel-teardown".into())
+            .spawn(move || loop {
+                if cancel.is_requested() {
+                    if !turn_done.load(Ordering::SeqCst) {
+                        for kill in kills.lock().expect("kill registry poisoned").iter() {
+                            kill.kill();
+                        }
+                    }
+                    return;
+                }
+                if turn_done.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(CANCEL_TEARDOWN_POLL);
+            });
+        if let Err(e) = spawned {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "failed to spawn the MCP cancel-teardown watcher; cancel will not \
+                 unblock a frozen MCP wait this turn: {e}"
+            );
+        }
     }
 
     /// Resolve a display-name slug collision by appending `_2`, `_3`, ... With
@@ -531,6 +690,51 @@ impl Default for McpAggregator {
     fn default() -> Self {
         Self::empty()
     }
+}
+
+/// Resolve a server's per-call deadline (issue #889):
+/// [`McpServerConfig::timeout_ms`] overrides the gateway default; `None`
+/// (or a config written before the field existed) falls back to
+/// [`DEFAULT_MCP_TIMEOUT_MS`]. The value is NOT validated here -- the
+/// config-layer contract routes 0 / huge values to a gateway fault at call
+/// time, not a config reject.
+fn effective_timeout(config: &McpServerConfig) -> Duration {
+    Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_MCP_TIMEOUT_MS) as u64)
+}
+
+/// Park `f` on a scoped worker thread and enforce `timeout` from this
+/// thread (issue #889). The transports are synchronous blocking reads with
+/// no native deadline; this wrapper races the call against `recv_timeout`.
+/// On expiry `kill` terminates the transport, which is what makes the
+/// worker's blocking read RETURN -- without it a timed-out park would just
+/// leak a thread and block the scope join forever. Returns `None` on
+/// expiry (after the kill), `Some` with the call's result otherwise.
+fn run_with_deadline<T: Send>(
+    timeout: Duration,
+    kill: impl FnOnce(),
+    f: impl FnOnce() -> T + Send,
+) -> Option<T> {
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(value) => Some(value),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                kill();
+                None
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // The worker dropped its sender without sending: it panicked.
+                // Kill for symmetry, then let the scope's join resume the
+                // panic on this thread -- the expiry `None` is never
+                // observed by the caller.
+                kill();
+                None
+            }
+        }
+    })
 }
 
 /// Read every secret env value for one server from the keychain (ADR-0029). A
@@ -684,6 +888,44 @@ pub enum RouteError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // --- effective_timeout (issue #889) ---------------------------------------
+
+    fn timeout_config(timeout_ms: Option<u32>) -> McpServerConfig {
+        use crate::mcp::config::McpTransport;
+        McpServerConfig {
+            id: McpServerId("t".into()),
+            display_name: "T".into(),
+            transport: McpTransport::stdio("unused", Vec::new()),
+            env: Default::default(),
+            keychain_env_keys: Vec::new(),
+            timeout_ms,
+            enabled: true,
+        }
+    }
+
+    /// `None` (unset / pre-field legacy config) falls back to the gateway
+    /// default; `Some` overrides verbatim -- the config contract routes 0 /
+    /// huge values to a gateway fault at call time, NOT a config reject, so
+    /// 0 resolves to a 0 ms budget unparsed.
+    #[test]
+    fn effective_timeout_none_defaults_some_overrides_verbatim() {
+        assert_eq!(
+            effective_timeout(&timeout_config(None)),
+            Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
+            "None -> the 120s gateway default"
+        );
+        assert_eq!(
+            effective_timeout(&timeout_config(Some(500))),
+            Duration::from_millis(500),
+            "Some overrides verbatim"
+        );
+        assert_eq!(
+            effective_timeout(&timeout_config(Some(0))),
+            Duration::from_millis(0),
+            "0 passes through as the gateway-fault budget (no config-layer reject)"
+        );
+    }
 
     // --- slugify -------------------------------------------------------------
 

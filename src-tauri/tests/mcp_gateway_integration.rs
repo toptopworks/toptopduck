@@ -454,6 +454,10 @@ enum ServerMode {
     HttpSseMalformed,
     /// Legacy SSE: GET opens SSE stream; POST sends messages.
     Sse,
+    /// Legacy SSE that accepts the POST but never forwards the response
+    /// onto the GET stream (issue #889): the client's `recv` parks on a
+    /// live-but-silent connection -- the deadline fixture for the SSE half.
+    SseSilent,
     /// Legacy SSE that sends `event: message` (not `event: endpoint`) as the
     /// first event — exercises `SseClient`'s first-event rejection guard (H1,
     /// issue #389).
@@ -573,6 +577,8 @@ fn handle_connection(
         (ServerMode::HttpSseMalformed, "POST") => handle_jsonrpc_sse_malformed_post(&mut stream),
         (ServerMode::Sse, "GET") => handle_sse_stream(&mut stream, &state, base_url),
         (ServerMode::Sse, "POST") => handle_sse_post(&mut stream, &body, &state),
+        (ServerMode::SseSilent, "GET") => handle_sse_stream(&mut stream, &state, base_url),
+        (ServerMode::SseSilent, "POST") => handle_sse_post_silent(&mut stream, &body, &state),
         (ServerMode::SseBadFirstEvent, "GET") => {
             handle_sse_stream_bad_first_event(&mut stream, base_url);
         }
@@ -698,6 +704,30 @@ fn handle_sse_post(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
             return;
         }
     };
+    let resp = build_rpc_response(&req, "sse-fake");
+    if resp != Value::Null {
+        state.sse_queue.lock().unwrap().push_back(resp.to_string());
+    }
+    write_response(stream, 202, "application/json", "");
+}
+
+/// POST handler for the silent-SSE fixture (issue #889): the handshake
+/// (`initialize` / `tools/list`) is answered normally so the connect phase
+/// succeeds, but a `tools/call` is acknowledged and never forwarded onto
+/// the GET stream -- the client's `recv` parks on a live-but-silent
+/// connection, the SSE half of the deadline shape.
+fn handle_sse_post_silent(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            write_response(stream, 400, "text/plain", "bad json");
+            return;
+        }
+    };
+    if req.get("method").and_then(Value::as_str) == Some("tools/call") {
+        write_response(stream, 202, "application/json", "");
+        return;
+    }
     let resp = build_rpc_response(&req, "sse-fake");
     if resp != Value::Null {
         state.sse_queue.lock().unwrap().push_back(resp.to_string());
@@ -1085,5 +1115,283 @@ fn tool_output_env_overrides_user_configured_value() {
         first_text(&result),
         gateway_dir,
         "gateway tool_output_dir must override user-configured value"
+    );
+}
+
+// --- Per-call deadline + cancel teardown (issue #889) ----------------------
+
+/// The never-responds stdio fixture (the connect-deadline shape): spawns,
+/// keeps the pipe open, never answers any request.
+const HANG_BIN: &str = env!("CARGO_BIN_EXE_mcp-hang-server");
+
+/// A stdio config whose command never responds, under a short per-call
+/// deadline.
+fn hang_config(id: &str, display: &str, timeout_ms: u32) -> McpServerConfig {
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: display.into(),
+        transport: McpTransport::stdio(HANG_BIN, Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: Some(timeout_ms),
+        enabled: true,
+    }
+}
+
+/// A fake-server config that answers the handshake but swallows every
+/// `tools/call` (`FAKE_HANG_ON_CALL=1` in the child env), under a short
+/// per-call deadline.
+fn hang_call_config(id: &str, display: &str, timeout_ms: u32) -> McpServerConfig {
+    let mut env = BTreeMap::new();
+    env.insert("FAKE_HANG_ON_CALL".to_string(), "1".to_string());
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: display.into(),
+        transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
+        env,
+        keychain_env_keys: Vec::new(),
+        timeout_ms: Some(timeout_ms),
+        enabled: true,
+    }
+}
+
+/// A stdio child that spawns but never responds parks the connect phase on
+/// a blocking read (issue #889): the per-call deadline bounds it, the server
+/// is skipped with a timeout attribution naming it, and the turn is not
+/// bricked (the trio still mounts on the attempted set).
+#[test]
+fn connect_deadline_skips_a_never_responding_stdio_server() {
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(
+        &[hang_config("hang-1", "HungMCP", 250)],
+        &KeychainStore::new(),
+    );
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the connect park is bounded by the deadline"
+    );
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert!(!r.connected, "a hung server is skipped, not fatal");
+    let error = r.error.as_deref().expect("the timeout reason");
+    assert!(
+        error.contains("timed out") && error.contains("HungMCP"),
+        "attribution names the server + the timeout, got: {error}"
+    );
+    // The trio mounts on the attempted set; the catalog stays empty.
+    assert_eq!(meta_names(&agg), META_TRIO.to_vec());
+    assert_eq!(catalog_handles(&agg.search_catalog("")).len(), 0);
+}
+
+/// A `tools/call` parked on a swallowing server returns at the deadline with
+/// server + tool attribution, and the server is disconnected for the rest of
+/// the turn: the next call fails fast instead of re-parking for the full
+/// budget (issue #889).
+#[test]
+fn route_deadline_attributed_and_server_disconnected_for_the_turn() {
+    use std::time::Instant;
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let mut agg = McpAggregator::empty();
+    agg.connect_all(
+        &[hang_call_config("hang-2", "HangCall", 2_000)],
+        &KeychainStore::new(),
+    );
+    assert_eq!(
+        meta_names(&agg).len(),
+        3,
+        "the handshake answered normally -- only tools/call swallows"
+    );
+
+    let started = Instant::now();
+    let err = match agg.route("mcp__hangcall__echo", &json!({"message": "x"})) {
+        Ok(_) => panic!("a swallowed tools/call must hit the deadline"),
+        Err(RouteError::Client(e)) => e,
+        Err(other) => panic!("expected RouteError::Client, got {other:?}"),
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the call park is bounded by the deadline"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("HangCall") && msg.contains("echo") && msg.contains("timed out"),
+        "attribution names server + tool + timeout, got: {msg}"
+    );
+
+    // Disconnected for the rest of the turn: the next call fails FAST.
+    let started = Instant::now();
+    let err2 = match agg.route("mcp__hangcall__echo", &json!({"message": "x"})) {
+        Err(RouteError::Client(e)) => e,
+        other => panic!("fast fail expected, got {other:?}"),
+    };
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "a dead server fails fast, no re-park"
+    );
+    assert!(
+        matches!(err2, ClientError::ServerClosed),
+        "a dead server reports ServerClosed, got {err2:?}"
+    );
+}
+
+/// The cancel-aware teardown (issue #889): a token fire while a call is
+/// parked kills the transport, the parked read returns `ServerClosed` well
+/// under the budget, and the stand-down contract holds -- a token fire AFTER
+/// the turn is done kills nothing.
+#[test]
+fn cancel_teardown_unblocks_a_parked_call_and_stands_down_when_done() {
+    use std::time::Instant;
+    use toptopduck_lib::cancel::CancelToken;
+    use toptopduck_lib::mcp::client::ClientError;
+
+    // --- unblock half ------------------------------------------------------
+    let cancel = Arc::new(CancelToken::new());
+    let turn_done = Arc::new(AtomicBool::new(false));
+    let mut agg = McpAggregator::empty();
+    // A long budget: only the CANCEL path can unblock this test in time.
+    agg.connect_all(
+        &[hang_call_config("hang-3", "HangCancel", 60_000)],
+        &KeychainStore::new(),
+    );
+    agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
+
+    let firer = Arc::clone(&cancel);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        firer.request();
+    });
+
+    let started = Instant::now();
+    let err = match agg.route("mcp__hangcancel__echo", &json!({"message": "x"})) {
+        Ok(_) => panic!("a cancelled park must not succeed"),
+        Err(RouteError::Client(e)) => e,
+        Err(other) => panic!("expected RouteError::Client, got {other:?}"),
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "cancel unblocks the parked read well under the 60s budget"
+    );
+    assert!(
+        matches!(err, ClientError::ServerClosed),
+        "a killed transport surfaces ServerClosed, got {err:?}"
+    );
+
+    // --- stand-down half ---------------------------------------------------
+    let cancel = Arc::new(CancelToken::new());
+    let turn_done = Arc::new(AtomicBool::new(true));
+    let mut agg = McpAggregator::empty();
+    agg.connect_all(&[fake_config("live-1", "LiveMCP")], &KeychainStore::new());
+    agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
+
+    cancel.request();
+    // Give the watcher a poll cycle to (wrongly) fire if it were to ignore
+    // the stand-down flag.
+    thread::sleep(Duration::from_millis(100));
+    let result = agg
+        .route("mcp__livemcp__echo", &json!({"message": "still alive"}))
+        .expect("a done turn's token fire must not kill the transport");
+    assert_eq!(
+        first_text(&result),
+        "Echo: still alive",
+        "the live server answers after stand-down"
+    );
+}
+
+/// The SSE half (issue #889): a live connection that acknowledges the POST
+/// but never delivers the response event parks the `recv` -- the same
+/// per-call deadline bounds it with the same attribution shape.
+#[test]
+fn route_deadline_bounds_a_silent_sse_connection() {
+    use std::time::Instant;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseSilent);
+    let config = McpServerConfig {
+        id: McpServerId("sse-silent".into()),
+        display_name: "SilentSSE".into(),
+        transport: McpTransport::Sse {
+            url: format!("{}/sse", server.url()),
+        },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: Some(250),
+        enabled: true,
+    };
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(&[config], &KeychainStore::new());
+    assert!(
+        results[0].connected,
+        "the handshake answered normally -- only tools/call goes silent"
+    );
+
+    let started = Instant::now();
+    let err = match agg.route("mcp__silentsse__echo", &json!({"message": "x"})) {
+        Err(RouteError::Client(e)) => e,
+        other => panic!("deadline expected, got {other:?}"),
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the recv park is bounded by the deadline"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("SilentSSE") && msg.contains("timed out"),
+        "attribution names the server + the timeout, got: {msg}"
+    );
+}
+
+/// The SSE cancel half (issue #889): a token fire while the `recv` is
+/// parked on a silent stream sets the reader stop flag -- the reader exits,
+/// the channel disconnects, and the parked call returns `ServerClosed` well
+/// under the budget.
+#[test]
+fn cancel_teardown_unblocks_a_silent_sse_park() {
+    use std::time::Instant;
+    use toptopduck_lib::cancel::CancelToken;
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseSilent);
+    let config = McpServerConfig {
+        id: McpServerId("sse-silent-cancel".into()),
+        display_name: "SilentSSECancel".into(),
+        transport: McpTransport::Sse {
+            url: format!("{}/sse", server.url()),
+        },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        // A long budget: only the CANCEL path can unblock this test in time.
+        timeout_ms: Some(60_000),
+        enabled: true,
+    };
+    let cancel = Arc::new(CancelToken::new());
+    let turn_done = Arc::new(AtomicBool::new(false));
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(&[config], &KeychainStore::new());
+    assert!(results[0].connected, "the handshake answered normally");
+    agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
+
+    let firer = Arc::clone(&cancel);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        firer.request();
+    });
+
+    let started = Instant::now();
+    let err = match agg.route("mcp__silentssecancel__echo", &json!({"message": "x"})) {
+        Ok(_) => panic!("a cancelled park must not succeed"),
+        Err(RouteError::Client(e)) => e,
+        Err(other) => panic!("expected RouteError::Client, got {other:?}"),
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "cancel unblocks the recv park well under the 60s budget"
+    );
+    assert!(
+        matches!(err, ClientError::ServerClosed),
+        "a stop-flagged reader disconnects the channel into ServerClosed, got {err:?}"
     );
 }

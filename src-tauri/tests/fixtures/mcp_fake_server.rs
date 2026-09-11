@@ -22,12 +22,20 @@
 //! stance). A blank or malformed line is skipped -- the gateway's framing
 //! already rejects malformed frames upstream, this just keeps the fixture
 //! tolerant of stray whitespace.
+//!
+//! Deadline fixture (issue #889): with `FAKE_HANG_ON_CALL=1` in the child
+//! env the server answers `initialize` + `tools/list` normally but swallows
+//! every `tools/call` -- read and discarded, never answered -- so the
+//! client's blocking read parks until the per-call deadline (or a kill)
+//! fires. The sibling `mcp-hang-server` fixture covers the never-responds-
+//! at-all shape for the connect deadline.
 
 use std::io::{self, BufRead, BufReader, Write};
 
 use serde_json::{json, Value};
 
 fn main() {
+    let hang_on_call = std::env::var("FAKE_HANG_ON_CALL").ok().as_deref() == Some("1");
     let mut out = io::stdout();
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -76,7 +84,15 @@ fn main() {
                     ]
                 }
             })),
-            Some("tools/call") => Some(call_response(id, &v)),
+            Some("tools/call") => {
+                if hang_on_call {
+                    // Deadline fixture (issue #889): swallow the request,
+                    // never respond -- the client parks on the read.
+                    None
+                } else {
+                    Some(call_response(id, &v))
+                }
+            }
             _ => None,
         };
         if let Some(r) = resp {
