@@ -220,7 +220,9 @@ impl RecipePersister {
                         crate::model::TurnOutcome::Failed(failure) => {
                             RecipeOutcome::Failed(failure.clone())
                         }
-                        crate::model::TurnOutcome::Cancelled => RecipeOutcome::Cancelled,
+                        crate::model::TurnOutcome::Cancelled(reason) => {
+                            RecipeOutcome::Cancelled(*reason)
+                        }
                     };
                     // The turn's recorded audit (ADR-0078, issue #319).
                     // Construction routes through the audit-bearing
@@ -533,8 +535,8 @@ impl Default for RecipePersister {
 mod tests {
     use super::*;
     use crate::model::{
-        DatasetDescriptor, SourceLifecycleEvent, SourceLifecycleKind, TextKind, TurnOutcome,
-        TurnRecord,
+        CancelledReason, DatasetDescriptor, SourceLifecycleEvent, SourceLifecycleKind, TextKind,
+        TurnOutcome, TurnRecord,
     };
     use crate::persistence::recipe::{
         RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RuntimeKind,
@@ -710,6 +712,38 @@ mod tests {
                     t.provenance.runtime,
                     Some(RuntimeKind::BuiltIn),
                     "audit provenance round-trips"
+                );
+            }
+            other => panic!("expected Turn, got {other:?}"),
+        }
+    }
+
+    /// Issue #883: the live-to-recipe mapping carries the cancel reason -- a
+    /// silent drop here would permanently degrade every persisted watchdog
+    /// kill to a manual cancel, contradicting the version-history note's
+    /// "a resumed watchdog kill still presents the timeout" (the serde
+    /// round-trip pin tests the codec, not this mapping).
+    #[test]
+    fn build_recipe_projects_cancelled_reason() {
+        let ws = WorkingSet::default();
+        let timeline = vec![turn_entry(
+            "stalled",
+            TurnOutcome::Cancelled(Some(CancelledReason::NoProgress)),
+        )];
+
+        let persister = RecipePersister::new();
+        let recipe = persister.build_recipe(
+            &ws,
+            &timeline,
+            &crate::session::SessionRuntimeFacts::default(),
+        );
+        assert_eq!(recipe.history.len(), 1);
+        match &recipe.history[0] {
+            RecipeEntry::Turn(t) => {
+                assert_eq!(
+                    t.outcome,
+                    RecipeOutcome::Cancelled(Some(CancelledReason::NoProgress)),
+                    "the watchdog kill's reason survives persistence"
                 );
             }
             other => panic!("expected Turn, got {other:?}"),

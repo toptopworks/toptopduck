@@ -3595,7 +3595,7 @@ fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
     handle.join().expect("cancel thread panicked");
 
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "blocked turn lands as Cancelled"
     );
 

@@ -525,6 +525,7 @@
   "thread.outcome.clarify": "Needs clarification",
   "thread.outcome.failed": "Failed",
   "thread.outcome.materialized": "Result ready",
+  "thread.outcome.noProgress": "No-progress timeout",
   "thread.outcome.refused": "Cannot fulfill",
   "thread.outcome.retry": "Retry",
   "thread.outcome.retryLabel": "Retry this question",

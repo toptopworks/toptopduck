@@ -68,7 +68,7 @@ export function cancelled(question: string): ThreadEntry {
     entry: "Turn",
     data: {
       question,
-      outcome: { kind: "Cancelled" },
+      outcome: { kind: "Cancelled", data: null },
       trace: [], provenance: { skills: [] },
     },
   };

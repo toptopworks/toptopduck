@@ -33,10 +33,10 @@ use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
-    ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportIoStep, ExportRowsError, RenameError,
-    RowPage, RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, TextKind,
-    ThreadEntry, TraceRound, TurnFailure, TurnOutcome, TurnPhase, TurnProvenance, TurnRecord,
-    TurnRuntime,
+    CancelledReason, ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportIoStep,
+    ExportRowsError, RenameError, RowPage, RowReadError, SkillLifecycleEvent, SkillProvenance,
+    SourceLifecycleEvent, TextKind, ThreadEntry, TraceRound, TurnFailure, TurnOutcome, TurnPhase,
+    TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::recipe::{
     LastRuntime, Recipe, RecipeTraceRound, RecipeTurn, RuntimeKind,
@@ -2299,9 +2299,10 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 ///   (the adapter's HTTP retry already ran; blind retry is abolished), and an
 ///   external-runtime wiring / transport fault a `Runtime` failure (issue
 ///   #852 -- the ACP domain never lands the built-in transient kind).
-/// - Cancel (user / close) -> [`TurnOutcome::Cancelled`]; the no-progress
-///   watchdog lands [`Termination::NoProgress`] -> `Cancelled` too, with the
-///   technical detail on the warn log (ADR-0115).
+/// - Cancel (user / close) -> [`TurnOutcome::Cancelled`] with no reason; the
+///   no-progress watchdog lands [`Termination::NoProgress`] -> `Cancelled`
+///   too, carrying the `NoProgress` reason for the presentation split and
+///   the technical detail on the warn log (ADR-0115, #883).
 ///
 /// Tool-level errors (SQL failure, approval denial) never land here -- the
 /// loop fed them back to the model for self-correction (ADR-0077); only a
@@ -2341,17 +2342,17 @@ fn turn_outcome_from_loop(outcome: LoopOutcome) -> TurnOutcome {
         Termination::StepCap(cap) => TurnOutcome::Failed(TurnFailure::Execute {
             detail: format!("agent did not converge within {cap} steps"),
         }),
-        Termination::Cancelled => TurnOutcome::Cancelled,
+        Termination::Cancelled => TurnOutcome::Cancelled(None),
         Termination::NoProgress(cap) => {
-            // The technical "no-progress timeout" fact rides the log (the
-            // cancelled-vs-timed-out UI split is issue #883); the landing
-            // stays a plain Cancelled (ADR-0115).
+            // The technical "no-progress timeout" fact rides the log AND the
+            // cancel reason payload (#883) -- the landing stays a Cancelled
+            // (ADR-0115), but one the frontend can present as a timeout.
             log::warn!(
                 target: "toptopduck::session",
                 "no-progress timeout: generation silent past the {:.1}s cap; aborting the turn",
                 cap.as_secs_f64()
             );
-            TurnOutcome::Cancelled
+            TurnOutcome::Cancelled(Some(CancelledReason::NoProgress))
         }
         Termination::NotWired => TurnOutcome::Failed(TurnFailure::NotWired),
         Termination::InvalidConfig(detail) => {
@@ -2736,7 +2737,7 @@ fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_
 #[cfg(test)]
 mod tests {
     use super::{turn_outcome_from_loop, Session, TOOL_OUTPUT_DIR_NAME};
-    use crate::model::{DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
+    use crate::model::{CancelledReason, DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
     use crate::provider::ProviderError;
@@ -2940,6 +2941,27 @@ mod tests {
                 assert_eq!(detail, "external runtime `cli-a` not found on PATH");
             }
             other => panic!("expected Failed(Runtime), got {other:?}"),
+        }
+    }
+
+    /// Issue #883: the projection arms the NoProgress landing with the cancel
+    /// reason -- a silent revert to a bare cancelled would leave every
+    /// watchdog kill presenting as the user's own stop with the suite green
+    /// (the #882 watchdog tests assert the pre-projection `Termination`;
+    /// this pins the projection itself, like the #852 peer above).
+    #[test]
+    fn turn_outcome_maps_no_progress_termination_to_cancelled_with_reason() {
+        let outcome = LoopOutcome {
+            termination: Termination::NoProgress(std::time::Duration::from_secs(120)),
+            promotions: Vec::new(),
+            trace: Vec::new(),
+            discovered_runtime: None,
+        };
+        match turn_outcome_from_loop(outcome) {
+            TurnOutcome::Cancelled(reason) => {
+                assert_eq!(reason, Some(CancelledReason::NoProgress));
+            }
+            other => panic!("expected Cancelled(Some(NoProgress)), got {other:?}"),
         }
     }
 
@@ -4865,7 +4887,7 @@ mod tests {
         let (mut session_b, _duck) = session_with_duck("");
         session_b.record_turn(
             "never finished",
-            TurnOutcome::Cancelled,
+            TurnOutcome::Cancelled(None),
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,
@@ -4912,7 +4934,7 @@ mod tests {
         let mut session = Session::new().expect("session");
         session.record_turn(
             "q",
-            TurnOutcome::Cancelled,
+            TurnOutcome::Cancelled(None),
             Vec::new(),
             Vec::new(),
             TurnRuntime::BuiltIn,

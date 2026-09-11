@@ -9,6 +9,7 @@ import {
   CircleOff,
   MessageCircleQuestion,
   Table2,
+  TimerOff,
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
@@ -152,17 +153,53 @@ export function outcomeVisual(
         tone: "text-destructive",
         label: intl.formatMessage({ id: "thread.outcome.failed", defaultMessage: "Failed" }),
       };
-    case "Cancelled":
+    case "Cancelled": {
+      // #883: a watchdog kill (ADR-0115) presents the timeout, not a plain
+      // cancel -- the honest reaction to a system-side abort is retry or
+      // report, which "Cancelled" alone hides. TimerOff names the cause at a
+      // glance; the tone stays the weakened grey (ADR-0047 D hue): a timeout
+      // is still not a failure.
+      //
+      // Deliberate DEVIATION from ADR-0050 (as with the B branch above):
+      // 0050 pins outcome D to `Ban` with one glyph per outcome class; the
+      // watchdog sub-case splits D by cause instead, glyph included -- the
+      // wording split alone hid the system-side timeout from a glance. The
+      // tone mapping is untouched, so 0047's D hue still holds.
+      // Exhaustiveness guard: a future CancelledReason member must add a
+      // branch here -- the outer switch's never-check cannot see the nested
+      // union, and a ternary fallthrough would mislabel the new reason as a
+      // manual cancel in the glyph's aria-label.
+      let Icon: LucideIcon;
+      let label: string;
+      const reason = outcome.data;
+      switch (reason) {
+        case "NoProgress":
+          Icon = TimerOff;
+          label = intl.formatMessage({
+            id: "thread.outcome.noProgress",
+            defaultMessage: "No-progress timeout",
+          });
+          break;
+        case null:
+          Icon = Ban;
+          label = intl.formatMessage({
+            id: "thread.outcome.cancelled",
+            defaultMessage: "Cancelled",
+          });
+          break;
+        default: {
+          const unhandled: never = reason;
+          throw new Error(`unhandled cancel reason: ${JSON.stringify(unhandled)}`);
+        }
+      }
       return {
-        Icon: Ban,
+        Icon,
         // D cancelled round = weakened grey (ADR-0047 D hue); the card also
         // dims via opacity-60 (TurnCard) per ADR-0028 Why 2.
         tone: "text-muted-foreground",
-        label: intl.formatMessage({
-          id: "thread.outcome.cancelled",
-          defaultMessage: "Cancelled",
-        }),
+        label,
       };
+    }
     default: {
       const unhandled: never = outcome;
       throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);

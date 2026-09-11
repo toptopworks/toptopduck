@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::approval::OperationKind;
 use crate::model::ThinkingTrace;
 use crate::model::{
-    RectifyProvenance, SkillLifecycleEvent, SkillLifecycleKind, SkillProvenance,
+    CancelledReason, RectifyProvenance, SkillLifecycleEvent, SkillLifecycleKind, SkillProvenance,
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, TextKind, TurnFailure,
 };
 
@@ -91,6 +91,12 @@ use crate::model::{
 /// the same no-op-widening posture as v6's actor field; turns persisted
 /// before #847 keep their terminal text in `assumption` (displayed as-is,
 /// not migrated).
+///
+/// Still v6 (#883): `RecipeOutcome::Cancelled` widens the same no-op way --
+/// a newtype over an optional [`CancelledReason`]. A key-less v6 `Cancelled`
+/// shape (written before the reason existed) deserializes as `None` via
+/// serde's missing-newtype-content path, so every existing file loads
+/// unchanged, and a resumed watchdog kill still presents the timeout.
 pub const RECIPE_FORMAT_VERSION: u32 = 6;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
@@ -522,7 +528,11 @@ pub enum RecipeOutcome {
     /// had live, not a flattened backend string.
     Failed(TurnFailure),
     /// Outcome D -- a cancelled turn (ADR-0021/0028). Statically rendered.
-    Cancelled,
+    /// The cancel reason (#883) round-trips so a resumed watchdog kill still
+    /// presents the timeout; `None` -- and the key-less pre-#883 `Cancelled`
+    /// form, which serde's missing-newtype-content path deserializes as
+    /// `None` -- is a manual cancel.
+    Cancelled(Option<CancelledReason>),
 }
 
 /// The recipe (ADR-0034): the current working set as a portable text
@@ -1258,6 +1268,33 @@ mod tests {
             }
             other => panic!("expected live Materialized (stale: None), got {other:?}"),
         }
+    }
+
+    /// #883 round-trip: a watchdog-killed turn's no-progress reason survives
+    /// persistence, so a resumed thread still presents the timeout; and a
+    /// pre-#883 recipe (`Cancelled` with no `data` key) loads as a manual
+    /// cancel -- the same missing-field posture the pre-#52 pin above locks.
+    #[test]
+    fn cancelled_outcome_reason_round_trips_and_pre_883_form_loads() {
+        let json = r#"{"kind":"Cancelled","data":"NoProgress"}"#;
+        let back: RecipeOutcome = serde_json::from_str(json).expect("deserialize reason form");
+        assert_eq!(
+            back,
+            RecipeOutcome::Cancelled(Some(CancelledReason::NoProgress))
+        );
+        assert_eq!(
+            serde_json::to_string(&back).expect("serialize"),
+            json,
+            "reason round-trips losslessly"
+        );
+
+        let old: RecipeOutcome =
+            serde_json::from_str(r#"{"kind":"Cancelled"}"#).expect("deserialize pre-#883 form");
+        assert_eq!(
+            old,
+            RecipeOutcome::Cancelled(None),
+            "the key-less pre-#883 Cancelled form loads as a manual cancel"
+        );
     }
 
     /// ADR-0041 ordering invariant (issue #52): an interleaved chain

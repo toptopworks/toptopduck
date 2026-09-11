@@ -576,10 +576,16 @@ function TurnBody({
         </div>
       );
     }
-    case "Cancelled":
-      // Outcome D, same card shape as Failed but muted (issue #720): the glyph
-      // head carries the whole body -- no reason text, no fold -- so the card
-      // reads as the weakened-grey sibling of the Failed card.
+    case "Cancelled": {
+      // Outcome D, same card shape as Failed but muted (issue #720): the
+      // glyph + outcome label carry the whole body -- no failure-detail
+      // text, no fold -- so the card reads as the weakened-grey sibling of
+      // the Failed card. #883: the
+      // label (and glyph, via outcomeVisual) splits on the cancel reason --
+      // a watchdog kill reads as the no-progress timeout, a manual stop as
+      // cancelled; the single visual keeps the visible text and the glyph's
+      // aria-label from drifting.
+      const visual = outcomeVisual(intl, record.outcome, false);
       return (
         <div
           className={cn(
@@ -588,12 +594,18 @@ function TurnBody({
           )}
         >
           <div className="flex items-center gap-1.5">
-            <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
-            <FormattedMessage id="thread.outcome.cancelled" defaultMessage="Cancelled" />
+            <OutcomeGlyph visual={visual} />
+            {/* Same wrap affordance as the Failed reason span (#862): the
+                label is a flex item whose min-width:auto floors its shrink
+                at the longest unbreakable run -- the watchdog copy runs
+                longer than the old cancel label, so it must
+                break inside the capped card, not stretch past it. */}
+            <span className="cancelled-reason min-w-0 break-words">{visual.label}</span>
           </div>
           {renderRetry()}
         </div>
       );
+    }
     default: {
       // Exhaustiveness guard: a future TurnOutcome variant must add a case here,
       // mirroring Rust's compile-time match exhaustiveness. `types/thread.ts` is the

@@ -342,7 +342,7 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
 
     let outcome = handle.join().expect("ask thread panicked");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "soft cancel during HTTP block should land Cancelled: got {outcome:?}"
     );
     // Immediacy (ADR-0107): the watcher aborts the in-flight SSE read
@@ -566,7 +566,7 @@ fn openai_cancel_during_http_block_lands_cancelled() {
 
     let outcome = handle.join().expect("ask thread panicked");
     assert!(
-        matches!(outcome, TurnOutcome::Cancelled),
+        matches!(outcome, TurnOutcome::Cancelled(_)),
         "mid-stream cancel on the openai wire lands Cancelled: got {outcome:?}"
     );
     // Immediacy, mirroring the anthropic pin: the watcher aborts the

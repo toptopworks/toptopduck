@@ -525,6 +525,7 @@
   "thread.outcome.clarify": "需要澄清",
   "thread.outcome.failed": "失败",
   "thread.outcome.materialized": "已出结果",
+  "thread.outcome.noProgress": "无进展超时",
   "thread.outcome.refused": "无法处理",
   "thread.outcome.retry": "重试",
   "thread.outcome.retryLabel": "重试该问题",

@@ -147,7 +147,7 @@ describe("useTurnFlow", () => {
 
     it("clears phase to null on every ask end (finally, incl. a Cancelled outcome)", async () => {
       const { deps } = setup();
-      vi.mocked(askQuestion).mockResolvedValue({ kind: "Cancelled" });
+      vi.mocked(askQuestion).mockResolvedValue({ kind: "Cancelled", data: null });
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
       emitProgress(SID, { Thinking: { attempt: 1 } });
@@ -534,7 +534,7 @@ describe("useTurnFlow", () => {
       });
       expect(result.current.liveTurn).not.toBeNull();
       await act(async () => {
-        resolveAsk({ kind: "Cancelled" });
+        resolveAsk({ kind: "Cancelled", data: null });
         await askDone;
       });
       expect(result.current.liveTurn).toBeNull();
@@ -573,7 +573,7 @@ describe("useTurnFlow", () => {
         },
       });
       await act(async () => {
-        resolveAsk({ kind: "Cancelled" });
+        resolveAsk({ kind: "Cancelled", data: null });
         await askDone;
       });
       const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));

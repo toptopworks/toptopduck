@@ -211,7 +211,7 @@ describe("Thread", () => {
         outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } },
         trace: [], provenance: { skills: [] },
       },
-      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "中途取消", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread
@@ -465,7 +465,7 @@ describe("Thread", () => {
       materializedRecord("result_1", null),
       { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [], provenance: { skills: [] } },
       { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [], provenance: { skills: [] } },
-      { question: "q", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "q", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -487,7 +487,7 @@ describe("Thread", () => {
     // so the question + reason/marker stay in the DOM and are queryable.
     const records: TurnRecord[] = [
       { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [], provenance: { skills: [] } },
-      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "中途取消", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -884,7 +884,7 @@ describe("Thread", () => {
     // the same dataset (the chip renders settled) -- the order must survive.
     const settledRecord: TurnRecord = {
       question: "在员工表上统计",
-      outcome: { kind: "Cancelled" },
+      outcome: { kind: "Cancelled", data: null },
       trace: [],
       provenance: { skills: [] },
     };
@@ -1178,8 +1178,8 @@ describe("Thread", () => {
       { reference_name: "orders", display_name: "订单表" },
     ];
     const records: TurnRecord[] = [
-      { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
-      { question: "总共几行", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "在订单表上统计总销售额", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
+      { question: "总共几行", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread
@@ -1212,7 +1212,7 @@ describe("Thread", () => {
     // recognize), never the matched token.
     const labels = [{ reference_name: "people", display_name: "员工表" }];
     const records: TurnRecord[] = [
-      { question: "在 people 上统计总销售额", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "在 people 上统计总销售额", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     renderThread(
       <Thread
@@ -1235,7 +1235,7 @@ describe("Thread", () => {
       { reference_name: "orders", display_name: "订单表" },
     ];
     const records: TurnRecord[] = [
-      { question: "在订单表上统计", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "在订单表上统计", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     renderThread(
       <Thread
@@ -1292,7 +1292,7 @@ describe("Thread", () => {
       materializedRecord("result_1", null),
       { question: "q", outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "b", assumption: null } }, trace: [], provenance: { skills: [] } },
       { question: "q", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } }, trace: [], provenance: { skills: [] } },
-      { question: "q", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "q", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -1344,7 +1344,7 @@ describe("Thread", () => {
     // assistant's); the user's question bubble never dims.
     const records: TurnRecord[] = [
       { question: "坏查询", outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "bad column" } } }, trace: [], provenance: { skills: [] } },
-      { question: "中途取消", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } },
+      { question: "中途取消", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
     ];
     const { container } = renderThread(
       <Thread entries={records.map(turnEntry)} selectedResult={null} onSelectResult={() => {}} />,
@@ -1506,7 +1506,7 @@ describe("Thread", () => {
     function tracedRecord(): TurnRecord {
       return {
         question: "多少行",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [
           {
             calls: [
@@ -1572,7 +1572,7 @@ describe("Thread", () => {
     it("omits the toggle for a zero-call turn (no trace to expand)", () => {
       renderThread(
         <Thread
-          entries={[turnEntry({ question: "q", outcome: { kind: "Cancelled" }, trace: [], provenance: { skills: [] } })]}
+          entries={[turnEntry({ question: "q", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } })]}
           selectedResult={null}
           onSelectResult={() => {}}
         />,
@@ -1868,7 +1868,7 @@ describe("Thread", () => {
     });
 
     it("renders Cancelled as a same-shape muted card whose glyph head is the whole body (issue #720)", () => {
-      const { container } = renderChat(chatRecord({ outcome: { kind: "Cancelled" } }));
+      const { container } = renderChat(chatRecord({ outcome: { kind: "Cancelled", data: null } }));
       const card = container.querySelector(".turn-outcome.cancelled");
       expect(card).not.toBeNull();
       expect(card!.className.split(/\s+/)).toContain("bg-muted");
@@ -1884,7 +1884,7 @@ describe("Thread", () => {
       // settle stamp, the row would render as an empty line -- no content
       // means no row; the outcome card alone closes the exchange.
       const { container } = renderChat(
-        chatRecord({ outcome: { kind: "Cancelled" }, settled_at: undefined }),
+        chatRecord({ outcome: { kind: "Cancelled", data: null }, settled_at: undefined }),
       );
       expect(container.querySelector(".turn-meta")).toBeNull();
       expect(container.querySelector(".turn-outcome.cancelled")).not.toBeNull();
@@ -2178,7 +2178,7 @@ describe("Thread", () => {
       };
       const record: TurnRecord = {
         question: "在员工表上统计总销售额",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [],
         provenance: { skills: [] },
       };
@@ -2338,7 +2338,7 @@ describe("Thread", () => {
       };
       const record: TurnRecord = {
         question: "q",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [
           { thinking: openedThinking, calls: [] },
           { thinking: closedThinking, calls: [] },
@@ -2426,7 +2426,7 @@ describe("Thread", () => {
       };
       const record: TurnRecord = {
         question: "q",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [{ thinking: openedThinking, calls: [] }],
         provenance: { skills: [] },
       };
@@ -2492,7 +2492,7 @@ describe("Thread", () => {
       };
       const record: TurnRecord = {
         question: "q",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [{ thinking: replacedThinking, calls: [] }],
         provenance: { skills: [] },
       };
@@ -2549,7 +2549,7 @@ describe("Thread", () => {
       };
       const record: TurnRecord = {
         question: "q",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [{ thinking, calls: [] }],
         provenance: { skills: [] },
       };
@@ -2584,13 +2584,13 @@ describe("Thread", () => {
       const thinkingB = { duration_ms: 1200, text: "推理乙" };
       const recordA: TurnRecord = {
         question: "问甲",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [{ thinking: thinkingA, calls: [] }],
         provenance: { skills: [] },
       };
       const recordB: TurnRecord = {
         question: "问乙",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [{ thinking: thinkingB, calls: [] }],
         provenance: { skills: [] },
       };
@@ -2869,7 +2869,7 @@ describe("Thread", () => {
     function turnWithSkill(name: string, contentHash: string): TurnRecord {
       return {
         question: "q",
-        outcome: { kind: "Cancelled" },
+        outcome: { kind: "Cancelled", data: null },
         trace: [],
         provenance: { skills: [{ name, content_hash: contentHash }] },
       };

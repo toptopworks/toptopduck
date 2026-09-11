@@ -662,11 +662,34 @@ fn turn_outcome_failed_invalid_config_carries_detail_under_data() {
 }
 
 #[test]
-fn turn_outcome_cancelled_is_a_unit_variant_with_no_data() {
-    // Outcome D (ADR-0028, placeholder until #28): a unit variant -- `kind`
-    // only, no `data` key -- like the other unit variants in the contract.
+fn turn_outcome_cancelled_carries_optional_reason() {
+    // Outcome D (ADR-0028, #883): a newtype over an optional cancel reason.
+    // A watchdog kill (ADR-0115) rides "NoProgress" under `data` so the
+    // frontend presents the timeout distinct from a user stop; a manual
+    // cancel serializes `data: null`. Pinned because the frontend's
+    // hand-mirrored `types/thread.ts` narrows on this exact shape.
+    use toptopduck_lib::{CancelledReason, TurnOutcome};
+    assert_wire(
+        &TurnOutcome::Cancelled(Some(CancelledReason::NoProgress)),
+        r#"{"kind":"Cancelled","data":"NoProgress"}"#,
+    );
+    assert_wire(
+        &TurnOutcome::Cancelled(None),
+        r#"{"kind":"Cancelled","data":null}"#,
+    );
+}
+
+#[test]
+fn turn_outcome_cancelled_without_data_key_deserializes_as_manual() {
+    // Pre-#883 compat: live IPC peers and .duck recordings written before the
+    // reason payload existed omit the `data` key entirely (then a unit
+    // variant). The newtype-over-Option shape must deserialize such a
+    // payload as a manual cancel -- losing the Option would break opening
+    // every pre-#883 recording with "missing field `data`".
     use toptopduck_lib::TurnOutcome;
-    assert_wire(&TurnOutcome::Cancelled, r#"{"kind":"Cancelled"}"#);
+    let back: TurnOutcome =
+        serde_json::from_str(r#"{"kind":"Cancelled"}"#).expect("deserialize pre-#883 form");
+    assert_eq!(back, TurnOutcome::Cancelled(None));
 }
 
 #[test]

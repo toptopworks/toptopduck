@@ -55,6 +55,11 @@ export type TurnFailure =
 // tagged: kind + data). The four kinds are exhaustive: a turn always produces
 // exactly one, regardless of whether it materialized a result. Only Materialized
 // advances result_N; the others occupy a thread slot but consume no number.
+// Why a turn landed cancelled (#883). "NoProgress" marks a no-progress
+// watchdog kill (ADR-0115); null / absence is the manual stop. Mirrors the
+// Rust CancelledReason (default serde naming: the variant ident).
+export type CancelledReason = "NoProgress";
+
 export type TurnOutcome =
   | {
     kind: "Materialized";
@@ -93,7 +98,13 @@ export type TurnOutcome =
     };
   }
   | { kind: "Failed"; data: TurnFailure }
-  | { kind: "Cancelled" };
+  // Outcome D (#883): the optional cancel reason, named to mirror the Rust
+  // CancelledReason (default serde naming: the variant ident). "NoProgress"
+  // marks a watchdog kill (ADR-0115); null is a manual stop. Null, not
+  // absent: the live wire always carries the data key; the Rust
+  // newtype-over-Option additionally accepts the key-less pre-#883 recorded
+  // shape as null.
+  | { kind: "Cancelled"; data: CancelledReason | null };
 
 // A round's persisted thinking block (ADR-0103): how long the model
 // reasoned plus its raw reasoning text. Mirrors the Rust ThinkingTrace.
