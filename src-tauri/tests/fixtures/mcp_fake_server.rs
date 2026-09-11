@@ -22,12 +22,30 @@
 //! stance). A blank or malformed line is skipped -- the gateway's framing
 //! already rejects malformed frames upstream, this just keeps the fixture
 //! tolerant of stray whitespace.
+//!
+//! Deadline fixture (issue #889): with `FAKE_HANG_ON_CALL=1` in the child
+//! env the server answers `initialize` + `tools/list` normally but swallows
+//! every `tools/call` -- read and discarded, never answered -- so the
+//! client's blocking read parks until the per-call deadline (or a kill)
+//! fires. `FAKE_HANG_ON_LIST=1` swallows `tools/list` instead (initialize
+//! answered): the same connect-phase budget, but the park lands after the
+//! handshake -- the tools/list half of the connect deadline. The sibling
+//! `mcp-hang-server` fixture covers the never-responds-at-all shape for the
+//! connect deadline.
+//!
+//! Server-death fixture (issue #889 review): `FAKE_DIE_AFTER_CALL=1` answers
+//! ONE `tools/call` normally and then exits -- the client's next read hits
+//! EOF (`ServerClosed`), the shape the aggregator's dead latch exists to
+//! normalize.
 
 use std::io::{self, BufRead, BufReader, Write};
 
 use serde_json::{json, Value};
 
 fn main() {
+    let hang_on_call = std::env::var("FAKE_HANG_ON_CALL").ok().as_deref() == Some("1");
+    let hang_on_list = std::env::var("FAKE_HANG_ON_LIST").ok().as_deref() == Some("1");
+    let die_after_call = std::env::var("FAKE_DIE_AFTER_CALL").ok().as_deref() == Some("1");
     let mut out = io::stdout();
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -59,24 +77,49 @@ fn main() {
                     "serverInfo": {"name": "mcp-fake-server", "version": "0.0.0"}
                 }
             })),
-            Some("tools/list") => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "tools": [
-                        {"name": "echo", "description": "echo the message field",
-                         "inputSchema": {"type": "object"}},
-                        {"name": "add", "description": "sum a and b",
-                         "inputSchema": {"type": "object",
-                                         "properties": {"a": {"type": "integer"},
-                                                        "b": {"type": "integer"}},
-                                         "required": ["a", "b"]}},
-                        {"name": "echo_env", "description": "reflect a child env var",
-                         "inputSchema": {"type": "object"}}
-                    ]
+            Some("tools/list") => {
+                if hang_on_list {
+                    // Deadline fixture (issue #889): initialize answered,
+                    // the listing swallows -- the client parks on the read
+                    // inside the same connect-phase budget.
+                    None
+                } else {
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "tools": [
+                                {"name": "echo", "description": "echo the message field",
+                                 "inputSchema": {"type": "object"}},
+                                {"name": "add", "description": "sum a and b",
+                                 "inputSchema": {"type": "object",
+                                                 "properties": {"a": {"type": "integer"},
+                                                                "b": {"type": "integer"}},
+                                                 "required": ["a", "b"]}},
+                                {"name": "echo_env", "description": "reflect a child env var",
+                                 "inputSchema": {"type": "object"}}
+                            ]
+                        }
+                    }))
                 }
-            })),
-            Some("tools/call") => Some(call_response(id, &v)),
+            }
+            Some("tools/call") => {
+                if hang_on_call {
+                    // Deadline fixture (issue #889): swallow the request,
+                    // never respond -- the client parks on the read.
+                    None
+                } else {
+                    let resp = call_response(id, &v);
+                    if die_after_call {
+                        // Server-death fixture (issue #889 review): answer
+                        // ONE call, then exit -- the next client read hits
+                        // EOF (ServerClosed), the dead-latch shape.
+                        write_msg(&mut out, &resp);
+                        break;
+                    }
+                    Some(resp)
+                }
+            }
             _ => None,
         };
         if let Some(r) = resp {

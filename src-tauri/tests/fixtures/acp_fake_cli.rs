@@ -758,6 +758,43 @@ fn play_scenario(
             notify(out, agent_message("done via gateway"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // Issue #889 review I4: like gateway_tool_call, but the call
+        // addresses an external MCP server through the meta-tool (ADR-0105:
+        // the handle rides mcp_invoke's `tool` argument, read from
+        // ACP_FAKE_GATEWAY_TOOL) and the response envelope is consumed
+        // without asserting isError -- the wiring test points this at a hung
+        // server whose call is unblocked by a cancel teardown, so the
+        // envelope that comes back IS the error shape and the scenario must
+        // tolerate it to keep the chain comparable.
+        "gateway_mcp_call" => {
+            bridge_write(&mcp_request(
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
+            ));
+            let _ = bridge_read().expect("initialize response");
+            let handle =
+                std::env::var("ACP_FAKE_GATEWAY_TOOL").unwrap_or_else(|_| "mcp_invoke".into());
+            bridge_write(&mcp_request(
+                2,
+                "tools/call",
+                serde_json::json!({
+                    "name": "mcp_invoke",
+                    "arguments": {"tool": handle}
+                }),
+            ));
+            let _ = bridge_read().expect("tools/call response");
+            notify(
+                out,
+                tool_call_start("gw_1", "gateway-mcp", ToolKind::Search),
+            );
+            notify(
+                out,
+                tool_call_finish("gw_1", "gateway-mcp", "gateway call settled"),
+            );
+            notify(out, agent_message("done via gateway"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         // Issue #673 (ADR-0108 Decision 6): a registered CLI tool must be
         // advertised on the bridge's `tools/list` (single tool plane) and a
         // bridge-originated `tools/call` must route through the gateway into

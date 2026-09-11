@@ -31,18 +31,25 @@
 //!
 //! Turn-local (issue #301 Q2): the gateway constructs one client per
 //! configured server at turn start and drops it at turn end -- no
-//! cross-turn state, no session-level handle. Per-call timeout is NOT
-//! enforced per-read here: blocking reads have no native deadline, and
-//! under ADR-0115 a gateway-served MCP call waits inside the dispatch
-//! freeze, so the no-progress clock never fires mid-wait -- a hung server
-//! parks the turn with no kill log. `timeout_ms` stays
-//! on [`crate::mcp::config::McpServerConfig`] as a forward-compat contract.
+//! cross-turn state, no session-level handle. Per-call timeouts are NOT
+//! enforced per-read here: the transports carry no per-call deadline of
+//! their own (a stdio read ends only at the child's stdout EOF, an SSE
+//! channel recv ends only when the reader exits -- at most one
+//! [`SSE_READ_TIMEOUT`] wake after the stop flag -- and an HTTP read ends
+//! at its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
+//! layer up -- the aggregator parks the blocking call on a worker thread
+//! and enforces
+//! [`McpServerConfig::timeout_ms`](crate::mcp::config::McpServerConfig::timeout_ms)
+//! / the gateway default via `recv_timeout`, terminating the transport
+//! through [`TransportKill`] on expiry (issue #889). The transports stay
+//! pure synchronous: `McpClient`'s wire methods never poll clocks or
+//! cancel tokens.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -74,6 +81,100 @@ const SSE_CHANNEL_BOUND: usize = 64;
 /// client, then passes the resolved `(env_key, value)` pairs in. The client
 /// never touches the keychain -- it is pure transport, testable without one.
 pub type SecretEnv = (String, String);
+
+/// A cross-thread kill handle for one transport (issue #889). Cloned from
+/// the owning client; [`TransportKill::kill`] makes that transport's
+/// blocking read return so a parked caller unblocks:
+/// - stdio: terminate the child -> its stdout EOFs -> `read_message`
+///   reports `ServerClosed`;
+/// - SSE: set the reader-thread stop flag -> the reader exits -> the
+///   response channel closes -> `recv` reports `ServerClosed`;
+/// - HTTP: no-op -- that transport is already bounded per-read
+///   ([`HTTP_READ_TIMEOUT`], issue #392).
+#[derive(Clone)]
+pub enum TransportKill {
+    /// Terminate the spawned stdio child. Shared with the client's `Drop`
+    /// (kill + reap stay single-owner through the mutex).
+    StdioChild(Arc<Mutex<Child>>),
+    /// Signal the SSE reader thread to stop.
+    SseStop(Arc<AtomicBool>),
+    /// Nothing to terminate (HTTP is per-read bounded).
+    Http,
+}
+
+impl TransportKill {
+    /// Make the transport's blocking read return. Idempotent: killing an
+    /// already-dead child or re-setting a stop flag is a harmless no-op, so
+    /// deadline expiry and cancel teardown may both fire it.
+    pub fn kill(&self) {
+        match self {
+            Self::StdioChild(child) => match child.lock() {
+                Ok(mut child) => {
+                    // Log the failure (issue #889 review): this kill is what
+                    // the deadline/cancel unwind rides on, so a failed kill
+                    // must be diagnosable in the field, not silent.
+                    if let Err(e) = child.kill() {
+                        log::warn!(
+                            target: "toptopduck::mcp",
+                            "stdio transport kill failed: {e}"
+                        );
+                    }
+                }
+                Err(_) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "stdio transport kill skipped: the child lock is poisoned"
+                    );
+                }
+            },
+            Self::SseStop(stop) => stop.store(true, Ordering::SeqCst),
+            Self::Http => {}
+        }
+    }
+}
+
+/// The shared deadline-vs-spawn rendezvous for one connect (issue #889).
+/// The transport [`publish`](ConnectKill::publish)es its [`TransportKill`]
+/// the moment the killable resource exists; the deadline side
+/// [`expire`](ConnectKill::expire)s on timeout. The two directions race:
+/// expiry may land before spawn finishes (the handle is not published yet),
+/// so publish re-checks the expired flag and self-terminates -- otherwise
+/// the worker would park on the handshake read after the deadline with
+/// nobody left to kill it, and the caller's scope join would never return.
+#[derive(Default)]
+pub struct ConnectKill {
+    handle: Mutex<Option<TransportKill>>,
+    expired: AtomicBool,
+}
+
+impl ConnectKill {
+    /// The transport side: publish the kill handle; if the deadline already
+    /// expired during the spawn, kill immediately.
+    pub fn publish(&self, kill: TransportKill) {
+        *self.handle.lock().expect("kill slot poisoned") = Some(kill.clone());
+        if self.expired.load(Ordering::SeqCst) {
+            kill.kill();
+        }
+    }
+
+    /// The deadline side: mark the connect expired and kill whatever is
+    /// published (a later [`Self::publish`] honors the flag).
+    pub fn expire(&self) {
+        self.expired.store(true, Ordering::SeqCst);
+        if let Some(kill) = self.handle.lock().expect("kill slot poisoned").as_ref() {
+            kill.kill();
+        }
+    }
+}
+
+/// The shared handle form passed into a `_with_kill` connect.
+pub type KillSlot = Arc<ConnectKill>;
+
+/// An unfilled [`KillSlot`] -- the no-kill default for the plain `connect`
+/// signatures (the probe path runs under its own deadline, issue #392).
+fn empty_kill_slot() -> KillSlot {
+    Arc::new(ConnectKill::default())
+}
 
 // ---------------------------------------------------------------------------
 // McpClient trait (issue #413)
@@ -450,7 +551,9 @@ fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
 /// config fails loudly rather than silently spawning a bogus child.
 pub struct StdioClient {
     inner: FramedClient<BufReader<ChildStdout>, ChildStdin>,
-    child: Child,
+    /// Shared so the deadline / cancel-kill paths can terminate the child
+    /// while a blocking read holds the rest of the client (issue #889).
+    child: Arc<Mutex<Child>>,
 }
 
 impl StdioClient {
@@ -464,15 +567,35 @@ impl StdioClient {
         secrets: &[SecretEnv],
         tool_output_dir: Option<&str>,
     ) -> Result<Self, ClientError> {
+        Self::connect_with_kill(config, secrets, tool_output_dir, &empty_kill_slot())
+    }
+
+    /// [`Self::connect`] with a [`KillSlot`]: the child handle is published
+    /// there the moment it is spawned, so a deadline hit during the
+    /// initialize handshake (whose blocking read has no native timeout)
+    /// can terminate it (issue #889).
+    pub fn connect_with_kill(
+        config: &McpServerConfig,
+        secrets: &[SecretEnv],
+        tool_output_dir: Option<&str>,
+        kill_slot: &KillSlot,
+    ) -> Result<Self, ClientError> {
         let mut child = stdio_command(config, secrets, tool_output_dir)?.spawn()?;
         let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
         let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
+        let child = Arc::new(Mutex::new(child));
+        kill_slot.publish(TransportKill::StdioChild(Arc::clone(&child)));
         let mut client = StdioClient {
             inner: FramedClient::new(BufReader::new(stdout), stdin),
             child,
         };
         client.initialize()?;
         Ok(client)
+    }
+
+    /// The cross-thread kill handle (issue #889).
+    pub fn kill_handle(&self) -> TransportKill {
+        TransportKill::StdioChild(Arc::clone(&self.child))
     }
 }
 
@@ -495,9 +618,26 @@ impl Drop for StdioClient {
         // The turn is over; kill the server rather than wait for a graceful
         // exit. Flushing stdin first signals EOF to a well-behaved server; the
         // kill + wait that follow guarantee release even if it ignores EOF.
+        // The lock only contends while a deadline / cancel kill is mid-flight
+        // (both return without holding it, issue #889).
         let _ = self.inner.writer.flush();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match self.child.lock() {
+            Ok(mut child) => {
+                if let Err(e) = child.kill() {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "stdio child kill at drop failed: {e}"
+                    );
+                }
+                let _ = child.wait();
+            }
+            Err(_) => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "stdio child kill at drop skipped: the child lock is poisoned"
+                );
+            }
+        }
     }
 }
 
@@ -610,9 +750,17 @@ pub struct HttpClient {
 impl HttpClient {
     /// Connect to the HTTP endpoint and perform the MCP initialize handshake.
     pub fn connect(url: &str) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, &empty_kill_slot())
+    }
+
+    /// [`Self::connect`] with a [`KillSlot`] (issue #889). HTTP is bounded
+    /// per-read ([`HTTP_READ_TIMEOUT`]), so the slot holds the no-op handle
+    /// purely for kill-shape uniformity across transports.
+    pub fn connect_with_kill(url: &str, kill_slot: &KillSlot) -> Result<Self, ClientError> {
         let agent = ureq::AgentBuilder::new()
             .timeout_read(HTTP_READ_TIMEOUT)
             .build();
+        kill_slot.publish(TransportKill::Http);
         let mut client = Self {
             url: url.to_string(),
             agent,
@@ -620,6 +768,11 @@ impl HttpClient {
         };
         client.initialize()?;
         Ok(client)
+    }
+
+    /// The cross-thread kill handle (issue #889) -- the no-op variant.
+    pub fn kill_handle(&self) -> TransportKill {
+        TransportKill::Http
     }
 
     /// Test-only: a client at a URL nothing listens on. The aggregator's
@@ -728,6 +881,17 @@ impl SseClient {
     /// Open the SSE stream, read the endpoint event, spawn the reader thread,
     /// and perform the MCP initialize handshake.
     pub fn connect(url: &str) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, &empty_kill_slot())
+    }
+
+    /// [`Self::connect`] with a [`KillSlot`] (issue #889). The stop flag is
+    /// published the moment it exists -- it is the ONLY thing that breaks a
+    /// deadline or cancel during the initialize handshake: the handshake
+    /// parks on an unbounded channel `recv` (the agent's `timeout_read`
+    /// bounds the reader's socket reads, not the channel), so without the
+    /// slot a spawn that outlives its budget would park with nobody left to
+    /// kill it.
+    pub fn connect_with_kill(url: &str, kill_slot: &KillSlot) -> Result<Self, ClientError> {
         // The GET agent carries a read timeout so the reader thread can
         // periodically check the stop flag (the stream is otherwise blocking
         // forever between events).
@@ -775,6 +939,11 @@ impl SseClient {
         // sync_channel backpressures a flooding server.
         let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
         let stop = Arc::new(AtomicBool::new(false));
+        // Publish the stop flag the moment it exists (issue #889): the
+        // deadline / cancel-kill paths terminate a parked `recv` by setting
+        // it -- the reader thread then exits, dropping the sender, and the
+        // channel disconnects.
+        kill_slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
         let stop_clone = stop.clone();
         let handle = thread::spawn(move || {
             sse_reader_loop(reader, tx, stop_clone);
@@ -791,6 +960,11 @@ impl SseClient {
 
         client.initialize()?;
         Ok(client)
+    }
+
+    /// The cross-thread kill handle (issue #889).
+    pub fn kill_handle(&self) -> TransportKill {
+        TransportKill::SseStop(Arc::clone(&self.stop))
     }
 }
 
@@ -994,6 +1168,17 @@ pub enum TransportClient {
     Http(HttpClient),
 }
 
+impl TransportClient {
+    /// The cross-thread kill handle for the concrete transport (issue #889).
+    pub fn kill_handle(&self) -> TransportKill {
+        match self {
+            Self::Stdio(c) => c.kill_handle(),
+            Self::Sse(c) => c.kill_handle(),
+            Self::Http(c) => c.kill_handle(),
+        }
+    }
+}
+
 impl McpClient for TransportClient {
     fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         match self {
@@ -1022,18 +1207,38 @@ impl McpClient for TransportClient {
 
 /// Connect to a configured MCP server, dispatching to the transport-specific
 /// client (issue #389). Each transport's `connect` performs the MCP initialize
-/// handshake and returns a ready-to-use [`TransportClient`].
+/// handshake and returns a ready-to-use [`TransportClient`]. No kill slot --
+/// the probe path that uses this runs under its own deadline (issue #392);
+/// the aggregator deadline path uses [`connect_transport_with_kill`].
 pub fn connect_transport(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
     tool_output_dir: Option<&str>,
 ) -> Result<TransportClient, ClientError> {
+    connect_transport_with_kill(config, secrets, tool_output_dir, &empty_kill_slot())
+}
+
+/// [`connect_transport`] with a [`KillSlot`] the caller reads on deadline
+/// expiry (issue #889): each transport publishes its [`TransportKill`] as
+/// soon as the killable resource exists, covering the initialize-handshake
+/// park (a stdio child that spawns but never responds).
+pub fn connect_transport_with_kill(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+    tool_output_dir: Option<&str>,
+    kill_slot: &KillSlot,
+) -> Result<TransportClient, ClientError> {
     match &config.transport {
         McpTransport::Stdio { .. } => {
-            StdioClient::connect(config, secrets, tool_output_dir).map(TransportClient::Stdio)
+            StdioClient::connect_with_kill(config, secrets, tool_output_dir, kill_slot)
+                .map(TransportClient::Stdio)
         }
-        McpTransport::Sse { url } => SseClient::connect(url).map(TransportClient::Sse),
-        McpTransport::Http { url } => HttpClient::connect(url).map(TransportClient::Http),
+        McpTransport::Sse { url } => {
+            SseClient::connect_with_kill(url, kill_slot).map(TransportClient::Sse)
+        }
+        McpTransport::Http { url } => {
+            HttpClient::connect_with_kill(url, kill_slot).map(TransportClient::Http)
+        }
     }
 }
 
@@ -1070,6 +1275,18 @@ pub enum ClientError {
     ServerError(Value),
     #[error("HTTP transport error: {0}")]
     Http(String),
+    /// The per-call deadline expired (issue #889): `server` names the
+    /// configured server, `call` the protocol step that hung
+    /// (`initialize` / `tools/list` / the `tools/call` tool name), and
+    /// `timeout_ms` the effective budget (per-server override or gateway
+    /// default). The transport was terminated -- subsequent calls to this
+    /// server fail fast for the rest of the turn.
+    #[error("MCP server `{server}` {call} timed out after {timeout_ms}ms; the server is disconnected for the rest of the turn")]
+    Timeout {
+        server: String,
+        call: String,
+        timeout_ms: u64,
+    },
 }
 
 #[cfg(test)]
@@ -1260,6 +1477,46 @@ mod tests {
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         client.list_tools().expect("first call (id=1)");
         client.call("x", &json!({})).expect("second call (id=2)");
+    }
+
+    // --- ConnectKill rendezvous (issue #889) ----------------------------------
+
+    /// The publish-after-expire ordering: `expire` may land before the
+    /// transport has published its kill handle (a spawn that outlasts the
+    /// budget), and the re-check inside `publish` is what kills the LATE
+    /// handle -- without it the worker parks on the handshake read after
+    /// the deadline with nobody left to kill it. The stop-flag variant
+    /// makes the kill observable without a process: a `publish` that
+    /// merely stores the handle leaves the flag unset and fails this pin.
+    #[test]
+    fn connect_kill_publish_after_expire_self_terminates_the_handle() {
+        let slot = ConnectKill::default();
+        slot.expire();
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "publish after expire must kill the late handle, not just store it"
+        );
+    }
+
+    /// The forward ordering for contrast: publishing BEFORE expiry stores
+    /// the handle without firing it (the transport is healthy); the later
+    /// `expire` performs the kill itself.
+    #[test]
+    fn connect_kill_expire_after_publish_fires_the_stored_handle() {
+        let slot = ConnectKill::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "a healthy connect's publish does not fire its own kill"
+        );
+        slot.expire();
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "expire kills whatever is published"
+        );
     }
 
     // --- SSE event parsing (issue #389) --------------------------------------

@@ -1376,6 +1376,17 @@ impl Session {
                         self.tool_output_path(),
                     );
                     mcp.connect_all(inputs.mcp_servers, inputs.keychain);
+                    // Cancel-aware teardown (issue #889): a token fire while
+                    // the loop is live terminates every connected transport,
+                    // unblocking a tools/call parked inside the dispatch
+                    // freeze. The flag is RAII ([`TurnDoneFlag`]): dropping
+                    // it at block end stands the watcher down whatever way
+                    // the block exits -- normal return or a panicking turn
+                    // -- so a normally finished turn tears down through the
+                    // aggregator's own `Drop` and a panicking turn cannot
+                    // leak its poller.
+                    let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
+                    mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
                     request.tools.extend(mcp.meta_tool_definitions());
                     // ADR-0108 Decision 6: the enabled CLI registrations are
                     // DIRECT-LISTED into the tool table (never via the
@@ -1479,6 +1490,9 @@ impl Session {
                             on_phase,
                         ),
                     };
+                    // The MCP cancel-teardown watcher stands down through
+                    // `mcp_turn_done`'s Drop at block end (issue #889) --
+                    // no manual store to skip on an unwinding path.
                     // The loop's real multi-call trace rides alongside the
                     // mapped outcome to record_turn (ADR-0078, issue #319): the
                     // mapper stays focused on the four-way classification, so
@@ -1693,6 +1707,15 @@ impl Session {
             let mut mcp =
                 crate::mcp::aggregator::McpAggregator::with_tool_output(self.tool_output_path());
             mcp.connect_all(inputs.mcp_servers, inputs.keychain);
+            // Cancel-aware teardown (issue #889): `engine_done` doubles as
+            // the stand-down signal -- the engine pump returning means the
+            // turn is unwinding through its own path (serve's loop-top check
+            // exits it; the aggregator drops at scope end). A token fire
+            // while the pump is still parked (the whole CLI -> bridge ->
+            // serve chain waits on a frozen MCP call) kills the transports,
+            // the parked read returns `ServerClosed`, serve unwinds, and the
+            // scope can end -- the session lock is released.
+            mcp.arm_cancel_teardown(Arc::clone(&self.cancel), Arc::clone(&engine_done));
             let deps = TurnDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,

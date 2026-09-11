@@ -74,7 +74,7 @@ _Avoid_: 活跃运行时(active runtime)——「活跃」是接入档案的属�
 _Avoid_: 运行时会话(runtime session)——运行时无状态，无会话可言；上下文段(context segment)
 
 **无进展看门狗 (No-progress Watchdog)**:
-轮次级执行安全网（ADR-0115）：仅度量 agent 自由活动段（生成）的无进展时长，触顶即整轮中止、outcome 落 cancelled；轮次等待外部主体期间不计时——网关工具执行、审批挂起、外部适配器自身工具执行均为冻结段。步数上限（执行轨迹的轮数上限）与之并列、独立计数。
+轮次级执行安全网（ADR-0115）：仅度量 agent 自由活动段（生成）的无进展时长，触顶即整轮中止、outcome 落 cancelled；轮次等待外部主体期间不计时——网关工具执行、审批挂起、外部适配器自身工具执行均为冻结段。冻结不等于无界：外部 MCP 调用有 per-call 帽值（server 级 `timeout_ms` 覆盖、缺省 120s，超时即调用级错误并断开该 server 本轮），cancel 触发杀断全部已连接 MCP 传输。步数上限（执行轨迹的轮数上限）与之并列、独立计数。
 _Avoid_: 墙钟(wall clock)——整轮计时语义已被取代；活动监测(activity monitor)——看门狗度量的是流活动停滞，不是进程活性
 
 **上次模型姿势**:
