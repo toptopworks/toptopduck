@@ -106,6 +106,71 @@ fn external_text_reply_turn_completes() {
     }
 }
 
+/// Issue #897: the bridge path's arming order pin -- the external-turn
+/// counterpart of the built-in pin in mcp_mount_blackbox.rs. The bridge
+/// branch's `arm_cancel_teardown` ahead of `connect_all` could silently
+/// regress; with a hung MCP server the whole CLI -> bridge -> serve chain
+/// parks on the server's own budget while the session lock is held. One
+/// never-responding stdio server under a long budget, a token fire 300ms
+/// in, and the external turn must return well under the budget.
+#[test]
+fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
+    use std::time::{Duration, Instant};
+
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    let hang = McpServerConfig {
+        id: McpServerId("wiring-hang".into()),
+        display_name: "HungMCP".into(),
+        transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-hang-server"), Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        // A long budget: only the CANCEL path can unblock this test in time
+        // (and generous against a cold-start turn unwind -- freshly compiled
+        // fixture binaries can take tens of seconds to spawn on a cold
+        // Windows dev box, which is setup latency, not the cancel contract).
+        timeout_ms: Some(120_000),
+        enabled: true,
+    };
+    // The fire lands AFTER the fast-finishing CLI has stored its engine-done
+    // flag -- the window where a stand-down signal tied to the engine half
+    // (instead of the turn's own unwind) would have retired the watcher
+    // over a turn that has not unwound yet.
+    let firer = Arc::clone(&session.cancel_token());
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        firer.request();
+    });
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let keychain = KeychainStore::new();
+    let started = Instant::now();
+    let outcome = session.ask_with_phase(
+        "run one turn",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[hang],
+            keychain: &keychain,
+            skills: &[],
+            skills_root: std::path::Path::new(""),
+            activated: &[],
+            cli_tools: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    // The ELAPSED bound is the pin: an arm-after-connect posture (or a
+    // stand-down tied to the engine half) parks the connect for the full
+    // 120s budget. The outcome's variant is NOT pinned -- a cold-start turn
+    // unwind (freshly compiled fixture binaries) can surface a Failed form
+    // that is setup latency, not the cancel contract.
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "the token fire unblocks the parked connect well under the 120s budget, got {outcome:?}"
+    );
+}
+
 /// The full chain: the fake-CLI's `gateway_tool_call` scenario drives one MCP
 /// `tools/call` (explore) through the spawned bridge -> the per-turn gateway
 /// -> `tools::dispatch`, then emits a terminal agent message. The turn must

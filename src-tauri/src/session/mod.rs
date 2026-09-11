@@ -1715,20 +1715,27 @@ impl Session {
             let mut mcp =
                 crate::mcp::aggregator::McpAggregator::with_tool_output(self.tool_output_path());
             // Cancel-aware teardown (issue #889; connect phase added by
-            // #892): `engine_done` doubles as the stand-down signal -- the
-            // engine pump returning means the turn is unwinding through its
-            // own path (serve's loop-top check exits it; the aggregator
-            // drops when the `GatewayCtx` that owns it returns from
-            // `serve_connection`, below). Arming runs BEFORE `connect_all`
-            // (#892): the watcher expires each pre-registered connect slot,
-            // so a token fire during the connect phase kills the parked
-            // handshake read instead of waiting out each hung server's
-            // budget (the between-attempts gap check rides the same token).
-            // A token fire while the pump is still parked (the whole CLI ->
-            // bridge -> serve chain waits on a frozen MCP call) kills the
-            // transports, the parked read returns `ServerClosed`, serve
-            // unwinds, and the scope can end -- the session lock is released.
-            mcp.arm_cancel_teardown(Arc::clone(&self.cancel), Arc::clone(&engine_done));
+            // #892): arming runs BEFORE `connect_all` -- the watcher
+            // expires each pre-registered connect slot, so a token fire
+            // during the connect phase kills the parked handshake read
+            // instead of waiting out each hung server's budget (the
+            // between-attempts gap check rides the same token). The
+            // stand-down signal is the RAII turn flag (issue #897), NOT
+            // `engine_done`: the engine thread parks ahead of the connects,
+            // and a fast-finishing CLI stores `engine_done` while the
+            // connects are still parked -- standing the watcher down over a
+            // turn that has not unwound yet would leave that window's token
+            // fire unable to unblock the parked handshake (the session lock
+            // stays held for the server's own budget). The flag stores when
+            // this scope exits ANY way, mirroring the built-in branch;
+            // `engine_done` remains the serve loop's exit signal
+            // (`serve_connection`'s loop-top check, below). A token fire
+            // while the pump is still parked (the whole CLI -> bridge ->
+            // serve chain waits on a frozen MCP call) kills the transports,
+            // the parked read returns `ServerClosed`, serve unwinds, and
+            // the scope can end -- the session lock is released.
+            let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
+            mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
             mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let deps = TurnDeps {
                 engine: &self.admin_engine,

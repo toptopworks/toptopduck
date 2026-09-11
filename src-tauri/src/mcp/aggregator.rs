@@ -100,9 +100,12 @@ struct AggregatedServer {
     /// (disconnecting the server for the rest of the turn) or cancel
     /// teardown (via the aggregator's shared registry).
     kill: TransportKill,
-    /// Latched when a deadline expired (issue #889): the transport is dead,
-    /// so subsequent calls fail fast instead of re-parking for the full
-    /// deadline. Never cleared in place -- the reset is the per-turn
+    /// Latched when the transport died (issue #889; wording calibrated by
+    /// #897): deadline expiry, cancel teardown, or the server dying on its
+    /// own -- `route` treats `ServerClosed` / `Framing(BrokenPipe)` as the
+    /// death shape regardless of who ended it, and the expiry arm latches
+    /// outright. Subsequent calls fail fast instead of re-parking for the
+    /// full deadline. Never cleared in place -- the reset is the per-turn
     /// aggregator itself (a fresh entry starts `dead: false`); there is no
     /// cross-turn health memory.
     dead: bool,
