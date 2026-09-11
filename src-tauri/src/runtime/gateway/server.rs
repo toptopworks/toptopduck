@@ -1453,8 +1453,12 @@ mod tests {
     /// OPEN (no EOF), serve_connection still returns promptly when
     /// `engine_done` is set -- it does not wait for the bridge to disconnect.
     /// Without this flag the serve would block on `read_message` until the
-    /// 120s wall-clock watchdog cancelled it; the flag is what makes serve's
-    /// return depend on the engine, not the bridge. Drives initialize +
+    /// armed no-progress clock fired on generation silence and the serve's
+    /// loop-top cancel check exited -- a ~cap-bounded exit, but a slow one
+    /// that mislabels a finished turn as a watchdog kill. The flag makes
+    /// serve's return prompt and independent of the watchdog. (This test
+    /// arms no clock, so without the flag its park would be truly
+    /// unbounded.) Drives initialize +
     /// tools/list first so the outcome reflects requests served BEFORE the flag
     /// fired (the "no in-flight request dropped" invariant).
     ///
@@ -1532,7 +1536,8 @@ mod tests {
 
         // The loop-top check fires within one READ_TIMEOUT (100ms) of the flag
         // store; the connect + exchange + 150ms park budget stays well under
-        // 2s. The prior behavior parked until the 120s wall-clock watchdog.
+        // 2s. The prior behavior parked until the whole-turn wall-clock
+        // timeout (retired by ADR-0115) fired.
         assert!(
             elapsed < Duration::from_secs(2),
             "serve returned promptly on engine_done, not the watchdog: {elapsed:?}"
@@ -1691,8 +1696,9 @@ mod tests {
 
     /// Issue #646: an over-long request frame from the bridge fails the serve
     /// with the framing error instead of being dropped -- a dropped frame
-    /// would leave the bridge's request unreplied and the turn hung until the
-    /// wall-clock watchdog. The error surfaces through the serve's `Err` path,
+    /// would leave the bridge's request unreplied and the turn hung with no
+    /// exit: the serving segment is frozen under ADR-0115, so the no-progress
+    /// clock never fires mid-wait. The error surfaces through the serve's `Err` path,
     /// which the turn assembler maps onto a failed (not cancelled) outcome;
     /// the bridge observes the teardown as EOF, never a response.
     #[test]

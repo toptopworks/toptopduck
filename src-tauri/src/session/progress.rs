@@ -32,7 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::cancel::{CancelToken, TurnGeneration};
-use crate::session::loop_contract::Termination;
+use crate::session::loop_contract::{NoProgressDetail, Termination};
 
 /// The watchdog's poll granularity. Same order as the cancel watcher's
 /// 25 ms loop (the UI cancel round-trip); kill latency past the cap is one
@@ -42,8 +42,8 @@ const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub(crate) struct ProgressClock {
     /// The cap the clock arms with (the ADR-0021-aligned 120 s in
     /// production; short values ride the `with_caps` test seam). Read back
-    /// by the termination derivation (`cancel_landing`) as the expired-cap
-    /// payload.
+    /// by the termination derivation (`cancel_landing`) as the payload's
+    /// `cap` leg.
     timeout: Duration,
     /// The monotonic origin the deadline is measured against: captured at
     /// arm, never read as a wall-clock. Deadline and `now` both live as
@@ -64,6 +64,11 @@ pub(crate) struct ProgressClock {
     /// Cancelled (the cancelled-vs-timed-out presentation split, issue
     /// #883, reads the same fact).
     timed_out: AtomicBool,
+    /// Latched alongside `timed_out` (#886): the silence actually observed
+    /// at expiry (now minus the last re-arm) and the turn's runtime since
+    /// arm -- the measurements the NoProgress payload carries.
+    trip_silence_ms: AtomicU64,
+    trip_elapsed_ms: AtomicU64,
 }
 
 impl ProgressClock {
@@ -78,6 +83,8 @@ impl ProgressClock {
             deadline_ms: AtomicU64::new(timeout.as_millis() as u64),
             frozen: AtomicU32::new(0),
             timed_out: AtomicBool::new(false),
+            trip_silence_ms: AtomicU64::new(0),
+            trip_elapsed_ms: AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&clock);
         // Builder::spawn (not the panicking thread::spawn): a spawn failure
@@ -95,10 +102,13 @@ impl ProgressClock {
                     while let Some(clock) = weak.upgrade() {
                         // A cancel already in flight means someone else fired
                         // first (the user, or a sibling path); stand down
-                        // without latching. The check-then-store window vs a
-                        // racing user cancel is one poll tick wide and both
-                        // landings abort the turn, so the mislabeled reason is
-                        // unobservable in practice.
+                        // without latching. The check-then-fire window vs a
+                        // racing user cancel spans one poll iteration, and
+                        // since #883 the reason IS observable (Cancelled
+                        // carries it to the presentation) -- a user cancel
+                        // landing inside that window can present as a watchdog
+                        // kill. Both landings abort the turn; the window is
+                        // scheduler-narrow, so the rare mislabel is accepted.
                         if token.is_requested() {
                             return;
                         }
@@ -107,8 +117,7 @@ impl ProgressClock {
                             // principal; the deadline re-arms from NOW each
                             // tick, so the cap restarts when the segment ends.
                             clock.defer(timeout);
-                        } else if clock.elapsed_ms() >= clock.deadline_ms.load(Ordering::SeqCst) {
-                            clock.timed_out.store(true, Ordering::SeqCst);
+                        } else if clock.trip_if_expired(timeout) {
                             // Generation-guarded (issue #696): a clock that
                             // slept through a turn boundary stands down instead
                             // of cancelling the successor.
@@ -154,13 +163,13 @@ impl ProgressClock {
     }
 
     /// The cancel landing's termination (ADR-0115): when the clock latched,
-    /// the cancel is the watchdog's -- NoProgress carrying the expired cap
-    /// (read from the clock's own armed timeout); otherwise a user / close
-    /// cancel. `None` means no clock was armed for the turn (the
-    /// `with_caps(None)` test seam), which lands a plain cancel.
+    /// the cancel is the watchdog's -- NoProgress carrying the armed cap plus
+    /// the trip-side measurements; otherwise a user / close cancel. `None`
+    /// means no clock was armed for the turn (the `with_caps(None)` test
+    /// seam), which lands a plain cancel.
     pub(crate) fn cancel_landing(clock: Option<&Arc<Self>>) -> Termination {
         match clock {
-            Some(clock) if clock.is_timed_out() => Termination::NoProgress(clock.timeout),
+            Some(clock) if clock.is_timed_out() => Termination::NoProgress(clock.detail()),
             _ => Termination::Cancelled,
         }
     }
@@ -186,6 +195,41 @@ impl ProgressClock {
     /// termination derivation reads).
     pub(crate) fn is_timed_out(&self) -> bool {
         self.timed_out.load(Ordering::SeqCst)
+    }
+
+    /// The expiry branch the watchdog polls: latch the kill reason + the
+    /// trip-side measurements when the free segment ran silent past the
+    /// deadline. ONE deadline load both judges and measures (#886), so a
+    /// touch racing the latch cannot skew the numbers (saturating math
+    /// keeps a post-check re-arm from underflowing the silence, and the
+    /// clamp keeps a raced re-arm reporting the cap rather than a
+    /// self-contradictory sub-cap silence -- the trip was judged against
+    /// the loaded deadline, so the cap is the truthful floor).
+    fn trip_if_expired(&self, timeout: Duration) -> bool {
+        let deadline = self.deadline_ms.load(Ordering::SeqCst);
+        let now = self.elapsed_ms();
+        if now < deadline {
+            return false;
+        }
+        let cap_ms = timeout.as_millis() as u64;
+        self.trip_silence_ms.store(
+            now.saturating_add(cap_ms)
+                .saturating_sub(deadline)
+                .max(cap_ms),
+            Ordering::SeqCst,
+        );
+        self.trip_elapsed_ms.store(now, Ordering::SeqCst);
+        self.timed_out.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// The trip measurements the NoProgress payload carries (#886).
+    fn detail(&self) -> NoProgressDetail {
+        NoProgressDetail {
+            cap: self.timeout,
+            silence: Duration::from_millis(self.trip_silence_ms.load(Ordering::SeqCst)),
+            turn_elapsed: Duration::from_millis(self.trip_elapsed_ms.load(Ordering::SeqCst)),
+        }
     }
 
     /// Millis since the monotonic [`Self::origin`] -- the clock's only
@@ -222,7 +266,22 @@ impl Drop for FreezeGuard {
 mod tests {
     use super::*;
 
-    const CAP: Duration = Duration::from_millis(100);
+    /// Timing budget (#886): every cadence-sensitive watchdog test keeps its
+    /// duration-to-cap ratio at >= 3x, so a single scheduler hiccup cannot
+    /// flip the pin. The two formerly narrow rows (30 ms touches vs a 100 ms
+    /// cap; a 100 ms drip vs a 300 ms cap) were re-margined above the floor:
+    ///
+    /// | Test | Cadence / wait | Cap | Ratio |
+    /// |---|---|---|---|
+    /// | `touch_defers_expiry_while_activity_continues` (here) | 30 ms touch cadence | 250 ms | 8.3x |
+    /// | `freeze_survives_a_segment_far_past_the_cap` (here) | 3x CAP frozen | CAP | 3x |
+    /// | `slow_drip_survives_past_the_cap` (claude_stream_json) | 100 ms frame drip | 400 ms | 4x |
+    /// | `generation_silence_fires_no_progress` (yoagent) | 400 ms stream delay | 100 ms | 4x |
+    /// | `approval_pending_survives_past_the_cap` (yoagent) | 300 ms responder park | 100 ms | 3x |
+    ///
+    /// Kill-side pins (a stuck fixture's unbounded silence against its cap)
+    /// are duration-side by construction and not cadence-sensitive.
+    const CAP: Duration = Duration::from_millis(250);
 
     fn armed(timeout: Duration) -> (Arc<CancelToken>, Arc<ProgressClock>, TurnGeneration) {
         let token = Arc::new(CancelToken::new());
@@ -244,8 +303,37 @@ mod tests {
         let _ = generation;
     }
 
+    /// The kill payload carries the trip-side measurements (#886): the
+    /// armed cap, the silence actually observed at expiry (cap + the poll
+    /// overshoot), and the turn's runtime since arm -- not just the
+    /// constant cap.
+    #[test]
+    fn no_progress_landing_carries_trip_measurements() {
+        let (token, clock, _generation) = armed(CAP);
+        thread::sleep(CAP + PROGRESS_POLL_INTERVAL * 4);
+        match ProgressClock::cancel_landing(Some(&clock)) {
+            Termination::NoProgress(detail) => {
+                assert_eq!(detail.cap, CAP, "the armed cap rides the payload");
+                assert!(
+                    detail.silence >= CAP,
+                    "the measured silence covers the cap: {detail:?}"
+                );
+                assert!(
+                    detail.silence < CAP + PROGRESS_POLL_INTERVAL * 8,
+                    "the measured silence stays within cap + poll-overshoot headroom: {detail:?}"
+                );
+                assert!(
+                    detail.turn_elapsed >= detail.silence,
+                    "the turn ran at least the measured silence: {detail:?}"
+                );
+            }
+            other => panic!("the latched clock must land NoProgress, got {other:?}"),
+        }
+        assert!(token.is_requested());
+    }
+
     /// Stream activity re-arms the deadline: touches every 30 ms keep a
-    /// 100 ms cap alive indefinitely; stopping the touches lets it fire.
+    /// 250 ms cap alive indefinitely; stopping the touches lets it fire.
     #[test]
     fn touch_defers_expiry_while_activity_continues() {
         let (token, clock, _generation) = armed(CAP);

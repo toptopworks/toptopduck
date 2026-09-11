@@ -960,7 +960,7 @@ fn posture_thought_level_stamps_every_built_in_round_trip_request() {
 fn step_cap_exhaustion_lands_a_failed_turn() {
     // ADR-0081 execution-level safety net: an agent that never converges
     // (keeps exploring) is aborted by the step cap (default 24) as a Failed
-    // turn carrying an honest non-convergence detail. The wall-clock watchdog
+    // turn carrying an honest non-convergence detail. The no-progress watchdog
     // (Cancelled) shares the cancel path; its deterministic coverage lives at
     // the yoagent offline seam (the 120s default is not tunable through the
     // Session facade).
@@ -1550,7 +1550,7 @@ fn the_active_dataset_command_reflects_the_resolved_active() {
 // --- Single in-flight + cancellation (issue #28) -- ADR-0021/0028/0081 -----
 //
 // ADR-0021 (extended by ADR-0081): at most one turn executes per session; a
-// cancel (user / close / wall-clock watchdog) aborts the WHOLE turn -- the
+// cancel (user / close / no-progress watchdog) aborts the WHOLE turn -- the
 // loop + any in-flight tool call -- via the shared cancel token, landing as
 // the Cancelled outcome with the working set untouched. The fake simulates a
 // long, cancellable round-trip by blocking in `generate_tool_turn` until the

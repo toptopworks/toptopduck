@@ -32,8 +32,10 @@
 //! Turn-local (issue #301 Q2): the gateway constructs one client per
 //! configured server at turn start and drops it at turn end -- no
 //! cross-turn state, no session-level handle. Per-call timeout is NOT
-//! enforced per-read here: blocking reads have no native deadline, so the
-//! turn-level watchdog (ADR-0021) bounds a hung server. `timeout_ms` stays
+//! enforced per-read here: blocking reads have no native deadline, and
+//! under ADR-0115 a gateway-served MCP call waits inside the dispatch
+//! freeze, so the no-progress clock never fires mid-wait -- a hung server
+//! parks the turn with no kill log. `timeout_ms` stays
 //! on [`crate::mcp::config::McpServerConfig`] as a forward-compat contract.
 
 use std::io::{BufRead, BufReader, Write};
@@ -1187,10 +1189,12 @@ mod tests {
     }
 
     /// Issue #646: a pending request whose response frame exceeds the byte
-    /// cap surfaces as an explicit `Framing` error, not a hang until the
-    /// wall-clock watchdog -- the over-long frame never yields the matched id,
-    /// so the error return is the only observable outcome. The error display
-    /// names the face (server transport) and the framing cause (the cap).
+    /// cap surfaces as an explicit `Framing` error, not a silent hang: the
+    /// over-long frame never yields the matched id, and a gateway-served MCP
+    /// call is a frozen segment under ADR-0115 -- the no-progress clock never
+    /// fires mid-wait -- so the error return is the only exit. The error
+    /// display names the face (server transport) and the framing cause (the
+    /// cap).
     #[test]
     fn overlong_response_frame_fails_request_as_framing_error() {
         // One over-long line: bigger than the cap, newline-terminated so the

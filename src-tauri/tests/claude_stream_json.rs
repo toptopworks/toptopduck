@@ -168,11 +168,11 @@ fn gateway_tool_call_emits_phases_keeps_prose_round() {
 /// The survival half of ADR-0115: a generation segment that keeps producing
 /// past the cap must NOT kill the turn -- every inbound frame re-arms the
 /// clock, and the reply lands. Without the pump's touch seam the watchdog
-/// fires mid-stream (a 300ms cap against a 100ms drip = six touches from
+/// fires mid-stream (a 400ms cap against a 100ms drip = four touches from
 /// death).
 #[test]
 fn slow_drip_survives_past_the_cap() {
-    let (outcome, _, _) = run_with_cap("slow_drip", 24, std::time::Duration::from_millis(300));
+    let (outcome, _, _) = run_with_cap("slow_drip", 24, std::time::Duration::from_millis(400));
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "dripped to the end"),
         other => panic!("steady stream activity must survive the cap, got {other:?}"),
@@ -368,7 +368,7 @@ fn step_cap_overflow_yields_step_cap_termination() {
     // the pin.
     assert!(
         elapsed < std::time::Duration::from_secs(3),
-        "took {elapsed:?} -- resolved via the wall-clock watchdog, not the step-cap path"
+        "took {elapsed:?} -- resolved via the no-progress watchdog, not the step-cap path"
     );
 }
 
@@ -388,12 +388,20 @@ fn no_progress_watchdog_fires_on_a_silent_turn() {
     std::env::set_var("CLAUDE_FAKE_SCENARIO", "turn_silent");
     let start = std::time::Instant::now();
     let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
-    assert_eq!(
-        outcome.termination,
-        Termination::NoProgress(std::time::Duration::from_millis(300)),
-        "watchdog on a stuck agent -> NoProgress: {:?}",
-        outcome.termination
-    );
+    match outcome.termination {
+        Termination::NoProgress(detail) => {
+            assert_eq!(
+                detail.cap,
+                std::time::Duration::from_millis(300),
+                "the armed cap rides the payload"
+            );
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
+        }
+        other => panic!("watchdog on a stuck agent -> NoProgress, got {other:?}"),
+    }
     // The watchdog resolves in ~300ms. A no-fire regression is caught by
     // the Cancelled assert itself (the run then rides the fixture's 30s
     // sleep to an EOF runtime failure); the window pin catches a slow-but-correct

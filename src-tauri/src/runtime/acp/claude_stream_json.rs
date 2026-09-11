@@ -430,6 +430,7 @@ pub(super) fn run_claude_stream_json(
 
     let mut termination = None;
     let mut step_cap_tripped = false;
+    let mut discards = super::process::DiscardLog::new();
 
     loop {
         // Cancel check (mirrors the other paths' loop-top check).
@@ -453,7 +454,11 @@ pub(super) fn run_claude_stream_json(
                 }
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
-                    Err(_) => continue, // skip unparseable line
+                    Err(_) => {
+                        // Top-level discard, answerable in logs (#886).
+                        super::process::note_discard(&mut discards, adapter.id.as_str(), &line);
+                        continue; // skip unparseable line
+                    }
                 };
                 for event in parse_events(&value) {
                     if let Some(term) = pump.fold(event, &mut on_phase) {

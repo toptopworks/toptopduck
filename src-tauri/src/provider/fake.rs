@@ -164,7 +164,8 @@ impl FakeProvider {
     /// `generate_tool_turn` polls the cancel token (sleep loop) and only
     /// returns once cancel is requested, simulating a long round-trip
     /// (ADR-0021). The cancel/watchdog tests drive this so a cancel or the
-    /// wall-clock watchdog lands the turn as Cancelled without a real slow
+    /// no-progress watchdog (generation silence, ADR-0115) lands the turn as
+    /// cancelled without a real slow
     /// provider. Requires [`Self::with_cancel`] -- without a token the block
     /// is a defensive no-op (the reply returns immediately).
     pub fn scripted_tool_turn_blocking(self, question: &str, reply: ToolTurnReply) -> Self {

@@ -2164,6 +2164,10 @@ pub async fn open_duck(
         // token was already shared via cancel_token above. The flag is the
         // monotonic ClosingFlag, so this re-attach preserves once-closing.
         new_session.set_closing_flag(closing_flag);
+        // Stamp the resumed session's identity (#886): a resumed Session
+        // reopens under the SAME id, so its no-progress kill log attributes
+        // to the session the file belongs to.
+        new_session.set_session_id(sid.clone());
         // ADR-0063: re-arm the close-and-wait-release drop signal for the
         // resumed session. Install a fresh (sender, receiver) pair: the sender
         // goes into the NEW session (its Drop will fire it after the canonical

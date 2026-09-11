@@ -387,9 +387,78 @@ pub(super) fn spawn_line_reader(stdout: ChildStdout) -> mpsc::Receiver<String> {
     rx
 }
 
+/// Count-and-rate-limit diagnostics for the pump loops' top-level parse
+/// discards (#886): a CLI streaming garbage keeps its turn alive forever
+/// -- every inbound line re-arms the no-progress clock (ADR-0115
+/// line-liveness) -- so the discard must stay answerable in logs (the
+/// #543 stance) without flooding them.
+pub(super) struct DiscardLog {
+    count: u64,
+}
+
+/// The warn stride: one line per thousand discards bounds the log against
+/// a garbage firehose -- diagnosis, not metering. u64 because
+/// line-liveness keeps a garbage stream's turn (and this counter)
+/// unbounded.
+const DISCARD_WARN_STRIDE: u64 = 1000;
+
+impl DiscardLog {
+    pub(super) const fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    /// Count one discarded line; returns the running count when this
+    /// discard warrants a warn (`None` = stay silent): the first discard,
+    /// then every DISCARD_WARN_STRIDE-th. Counting is split from the
+    /// logging so the stride is unit-pinnable (the crate has no
+    /// log-capture harness).
+    pub(super) fn record(&mut self) -> Option<u64> {
+        self.count += 1;
+        (self.count == 1 || (self.count - 1) % DISCARD_WARN_STRIDE == 0).then_some(self.count)
+    }
+}
+
+/// The discard warn's excerpt budget: the head of the line carries the
+/// shape; the tail adds nothing.
+const DISCARD_EXCERPT_CHARS: usize = 80;
+
+/// Record one discarded line and, when the stride warrants it, warn --
+/// the pump loops' one call for a top-level parse discard (#886): a
+/// garbage stream otherwise reads as healthy turn activity (every
+/// inbound line re-arms the no-progress clock), so the discard stays
+/// answerable in logs without flooding them. ONE shape for all three
+/// pump loops so the wording cannot drift; the counting stays inside
+/// [`DiscardLog::record`] so the stride is unit-pinnable.
+pub(super) fn note_discard(discards: &mut DiscardLog, face: &str, line: &str) {
+    if let Some(count) = discards.record() {
+        log::warn!(
+            target: "toptopduck::acp",
+            "{face}: discarded unparseable stdout line #{count}: {}",
+            crate::util::truncate_chars_with_ellipsis(line, DISCARD_EXCERPT_CHARS)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #886: the discard log warns on the first unparseable line and then
+    /// every DISCARD_WARN_STRIDE-th -- a garbage-streaming CLI stays
+    /// answerable in logs without flooding them.
+    #[test]
+    fn discard_log_warns_on_the_first_and_then_per_stride() {
+        let mut log = DiscardLog::new();
+        assert_eq!(log.record(), Some(1), "the first discard warns");
+        for _ in 1..DISCARD_WARN_STRIDE {
+            assert_eq!(log.record(), None, "the stride stays silent");
+        }
+        assert_eq!(
+            log.record(),
+            Some(DISCARD_WARN_STRIDE + 1),
+            "the stride boundary warns"
+        );
+    }
 
     /// Issue #640: once the queue is at capacity with no consumer, the next
     /// enqueue warns once and BLOCKS -- no drop, no spin. Draining releases
