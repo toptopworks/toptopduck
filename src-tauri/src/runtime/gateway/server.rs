@@ -173,6 +173,15 @@ fn is_bridge_gone(kind: io::ErrorKind) -> bool {
     )
 }
 
+/// A read parked under `READ_TIMEOUT` surfaces as one of these on either
+/// platform (Windows WSAETIMEDOUT maps to `TimedOut`; a non-blocking Unix
+/// read maps `EAGAIN` to `WouldBlock`). Shared by both timeout-retry arms
+/// (the serve loop's frame read and the pre-auth auth read) so the retry
+/// predicate cannot drift between the twins.
+fn is_read_timeout(kind: io::ErrorKind) -> bool {
+    matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
 /// Accept one bridge connection, verify its token, and drive the MCP subset
 /// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
 /// (read EOF, or a reset -- a hard bridge death, issue #801 -- or a failed
@@ -267,9 +276,7 @@ pub fn serve_connection(
             // fires. The partial line stays buffered in the frame reader --
             // the retried read resumes the same line; no bytes pulled past
             // the BufReader are lost.
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
+            Err(e) if is_read_timeout(e.kind()) => {
                 continue;
             }
             // A bridge that dies hard (the turn's CLI exits or is killed)
@@ -388,7 +395,10 @@ fn accept_bridge(
 /// the turn to the ACP termination instead of surfacing the serve error that
 /// mislabels the completed turn as Failed (the same single-source
 /// disposition as the accept and serve-loop arms). `Ok(true)`: auth
-/// verified.
+/// verified. The retry cadence leans on a caller-side precondition: the
+/// stream must carry a bounded read timeout (`serve_connection` sets
+/// `READ_TIMEOUT` before the call) -- a blocking-forever reader parks in
+/// the read and the loop-top flag checks never fire.
 fn verify_bridge(
     reader: &mut impl BufRead,
     writer: &mut impl Write,
@@ -400,11 +410,25 @@ fn verify_bridge(
     // read -- the stateless form discards it on error (issue #649's
     // documented caveat), and a resumed handshake must not lose the head.
     let mut lines = BoundedLineReader::new(reader);
+    let expected_line = format!("BRIDGE_AUTH {expected}");
     loop {
         // The pre-auth window's loop-top check (issue #909): the same
         // single-source disposition as the accept and serve-loop arms --
         // the ACP termination decides the TurnOutcome, never the gateway.
         if cancel.is_requested() || engine_done.load(Ordering::SeqCst) {
+            // Companion to the accept arms' logs (issue #849's
+            // invisible-exit lesson): without this line a bridge that
+            // connected and was terminated pre-auth is indistinguishable
+            // from one that never connected.
+            log::debug!(
+                target: "toptopduck::gateway",
+                "verify_bridge exiting on {} in the pre-auth window",
+                if cancel.is_requested() {
+                    "the cancel flag"
+                } else {
+                    "engine completion"
+                }
+            );
             return Ok(false);
         }
         let line = match lines.read_line_bounded(LINE_MAX_BYTES) {
@@ -414,15 +438,13 @@ fn verify_bridge(
             Ok(LineRead::Overlong | LineRead::Eof) => String::new(),
             // Read timeout (READ_TIMEOUT): retry so the loop-top flag check
             // fires, mirroring the serve loop timeout arm.
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
+            Err(e) if is_read_timeout(e.kind()) => {
                 continue;
             }
             Err(e) => return Err(e),
         };
         let got = line.trim_end_matches(['\r', '\n']);
-        if got == format!("BRIDGE_AUTH {expected}") {
+        if got == expected_line {
             writer.write_all(b"BRIDGE_OK\n")?;
             return Ok(true);
         }
@@ -1330,14 +1352,12 @@ mod tests {
         engine_done: Arc<AtomicBool>,
     }
     impl Read for StalledPreAuthReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            if self.stalls > 3 {
-                return Ok(0);
-            }
-            Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "simulated read timeout",
-            ))
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
         }
     }
     impl BufRead for StalledPreAuthReader {

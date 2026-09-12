@@ -29,11 +29,12 @@
 //! whose reads cannot time out), and [`BoundedLineReader`] (the partial line
 //! stays with the reader, so a caller that retries on a read timeout resumes
 //! the same line instead of re-framing from the stream's mid-line position).
-//! The one stateless caller whose reads can time out is the serve loop's
-//! pre-auth handshake: it reads under `READ_TIMEOUT` statelessly, so a
-//! mid-line pause longer than that fails the connection (theoretical window
-//! -- the bridge writes the auth line in a single call); the serve loop past
-//! auth reads through [`BoundedLineReader`] and does not share the gap.
+//! Every face that reads under a timeout now goes through
+//! [`BoundedLineReader`]: the serve loop past auth (issue #649) and the
+//! gateway's pre-auth handshake (issue #909 -- a read timeout retries with
+//! the termination flags re-checked at the loop top, resuming the partial
+//! line); the stateless form serves only callers whose reads cannot time
+//! out.
 use std::io::{BufRead, Read};
 
 /// The byte cap on a single incoming line (issue #629): an untrusted
