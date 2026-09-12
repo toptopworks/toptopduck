@@ -258,6 +258,13 @@ pub struct McpAggregator {
     /// until armed -- the pre-#892 arm-after-connect posture stays
     /// behavior-free when the watcher is never armed ahead of the connects.
     cancel: Option<Arc<CancelToken>>,
+    /// Whether the cancel-teardown watcher thread actually spawned (issue
+    /// #899). A spawn failure (thread-resource exhaustion, rare) only warns
+    /// through the log facade -- invisible to test binaries that initialize
+    /// no logger -- and silently degrades the turn to budget-bounded waits
+    /// (exactly the stuck-session shape the cancel chain exists to prevent),
+    /// so the spawn result also lands here where a test can read it.
+    watcher_spawned: bool,
 }
 
 impl McpAggregator {
@@ -272,6 +279,7 @@ impl McpAggregator {
             tool_output_dir: None,
             kill_slots: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
+            watcher_spawned: false,
         }
     }
 
@@ -286,6 +294,7 @@ impl McpAggregator {
             tool_output_dir: Some(tool_output_dir),
             kill_slots: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
+            watcher_spawned: false,
         }
     }
 
@@ -313,6 +322,14 @@ impl McpAggregator {
         // the parked initialize read is killed instead of waiting out this
         // server's budget while the watcher sits on a registry that would
         // only hold handles for COMPLETED connects.
+        //
+        // The poisoned-mutex expect has no panic producer today (the lock's
+        // holders never panic while holding it), but IF one ever appears the
+        // caller dies on a bare stderr write: release windows-subsystem
+        // builds drop stderr, leaving zero trace -- the turn thread dies
+        // mid-connect before any budget park exists (issue #899 note). The
+        // budget-degradation shape is the watcher-death consequence -- same
+        // note at the watcher's expiry pass below.
         self.kill_slots
             .lock()
             .expect("kill registry poisoned")
@@ -789,6 +806,17 @@ impl McpAggregator {
     /// on drop through any unwind); the parameter stays the bare
     /// `Arc<AtomicBool>` so tests can arm synthetic stand-down states (an
     /// already-stood-down flag) the owning RAII type cannot express.
+    ///
+    /// The watcher is one-shot by design: on a token fire it expires the
+    /// registry snapshot and exits. Known window (issue #899): a sibling
+    /// whose between-attempts gap check passed just before the fire and
+    /// whose kill-slot publish lands after the expiry pass parks with no
+    /// watcher left to kill it and degrades to that server's own budget
+    /// (default 120s; the session-lock floor). The window is typically
+    /// milliseconds wide (it spans the keychain reads between the gap
+    /// check and the publish), covers at most one server per fire, and
+    /// the budget floor is the design guarantee -- accepted over a
+    /// watcher that keeps polling through stand-down (ADR-0115).
     pub fn arm_cancel_teardown(&mut self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
         self.cancel = Some(Arc::clone(&cancel));
         // Consume any stale request before the connects (issue #892
@@ -815,6 +843,18 @@ impl McpAggregator {
                     // subsystem has no console), and cancel-teardown events
                     // are exactly the diagnostics a stuck-session report
                     // needs.
+                    //
+                    // If this expect ever panics (no producer today), the
+                    // watcher dies on bare stderr -- zero trace in release
+                    // windows-subsystem builds -- and the turn silently
+                    // degrades to budget-bounded waits (issue #899 note;
+                    // same note at the registry push in connect_one). The
+                    // expiry pass also runs ConnectKill's own slot-mutex
+                    // expects (publish/expire in client.rs) under this
+                    // registry guard: a producer there dies mid-pass (some
+                    // slots killed, later ones parked for their budgets)
+                    // and poisons this registry, cascading a panic into
+                    // the next connect_one push.
                     let slots = kill_slots.lock().expect("kill registry poisoned");
                     log::warn!(
                         target: "toptopduck::mcp",
@@ -835,6 +875,11 @@ impl McpAggregator {
                 "failed to spawn the MCP cancel-teardown watcher; cancel will not \
                  unblock a frozen MCP wait this turn: {e}"
             );
+        } else {
+            // The observation surface for the same failure (issue #899):
+            // the warn above is invisible without a logger; this records the
+            // spawn result on the aggregator itself.
+            self.watcher_spawned = true;
         }
     }
 
@@ -1205,6 +1250,28 @@ mod tests {
         assert!(
             watched.load(Ordering::SeqCst),
             "drop stands the watcher down whatever way the turn unwound"
+        );
+    }
+
+    /// Issue #899: the watcher spawn result is recorded on the aggregator.
+    /// The spawn-failure arm only warns through the log facade, and test
+    /// binaries do not initialize a logger -- a degraded turn (no watcher;
+    /// waits bounded only by budgets) would leave zero trace. The failure
+    /// itself is not injectible in a unit test (thread-resource
+    /// exhaustion), so this pins the field as the observation surface and
+    /// the success arm's recording; the stood-down flag makes the spawned
+    /// watcher exit at once, keeping the test leak-free.
+    #[test]
+    fn arm_cancel_teardown_records_the_watcher_spawn_result() {
+        let mut agg = McpAggregator::empty();
+        assert!(!agg.watcher_spawned, "an unarmed aggregator has no watcher");
+        let flag_holder = TurnDoneFlag::new();
+        let watched = flag_holder.flag();
+        drop(flag_holder);
+        agg.arm_cancel_teardown(Arc::new(CancelToken::new()), watched);
+        assert!(
+            agg.watcher_spawned,
+            "a successful spawn records the watcher as spawned"
         );
     }
 
