@@ -37,6 +37,10 @@
 //! ONE `tools/call` normally and then exits -- the client's next read hits
 //! EOF (`ServerClosed`), the shape the aggregator's dead latch exists to
 //! normalize.
+//!
+//! Pagination-cap fixture (issue #900): `FAKE_CURSOR_LOOP=1` answers
+//! `tools/list` with one tool plus a `nextCursor` on EVERY page, so the
+//! client's traversal can never complete -- the page-cap shape.
 
 use std::io::{self, BufRead, BufReader, Write};
 
@@ -46,6 +50,7 @@ fn main() {
     let hang_on_call = std::env::var("FAKE_HANG_ON_CALL").ok().as_deref() == Some("1");
     let hang_on_list = std::env::var("FAKE_HANG_ON_LIST").ok().as_deref() == Some("1");
     let die_after_call = std::env::var("FAKE_DIE_AFTER_CALL").ok().as_deref() == Some("1");
+    let cursor_loop = std::env::var("FAKE_CURSOR_LOOP").ok().as_deref() == Some("1");
     let mut out = io::stdout();
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -83,6 +88,23 @@ fn main() {
                     // the listing swallows -- the client parks on the read
                     // inside the same connect-phase budget.
                     None
+                } else if cursor_loop {
+                    // Pagination-cap fixture (issue #900): every page returns
+                    // one tool and a fresh cursor -- the traversal can never
+                    // end, so the client's page cap must trip and the connect
+                    // path must record the guardrail error as this server's
+                    // failure reason (no silently-partial catalog).
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "tools": [
+                                {"name": "loop", "description": "endless pagination",
+                                 "inputSchema": {"type": "object"}}
+                            ],
+                            "nextCursor": "more"
+                        }
+                    }))
                 } else {
                     Some(json!({
                         "jsonrpc": "2.0",

@@ -46,6 +46,7 @@
 //! pure synchronous: `McpClient`'s wire methods never poll clocks or
 //! cancel tokens.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,6 +76,17 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backpressures a flooding server so the reader blocks on send rather than
 /// accumulating unbounded messages in memory.
 const SSE_CHANNEL_BOUND: usize = 64;
+
+/// The `tools/list` pagination guardrails (issue #900). A server may split
+/// its tool list across pages joined by `nextCursor`; a server that never
+/// stops paging (or keeps producing tools) would burn the entire connect
+/// budget and surface as a generic timeout, or accumulate an unbounded
+/// catalog, so the traversal is bounded: at most [`TOOLS_LIST_PAGE_CAP`]
+/// pages, and no further page is fetched once the folded count reaches
+/// [`TOOLS_LIST_TOOL_CAP`] while a cursor remains. Same order of magnitude
+/// as other gateways' caps.
+const TOOLS_LIST_PAGE_CAP: usize = 32;
+const TOOLS_LIST_TOOL_CAP: usize = 2048;
 
 /// One keychain-backed env value the gateway injects at spawn. The gateway
 /// resolves these from the OS keychain via
@@ -245,18 +257,94 @@ pub trait McpClient {
         Ok(result)
     }
 
-    /// List the server's tools. Returns the raw `tools` array entries (each is
-    /// the server's own `{name, description, inputSchema}` shape); the gateway
-    /// namespaces them (`mcp__<server_slug>__<tool>`) at aggregation time.
-    fn list_tools(&mut self) -> Result<Vec<Value>, ClientError> {
-        let id = self.next_id();
-        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
-        let result = self.request(req)?;
-        Ok(result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
+    /// List the server's tools, following `nextCursor` pagination (issue
+    /// #900). `server` is the configured display name, carried for log /
+    /// error attribution the same way the #889 `Timeout` variant carries it.
+    /// Returns the raw `tools` array entries (each is the server's own
+    /// `{name, description, inputSchema}` shape); the gateway namespaces them
+    /// (`mcp__<server_slug>__<tool>`) at aggregation time.
+    ///
+    /// The traversal folds every page into one list, deduplicating by tool
+    /// name (first sight wins -- `query_catalog`'s catalog-fold precedent,
+    /// issue #543) and bounded by the pagination guardrails: a server still
+    /// paging at the page cap, or at the tool cap with a cursor outstanding,
+    /// fails with [`ClientError::PageCap`] / [`ClientError::ToolCap`] so the
+    /// connect paths record an explicit failure -- naming the tripped
+    /// dimension -- instead of mounting a silently partial catalog.
+    /// The whole traversal runs inside the caller's one connect-phase
+    /// deadline (the #892 shared budget).
+    fn list_tools(&mut self, server: &str) -> Result<Vec<Value>, ClientError> {
+        let mut tools: Vec<Value> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut cursor: Option<String> = None;
+        for page in 1..=TOOLS_LIST_PAGE_CAP {
+            let params = match &cursor {
+                Some(c) => json!({"cursor": c}),
+                None => json!({}),
+            };
+            let id = self.next_id();
+            let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params});
+            let result = self.request(req)?;
+            for tool in result
+                .get("tools")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                match tool.get("name").and_then(Value::as_str) {
+                    Some(name) if seen.insert(name.to_string()) => tools.push(tool),
+                    Some(name) => log::debug!(
+                        target: "toptopduck::mcp",
+                        "MCP server `{server}` re-listed tool `{name}` on tools/list \
+                         page {page}; keeping the first-seen entry"
+                    ),
+                    // A nameless entry cannot be dedup-keyed; it rides
+                    // through and is filtered by `extract_tool_info`
+                    // downstream (issue #663).
+                    None => tools.push(tool),
+                }
+            }
+            let next = match result.get("nextCursor") {
+                // Absent or null: the traversal is complete.
+                None | Some(Value::Null) => return Ok(tools),
+                Some(Value::String(c)) => c.clone(),
+                // A non-string cursor is a protocol violation and a
+                // silent-truncation hazard if read as absent (issue #900) --
+                // fail the traversal instead.
+                Some(_) => {
+                    return Err(ClientError::Framing(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "tools/list nextCursor must be a string",
+                    )))
+                }
+            };
+            // The tool cap: an endless-page server that also floods tools
+            // trips here without paying for the next request. The check is
+            // post-fold, so the count routinely crosses the cap; the error
+            // carries the true folded count. Exactly at the cap with NO
+            // cursor is a complete catalog (accepted -- the cap guards
+            // unbounded traversal, not a complete response).
+            if tools.len() >= TOOLS_LIST_TOOL_CAP {
+                return Err(ClientError::ToolCap {
+                    server: server.to_string(),
+                    pages: page,
+                    tools: tools.len(),
+                });
+            }
+            log::debug!(
+                target: "toptopduck::mcp",
+                "MCP server `{server}` tools/list page {page}: {} tools so far, cursor \
+                 present -- continuing",
+                tools.len()
+            );
+            cursor = Some(next);
+        }
+        // The loop spent its page budget with a cursor still outstanding --
+        // the page cap: fail the connect, mount no partial catalog.
+        Err(ClientError::PageCap {
+            server: server.to_string(),
+            tools: tools.len(),
+        })
     }
 
     /// Call one tool. `name` is the server-native name (the gateway already
@@ -725,10 +813,11 @@ pub fn spawn_stdio_child(
 pub fn stdio_handshake(
     stdin: std::process::ChildStdin,
     stdout: std::process::ChildStdout,
+    server: &str,
 ) -> Result<Vec<Value>, ClientError> {
     let mut client = FramedClient::new(BufReader::new(stdout), stdin);
     client.initialize()?;
-    client.list_tools()
+    client.list_tools(server)
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1378,25 @@ pub enum ClientError {
         call: String,
         timeout_ms: u64,
     },
+    /// The `tools/list` traversal tripped the page cap (issue #900): the
+    /// server still returned a `nextCursor` after the page budget was spent.
+    /// `tools` is what the traversal had folded when it tripped. The connect
+    /// paths record the message as the server's failure reason -- the
+    /// gateway mounts no silently-partial catalog.
+    #[error("MCP server `{server}` tools/list still returned a cursor after {} pages (the page cap, {} tools folded); the server is not mounted -- no partial catalog", TOOLS_LIST_PAGE_CAP, tools)]
+    PageCap { server: String, tools: usize },
+    /// The `tools/list` traversal tripped the tool cap (issue #900): the
+    /// traversal had folded `tools` entries -- at or past the cap -- with a
+    /// cursor still outstanding, and refused to pay for the next page.
+    /// `pages` is where the traversal stood. The connect paths record the
+    /// message as the server's failure reason -- the gateway mounts no
+    /// silently-partial catalog.
+    #[error("MCP server `{server}` tools/list folded {tools} tools (the tool cap is {}), on page {pages}, still paging; the server is not mounted -- no partial catalog", TOOLS_LIST_TOOL_CAP)]
+    ToolCap {
+        server: String,
+        pages: usize,
+        tools: usize,
+    },
 }
 
 #[cfg(test)]
@@ -1341,7 +1449,7 @@ mod tests {
         ]);
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})]);
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools().expect("list ok");
+        let listed = client.list_tools("fake-mcp").expect("list ok");
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0]["name"], "search");
         assert_eq!(listed[1]["name"], "fetch");
@@ -1351,8 +1459,263 @@ mod tests {
     fn list_tools_empty_when_result_has_no_tools_key() {
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {}})]);
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools().expect("list ok");
+        let listed = client.list_tools("fake-mcp").expect("list ok");
         assert!(listed.is_empty(), "missing tools key -> empty, not error");
+    }
+
+    // --- tools/list pagination (issue #900) -----------------------------------
+
+    /// Issue #900: a `tools/list` response carrying `nextCursor` is followed
+    /// -- the continuation request echoes the cursor in `params`, and the
+    /// pages fold into one list in advertised order. A page with no cursor
+    /// ends the traversal.
+    #[test]
+    fn list_tools_follows_next_cursor_pages() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "tools": [
+                    {"name": "echo", "description": "page 1"},
+                    {"name": "add", "description": "page 1"}
+                ],
+                "nextCursor": "page-2"
+            }}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {
+                "tools": [{"name": "fetch_page2", "description": "page 2"}]
+            }}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let names: Vec<&str> = listed
+            .iter()
+            .map(|t| t["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, vec!["echo", "add", "fetch_page2"]);
+        // The continuation request carried the cursor the previous page
+        // handed back; the first request carried none.
+        let mut r = Cursor::new(client.writer.get_ref().clone());
+        let req1 = framing::read_message(&mut r).unwrap().unwrap();
+        let req2 = framing::read_message(&mut r).unwrap().unwrap();
+        assert!(
+            req1["params"]["cursor"].is_null(),
+            "first request carries no cursor: {req1}"
+        );
+        assert_eq!(req2["params"]["cursor"], "page-2");
+    }
+
+    /// Issue #900: a server that never stops paging (every page returns a
+    /// fresh `nextCursor`) trips the page cap -- an explicit error naming
+    /// the server, the tripped dimension, and where the traversal stood,
+    /// never a silently partial catalog (the #889 attribution shape).
+    #[test]
+    fn list_tools_page_cap_trips_on_an_endingless_cursor() {
+        let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
+            .map(|i| {
+                json!({
+                    "jsonrpc": "2.0", "id": i, "result": {
+                        "tools": [{"name": format!("tool_{i}")}],
+                        "nextCursor": format!("page-{i}")
+                    }
+                })
+            })
+            .collect();
+        let server = wire(&pages);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("cap-fake").expect_err("page cap");
+        let display = err.to_string();
+        match err {
+            ClientError::PageCap { server, tools } => {
+                assert_eq!(server, "cap-fake");
+                assert_eq!(tools, TOOLS_LIST_PAGE_CAP);
+            }
+            other => panic!("expected PageCap, got {other:?}"),
+        }
+        assert!(display.contains("cap-fake"), "names the server: {display}");
+        assert!(
+            display.contains("page cap"),
+            "names the tripped dimension: {display}"
+        );
+    }
+
+    /// Issue #900: the tool cap -- a server whose accumulated entries reach
+    /// the cap while STILL paging trips its own dimension, without paying
+    /// for the next request. The at-cap complete-catalog companion below
+    /// pins the boundary's other half.
+    #[test]
+    fn list_tools_tool_cap_trips_when_still_paging() {
+        let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP)
+            .map(|i| json!({"name": format!("tool_{i}")}))
+            .collect();
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1, "result": {
+                "tools": tools,
+                "nextCursor": "page-2"
+            }
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("cap-fake").expect_err("tool cap");
+        let display = err.to_string();
+        match err {
+            ClientError::ToolCap {
+                server,
+                pages,
+                tools,
+            } => {
+                assert_eq!(server, "cap-fake");
+                assert_eq!(pages, 1, "trips on the page that reached the cap");
+                assert_eq!(tools, TOOLS_LIST_TOOL_CAP, "carries the true folded count");
+            }
+            other => panic!("expected ToolCap, got {other:?}"),
+        }
+        assert!(
+            display.contains("tool cap"),
+            "names the tripped dimension: {display}"
+        );
+    }
+
+    /// The overshoot half: the cap check is post-fold, so one page can push
+    /// the count past the cap -- the error must carry the real total, not
+    /// the constant (a constant-at-the-cap report would read 2048 here).
+    #[test]
+    fn list_tools_tool_cap_carries_the_overshot_count() {
+        let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP + 100)
+            .map(|i| json!({"name": format!("tool_{i}")}))
+            .collect();
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1, "result": {
+                "tools": tools,
+                "nextCursor": "page-2"
+            }
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("cap-fake").expect_err("tool cap");
+        match err {
+            ClientError::ToolCap { tools, .. } => {
+                assert_eq!(tools, TOOLS_LIST_TOOL_CAP + 100, "the overshot total");
+            }
+            other => panic!("expected ToolCap, got {other:?}"),
+        }
+    }
+
+    /// The at-boundary half (the #666 at-budget pattern): exactly
+    /// `TOOLS_LIST_TOOL_CAP` entries in a complete page -- no continuation
+    /// -- is accepted, not tripped. The cap guards unbounded traversal; a
+    /// complete single response is already bounded by the frame cap.
+    #[test]
+    fn list_tools_accepts_a_cap_sized_complete_catalog() {
+        let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP)
+            .map(|i| json!({"name": format!("tool_{i}")}))
+            .collect();
+        let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client
+            .list_tools("cap-fake")
+            .expect("a complete at-cap catalog is accepted");
+        assert_eq!(listed.len(), TOOLS_LIST_TOOL_CAP);
+    }
+
+    /// The page-budget at-boundary half (the #666 at-budget pattern,
+    /// mirroring the tool-cap companion above): 32 pages each carrying one
+    /// tool, with page 32 cursorless -- completing exactly ON the last
+    /// allowed page returns the full catalog; only needing a 33rd page
+    /// trips the cap.
+    #[test]
+    fn list_tools_accepts_a_cap_sized_page_run_completing_on_the_last_page() {
+        let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
+            .map(|i| {
+                let mut result = json!({"tools": [{"name": format!("tool_{i}")}]});
+                if i < TOOLS_LIST_PAGE_CAP {
+                    result["nextCursor"] = json!(format!("page-{i}"));
+                }
+                json!({"jsonrpc": "2.0", "id": i, "result": result})
+            })
+            .collect();
+        let server = wire(&pages);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client
+            .list_tools("cap-fake")
+            .expect("completing on the page budget's last page is accepted");
+        assert_eq!(listed.len(), TOOLS_LIST_PAGE_CAP);
+    }
+
+    /// Issue #900 AC: an empty first page that continues to an empty second
+    /// page is a valid zero-tool catalog, not a failure.
+    #[test]
+    fn list_tools_empty_pages_are_a_valid_zero_tool_catalog() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [], "nextCursor": "p2"}}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("zero-tool catalog ok");
+        assert!(listed.is_empty());
+    }
+
+    /// Issue #900: a server re-listing a tool name on a later page must not
+    /// shadow its first-seen entry -- cross-page dedup keeps the page-1
+    /// entry (`query_catalog`'s catalog-fold precedent, issue #543).
+    #[test]
+    fn list_tools_cross_page_duplicate_keeps_first_sight() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "tools": [
+                    {"name": "dup", "description": "first sight"},
+                    {"name": "keep", "description": "page 1"}
+                ],
+                "nextCursor": "p2"
+            }}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {
+                "tools": [{"name": "dup", "description": "later shadow"}]
+            }}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 2, "the re-listed name folds to one entry");
+        let dup = listed
+            .iter()
+            .find(|t| t["name"] == "dup")
+            .expect("the dup entry");
+        assert_eq!(dup["description"], "first sight");
+    }
+
+    /// Issue #900: `nextCursor` must be a string (or absent/null). A
+    /// non-string cursor is a protocol violation AND a silent-truncation
+    /// hazard -- treating it as absent would recreate the bug class this
+    /// traversal exists to close -- so it surfaces as a framing error.
+    #[test]
+    fn list_tools_non_string_next_cursor_is_a_framing_error() {
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"tools": [], "nextCursor": 7}
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client
+            .list_tools("fake-mcp")
+            .expect_err("non-string cursor");
+        assert!(
+            matches!(
+                err,
+                ClientError::Framing(ref e) if e.kind() == std::io::ErrorKind::InvalidData
+            ),
+            "non-string cursor -> Framing(InvalidData), got {err:?}"
+        );
+    }
+
+    /// Nameless entries cannot be dedup-keyed; they ride through verbatim
+    /// and are filtered downstream by `extract_tool_info` (issue #663 -- a
+    /// malformed entry never reaches the catalog, so the usable count stays
+    /// honest).
+    #[test]
+    fn list_tools_nameless_entries_ride_through_without_dedup() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "tools": [{"description": "no name"}, {"description": "no name either"}],
+                "nextCursor": "p2"
+            }}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 2);
     }
 
     /// `call` relays the server's tools/call result (content + isError).
@@ -1400,7 +1763,7 @@ mod tests {
     fn eof_before_response_surfaces_as_server_closed() {
         let server = wire(&[]); // no frames at all
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let err = client.list_tools().expect_err("eof");
+        let err = client.list_tools("fake-mcp").expect_err("eof");
         assert!(
             matches!(err, ClientError::ServerClosed),
             "EOF -> ServerClosed, got {err:?}"
@@ -1422,7 +1785,9 @@ mod tests {
         let mut server = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
         server.push(b'\n');
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let err = client.list_tools().expect_err("over-long response");
+        let err = client
+            .list_tools("fake-mcp")
+            .expect_err("over-long response");
         assert!(
             matches!(
                 err,
@@ -1450,7 +1815,9 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
         ]);
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools().expect("list ok past notification");
+        let listed = client
+            .list_tools("fake-mcp")
+            .expect("list ok past notification");
         assert!(listed.is_empty());
     }
 
@@ -1463,7 +1830,7 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "right"}]}}),
         ]);
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools().expect("list ok");
+        let listed = client.list_tools("fake-mcp").expect("list ok");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["name"], "right");
     }
@@ -1477,7 +1844,7 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 2, "result": {"content": [], "isError": false}}),
         ]);
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        client.list_tools().expect("first call (id=1)");
+        client.list_tools("fake-mcp").expect("first call (id=1)");
         client.call("x", &json!({})).expect("second call (id=2)");
     }
 

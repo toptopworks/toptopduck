@@ -1,7 +1,7 @@
 //! Probe timeout + child-kill integration (issue #392).
 //!
 //! Tests the `spawn_stdio_child` + `stdio_handshake` building blocks the
-//! async `probe_mcp_server` command composes. Two scenarios:
+//! async `probe_mcp_server` command composes. Three scenarios:
 //!
 //! 1. **Responsive server** ([`mcp_fake_server`]): spawn + handshake
 //!    completes within the deadline; tool list returned; child killed +
@@ -9,6 +9,8 @@
 //! 2. **Hanging server** ([`mcp_hang_server`]): spawn succeeds, handshake
 //!    hangs (server never replies to initialize). A short `recv_timeout`
 //!    deadline fires; the child is killed + reaped, proving no process leak.
+//! 3. **Paginated server** ([`mcp_paginated_server`]): the handshake folds a
+//!    two-page `tools/list` joined by `nextCursor` (issue #900).
 //!
 //! The command layer wraps these in `tokio::time::timeout` +
 //! `spawn_blocking`; here we use `std::thread` + `mpsc::recv_timeout` to
@@ -30,6 +32,10 @@ const FAKE_BIN: &str = env!("CARGO_BIN_EXE_mcp-fake-server");
 /// Path to the compiled hang MCP server (never-responds fixture).
 const HANG_BIN: &str = env!("CARGO_BIN_EXE_mcp-hang-server");
 
+/// Path to the compiled paginated MCP server fixture (issue #900): a
+/// two-page `tools/list` answer joined by `nextCursor`.
+const PAGINATED_BIN: &str = env!("CARGO_BIN_EXE_mcp-paginated-server");
+
 /// Build a stdio `McpServerConfig` pointing at a fixture binary.
 fn stdio_config(id: &str, bin: &str) -> McpServerConfig {
     McpServerConfig {
@@ -45,14 +51,17 @@ fn stdio_config(id: &str, bin: &str) -> McpServerConfig {
 
 /// Run the handshake on a worker thread, returning a receiver so the caller
 /// can `recv_timeout`. Mirrors the `spawn_blocking` + `tokio::time::timeout`
-/// pattern the command uses, without requiring a Tauri runtime.
+/// pattern the command uses, without requiring a Tauri runtime. `server` is
+/// the attribution label `stdio_handshake` threads into `list_tools`.
 fn handshake_async(
     stdin: std::process::ChildStdin,
     stdout: std::process::ChildStdout,
+    server: &str,
 ) -> mpsc::Receiver<Result<Vec<serde_json::Value>, String>> {
     let (tx, rx) = mpsc::channel();
+    let server = server.to_string();
     thread::spawn(move || {
-        let result = stdio_handshake(stdin, stdout).map_err(|e| e.to_string());
+        let result = stdio_handshake(stdin, stdout, &server).map_err(|e| e.to_string());
         let _ = tx.send(result);
     });
     rx
@@ -65,7 +74,7 @@ fn probe_succeeds_on_responsive_server() {
 
     let stdin = child.stdin.take().expect("child stdin");
     let stdout = child.stdout.take().expect("child stdout");
-    let rx = handshake_async(stdin, stdout);
+    let rx = handshake_async(stdin, stdout, "test-ok");
 
     // 10 s deadline — generous; the fake server responds instantly.
     let result = rx
@@ -84,6 +93,38 @@ fn probe_succeeds_on_responsive_server() {
     );
 }
 
+/// Issue #900: the probe handshake folds the whole multi-page `tools/list` --
+/// the page-2 tool (`fetch_page2`) is only reachable via the cursor, so its
+/// presence pins the pagination through the exact building blocks
+/// `probe_mcp_server` composes (the settings page's tool count reads every
+/// page, not just the first).
+#[test]
+fn probe_lists_all_tools_across_pages() {
+    let config = stdio_config("test-pages", PAGINATED_BIN);
+    let mut child = spawn_stdio_child(&config, &[]).expect("spawn paginated server");
+
+    let stdin = child.stdin.take().expect("child stdin");
+    let stdout = child.stdout.take().expect("child stdout");
+    let rx = handshake_async(stdin, stdout, "test-pages");
+
+    // 10 s deadline — generous; the fake server responds instantly.
+    let result = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("handshake should complete within deadline");
+
+    // Always kill + reap the child (probe is one-shot).
+    let _ = child.kill();
+    child.wait().expect("child reaped");
+
+    let tools = result.expect("handshake should succeed");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["echo", "add", "fetch_page2"],
+        "both pages' tools listed, got {tools:?}"
+    );
+}
+
 #[test]
 fn probe_times_out_and_kills_child_when_server_hangs() {
     let config = stdio_config("test-hang", HANG_BIN);
@@ -91,7 +132,7 @@ fn probe_times_out_and_kills_child_when_server_hangs() {
 
     let stdin = child.stdin.take().expect("child stdin");
     let stdout = child.stdout.take().expect("child stdout");
-    let rx = handshake_async(stdin, stdout);
+    let rx = handshake_async(stdin, stdout, "test-hang");
 
     // 500 ms deadline — the hang server never responds, so this MUST time out.
     let result = rx.recv_timeout(Duration::from_millis(500));
