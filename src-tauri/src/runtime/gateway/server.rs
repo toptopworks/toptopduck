@@ -382,6 +382,13 @@ fn accept_bridge(
 /// only error path -- the stream is dropped without a response so a probing
 /// client learns nothing beyond "refused" (ADR-0085 security model).
 ///
+/// The termination predicate shared by verify_bridge's two arms -- the
+/// loop-top check and the post-error re-check (issue #911) -- so the twin
+/// flag sets cannot drift apart (the is_read_timeout rationale).
+fn preauth_termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> bool {
+    cancel.is_requested() || engine_done.load(Ordering::SeqCst)
+}
+
 /// The auth line is read through the shared byte cap (issue #643): this read
 /// happens BEFORE the token check, so the peer is an unauthenticated prober
 /// that grabbed the connection -- the pre-auth surface. An over-long line,
@@ -420,7 +427,7 @@ fn verify_bridge(
         // The pre-auth window's loop-top check (issue #909): the same
         // single-source disposition as the accept and serve-loop arms --
         // the ACP termination decides the TurnOutcome, never the gateway.
-        if cancel.is_requested() || engine_done.load(Ordering::SeqCst) {
+        if preauth_termination_fired(cancel, engine_done) {
             // Companion to the accept arms' logs (issue #849's
             // invisible-exit lesson): without this line a bridge that
             // connected and was terminated pre-auth is indistinguishable
@@ -455,9 +462,13 @@ fn verify_bridge(
             // mismatch / over-long / EOF arms above deliberately do NOT
             // re-check (a wrong token is a genuine bridge-side defect and
             // must surface), and with no flag set this is a pre-auth hard
-            // death that stays a truthful error.
+            // death that stays a truthful error. The class rule is
+            // kind-agnostic: a non-UTF-8 auth line surfaces as InvalidData
+            // from the bounded reader and rides this arm's re-check too -- a
+            // set flag means the termination already decided the turn
+            // regardless of error kind.
             Err(e) => {
-                if cancel.is_requested() || engine_done.load(Ordering::SeqCst) {
+                if preauth_termination_fired(cancel, engine_done) {
                     log::debug!(
                         target: "toptopduck::gateway",
                         "verify_bridge exiting on {} in the pre-auth window after a read error ({})",
@@ -1412,11 +1423,11 @@ mod tests {
     /// runs (setting `engine_done` or requesting cancel) and the SAME fill_buf
     /// call surfaces the reset, so the error reaches the error arm with the
     /// flag already set (the #909 main scenario's shape: engine completes ->
-    /// teardown kills the CLI -> the bridge's RST wakes the parked read). A
-    /// reverted arm re-check fails by surfacing the reset as a serve error
-    /// that mislabels the completed turn as Failed.
+    /// teardown kills the CLI -> on Windows the job-object kill aborts the
+    /// bridge's sockets into the RST that wakes the parked read). A reverted
+    /// arm re-check fails by surfacing the reset as a serve error that
+    /// mislabels the completed turn as Failed.
     struct RacingResetReader<'a> {
-        fired: bool,
         fire: Box<dyn Fn() + 'a>,
     }
     impl Read for RacingResetReader<'_> {
@@ -1430,10 +1441,7 @@ mod tests {
     }
     impl BufRead for RacingResetReader<'_> {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            if !self.fired {
-                self.fired = true;
-                (self.fire)();
-            }
+            (self.fire)();
             Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
                 "simulated teardown reset",
@@ -1498,7 +1506,6 @@ mod tests {
         let engine_done = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&engine_done);
         let mut reader = RacingResetReader {
-            fired: false,
             fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
         };
         let mut writer = Vec::new();
@@ -1520,7 +1527,6 @@ mod tests {
     fn verify_bridge_cancel_racing_reset_returns_terminated() {
         let cancel = CancelToken::new();
         let mut reader = RacingResetReader {
-            fired: false,
             fire: Box::new(|| cancel.request()),
         };
         let mut writer = Vec::new();
@@ -1542,7 +1548,6 @@ mod tests {
     #[test]
     fn verify_bridge_reset_without_flags_stays_a_serve_error() {
         let mut reader = RacingResetReader {
-            fired: false,
             fire: Box::new(|| {}),
         };
         let mut writer = Vec::new();
@@ -2264,9 +2269,12 @@ mod tests {
 
     /// Close a connected socket abortively so the peer's parked read surfaces
     /// a hard reset (RST, not FIN): SO_LINGER with a zero timeout makes close
-    /// discard pending data with a reset. This is the shape the production
-    /// teardown produces when it kills the bridge's spawner (issue #911's
-    /// racing error); a plain drop would only FIN and read as EOF.
+    /// discard pending data with a reset. This is the shape the Windows
+    /// production teardown produces when it kills the bridge's spawner -- a
+    /// job-object terminate aborts the sockets into resets (issue #911's
+    /// racing error); a plain drop would only FIN and read as EOF. The POSIX
+    /// teardown (killpg SIGKILL) closes gracefully instead: its EOF surfaces
+    /// through the refusal arm, which deliberately does not re-check.
     fn abortive_close(s: TcpStream) {
         #[cfg(windows)]
         {
@@ -2281,15 +2289,19 @@ mod tests {
             // SAFETY: the socket handle is owned by `s` and outlives the
             // call; the option buffer points at the stack linger struct for
             // exactly the call's length.
-            unsafe {
+            let r = unsafe {
                 setsockopt(
                     s.as_raw_socket() as SOCKET,
                     SOL_SOCKET,
                     SO_LINGER,
                     &linger as *const LINGER as *const u8,
                     std::mem::size_of::<LINGER>() as i32,
-                );
-            }
+                )
+            };
+            // A failed option call degrades the close to a graceful FIN,
+            // which the pins below would surface as a misleading token
+            // mismatch -- fail here instead, at the fixture's seam.
+            assert_eq!(r, 0, "SO_LINGER(0) failed: {}", io::Error::last_os_error());
             drop(s);
         }
         #[cfg(unix)]
@@ -2301,15 +2313,16 @@ mod tests {
             };
             // SAFETY: same shape as the Windows arm -- an owned fd plus a
             // stack option buffer sized for exactly the call.
-            unsafe {
+            let r = unsafe {
                 libc::setsockopt(
                     s.as_raw_fd(),
                     libc::SOL_SOCKET,
                     libc::SO_LINGER,
                     &linger as *const libc::linger as *const libc::c_void,
                     std::mem::size_of::<libc::linger>() as libc::socklen_t,
-                );
-            }
+                )
+            };
+            assert_eq!(r, 0, "SO_LINGER(0) failed: {}", io::Error::last_os_error());
             drop(s);
         }
     }
@@ -2317,7 +2330,9 @@ mod tests {
     /// Issue #911 serve-layer pin: the #909 main scenario's tail over a real
     /// socket -- the engine completes while serve is parked in the pre-auth
     /// auth read, and the teardown's kill lands on the bridge as an abortive
-    /// close (RST) that wakes the parked read BEFORE its READ_TIMEOUT fires.
+    /// close (RST, the Windows job-object kill's shape -- the POSIX killpg
+    /// teardown FINs and surfaces through the refusal arm instead) that
+    /// wakes the parked read BEFORE its READ_TIMEOUT fires.
     /// The error arm's re-check (not the loop top, which the parked read has
     /// already passed) hands the turn to the ACP termination; a reverted
     /// re-check surfaces the reset as a serve error that mislabels the
