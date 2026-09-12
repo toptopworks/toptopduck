@@ -1179,6 +1179,10 @@ pub fn upsert_mcp_server(
     live: State<'_, LiveProviderConfig>,
     server: McpServerConfig,
 ) -> Result<McpServerConfig, StoreCommandError> {
+    // The header-face guard runs inside `live.upsert_mcp_server` (issue
+    // #901): the deepest write boundary, so every path that persists a
+    // server refuses an invalid header face, and the user-correctable
+    // message surfaces through ConfigWriteFailure.
     live.upsert_mcp_server(server)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
@@ -1264,6 +1268,33 @@ pub fn clear_mcp_server_secret(
     env_key: String,
 ) -> Result<(), StoreCommandError> {
     live.clear_mcp_secret(&id, &env_key)
+        .map_err(StoreCommandError::KeychainFailure)
+}
+
+/// Store one MCP server request-header secret in the OS keychain under
+/// `mcp-<id>-header-<name>` (issue #901, ADR-0029 one-shot transfer; the
+/// header- infix keeps the account distinct from the same-named env key's).
+/// The value never crosses IPC back out.
+#[tauri::command]
+pub fn set_mcp_server_header_secret(
+    live: State<'_, LiveProviderConfig>,
+    id: McpServerId,
+    header_name: String,
+    value: String,
+) -> Result<(), StoreCommandError> {
+    live.set_mcp_header_secret(&id, &header_name, &value)
+        .map_err(StoreCommandError::KeychainFailure)
+}
+
+/// Remove one MCP server request-header secret (idempotent; issue #901). A
+/// real keychain error surfaces (ADR-0029 trust root).
+#[tauri::command]
+pub fn clear_mcp_server_header_secret(
+    live: State<'_, LiveProviderConfig>,
+    id: McpServerId,
+    header_name: String,
+) -> Result<(), StoreCommandError> {
+    live.clear_mcp_header_secret(&id, &header_name)
         .map_err(StoreCommandError::KeychainFailure)
 }
 
@@ -1362,6 +1393,7 @@ pub async fn probe_mcp_server(
     server: McpServerConfig,
 ) -> Result<McpProbeResult, StoreCommandError> {
     let secrets = crate::mcp::aggregator::collect_secrets(live.keychain(), &server);
+    let header_secrets = crate::mcp::aggregator::collect_header_secrets(live.keychain(), &server);
     let deadline_ms = server.timeout_ms.unwrap_or(PROBE_DEFAULT_TIMEOUT_MS);
     let deadline = Duration::from_millis(deadline_ms as u64);
     let server_id = server.id.as_str();
@@ -1410,8 +1442,12 @@ pub async fn probe_mcp_server(
     let server_for_blocking = server.clone();
     let result = tokio::time::timeout(deadline, async {
         tauri::async_runtime::spawn_blocking(move || {
-            let mut client =
-                crate::mcp::client::connect_transport(&server_for_blocking, &secrets, None)?;
+            let mut client = crate::mcp::client::connect_transport(
+                &server_for_blocking,
+                &secrets,
+                &header_secrets,
+                None,
+            )?;
             client.list_tools(&server_for_blocking.display_name)
         })
         .await

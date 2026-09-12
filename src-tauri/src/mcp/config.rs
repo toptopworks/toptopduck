@@ -27,8 +27,21 @@
 //! never collide). The store methods that read/write those entries land in a
 //! later slice; this module pins the addressing anchor (the id) the scheme
 //! composes onto.
+//!
+//! ## Remote headers (issue #901)
+//!
+//! The sse / http transport variants carry `headers` -- NON-SECRET request
+//! header values attached to every request on that transport (the remote
+//! counterpart of the stdio env face). A SECRET header value (an
+//! `Authorization: Bearer` token) lives in the OS keychain under
+//! `mcp-<id>-header-<key>` -- the `header-` infix keeps a header named like an
+//! env key (`X-API-KEY`) from colliding with that env key's account. The
+//! stdio variant cannot carry headers (the connection is a subprocess, not
+//! HTTP); the tagged enum makes that structural.
 
 use std::collections::BTreeMap;
+
+use crate::app_config::io::is_secret_header_name;
 
 use serde::{Deserialize, Serialize};
 
@@ -103,13 +116,30 @@ pub enum McpTransport {
         args: Vec<String>,
     },
     /// A Server-Sent-Events MCP transport: the client opens `url` for a
-    /// bidirectional SSE channel. v1 advertises the shape; the MCP client
-    /// wiring lands in a later slice.
-    Sse { url: String },
+    /// bidirectional SSE channel; JSON-RPC requests are POSTed to the
+    /// server-advertised endpoint (issue #389).
+    Sse {
+        url: String,
+        /// NON-SECRET request header values attached to the SSE GET stream and
+        /// every POST on this transport (issue #901). Secret header values
+        /// live in the OS keychain (`McpServerConfig::keychain_header_keys`);
+        /// a header name matching the secret-name scan is refused at config
+        /// read time. `BTreeMap` so serialization is deterministic (same
+        /// convention as [`McpServerConfig::env`]). `#[serde(default)]` so a
+        /// config written before this field existed deserializes to empty.
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
     /// A streamable-HTTP MCP transport (MCP spec rev): the client POSTs JSON-RPC
-    /// to `url`. v1 advertises the shape; the MCP client wiring lands in a
-    /// later slice.
-    Http { url: String },
+    /// to `url` (issue #389).
+    Http {
+        url: String,
+        /// NON-SECRET request header values attached to every POST on this
+        /// transport (issue #901; same contract as [`McpTransport::Sse`]'s
+        /// `headers`).
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
 }
 
 impl McpTransport {
@@ -168,6 +198,17 @@ pub struct McpServerConfig {
     /// the server still runs with its non-secret env).
     #[serde(default)]
     pub keychain_env_keys: Vec<String>,
+    /// The header names (on an sse/http transport) whose VALUES live in the OS
+    /// keychain under `mcp-<id>-header-<key>` (issue #901) -- the header-face
+    /// counterpart of [`Self::keychain_env_keys`]. The client merges each
+    /// keychain-resolved value into the transport's request headers at connect
+    /// time; the values NEVER cross this config (structural + read-time scan,
+    /// ADR-0029/0036/0038 -- the header-name scan uses an expanded substring
+    /// list so a secret-named header's literal value is refused at read time).
+    /// Meaningless on a stdio transport (no HTTP requests); `#[serde(default)]`
+    /// so a config written before this field existed deserializes to empty.
+    #[serde(default)]
+    pub keychain_header_keys: Vec<String>,
     /// Per-server call timeout in milliseconds (issue #301). `None` = the
     /// gateway's default timeout applies (the gateway client lands in a later
     /// slice); `Some(ms)` overrides per server. `#[serde(default)]` so a config
@@ -193,6 +234,132 @@ pub struct McpServerConfig {
 /// save, import, legacy config -- all carry explicit user intent).
 fn default_enabled() -> bool {
     true
+}
+
+// ---------------------------------------------------------------------------
+// Header validation (issue #901, upsert boundary)
+// ---------------------------------------------------------------------------
+
+/// The RFC 7230 `tchar` set (the token characters a header NAME may use):
+/// printable ASCII minus the structural delimiters. Conservative on purpose --
+/// anything outside it cannot form a legal header name on the wire.
+fn is_header_tchar(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c)
+}
+
+/// Validate a configured server's header face at the write boundary
+/// (issue #901). Five rules:
+/// 1. A stdio transport must not carry `keychain_header_keys` (it makes no
+///    HTTP requests; a stray list means the frontend lost the transport
+///    split -- refuse rather than persist dead config).
+/// 2. Every header name must be a non-empty RFC 7230 token and every value
+///    must contain no control characters -- a CR/LF (or any control byte) in
+///    either position is a header-injection vector, so the refusal is at the
+///    write boundary, not at request time (fail the save, not the turn).
+/// 3. A configured name must not look like a credential (the expanded
+///    read-time scan list): the value belongs in the OS keychain behind the
+///    form's Secret row. A persisted literal would sail through the save and
+///    be refused by the read-time scan at the NEXT launch -- degrading the
+///    whole app-config to defaults -- so the write boundary must reject
+///    what the read boundary would nuke the file over.
+/// 4. `Accept` and `Content-Type` are protocol-managed: the transports set
+///    them per request shape (the event-stream Accept on the SSE GET, the
+///    JSON Content-Type on every POST), and a configured copy silently
+///    breaks the protocol handshake with a far-away error.
+/// 5. Header names are unique case-insensitively across the configured map
+///    and the keychain list: HTTP header names fold to lowercase, and a
+///    case-variant pair would send two headers on the wire.
+pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), String> {
+    let headers = match &server.transport {
+        McpTransport::Stdio { .. } => {
+            if !server.keychain_header_keys.is_empty() {
+                return Err(format!(
+                    "MCP server `{}`: a stdio transport cannot carry header secrets \
+                     (keychain_header_keys must be empty)",
+                    server.id
+                ));
+            }
+            return Ok(());
+        }
+        McpTransport::Sse { headers, .. } | McpTransport::Http { headers, .. } => headers,
+    };
+    for (name, value) in headers {
+        if !is_valid_header_name(name) {
+            return Err(format!(
+                "MCP server `{}`: invalid header name {name:?} -- must be a non-empty \
+                 HTTP token (letters, digits, or !#$%&'*+-.^_`|~)",
+                server.id
+            ));
+        }
+        if is_secret_header_name(name) {
+            return Err(format!(
+                "MCP server `{}`: header name {name:?} looks like a credential -- check the \
+                 Secret row so the value goes to the OS keychain instead of the config file",
+                server.id
+            ));
+        }
+        if is_protocol_header(name) {
+            return Err(format!(
+                "MCP server `{}`: header {name:?} is protocol-managed (the transport sets \
+                 Accept / Content-Type per request); remove it from the configured headers",
+                server.id
+            ));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(format!(
+                "MCP server `{}`: header {name:?} value contains a control character \
+                 (CR/LF are refused to prevent header injection)",
+                server.id
+            ));
+        }
+    }
+    // A keychain-declared name is a header name too (it reaches the wire the
+    // moment the keychain value resolves) -- the token and protocol rules
+    // apply at the same boundary (issue #901).
+    for name in &server.keychain_header_keys {
+        if !is_valid_header_name(name) {
+            return Err(format!(
+                "MCP server `{}`: invalid keychain header name {name:?} -- must be a \
+                 non-empty HTTP token (letters, digits, or !#$%&'*+-.^_`|~)",
+                server.id
+            ));
+        }
+        if is_protocol_header(name) {
+            return Err(format!(
+                "MCP server `{}`: keychain header name {name:?} is protocol-managed (the \
+                 transport sets Accept / Content-Type per request); remove it",
+                server.id
+            ));
+        }
+    }
+    // Case-insensitive uniqueness across both name sources (issue #901):
+    // HTTP header names fold to lowercase, so a case-variant pair (configured
+    // `X-Custom` + keychain `x-custom`) would send two headers on the wire.
+    let mut folded: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for name in headers.keys().chain(server.keychain_header_keys.iter()) {
+        if !folded.insert(name.to_ascii_lowercase()) {
+            return Err(format!(
+                "MCP server `{}`: duplicate header name {name:?} (HTTP header names are \
+                 case-insensitive; a case-variant pair sends two headers on the wire)",
+                server.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A header NAME is valid when it is a non-empty RFC 7230 token: every char
+/// is a `tchar` (see [`is_header_tchar`]). Shared with the read-time scan's
+/// charset backstop (app_config::io).
+pub(crate) fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(is_header_tchar)
+}
+
+/// Protocol-managed header names the transports set per request shape
+/// (issue #901): a configured copy silently overrides the SSE stream's
+/// `Accept: text/event-stream` or the POST's JSON `Content-Type`.
+fn is_protocol_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("accept") || name.eq_ignore_ascii_case("content-type")
 }
 
 // ---------------------------------------------------------------------------
@@ -294,23 +461,49 @@ mod tests {
     }
 
     #[test]
-    fn sse_transport_serializes_url_only() {
+    fn sse_transport_serializes_url_and_default_empty_headers() {
         let t = McpTransport::Sse {
             url: "https://example.test/sse".into(),
+            headers: BTreeMap::new(),
         };
         let json = serde_json::to_value(&t).unwrap();
         assert_eq!(json["type"], "sse");
         assert_eq!(json["url"], "https://example.test/sse");
+        // serde(default) on the field, no skip_serializing_if: an empty
+        // header map still serializes as {} (the project's stable on-disk
+        // shape convention), and a config written without the field
+        // deserializes to the same empty map.
+        assert_eq!(json["headers"], serde_json::json!({}));
     }
 
     #[test]
-    fn http_transport_serializes_url_only() {
+    fn http_transport_serializes_url_and_headers() {
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Client".into(), "toptopduck".into());
         let t = McpTransport::Http {
             url: "https://example.test/mcp".into(),
+            headers,
         };
         let json = serde_json::to_value(&t).unwrap();
         assert_eq!(json["type"], "http");
         assert_eq!(json["url"], "https://example.test/mcp");
+        assert_eq!(json["headers"]["X-Client"], "toptopduck");
+    }
+
+    #[test]
+    fn remote_transport_partial_deserialize_fills_default_empty_headers() {
+        // Forward-compat: a config written before the headers field existed
+        // (or a hand-edit omitting it) deserializes to the empty map rather
+        // than rejecting the whole config -- same convention as stdio's
+        // default-empty args.
+        let json = r#"{"type":"http","url":"https://example.test/mcp"}"#;
+        let t: McpTransport = serde_json::from_str(json).unwrap();
+        match t {
+            McpTransport::Http { headers, .. } => {
+                assert!(headers.is_empty(), "missing headers -> empty default");
+            }
+            _ => panic!("expected Http"),
+        }
     }
 
     #[test]
@@ -361,6 +554,7 @@ mod tests {
             transport: McpTransport::stdio("/usr/local/bin/github-mcp", vec!["--stdio".into()]),
             env,
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: false,
         };
@@ -434,6 +628,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/a", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         });
@@ -454,6 +649,7 @@ mod tests {
                     transport: McpTransport::stdio("/bin/first", Vec::new()),
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
+                    keychain_header_keys: Vec::new(),
                     timeout_ms: None,
                     enabled: true,
                 },
@@ -463,6 +659,7 @@ mod tests {
                     transport: McpTransport::stdio("/bin/second", Vec::new()),
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
+                    keychain_header_keys: Vec::new(),
                     timeout_ms: None,
                     enabled: true,
                 },
@@ -472,6 +669,7 @@ mod tests {
                     transport: McpTransport::stdio("/bin/u", Vec::new()),
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
+                    keychain_header_keys: Vec::new(),
                     timeout_ms: None,
                     enabled: true,
                 },
@@ -497,6 +695,7 @@ mod tests {
                 transport: McpTransport::stdio("/bin/s", Vec::new()),
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
                 timeout_ms: None,
                 enabled: true,
             }],
@@ -520,6 +719,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -547,6 +747,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -566,6 +767,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -583,6 +785,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -599,6 +802,7 @@ mod tests {
                 transport: McpTransport::stdio("/bin/old", Vec::new()),
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
                 timeout_ms: None,
                 enabled: true,
             }],
@@ -609,6 +813,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/new", vec!["--flag".into()]),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -634,6 +839,7 @@ mod tests {
                 transport: McpTransport::stdio("/bin/a", Vec::new()),
                 env: BTreeMap::new(),
                 keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
                 timeout_ms: None,
                 enabled: true,
             }],
@@ -644,6 +850,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/b", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -667,6 +874,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/slow", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: Some(45_000),
             enabled: true,
         };
@@ -679,6 +887,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/default", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -706,6 +915,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/slow", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: Some(45_000),
             enabled: true,
         };
@@ -720,12 +930,292 @@ mod tests {
             transport: McpTransport::stdio("/bin/slow", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
         let stored = reg.upsert(without_timeout);
         assert_eq!(stored.timeout_ms, None);
         assert_eq!(reg.servers[0].timeout_ms, None);
+    }
+
+    // --- header validation (issue #901) --------------------------------------
+
+    /// A remote transport with a legal token name + control-free value
+    /// validates clean; an empty header map validates clean.
+    #[test]
+    fn header_validation_accepts_token_names_and_clean_values() {
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Api-Version".into(), "2024-11-05".into());
+        headers.insert("Accept-Language".into(), "en-US, zh-CN".into());
+        let remote = McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers,
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        validate_mcp_server_headers(&remote).expect("legal headers validate");
+        let empty = McpServerConfig {
+            transport: McpTransport::Sse {
+                url: "https://example.test/sse".into(),
+                headers: BTreeMap::new(),
+            },
+            ..remote
+        };
+        validate_mcp_server_headers(&empty).expect("empty header map validates");
+    }
+
+    /// A header NAME outside the RFC 7230 token set is refused at the upsert
+    /// boundary: spaces, structural delimiters, non-ASCII, and the empty
+    /// string all fail (the error names the offending name).
+    #[test]
+    fn header_validation_refuses_non_token_names() {
+        for bad in ["", "X Bad", "X-Bad:", "X;Bad", "X(Bad)", "名字"] {
+            let mut headers = BTreeMap::new();
+            headers.insert(bad.into(), "v".into());
+            let server = McpServerConfig {
+                id: McpServerId("remote".into()),
+                display_name: "Remote".into(),
+                transport: McpTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers,
+                },
+                env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
+                timeout_ms: None,
+                enabled: true,
+            };
+            let err =
+                validate_mcp_server_headers(&server).expect_err("a non-token name must be refused");
+            assert!(
+                err.contains("header name"),
+                "the refusal names the field, got: {err}"
+            );
+        }
+    }
+
+    /// A header VALUE carrying a control character (CR, LF, NUL, tab, DEL)
+    /// is refused at the upsert boundary -- the header-injection vector.
+    #[test]
+    fn header_validation_refuses_control_characters_in_values() {
+        for bad_value in ["a\rb", "a\nb", "a\tb", "a\u{0}b", "a\u{7f}b"] {
+            let mut headers = BTreeMap::new();
+            headers.insert("X-Ok-Name".into(), bad_value.into());
+            let server = McpServerConfig {
+                id: McpServerId("remote".into()),
+                display_name: "Remote".into(),
+                transport: McpTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers,
+                },
+                env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
+                timeout_ms: None,
+                enabled: true,
+            };
+            let err = validate_mcp_server_headers(&server)
+                .expect_err("a control character must be refused");
+            assert!(
+                err.contains("control character"),
+                "the refusal names the class, got: {err}"
+            );
+        }
+    }
+
+    /// A stdio transport cannot carry header secrets: a stray
+    /// `keychain_header_keys` list is refused (dead config -- stdio makes no
+    /// HTTP requests), while the same stdio config with an empty list is
+    /// fine.
+    #[test]
+    fn header_validation_refuses_header_secrets_on_stdio() {
+        let mut server = McpServerConfig {
+            id: McpServerId("s".into()),
+            display_name: "S".into(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        validate_mcp_server_headers(&server).expect("clean stdio validates");
+        server.keychain_header_keys = vec!["X-Test-Token".into()];
+        let err = validate_mcp_server_headers(&server).expect_err("stdio + header keys is refused");
+        assert!(
+            err.contains("stdio"),
+            "the refusal names the transport, got: {err}"
+        );
+    }
+
+    /// A keychain-declared header NAME is a header name like any other
+    /// (review c-2, issue #901): a non-token name in `keychain_header_keys`
+    /// is refused at the same upsert boundary, not at request time.
+    #[test]
+    fn header_validation_refuses_non_token_keychain_header_names() {
+        let mut server = McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers: BTreeMap::new(),
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        server.keychain_header_keys = vec!["X Bad Name".into()];
+        let err = validate_mcp_server_headers(&server)
+            .expect_err("a non-token keychain name must be refused");
+        assert!(
+            err.contains("keychain header name"),
+            "the refusal names the face, got: {err}"
+        );
+        server.keychain_header_keys = vec!["X-Test-Token".into()];
+        validate_mcp_server_headers(&server).expect("a token keychain name validates");
+    }
+
+    /// A configured header NAME that looks like a credential is refused at
+    /// the write boundary (issue #901): a persisted literal would be refused
+    /// by the read-time scan at the next launch -- degrading the whole
+    /// app-config to defaults -- so the save must reject it first, pointing
+    /// the user at the Secret row / keychain face. The same name declared in
+    /// `keychain_header_keys` is exactly where it belongs and validates.
+    #[test]
+    fn header_validation_routes_secret_named_headers_to_the_keychain_face() {
+        for secret_named in ["Authorization", "X-Api-Token", "Cookie", "X-Session-Id"] {
+            let mut headers = BTreeMap::new();
+            headers.insert(secret_named.into(), "literal-credential".into());
+            let server = McpServerConfig {
+                id: McpServerId("remote".into()),
+                display_name: "Remote".into(),
+                transport: McpTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers,
+                },
+                env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
+                timeout_ms: None,
+                enabled: true,
+            };
+            let err = validate_mcp_server_headers(&server)
+                .expect_err("a secret-named configured header must be refused");
+            assert!(
+                err.contains("credential"),
+                "the refusal routes to the keychain face, got: {err}"
+            );
+        }
+        // The same names on the KEYCHAIN face are the intended shape.
+        let mut server = McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers: BTreeMap::new(),
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        server.keychain_header_keys = vec!["Authorization".into(), "X-Session-Id".into()];
+        validate_mcp_server_headers(&server).expect("keychain-declared secret names validate");
+    }
+
+    /// `Accept` and `Content-Type` are protocol-managed (issue #901): the
+    /// transports set them per request shape, and a configured copy silently
+    /// breaks the protocol handshake -- refused on both name sources,
+    /// case-insensitively.
+    #[test]
+    fn header_validation_refuses_protocol_managed_headers() {
+        for protocol_named in ["Accept", "accept", "Content-Type", "content-type"] {
+            let mut headers = BTreeMap::new();
+            headers.insert(protocol_named.into(), "v".into());
+            let configured = McpServerConfig {
+                id: McpServerId("remote".into()),
+                display_name: "Remote".into(),
+                transport: McpTransport::Sse {
+                    url: "https://example.test/sse".into(),
+                    headers,
+                },
+                env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
+                timeout_ms: None,
+                enabled: true,
+            };
+            let err = validate_mcp_server_headers(&configured)
+                .expect_err("a protocol-managed configured header must be refused");
+            assert!(
+                err.contains("protocol-managed"),
+                "the refusal names the class, got: {err}"
+            );
+
+            let mut keychain = McpServerConfig {
+                transport: McpTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers: BTreeMap::new(),
+                },
+                ..configured
+            };
+            keychain.keychain_header_keys = vec![protocol_named.into()];
+            let err = validate_mcp_server_headers(&keychain)
+                .expect_err("a protocol-managed keychain header name must be refused");
+            assert!(
+                err.contains("protocol-managed"),
+                "the refusal names the class, got: {err}"
+            );
+        }
+    }
+
+    /// Header names must be unique case-insensitively across the configured
+    /// map and the keychain list (issue #901): HTTP header names fold to
+    /// lowercase, so a case-variant pair would send two headers on the wire.
+    #[test]
+    fn header_validation_refuses_case_folded_duplicate_names() {
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Custom".into(), "configured".into());
+        let server = McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers,
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: vec!["x-custom".into()],
+            timeout_ms: None,
+            enabled: true,
+        };
+        let err = validate_mcp_server_headers(&server)
+            .expect_err("a case-folded cross-face duplicate must be refused");
+        assert!(
+            err.contains("case-insensitive"),
+            "the refusal names the fold, got: {err}"
+        );
+
+        // The same fold inside the keychain list alone.
+        let mut server = McpServerConfig { ..server };
+        server.keychain_header_keys = vec!["X-Trace".into(), "x-trace".into()];
+        let err = validate_mcp_server_headers(&server)
+            .expect_err("a case-folded keychain-internal duplicate must be refused");
+        assert!(
+            err.contains("case-insensitive"),
+            "the refusal names the fold, got: {err}"
+        );
     }
 
     // --- keychain_env_keys (C0) ---------------------------------------------
@@ -743,6 +1233,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: vec!["API_KEY".into(), "WEBHOOK_SECRET".into()],
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -762,6 +1253,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/bare", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };

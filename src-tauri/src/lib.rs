@@ -451,6 +451,8 @@ pub fn run() {
             commands::rescan_builtin_cli_tools,
             commands::set_mcp_server_secret,
             commands::clear_mcp_server_secret,
+            commands::set_mcp_server_header_secret,
+            commands::clear_mcp_server_header_secret,
             commands::probe_mcp_server,
             commands::discover_mcp_servers,
             commands::list_sessions,

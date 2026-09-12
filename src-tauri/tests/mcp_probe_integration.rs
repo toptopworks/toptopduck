@@ -44,6 +44,7 @@ fn stdio_config(id: &str, bin: &str) -> McpServerConfig {
         transport: McpTransport::stdio(bin, Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     }
@@ -156,9 +157,11 @@ fn spawn_stdio_child_rejects_non_stdio_transport() {
         display_name: "SSE".into(),
         transport: McpTransport::Sse {
             url: "http://localhost:1".into(),
+            headers: BTreeMap::new(),
         },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     };

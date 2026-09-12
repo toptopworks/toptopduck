@@ -520,6 +520,7 @@ fn skill_declaring_disabled_server_mounts_and_stays_declarative() {
         transport: McpTransport::stdio("/bin/srv", Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: false,
     })

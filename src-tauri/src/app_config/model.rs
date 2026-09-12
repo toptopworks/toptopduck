@@ -985,6 +985,7 @@ mod tests {
                 ),
                 env,
                 keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
                 timeout_ms: None,
                 enabled: true,
             });
@@ -1023,6 +1024,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: std::collections::BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };

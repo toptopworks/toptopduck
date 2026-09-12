@@ -35,6 +35,7 @@ fn broken_mcp_server() -> McpServerConfig {
         transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
         env: std::collections::BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     }
@@ -145,6 +146,7 @@ fn a_connect_phase_token_fire_bounds_the_built_in_turn_with_a_hung_server() {
         transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-hang-server"), Vec::new()),
         env: std::collections::BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         // A long budget: only the CANCEL path can unblock this test in time.
         timeout_ms: Some(120_000),
         enabled: true,

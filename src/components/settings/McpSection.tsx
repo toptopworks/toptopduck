@@ -24,6 +24,7 @@ import type {
 } from "../../types/mcp";
 import {
   clearMcpServerSecret,
+  clearMcpServerHeaderSecret,
   probeMcpServer,
   upsertMcpServer,
 } from "../../api";
@@ -71,6 +72,7 @@ type DeleteTarget = {
   id: string;
   displayName: string;
   keychainEnvKeys: string[];
+  keychainHeaderKeys: string[];
 };
 
 type FormTarget = {
@@ -147,6 +149,7 @@ export function McpSection({
         transport: { type: "stdio", command: "", args: [] },
         env: {},
         keychain_env_keys: [],
+        keychain_header_keys: [],
         timeout_ms: null,
         // A new server saves enabled (ADR-0106 Decision 4 -- the form's save
         // is explicit intent); the row toggle is the only writer afterwards.
@@ -305,6 +308,7 @@ export function McpSection({
       // Config removed — clean up local state for the removed server.
       const removedId = deleteTarget.id;
       const removedKeys = deleteTarget.keychainEnvKeys;
+      const removedHeaderKeys = deleteTarget.keychainHeaderKeys;
       setProbeStates((prev) => {
         const next = { ...prev };
         delete next[removedId];
@@ -324,6 +328,15 @@ export function McpSection({
           await clearMcpServerSecret(removedId, envKey);
         } catch (e) {
           console.warn("keychain clear failed for", removedId, envKey, e);
+        }
+      }
+      // Header secrets ride distinct accounts (`mcp-<id>-header-<name>`,
+      // issue #901) and need their own clears, same best-effort posture.
+      for (const headerName of removedHeaderKeys) {
+        try {
+          await clearMcpServerHeaderSecret(removedId, headerName);
+        } catch (e) {
+          console.warn("keychain clear failed for", removedId, headerName, e);
         }
       }
     }
@@ -451,6 +464,7 @@ export function McpSection({
                   id: server.id,
                   displayName: server.display_name,
                   keychainEnvKeys: server.keychain_env_keys,
+                  keychainHeaderKeys: server.keychain_header_keys,
                 })}
             />
           ))

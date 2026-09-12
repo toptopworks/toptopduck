@@ -57,6 +57,14 @@ pub struct DiscoveredServer {
     /// the keychain (values dropped during import -- the user re-enters them).
     #[serde(default)]
     pub keychain_env_keys: Vec<String>,
+    /// Header names whose values live in the OS keychain (issue #901). Always
+    /// EMPTY here: the external-config sources (Claude Desktop / Codex) only
+    /// describe stdio servers, whose transports carry no headers. The field
+    /// exists so the IPC wire shape matches the frontend's `DiscoveredServer`
+    /// type (a missing field would leave `undefined` on the JS side -- the
+    /// import checklist spreads it into the upsert payload).
+    #[serde(default)]
+    pub keychain_header_keys: Vec<String>,
 }
 
 /// Result of discovering MCP servers from an external config (issue #390).
@@ -374,6 +382,7 @@ fn parse_external_server(
         transport: McpTransport::Stdio { command, args },
         env: safe_env,
         keychain_env_keys,
+        keychain_header_keys: Vec::new(),
     }
 }
 
@@ -586,8 +595,13 @@ args = ["mcp-server-fetch"]
             transport: McpTransport::stdio("npx", vec!["-y".into(), "server".into()]),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
         };
+        // The wire shape carries the header-key face too (issue #901): the
+        // frontend type declares it non-optional, so the serialized entry
+        // must always include it (empty here -- the sources are stdio-only).
         let json = serde_json::to_value(&server).unwrap();
+        assert_eq!(json["keychain_header_keys"], serde_json::json!([]));
         assert_eq!(json["display_name"], "test");
         assert_eq!(json["transport"]["type"], "stdio");
         assert_eq!(json["transport"]["command"], "npx");

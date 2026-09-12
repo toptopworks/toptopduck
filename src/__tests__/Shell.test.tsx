@@ -1584,6 +1584,7 @@ function mcpServer(id: string): McpServerConfig {
     transport: { type: "stdio", command: "/bin/srv", args: [] },
     env: {},
     keychain_env_keys: [],
+    keychain_header_keys: [],
     timeout_ms: null,
     enabled: true,
   };

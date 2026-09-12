@@ -8,11 +8,14 @@
 // snake_case variant names, mirroring the Rust McpTransport serde shape
 // (crate::mcp::config). stdio = the app spawns `command` with `args` and speaks
 // newline-delimited JSON-RPC over the child's stdin/stdout; sse / http carry a
-// single endpoint url.
+// single endpoint url plus NON-SECRET request headers (issue #901) -- secret
+// header values ride in the keychain via keychain_header_keys, never here.
+// Rust always serializes `headers` (serde default, no skip), so the field is
+// NOT optional.
 export type McpTransport =
   | { type: "stdio"; command: string; args: string[] }
-  | { type: "sse"; url: string }
-  | { type: "http"; url: string };
+  | { type: "sse"; url: string; headers: Record<string, string> }
+  | { type: "http"; url: string; headers: Record<string, string> };
 
 // One user-configured MCP server (ADR-0076, issue #301). The connection
 // descriptor (`transport`) plus NON-SECRET env values (`env`). `id` is the
@@ -40,6 +43,14 @@ export interface McpServerConfig {
   // serde(default) -- empty serializes as [] (the project convention), so
   // this field is `string[]`, NOT optional.
   keychain_env_keys: string[];
+  // The header names (on an sse/http transport) whose VALUES live in the OS
+  // keychain under `mcp-<id>-header-<name>` (issue #901) -- the header-face
+  // counterpart of `keychain_env_keys`. The client merges each resolved value
+  // into the transport's request headers at connect time; the values NEVER
+  // cross config (mirrors Rust `Vec<String>` + bare serde(default) -- `[]`
+  // when absent, the project convention, so NOT optional). Meaningless on a
+  // stdio transport.
+  keychain_header_keys: string[];
   // Per-server call timeout in milliseconds (ADR-0076, issue #301). `null` =
   // the gateway's default timeout applies (the gateway client lands in a later
   // slice); a number overrides per server. Mirrors Rust `Option<u32>` + bare
@@ -109,6 +120,7 @@ export interface DiscoveredServer {
   transport: McpTransport;
   env: Record<string, string>;
   keychain_env_keys: string[];
+  keychain_header_keys: string[];
 }
 
 // Result of discovering servers from one external source (issue #390). Includes

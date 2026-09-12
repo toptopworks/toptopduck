@@ -38,6 +38,7 @@ fn fake_config(id: &str, display: &str) -> McpServerConfig {
         transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     }
@@ -53,6 +54,7 @@ fn paginated_config(id: &str, display: &str) -> McpServerConfig {
         transport: McpTransport::stdio(PAGINATED_BIN, Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     }
@@ -70,6 +72,7 @@ fn cursor_loop_config(id: &str, display: &str) -> McpServerConfig {
         transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
         env,
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     }
@@ -101,6 +104,7 @@ fn broken_config(id: &str, display: &str) -> McpServerConfig {
         transport: McpTransport::stdio("/no/such/toptopduck-binary", Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     }
@@ -428,11 +432,12 @@ fn connect_one_injects_secrets_into_the_child_env() {
         transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: vec!["TOPTOPDUCK_TEST_MCP_SECRET".into()],
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     };
     let mut agg = McpAggregator::empty();
-    agg.connect_one(&config, &secrets);
+    agg.connect_one(&config, &secrets, &[]);
 
     // The declared secret reaches the child env (the fake server's echo_env
     // tool reflects std::env::var).
@@ -490,9 +495,11 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
         display_name: "HttpFail".into(),
         transport: McpTransport::Http {
             url: "http://127.0.0.1:1".into(),
+            headers: BTreeMap::new(),
         },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     };
@@ -550,6 +557,11 @@ use std::time::Duration;
 struct ServerState {
     sse_queue: Mutex<VecDeque<String>>,
     shutdown: AtomicBool,
+    /// Every request's captured headers (name lowercased, value verbatim),
+    /// appended per connection in arrival order (issue #901): the
+    /// header-injection pins read this back to assert what the transports
+    /// actually put on the wire.
+    captured_headers: Mutex<Vec<(String, String)>>,
 }
 
 /// Which transport protocol the test server speaks.
@@ -581,6 +593,18 @@ enum ServerMode {
     /// first event — exercises `SseClient`'s first-event rejection guard (H1,
     /// issue #389).
     SseBadFirstEvent,
+    /// Streamable HTTP answering every POST with `301` + a Location header —
+    /// exercises the no-redirect guardrail: the error must name the refused
+    /// redirect, not follow it (issue #901).
+    HttpRedirect,
+    /// Legacy SSE answering the GET stream with `301` + a Location header —
+    /// the SSE half of the no-redirect guardrail (issue #901).
+    SseRedirectGet,
+    /// Legacy SSE whose endpoint event advertises an absolute CROSS-ORIGIN
+    /// POST url — exercises the same-origin guardrail: refused when headers
+    /// are configured, plain connection failure (no guard) when not
+    /// (issue #901).
+    SseCrossOriginEndpoint,
 }
 
 /// A minimal in-process HTTP MCP server for integration testing (issue #389).
@@ -600,6 +624,7 @@ impl HttpMcpServer {
         let state = Arc::new(ServerState {
             sse_queue: Mutex::new(VecDeque::new()),
             shutdown: AtomicBool::new(false),
+            captured_headers: Mutex::new(Vec::new()),
         });
         let state_clone = state.clone();
         listener.set_nonblocking(true).expect("set_nonblocking");
@@ -667,8 +692,10 @@ fn handle_connection(
     let method = parts[0];
     let _path = parts[1];
 
-    // Read headers to get content-length.
+    // Read headers to get content-length; capture every header (name
+    // lowercased) for the issue-901 header-injection pins.
     let mut content_length = 0usize;
+    let mut captured: Vec<(String, String)> = Vec::new();
     loop {
         let line = match read_line(&mut reader) {
             Some(l) => l,
@@ -680,7 +707,15 @@ fn handle_connection(
         if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = rest.trim().parse().unwrap_or(0);
         }
+        if let Some((name, value)) = line.split_once(':') {
+            captured.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
     }
+    state
+        .captured_headers
+        .lock()
+        .expect("captured_headers poisoned")
+        .extend(captured);
 
     // Read body.
     let mut body = vec![0u8; content_length];
@@ -704,6 +739,13 @@ fn handle_connection(
         }
         (ServerMode::SseBadFirstEvent, "GET") => {
             handle_sse_stream_bad_first_event(&mut stream, base_url);
+        }
+        (ServerMode::HttpRedirect, "POST") => handle_redirect(&mut stream, "/moved"),
+        (ServerMode::SseRedirectGet, "GET") => handle_redirect(&mut stream, "/elsewhere"),
+        (ServerMode::SseCrossOriginEndpoint, "GET") => {
+            // A cross-origin absolute endpoint: port 9 (discard) is not this
+            // listener's port, so the origin differs by construction.
+            handle_sse_stream_with_endpoint(&mut stream, "http://127.0.0.1:9/message");
         }
         _ => {
             write_response(&mut stream, 404, "text/plain", "not found");
@@ -763,6 +805,34 @@ fn handle_jsonrpc_sse_malformed_post(stream: &mut TcpStream) {
 }
 
 // --- Legacy SSE handlers ---------------------------------------------------
+
+/// Answer with `301` + a Location header and hold the connection briefly
+/// (issue #901): the no-redirect guardrail pins must see the redirect status,
+/// not a followed second hop.
+fn handle_redirect(stream: &mut TcpStream, location: &str) {
+    let header = format!(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.flush();
+    thread::sleep(Duration::from_millis(200));
+}
+
+/// Open an SSE stream whose first event is a well-formed `endpoint` event
+/// carrying the GIVEN url verbatim (issue #901): unlike
+/// [`handle_sse_stream`], which derives the endpoint from the listener's own
+/// base url, this pins the server-advertised-absolute-endpoint shape the
+/// same-origin guardrail reasons about.
+fn handle_sse_stream_with_endpoint(stream: &mut TcpStream, endpoint_url: &str) {
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.flush();
+
+    let endpoint = format!("event: endpoint\r\ndata: {endpoint_url}\r\n\r\n");
+    let _ = stream.write_all(endpoint.as_bytes());
+    let _ = stream.flush();
+    thread::sleep(Duration::from_secs(5));
+}
 
 /// GET handler for SSE transport that sends `event: message` as the first
 /// event instead of `event: endpoint` — exercises `SseClient`'s first-event
@@ -981,7 +1051,8 @@ fn http_transport_connect_tools_list_and_call() {
     let server = HttpMcpServer::spawn(ServerMode::Http);
     let url = format!("{}/mcp", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url).expect("http connect");
+    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
+        .expect("http connect");
 
     let tools = client.list_tools("http-fake").expect("tools/list");
     assert_eq!(tools.len(), 2, "http server advertises echo + add");
@@ -1008,9 +1079,13 @@ fn http_transport_aggregator_connect_and_route() {
     let config = McpServerConfig {
         id: McpServerId("http-srv".into()),
         display_name: "HttpMCP".into(),
-        transport: McpTransport::Http { url },
+        transport: McpTransport::Http {
+            url,
+            headers: BTreeMap::new(),
+        },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     };
@@ -1043,8 +1118,8 @@ fn http_transport_handles_sse_response_branch() {
     let server = HttpMcpServer::spawn(ServerMode::HttpSse);
     let url = format!("{}/mcp", server.url());
 
-    let mut client =
-        toptopduck_lib::mcp::client::HttpClient::connect(&url).expect("http-sse connect");
+    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
+        .expect("http-sse connect");
 
     let tools = client
         .list_tools("http-sse-fake")
@@ -1067,7 +1142,7 @@ fn http_transport_sse_malformed_data_fails_as_framing() {
     let server = HttpMcpServer::spawn(ServerMode::HttpSseMalformed);
     let url = format!("{}/mcp", server.url());
 
-    let err = match toptopduck_lib::mcp::client::HttpClient::connect(&url) {
+    let err = match toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new()) {
         Ok(_) => panic!("malformed SSE data must fail the request"),
         Err(e) => e,
     };
@@ -1097,7 +1172,7 @@ fn sse_transport_rejects_non_endpoint_first_event() {
     let server = HttpMcpServer::spawn(ServerMode::SseBadFirstEvent);
     let url = format!("{}/sse", server.url());
 
-    let result = toptopduck_lib::mcp::client::SseClient::connect(&url);
+    let result = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new());
     let err = match result {
         Ok(_) => panic!("non-endpoint first event should be rejected"),
         Err(e) => e,
@@ -1116,7 +1191,8 @@ fn sse_transport_connect_tools_list_and_call() {
     let server = HttpMcpServer::spawn(ServerMode::Sse);
     let url = format!("{}/sse", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url).expect("sse connect");
+    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
+        .expect("sse connect");
 
     let tools = client.list_tools("sse-fake").expect("tools/list");
     assert_eq!(tools.len(), 2, "sse server advertises echo + add");
@@ -1145,9 +1221,13 @@ fn sse_transport_aggregator_connect_and_route() {
     let config = McpServerConfig {
         id: McpServerId("sse-srv".into()),
         display_name: "SseMCP".into(),
-        transport: McpTransport::Sse { url },
+        transport: McpTransport::Sse {
+            url,
+            headers: BTreeMap::new(),
+        },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     };
@@ -1275,6 +1355,7 @@ fn hang_config(id: &str, display: &str, timeout_ms: u32) -> McpServerConfig {
         transport: McpTransport::stdio(HANG_BIN, Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: Some(timeout_ms),
         enabled: true,
     }
@@ -1292,6 +1373,7 @@ fn hang_call_config(id: &str, display: &str, timeout_ms: u32) -> McpServerConfig
         transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
         env,
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: Some(timeout_ms),
         enabled: true,
     }
@@ -1310,6 +1392,7 @@ fn hang_list_config(id: &str, display: &str, timeout_ms: u32) -> McpServerConfig
         transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
         env,
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: Some(timeout_ms),
         enabled: true,
     }
@@ -1327,6 +1410,7 @@ fn die_call_config(id: &str, display: &str) -> McpServerConfig {
         transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
         env,
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
     }
@@ -1498,9 +1582,11 @@ fn route_deadline_bounds_a_silent_sse_connection() {
         display_name: "SilentSSE".into(),
         transport: McpTransport::Sse {
             url: format!("{}/sse", server.url()),
+            headers: BTreeMap::new(),
         },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: Some(250),
         enabled: true,
     };
@@ -1543,9 +1629,11 @@ fn cancel_teardown_unblocks_a_silent_sse_park() {
         display_name: "SilentSSECancel".into(),
         transport: McpTransport::Sse {
             url: format!("{}/sse", server.url()),
+            headers: BTreeMap::new(),
         },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         // A long budget: only the CANCEL path can unblock this test in time.
         timeout_ms: Some(60_000),
         enabled: true,
@@ -1604,9 +1692,11 @@ fn connect_phase_cancel_unblocks_a_silent_sse_handshake() {
         display_name: "HandshakeSilentSSE".into(),
         transport: McpTransport::Sse {
             url: format!("{}/sse", server.url()),
+            headers: BTreeMap::new(),
         },
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         // A long budget: only the CANCEL path can unblock this test in time.
         timeout_ms: Some(60_000),
         enabled: true,
@@ -1850,5 +1940,225 @@ fn connect_deadline_bounds_a_tools_list_hang() {
     assert!(
         error.contains("timed out") && error.contains("HangListMCP"),
         "attribution names the server + the timeout, got: {error}"
+    );
+}
+
+// --- Remote transport headers (issue #901) ----------------------------------
+
+/// The captured-headers assertion helper: true when at least one captured
+/// request carried the exact `(name, value)` pair. Name matching is
+/// case-insensitive on the fixture side (the fixture lowercases what it
+/// captures), mirroring HTTP header-name semantics.
+fn captured_has(server: &HttpMcpServer, name: &str, value: &str) -> bool {
+    let captured = server.state.captured_headers.lock().expect("poisoned");
+    captured.iter().any(|(n, v)| n == name && v == value)
+}
+
+/// The configured (non-secret) headers reach the wire: `HttpClient` attaches
+/// them to every POST (issue #901 AC: the injection is assertable by the
+/// fixture). initialize + tools/list both POST, so the pair is captured
+/// twice over; one hit suffices.
+#[test]
+fn http_transport_sends_configured_headers_on_every_post() {
+    let server = HttpMcpServer::spawn(ServerMode::Http);
+    let url = format!("{}/mcp", server.url());
+    let mut headers = BTreeMap::new();
+    headers.insert("X-Test-Token".into(), "plain-config-value".into());
+
+    let mut client =
+        toptopduck_lib::mcp::client::HttpClient::connect(&url, &headers).expect("http connect");
+    client.list_tools("hdr-fake").expect("tools/list");
+
+    assert!(
+        captured_has(&server, "x-test-token", "plain-config-value"),
+        "the POST carried the configured header, got {:?}",
+        server.state.captured_headers.lock().expect("poisoned")
+    );
+}
+
+/// The header face through the AGGREGATOR with the secret value resolved
+/// from the keychain face (issue #901 AC: the secret value never enters the
+/// config -- `transport.headers` is empty; `keychain_header_keys` names it;
+/// the fixture sees the injected value). The keychain itself is bypassed by
+/// passing the resolved pair straight to `connect_one` (its documented
+/// seam -- the command / aggregator resolve from the OS store in production).
+#[test]
+fn aggregator_injects_keychain_header_secrets_into_http_requests() {
+    let server = HttpMcpServer::spawn(ServerMode::Http);
+    let config = McpServerConfig {
+        id: McpServerId("hdr-secret".into()),
+        display_name: "HdrSecret".into(),
+        transport: McpTransport::Http {
+            url: format!("{}/mcp", server.url()),
+            headers: BTreeMap::new(),
+        },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        // The SECRET header rides only as a name -- the value lives in the
+        // keychain face, never in this config.
+        keychain_header_keys: vec!["X-Test-Token".into()],
+        timeout_ms: None,
+        enabled: true,
+    };
+    let mut agg = McpAggregator::empty();
+    let header_secrets: Vec<SecretEnv> = vec![("X-Test-Token".into(), "keychain-value".into())];
+    agg.connect_one(&config, &[], &header_secrets);
+
+    assert!(
+        captured_has(&server, "x-test-token", "keychain-value"),
+        "the keychain-resolved value reached the wire, got {:?}",
+        server.state.captured_headers.lock().expect("poisoned")
+    );
+}
+
+/// The SSE transport attaches headers to BOTH faces: the GET stream open and
+/// every POST to the advertised endpoint (issue #901). initialize + tools/list
+/// produce one GET and two POSTs; both faces must show the pair.
+#[test]
+fn sse_transport_sends_headers_on_get_stream_and_post() {
+    let server = HttpMcpServer::spawn(ServerMode::Sse);
+    let url = format!("{}/sse", server.url());
+    let mut headers = BTreeMap::new();
+    headers.insert("X-Test-Token".into(), "sse-config-value".into());
+
+    let mut client =
+        toptopduck_lib::mcp::client::SseClient::connect(&url, &headers).expect("sse connect");
+    client.list_tools("sse-hdr-fake").expect("tools/list");
+
+    // The GET stream + at least one POST: two requests carrying the pair.
+    let captured = server.state.captured_headers.lock().expect("poisoned");
+    let hits = captured
+        .iter()
+        .filter(|(n, v)| n == "x-test-token" && v == "sse-config-value")
+        .count();
+    drop(captured);
+    assert!(
+        hits >= 2,
+        "the GET stream and a POST both carried the header ({hits} hits, got {:?})",
+        server.state.captured_headers.lock().expect("poisoned")
+    );
+}
+
+/// A header-authenticated SSE connect REFUSES a cross-origin endpoint event:
+/// the error names the refusal and BOTH origins (issue #901 guardrail two --
+/// the POST target comes from the server's own event, so without the guard a
+/// compromised server aims the authenticated POST at any host).
+#[test]
+fn sse_transport_rejects_cross_origin_endpoint_when_headers_configured() {
+    let server = HttpMcpServer::spawn(ServerMode::SseCrossOriginEndpoint);
+    let url = format!("{}/sse", server.url());
+    let mut headers = BTreeMap::new();
+    headers.insert("X-Test-Token".into(), "v".into());
+
+    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &headers)
+        .err()
+        .expect("cross-origin endpoint must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cross-origin"),
+        "names the refusal, got: {msg}"
+    );
+    assert!(
+        msg.contains("http://127.0.0.1:9")
+            && msg.contains(&format!("http://127.0.0.1:{}", server.port)),
+        "names both origins (post {} vs sse {}), got: {msg}",
+        "http://127.0.0.1:9",
+        server.port
+    );
+}
+
+/// The stock behavior half of the guardrail (issue #901): with NO headers
+/// configured, a cross-origin endpoint stays accepted at the origin check --
+/// the connect proceeds to the advertised (dead) host and fails as a plain
+/// connection error, not a guard refusal. Existing header-less configs keep
+/// their pre-#901 semantics.
+#[test]
+fn sse_transport_cross_origin_endpoint_without_headers_is_not_guard_refused() {
+    let server = HttpMcpServer::spawn(ServerMode::SseCrossOriginEndpoint);
+    let url = format!("{}/sse", server.url());
+
+    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
+        .err()
+        .expect("the dead advertised host still fails the connect");
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("cross-origin"),
+        "no headers -> no same-origin guard, got: {msg}"
+    );
+}
+
+/// The no-redirect guardrail, HTTP half (issue #901 guardrail one): a 301 is
+/// NOT followed -- the error names the redirect and its target explicitly.
+#[test]
+fn http_transport_refuses_redirect_instead_of_following() {
+    let server = HttpMcpServer::spawn(ServerMode::HttpRedirect);
+    let url = format!("{}/mcp", server.url());
+
+    let err = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
+        .err()
+        .expect("a redirecting endpoint must fail the connect");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("301") && msg.contains("/moved"),
+        "names the status + target, got: {msg}"
+    );
+    assert!(
+        msg.contains("redirect") && msg.to_lowercase().contains("refus"),
+        "names the refusal, got: {msg}"
+    );
+}
+
+/// The no-redirect guardrail, SSE GET half (issue #901): the stream open hits
+/// the same agent-level refusal.
+#[test]
+fn sse_transport_refuses_redirect_on_get_stream() {
+    let server = HttpMcpServer::spawn(ServerMode::SseRedirectGet);
+    let url = format!("{}/sse", server.url());
+
+    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
+        .err()
+        .expect("a redirecting stream must fail the connect");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("301") && msg.contains("redirect") && msg.contains("/elsewhere"),
+        "names the refused redirect, got: {msg}"
+    );
+}
+
+/// Guardrail two keys on the CONFIGURED face (review fix): a server that
+/// declares only a SECRET header name (`keychain_header_keys`) -- whose
+/// keychain value is missing here, so the merged runtime map is empty --
+/// still counts as header-authenticated and refuses a cross-origin endpoint
+/// (issue #901: "配置了任意 header（密或非密）时").
+#[test]
+fn sse_transport_guard_trips_on_a_declared_secret_name_without_a_resolved_value() {
+    let server = HttpMcpServer::spawn(ServerMode::SseCrossOriginEndpoint);
+    let config = McpServerConfig {
+        id: McpServerId("hdr-secret-only".into()),
+        display_name: "HdrSecretOnly".into(),
+        transport: McpTransport::Sse {
+            url: format!("{}/sse", server.url()),
+            // No plain headers; the declaration alone carries the guard.
+            headers: BTreeMap::new(),
+        },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        keychain_header_keys: vec!["X-Test-Token".into()],
+        timeout_ms: None,
+        enabled: true,
+    };
+    // No keychain entry exists, so the resolved header_secrets are empty --
+    // exactly the shape the merged-map check would have waved through.
+    let keychain = KeychainStore::new();
+    let mut agg = McpAggregator::empty();
+    agg.connect_all(&[config], &keychain);
+
+    let listing = agg.server_listing();
+    let error = listing["servers"][0]["error"]
+        .as_str()
+        .expect("the connect failed");
+    assert!(
+        error.contains("cross-origin"),
+        "the declared secret name alone trips the guard, got: {error}"
     );
 }

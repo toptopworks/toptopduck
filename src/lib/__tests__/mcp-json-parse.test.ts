@@ -86,23 +86,54 @@ describe("normalizeJsonToConfig", () => {
     const json = {
       id: "srv-1",
       display_name: "existing",
-      transport: { type: "http", url: "https://example.com/mcp" },
+      transport: {
+        type: "http",
+        url: "https://example.com/mcp",
+        headers: { "X-Custom": "val" },
+      },
       env: { FOO: "bar" },
       keychain_env_keys: ["SECRET_KEY"],
+      keychain_header_keys: ["Authorization"],
       timeout_ms: 5000,
     };
 
     const config = normalizeJsonToConfig(json, "");
     // The draft carries every field EXCEPT `enabled` (the form's save owns
-    // that field; #659).
+    // that field; #659). The remote row's env rides along DORMANT (issue
+    // #901: preserved through edits, invisible in the editors).
     expect(config).toEqual({
       id: "srv-1",
       display_name: "existing",
-      transport: { type: "http", url: "https://example.com/mcp" },
+      transport: {
+        type: "http",
+        url: "https://example.com/mcp",
+        headers: { "X-Custom": "val" },
+      },
       env: { FOO: "bar" },
       keychain_env_keys: ["SECRET_KEY"],
+      keychain_header_keys: ["Authorization"],
       timeout_ms: 5000,
     });
+  });
+
+  it("fills an empty header map when internal format omits headers (issue #901)", () => {
+    // A config written before the headers field existed has no
+    // transport.headers; the passthrough fills the empty map so downstream
+    // spread/merge stays total.
+    const json = {
+      id: "srv-1",
+      display_name: "legacy",
+      transport: { type: "sse", url: "https://example.com/sse" },
+      env: {},
+      keychain_env_keys: [],
+    };
+    const config = normalizeJsonToConfig(json, "");
+    expect(config.transport).toEqual({
+      type: "sse",
+      url: "https://example.com/sse",
+      headers: {},
+    });
+    expect(config.keychain_header_keys).toEqual([]);
   });
 
   it("drops an `enabled` field in internal-format JSON (ADR-0106, #659)", () => {
@@ -150,10 +181,11 @@ describe("normalizeJsonToConfig", () => {
     expect(config.transport).toEqual({
       type: "sse",
       url: "https://example.com/sse",
+      headers: {},
     });
   });
 
-  it("reads headers (not env) for http/sse servers", () => {
+  it("routes web-format headers onto transport.headers for http/sse servers (issue #901)", () => {
     const json = {
       "api-server": {
         type: "http",
@@ -166,11 +198,23 @@ describe("normalizeJsonToConfig", () => {
     };
 
     const config = normalizeJsonToConfig(json, "");
-    expect(config.env).toEqual({ "X-Custom-Header": "value" });
-    expect(config.keychain_env_keys).toContain("Authorization");
+    // Non-secret values land on the transport's header face (NOT env -- the
+    // pre-#901 parser wrote them to env where the http transport never read
+    // them).
+    expect(config.transport).toMatchObject({
+      type: "http",
+      headers: { "X-Custom-Header": "value" },
+    });
+    // Secret-named headers route to the header keychain face; the value is
+    // dropped (the user re-enters it via the form Secret checkbox).
+    expect(config.keychain_header_keys).toContain("Authorization");
+    expect(config.env).toEqual({});
+    expect(config.keychain_env_keys).toEqual([]);
   });
 
-  it("falls back to env for http/sse when headers absent", () => {
+  it("falls back to env for http/sse when headers absent (non-standard shape)", () => {
+    // Some non-standard web formats put the header map under "env" on an
+    // http/sse row: the fallback still routes it to the HEADER face.
     const json = {
       "api-server": {
         type: "http",
@@ -180,7 +224,10 @@ describe("normalizeJsonToConfig", () => {
     };
 
     const config = normalizeJsonToConfig(json, "");
-    expect(config.env).toEqual({ "X-Custom-Header": "value" });
+    expect(config.transport).toMatchObject({
+      headers: { "X-Custom-Header": "value" },
+    });
+    expect(config.env).toEqual({});
   });
 
   it("defaults url transport to http when type is absent", () => {
@@ -194,6 +241,7 @@ describe("normalizeJsonToConfig", () => {
     expect(config.transport).toEqual({
       type: "http",
       url: "https://example.com/mcp",
+      headers: {},
     });
   });
 
@@ -261,6 +309,7 @@ describe("configToWebJson", () => {
       transport: { type: "stdio", command: "npx", args: ["-y", "@pkg/srv"] },
       env: { LOG_LEVEL: "debug" },
       keychain_env_keys: [],
+      keychain_header_keys: [],
       timeout_ms: null,
     });
 
@@ -278,9 +327,10 @@ describe("configToWebJson", () => {
     const json = configToWebJson({
       id: "srv-1",
       display_name: "api",
-      transport: { type: "http", url: "https://example.com/mcp" },
+      transport: { type: "http", url: "https://example.com/mcp", headers: {} },
       env: {},
       keychain_env_keys: [],
+      keychain_header_keys: [],
       timeout_ms: null,
     });
 
@@ -292,18 +342,25 @@ describe("configToWebJson", () => {
     expect(parsed["api"].headers).toBeUndefined();
   });
 
-  it("serializes http env as headers in web format", () => {
+  it("serializes transport headers (secret names blanked) as the web-format headers field", () => {
+    // Issue #901: the remote face serializes transport.headers (non-secret)
+    // + keychain_header_keys (names only, values blanked) under "headers";
+    // a remote row's dormant env is NOT serialized (invisible everywhere).
     const json = configToWebJson({
       id: "srv-1",
       display_name: "api",
-      transport: { type: "http", url: "https://example.com/mcp" },
-      env: { "X-Custom": "val" },
-      keychain_env_keys: ["Authorization"],
+      transport: {
+        type: "http",
+        url: "https://example.com/mcp",
+        headers: { "X-Custom": "val" },
+      },
+      env: { LEGACY_ENV: "dormant" },
+      keychain_env_keys: [],
+      keychain_header_keys: ["Authorization"],
       timeout_ms: null,
     });
 
     const parsed = JSON.parse(json);
-    // http → "headers", NOT "env"
     expect(parsed["api"].headers).toEqual({ "X-Custom": "val", "Authorization": "" });
     expect(parsed["api"].env).toBeUndefined();
   });
@@ -315,6 +372,7 @@ describe("configToWebJson", () => {
       transport: { type: "stdio", command: "run", args: [] },
       env: { LOG_LEVEL: "info" },
       keychain_env_keys: ["API_KEY"],
+      keychain_header_keys: [],
       timeout_ms: null,
     });
 
@@ -329,6 +387,7 @@ describe("configToWebJson", () => {
       transport: { type: "stdio", command: "run", args: [] },
       env: {},
       keychain_env_keys: [],
+      keychain_header_keys: [],
       timeout_ms: 60000,
     });
 
@@ -343,6 +402,7 @@ describe("configToWebJson", () => {
       transport: { type: "stdio", command: "run", args: [] },
       env: {},
       keychain_env_keys: [],
+      keychain_header_keys: [],
       timeout_ms: null,
     });
 
@@ -358,6 +418,7 @@ describe("configToWebJson", () => {
       transport: { type: "stdio", command: "npx", args: ["-y", "pkg"] },
       env: { LOG_LEVEL: "debug" },
       keychain_env_keys: ["API_KEY"],
+      keychain_header_keys: [],
       timeout_ms: 30000,
       enabled: true,
     };
@@ -382,9 +443,14 @@ describe("configToWebJson", () => {
     const original: McpServerConfig = {
       id: "srv-1",
       display_name: "api-server",
-      transport: { type: "http", url: "https://example.com/mcp" },
-      env: { "X-Custom": "val" },
-      keychain_env_keys: ["Authorization"],
+      transport: {
+        type: "http",
+        url: "https://example.com/mcp",
+        headers: { "X-Custom": "val" },
+      },
+      env: {},
+      keychain_env_keys: [],
+      keychain_header_keys: ["Authorization"],
       timeout_ms: 45000,
       enabled: true,
     };
@@ -396,10 +462,11 @@ describe("configToWebJson", () => {
     expect(restored.transport).toEqual({
       type: "http",
       url: "https://example.com/mcp",
+      headers: { "X-Custom": "val" },
     });
-    // http → serialized as "headers", parsed back via config.headers path.
-    expect(restored.env).toEqual({ "X-Custom": "val" });
-    expect(restored.keychain_env_keys).toContain("Authorization");
+    // Serialized under "headers" (secret blanked), parsed back onto the
+    // header face with the secret re-detected.
+    expect(restored.keychain_header_keys).toContain("Authorization");
     expect(restored.timeout_ms).toBe(45000);
   });
 });
