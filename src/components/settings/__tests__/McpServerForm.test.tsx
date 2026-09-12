@@ -1210,6 +1210,94 @@ describe("McpServerForm (issue #388)", () => {
     expect(clearMcpServerSecret).not.toHaveBeenCalled();
   });
 
+  it("clears the keychain account of a deleted header secret row on save, surviving a mode switch (issue #904)", async () => {
+    // The header-face twin of the env clear test, plus the mode-switch
+    // survival the module doc claims: the recorded deletion rides the
+    // Form -> JSON switch and clears at the JSON-mode save (either mode).
+    const sseTransport = {
+      type: "sse",
+      url: "https://example.com/sse",
+      headers: {},
+    } as const;
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({
+        transport: sseTransport,
+        env: {},
+        keychain_env_keys: [],
+        keychain_header_keys: [],
+      }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          transport: sseTransport,
+          env: {},
+          keychain_env_keys: [],
+          keychain_header_keys: ["Authorization"],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Remove the header secret row, then switch to JSON mode before
+    // saving: the recorded deletion must survive the mode switch.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove header (row 1)" }),
+    );
+    fireEvent.click(screen.getByText("JSON"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+    expect(
+      vi.mocked(upsertMcpServer).mock.calls[0][0].keychain_header_keys,
+    ).toEqual([]);
+    await waitFor(() =>
+      expect(clearMcpServerHeaderSecret).toHaveBeenCalledWith(
+        "srv-1",
+        "Authorization",
+      ),
+    );
+    expect(clearMcpServerSecret).not.toHaveBeenCalled();
+  });
+
+  it("still hands off to the list and warns when a clear fails after the save (issue #904)", async () => {
+    // The upsert already committed, so the handoff must still run (the
+    // list's mirror must not diverge from disk) and the failure rides the
+    // probe result's error channel -- connected stays true, only the
+    // cleanup did not land.
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({ env: { LOG_LEVEL: "info" }, keychain_env_keys: [] }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+    vi.mocked(clearMcpServerSecret).mockRejectedValue(
+      new Error("keychain locked"),
+    );
+    const onSaved = vi.fn();
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={onSaved}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove variable.*row 2/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    const [, probeResult] = onSaved.mock.calls[0];
+    expect(probeResult.connected).toBe(true);
+    expect(probeResult.error).toContain("keychain locked");
+  });
+
   it("shows the keep/clear hint only when a secret row exists (issue #904)", () => {
     const { unmount } = renderWithProviders(
       <McpServerForm

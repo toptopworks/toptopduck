@@ -132,7 +132,10 @@ function headerFaceOf(server: McpServerDraft): {
 type KvEntryActions = {
   add: () => void;
   remove: (index: number) => void;
-  update: (index: number, patch: Partial<KvEntry>) => void;
+  // The row id is minted once at add-time and keys the row for its whole
+  // life (H1 stable-row-key); the patch type excludes it so the type
+  // system rejects an id-overwriting update.
+  update: (index: number, patch: Partial<Omit<KvEntry, "id">>) => void;
 };
 
 /** Build one face's row-action triplet over its state setter (issue #904
@@ -617,14 +620,30 @@ export function McpServerForm({
       const envClears = [...new Set(deletedSecretKeysRef.current.env)].filter(
         (key) => !finalized.keychain_env_keys.includes(key),
       );
-      for (const key of envClears) {
-        await clearMcpServerSecret(finalized.id, key);
-      }
       const headerClears = [
         ...new Set(deletedSecretKeysRef.current.header),
       ].filter((name) => !finalized.keychain_header_keys.includes(name));
+      // Non-fatal the way the probe below is (C2): the upsert already
+      // committed, and aborting before onSaved would leave the list's
+      // mirror stale -- any later full-config commit (a theme change, an
+      // engine save) would silently revert this save (review I3). Each
+      // failure is collected and appended to the probe result's error
+      // channel so the row surfaces it; connected stays true -- the
+      // server itself is fine, only the cleanup did not land.
+      const clearWarnings: string[] = [];
+      for (const key of envClears) {
+        try {
+          await clearMcpServerSecret(finalized.id, key);
+        } catch (clearErr) {
+          clearWarnings.push(fmtError(clearErr, intl));
+        }
+      }
       for (const name of headerClears) {
-        await clearMcpServerHeaderSecret(finalized.id, name);
+        try {
+          await clearMcpServerHeaderSecret(finalized.id, name);
+        } catch (clearErr) {
+          clearWarnings.push(fmtError(clearErr, intl));
+        }
       }
 
       // 4. Auto-probe so the list shows an immediate status. A probe failure
@@ -639,6 +658,17 @@ export function McpServerForm({
           connected: false,
           tools: [],
           error: fmtError(probeErr, intl),
+        };
+      }
+      if (clearWarnings.length > 0) {
+        // A deleted credential may still sit in the OS keychain -- the row
+        // tells the user instead of the save silently half-completing.
+        const warning = clearWarnings.join("; ");
+        probeResult = {
+          ...probeResult,
+          error: probeResult.error
+            ? `${probeResult.error}; ${warning}`
+            : warning,
         };
       }
 

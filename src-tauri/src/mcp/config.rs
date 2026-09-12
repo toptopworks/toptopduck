@@ -42,6 +42,7 @@
 use std::collections::BTreeMap;
 
 use crate::app_config::io::is_secret_header_name;
+use crate::mcp::secrets::HEADER_ACCOUNT_INFIX;
 
 use serde::{Deserialize, Serialize};
 
@@ -289,11 +290,11 @@ pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), Strin
     // so only the lowercase-literal `header-` prefix conflicts (`Header-X`
     // lands a different account than any header name can produce).
     for env_key in &server.keychain_env_keys {
-        if let Some(header_name) = env_key.strip_prefix("header-") {
+        if let Some(header_name) = env_key.strip_prefix(HEADER_ACCOUNT_INFIX) {
             return Err(format!(
-                "MCP server `{}`: env key {env_key:?} starts with `header-` -- its keychain \
-                 account collides with the header secret named {header_name:?} on this server; \
-                 rename the env key",
+                "MCP server `{}`: env key {env_key:?} starts with `{HEADER_ACCOUNT_INFIX}` -- \
+                 its keychain account collides with the header secret named {header_name:?} on \
+                 this server; rename the env key",
                 server.id
             ));
         }

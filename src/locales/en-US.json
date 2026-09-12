@@ -318,6 +318,7 @@
   "settings.mcp.notTested": "Not tested yet. Click Test to check connectivity.",
   "settings.mcp.notTestedHint": "Not tested",
   "settings.mcp.probeFailed": "Connection failed: {error}",
+  "settings.mcp.probeWarning": "Saved with a warning: {error}",
   "settings.mcp.searchPlaceholder": "Search servers…",
   "settings.mcp.test": "Test",
   "settings.mcp.testLabel": "Test server {name}",

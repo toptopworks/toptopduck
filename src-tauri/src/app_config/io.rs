@@ -355,7 +355,10 @@ enum ScanHit {
 /// `X` header secret -- a hand-edit racing the form's own write boundary,
 /// self-inflicted and last-writer-wins; refusing the whole app-config over
 /// it would nuke every unrelated preference for an asymmetrically small
-/// harm. The write boundary (upsert) is the sole guard.
+/// harm. The write boundary (upsert) guards every app-initiated write; the
+/// raw `set_app_config` mirror write does not validate, so a hand-edited
+/// colliding shape rides any unrelated full-config commit back to disk
+/// unchanged -- accepted, same calculus.
 fn find_scan_hit(value: &Value) -> Option<ScanHit> {
     match value {
         Value::Object(map) => {
@@ -446,9 +449,9 @@ mod tests {
             "the frontend base list must equal SECRET_KEY_NAMES entry for entry"
         );
         assert_eq!(
-            ts_string_array(ts, "IMPORT_SECRET_SUBSTRINGS"),
+            ts_string_array(ts, "HEADER_SECRET_SUBSTRINGS"),
             to_strings(HEADER_SECRET_SUBSTRINGS),
-            "the frontend additions must equal HEADER_SECRET_SUBSTRINGS entry for entry"
+            "the frontend header additions must equal HEADER_SECRET_SUBSTRINGS entry for entry"
         );
         for extra in crate::mcp::import::IMPORT_SECRET_SUBSTRINGS {
             assert!(

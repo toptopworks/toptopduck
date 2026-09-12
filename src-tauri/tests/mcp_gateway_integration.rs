@@ -2083,11 +2083,16 @@ fn connect_transport_injects_keychain_header_secrets_into_http_requests() {
     );
 }
 
-/// The probe's stdio transport entry (issue #904): the same `connect_transport`
-/// distributes the ENV face -- the resolved keychain env pair reaches the
-/// spawned child's environment (the echo_env tool reflects std::env::var).
-/// The keychain itself is bypassed at the documented seam: the probe
-/// resolves from the OS store in production, the resolved pair rides here.
+/// The aggregator's stdio transport entry (issue #904): `connect_transport`
+/// routes a stdio config to `StdioClient::connect_with_kill`, sharing the
+/// `stdio_command` env-injection seam with the probe's `spawn_stdio_child`
+/// (which never goes through `connect_transport` -- the probe's stdio arm
+/// in commands.rs spawns and handshakes the child directly, and is not
+/// itself driven by any test). The resolved keychain env pair reaches the
+/// spawned child's environment through that shared seam (the echo_env tool
+/// reflects std::env::var). The keychain is bypassed at the documented
+/// seam: the probe resolves from the OS store in production, the resolved
+/// pair rides here.
 #[test]
 fn connect_transport_injects_keychain_env_secrets_into_the_child_env() {
     let config = McpServerConfig {

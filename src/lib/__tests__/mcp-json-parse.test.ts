@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { McpServerConfig } from "../../types/mcp";
 import {
   configToWebJson,
-  IMPORT_SECRET_SUBSTRINGS,
+  HEADER_SECRET_SUBSTRINGS,
   isSecretEnvKey,
   normalizeJsonToConfig,
   SECRET_NAME_SUBSTRINGS,
@@ -35,7 +35,7 @@ describe("isSecretEnvKey", () => {
   // CONTENTS to the Rust lists entry for entry, this test holds the FUNCTION
   // to consulting every entry both lists carry.
   it("flags every entry of both secret-name lists (drift mirror)", () => {
-    for (const name of [...SECRET_NAME_SUBSTRINGS, ...IMPORT_SECRET_SUBSTRINGS]) {
+    for (const name of [...SECRET_NAME_SUBSTRINGS, ...HEADER_SECRET_SUBSTRINGS]) {
       expect(isSecretEnvKey(name)).toBe(true);
     }
   });
