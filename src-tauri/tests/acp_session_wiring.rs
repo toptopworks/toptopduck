@@ -80,6 +80,31 @@ fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<
         "TOPTOPDUCK_ACP_BRIDGE_BIN",
         env!("CARGO_BIN_EXE_toptopduck-acp-bridge"),
     );
+    // Pre-warm the two fixture images (issue #897 review): a first spawn on
+    // a cold Windows box pays tens of seconds of image load per binary, and
+    // the arming-order pin's fire must land AFTER the CLI stores its
+    // engine-done flag -- which rides the CLI's first complete scenario,
+    // and the CLI spawns the bridge synchronously mid-scenario, so a cold
+    // bridge delays that store just as much. The CLI is a bare spawn whose
+    // stdin closes at once (it exits on the EOF before any scenario runs,
+    // so no bridge of its own spawns); the bridge exits immediately on its
+    // missing env pair. The arming pin's own test layers a full warm turn
+    // on top -- the protocol half of the chain needs it (mutant-verified).
+    let mut warm_cli = std::process::Command::new(&fake_cli)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("prewarm: fake CLI spawns");
+    drop(warm_cli.stdin.take());
+    let _ = warm_cli.wait().expect("prewarm: fake CLI exits");
+    let mut warm_bridge = std::process::Command::new(env!("CARGO_BIN_EXE_toptopduck-acp-bridge"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("prewarm: bridge spawns");
+    let _ = warm_bridge.wait().expect("prewarm: bridge exits");
     let mut session = Session::new().expect("session");
     session.set_external_runtime(Some(fake_cli_adapter()));
     (session, old_path, guard)
@@ -104,6 +129,87 @@ fn external_text_reply_turn_completes() {
         }
         other => panic!("text_reply must complete Textual, got {other:?}"),
     }
+}
+
+/// Issue #897: the bridge path's arming order pin -- the external-turn
+/// counterpart of the built-in pin in mcp_mount_blackbox.rs. The bridge
+/// branch's `arm_cancel_teardown` ahead of `connect_all` could silently
+/// regress; with a hung MCP server the whole CLI -> bridge -> serve chain
+/// parks on the server's own budget while the session lock is held. One
+/// never-responding stdio server under a long budget, a token fire 5s in
+/// (after the pre-warmed CLI stores its engine-done flag), and the external
+/// turn must return well under the budget.
+#[test]
+fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
+    use std::time::{Duration, Instant};
+
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    // One full no-MCP turn first (issue #897 review): the 5s fire must land
+    // AFTER the CLI stores its engine-done flag, and that store rides the
+    // CLI's first complete scenario -- spawn, handshake, and the bridge the
+    // CLI spawns mid-scenario -- whose first pass on a cold box costs tens
+    // of seconds. The harness's bare image prewarm does not close the
+    // window (mutant-verified: the protocol half stays cold); this warm
+    // turn makes the pinned turn the chain's second full pass, where the
+    // store lands inside a couple of seconds -- inside the 5s fire.
+    let _ = session.ask("warm");
+    let hang = McpServerConfig {
+        id: McpServerId("wiring-hang".into()),
+        display_name: "HungMCP".into(),
+        transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-hang-server"), Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        // A long budget: only the CANCEL path can unblock this test in time.
+        // Cold-fixture spawn latency is paid by the harness pre-warm before
+        // the turn starts, so this budget measures the cancel contract, not
+        // box temperature.
+        timeout_ms: Some(120_000),
+        enabled: true,
+    };
+    // The fire lands AFTER the fast-finishing CLI has stored its engine-done
+    // flag -- the window where a stand-down signal tied to the engine half
+    // (instead of the turn's own unwind) would have retired the watcher
+    // over a turn that has not unwound yet. The delay is a heuristic, not a
+    // synchronization: the harness image pre-warm plus the warm turn below
+    // are what keep the store (measured 0.8-5s warm, tens of seconds cold)
+    // inside the 5s on this box, and a cold box without them defeats any
+    // fixed delay (mutant-verified: the same fire at 800ms greens the
+    // stand-down revert even with the image pre-warm in place).
+    let firer = Arc::clone(&session.cancel_token());
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(5000));
+        firer.request();
+    });
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let keychain = KeychainStore::new();
+    let started = Instant::now();
+    let outcome = session.ask_with_phase(
+        "run one turn",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[hang],
+            keychain: &keychain,
+            skills: &[],
+            skills_root: std::path::Path::new(""),
+            activated: &[],
+            cli_tools: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    // The ELAPSED bound is the pin: an arm-after-connect posture (or a
+    // stand-down tied to the engine half) parks the connect for the full
+    // 120s budget. The outcome's variant is NOT pinned -- a turn whose CLI
+    // is cancelled before it spawns the bridge surfaces the 30s bridge
+    // accept deadline as a Failed form, a race the pre-warm makes unlikely
+    // but cannot remove, and not the cancel contract either way.
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "the token fire unblocks the parked connect well under the 120s budget, got {outcome:?}"
+    );
 }
 
 /// The full chain: the fake-CLI's `gateway_tool_call` scenario drives one MCP

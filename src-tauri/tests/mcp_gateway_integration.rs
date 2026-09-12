@@ -300,14 +300,13 @@ fn route_to_unknown_slug_surfaces_unknown_server_error() {
 fn connect_one_injects_secrets_into_the_child_env() {
     // The gateway resolves `keychain_env_keys` at spawn (ADR-0029) and injects
     // each value into the child env via `StdioClient::connect_with_kill`.
-    // `connect_one`
-    // takes the already-resolved `SecretEnv` pairs (the keychain READ is
-    // exercised by the slice B unit tests); this test verifies the INJECTION --
-    // a declared secret reaches the spawned child, an undeclared key stays
-    // unset. Uses `connect_one` (not `connect_all`) to bypass the keychain (a
-    // real OS store, not an in-memory mock) and inject the pair directly. The
-    // key name is distinctive to avoid collision with a real env var on the
-    // host running the tests.
+    // `connect_one` takes the already-resolved `SecretEnv` pairs (the
+    // keychain READ is exercised by the slice B unit tests); this test
+    // verifies the INJECTION -- a declared secret reaches the spawned child,
+    // an undeclared key stays unset. Uses `connect_one` (not `connect_all`)
+    // to bypass the keychain (a real OS store, not an in-memory mock) and
+    // inject the pair directly. The key name is distinctive to avoid
+    // collision with a real env var on the host running the tests.
     let secret_value = "test-secret-xyz";
     let secrets: Vec<SecretEnv> = vec![("TOPTOPDUCK_TEST_MCP_SECRET".into(), secret_value.into())];
     let config = McpServerConfig {
@@ -459,6 +458,12 @@ enum ServerMode {
     /// onto the GET stream (issue #889): the client's `recv` parks on a
     /// live-but-silent connection -- the deadline fixture for the SSE half.
     SseSilent,
+    /// Legacy SSE whose silence starts at the handshake (issue #897): the
+    /// endpoint event rides the GET stream, every POST is acknowledged,
+    /// but no response event is EVER forwarded -- the initialize `recv`
+    /// parks mid-connect, the connect-phase half that `SseSilent` (which
+    /// silences only `tools/call`) never modeled.
+    SseHandshakeSilent,
     /// Legacy SSE that sends `event: message` (not `event: endpoint`) as the
     /// first event — exercises `SseClient`'s first-event rejection guard (H1,
     /// issue #389).
@@ -580,6 +585,10 @@ fn handle_connection(
         (ServerMode::Sse, "POST") => handle_sse_post(&mut stream, &body, &state),
         (ServerMode::SseSilent, "GET") => handle_sse_stream(&mut stream, &state, base_url),
         (ServerMode::SseSilent, "POST") => handle_sse_post_silent(&mut stream, &body, &state),
+        (ServerMode::SseHandshakeSilent, "GET") => handle_sse_stream(&mut stream, &state, base_url),
+        (ServerMode::SseHandshakeSilent, "POST") => {
+            handle_sse_post_handshake_silent(&mut stream, &body)
+        }
         (ServerMode::SseBadFirstEvent, "GET") => {
             handle_sse_stream_bad_first_event(&mut stream, base_url);
         }
@@ -696,7 +705,7 @@ fn handle_sse_stream(stream: &mut TcpStream, state: &ServerState, base_url: &str
 }
 
 /// Parse one SSE POST body as JSON-RPC: a malformed body is answered with a
-/// 400 and yields `None` (shared by both SSE POST handlers).
+/// 400 and yields `None` (shared by every SSE POST handler).
 fn parse_sse_post(stream: &mut TcpStream, body: &[u8]) -> Option<Value> {
     match serde_json::from_slice(body) {
         Ok(v) => Some(v),
@@ -740,6 +749,17 @@ fn handle_sse_post_silent(stream: &mut TcpStream, body: &[u8], state: &ServerSta
         return;
     }
     enqueue_and_ack_sse_response(stream, &req, state);
+}
+
+/// POST handler for the handshake-silent SSE fixture (issue #897): every
+/// POST is acknowledged (202) but nothing is ever enqueued -- the initialize
+/// handshake itself parks the client's `recv` on a live-but-silent
+/// connection.
+fn handle_sse_post_handshake_silent(stream: &mut TcpStream, body: &[u8]) {
+    if parse_sse_post(stream, body).is_none() {
+        return;
+    }
+    write_response(stream, 202, "application/json", "");
 }
 
 // --- Shared JSON-RPC response builder --------------------------------------
@@ -1230,11 +1250,11 @@ fn connect_deadline_skips_a_never_responding_stdio_server() {
 }
 
 /// A `tools/call` parked on a swallowing server returns at the deadline with
-/// server + tool attribution, and the server is disconnected for the rest of
+/// server + tool attribution, and the server is unavailable for the rest of
 /// the turn: the next call fails fast instead of re-parking for the full
 /// budget (issue #889).
 #[test]
-fn route_deadline_attributed_and_server_disconnected_for_the_turn() {
+fn route_deadline_attributed_and_server_unavailable_for_the_turn() {
     use std::time::Instant;
     use toptopduck_lib::mcp::client::ClientError;
 
@@ -1441,6 +1461,74 @@ fn cancel_teardown_unblocks_a_silent_sse_park() {
     assert!(
         matches!(err, ClientError::ServerClosed),
         "a stop-flagged reader disconnects the channel into ServerClosed, got {err:?}"
+    );
+}
+
+/// Issue #897: the SSE half of the connect-phase cancel. The silence starts
+/// at the handshake (every POST acked, no response event ever forwarded), so
+/// the initialize `recv` parks mid-connect with nobody but the
+/// pre-registered stop flag to break it -- arming before `connect_all`
+/// means the token fire stop-flags the reader, the channel disconnects, and
+/// the connect returns a transport death within one `SSE_READ_TIMEOUT` wake
+/// instead of the 60s budget. The failure must be the killed transport,
+/// not a skip: the fire landed mid-connect, so only the first server was
+/// parked (an inverted gap check -- armed means skip -- turns the wording
+/// assertion red at 0s).
+///
+/// No fixture mirrors this for streamable HTTP (issue #897): its kill is a
+/// no-op (`TransportKill::Http`) and the connect phase is bounded by the
+/// per-read timeout + the phase budget instead of a kill.
+#[test]
+fn connect_phase_cancel_unblocks_a_silent_sse_handshake() {
+    use std::time::Instant;
+    use toptopduck_lib::cancel::CancelToken;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseHandshakeSilent);
+    let config = McpServerConfig {
+        id: McpServerId("sse-hs-silent".into()),
+        display_name: "HandshakeSilentSSE".into(),
+        transport: McpTransport::Sse {
+            url: format!("{}/sse", server.url()),
+        },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        // A long budget: only the CANCEL path can unblock this test in time.
+        timeout_ms: Some(60_000),
+        enabled: true,
+    };
+    let cancel = Arc::new(CancelToken::new());
+    let turn_done = Arc::new(AtomicBool::new(false));
+    let mut agg = McpAggregator::empty();
+    // The post-#892 arming posture: the watcher is live BEFORE the connects
+    // (the session paths arm ahead of `connect_all`).
+    agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
+
+    let firer = Arc::clone(&cancel);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        firer.request();
+    });
+
+    let started = Instant::now();
+    let results = agg.connect_all(&[config], &KeychainStore::new());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "cancel unblocks the parked handshake well under the 60s budget"
+    );
+    assert_eq!(results.len(), 1, "every attempt still reports an outcome");
+    assert!(
+        !results[0].connected,
+        "the killed handshake must not connect: {:?}",
+        results[0].error
+    );
+    assert!(
+        !results[0]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("skipped"),
+        "the parked handshake died a transport death, not a skip: {:?}",
+        results[0].error
     );
 }
 

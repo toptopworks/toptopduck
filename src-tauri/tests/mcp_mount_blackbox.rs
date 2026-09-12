@@ -120,3 +120,67 @@ fn an_empty_effective_set_mounts_no_meta_tools() {
         "no meta tool rides the surface when nothing was attempted, got {names:?}"
     );
 }
+
+/// Issue #897: the built-in path's arming order pin. The aggregator API
+/// contract (arm before `connect_all`) is pinned at the gateway seam
+/// (mcp_gateway_integration), but the session facade's built-in branch
+/// could silently regress to arm-after-connect -- with a hung MCP server
+/// the connect parks the turn on the server's own budget with nobody
+/// watching. This drives the real session path: one never-responding
+/// stdio server under a long budget, a token fire 300ms in, and the turn
+/// must return well under the budget (an arm-after-connect posture waits
+/// the budget out -- the red this test exists to catch).
+#[test]
+fn a_connect_phase_token_fire_bounds_the_built_in_turn_with_a_hung_server() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let provider =
+        FakeProvider::new().scripted_tool_turn("查询", ToolTurnReply::Text("done".into()));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+
+    let hang = McpServerConfig {
+        id: McpServerId("blackbox-hang".into()),
+        display_name: "HungMCP".into(),
+        transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-hang-server"), Vec::new()),
+        env: std::collections::BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        // A long budget: only the CANCEL path can unblock this test in time.
+        timeout_ms: Some(120_000),
+        enabled: true,
+    };
+    let firer = Arc::clone(&session.cancel_token());
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        firer.request();
+    });
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let started = Instant::now();
+    let outcome = session.ask_with_phase(
+        "查询",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[hang],
+            keychain: &KeychainStore::new(),
+            skills: &[],
+            skills_root: std::path::Path::new(""),
+            activated: &[],
+            cli_tools: &[],
+        },
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "the token fire unblocks the parked connect well under the 120s budget"
+    );
+    assert!(
+        matches!(
+            outcome,
+            TurnOutcome::Cancelled { .. } | TurnOutcome::Textual { .. }
+        ),
+        "the turn resolves after the cancelled connect, got {outcome:?}"
+    );
+}
