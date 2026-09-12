@@ -382,6 +382,13 @@ fn accept_bridge(
 /// only error path -- the stream is dropped without a response so a probing
 /// client learns nothing beyond "refused" (ADR-0085 security model).
 ///
+/// The termination predicate shared by verify_bridge's two arms -- the
+/// loop-top check and the post-error re-check (issue #911) -- so the twin
+/// flag sets cannot drift apart (the is_read_timeout rationale).
+fn preauth_termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> bool {
+    cancel.is_requested() || engine_done.load(Ordering::SeqCst)
+}
+
 /// The auth line is read through the shared byte cap (issue #643): this read
 /// happens BEFORE the token check, so the peer is an unauthenticated prober
 /// that grabbed the connection -- the pre-auth surface. An over-long line,
@@ -394,7 +401,12 @@ fn accept_bridge(
 /// while the engine completes (or cancel fires) returns `Ok(false)`, handing
 /// the turn to the ACP termination instead of surfacing the serve error that
 /// mislabels the completed turn as Failed (the same single-source
-/// disposition as the accept and serve-loop arms). `Ok(true)`: auth
+/// disposition as the accept and serve-loop arms). A hard read error takes
+/// the same re-check in the error arm itself (issue #911): the teardown's
+/// reset landing on the parked read after a flag already fired returns
+/// `Ok(false)` too, while a reset with no flag stays a truthful error (and
+/// the mismatch arm never re-checks -- a wrong token is a genuine
+/// bridge-side defect). `Ok(true)`: auth
 /// verified. The retry cadence leans on a caller-side precondition: the
 /// stream must carry a bounded read timeout (`serve_connection` sets
 /// `READ_TIMEOUT` before the call) -- a blocking-forever reader parks in
@@ -415,7 +427,7 @@ fn verify_bridge(
         // The pre-auth window's loop-top check (issue #909): the same
         // single-source disposition as the accept and serve-loop arms --
         // the ACP termination decides the TurnOutcome, never the gateway.
-        if cancel.is_requested() || engine_done.load(Ordering::SeqCst) {
+        if preauth_termination_fired(cancel, engine_done) {
             // Companion to the accept arms' logs (issue #849's
             // invisible-exit lesson): without this line a bridge that
             // connected and was terminated pre-auth is indistinguishable
@@ -441,7 +453,36 @@ fn verify_bridge(
             Err(e) if is_read_timeout(e.kind()) => {
                 continue;
             }
-            Err(e) => return Err(e),
+            // A hard read error racing a termination flag (issue #911): the
+            // teardown's kill lands on the parked auth read as a reset
+            // (typically `is_bridge_gone`) AFTER engine completion or cancel
+            // already decided the turn -- the arm re-check gives it the same
+            // single-source disposition as the loop top instead of surfacing
+            // a serve error that mislabels the completed turn as Failed. The
+            // mismatch / over-long / EOF arms above deliberately do NOT
+            // re-check (a wrong token is a genuine bridge-side defect and
+            // must surface), and with no flag set this is a pre-auth hard
+            // death that stays a truthful error. The class rule is
+            // kind-agnostic: a non-UTF-8 auth line surfaces as InvalidData
+            // from the bounded reader and rides this arm's re-check too -- a
+            // set flag means the termination already decided the turn
+            // regardless of error kind.
+            Err(e) => {
+                if preauth_termination_fired(cancel, engine_done) {
+                    log::debug!(
+                        target: "toptopduck::gateway",
+                        "verify_bridge exiting on {} in the pre-auth window after a read error ({})",
+                        if cancel.is_requested() {
+                            "the cancel flag"
+                        } else {
+                            "engine completion"
+                        },
+                        e.kind()
+                    );
+                    return Ok(false);
+                }
+                return Err(e);
+            }
         };
         let got = line.trim_end_matches(['\r', '\n']);
         if got == expected_line {
@@ -1377,6 +1418,38 @@ mod tests {
         fn consume(&mut self, _amt: usize) {}
     }
 
+    /// Issue #911 deterministic seam: a pre-auth reader whose parked read dies
+    /// with a hard reset the instant the termination lands -- the fire closure
+    /// runs (setting `engine_done` or requesting cancel) and the SAME fill_buf
+    /// call surfaces the reset, so the error reaches the error arm with the
+    /// flag already set (the #909 main scenario's shape: engine completes ->
+    /// teardown kills the CLI -> on Windows the job-object kill aborts the
+    /// bridge's sockets into the RST that wakes the parked read). A reverted
+    /// arm re-check fails by surfacing the reset as a serve error that
+    /// mislabels the completed turn as Failed.
+    struct RacingResetReader<'a> {
+        fire: Box<dyn Fn() + 'a>,
+    }
+    impl Read for RacingResetReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+    impl BufRead for RacingResetReader<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            (self.fire)();
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "simulated teardown reset",
+            ))
+        }
+        fn consume(&mut self, _amt: usize) {}
+    }
+
     /// Issue #909: a cancel that fired before the handshake begins terminates
     /// the pre-auth window without touching the stream -- the turn belongs to
     /// the ACP termination, never the gateway.
@@ -1421,6 +1494,73 @@ mod tests {
         .expect("terminated, not a refused handshake");
         assert!(!verified, "the pre-auth window ended in termination");
         assert!(writer.is_empty(), "no response on a terminated handshake");
+    }
+
+    /// Issue #911: engine completion racing the teardown reset OUT of the
+    /// parked auth read -- the flag fires inside the read that then surfaces
+    /// the reset, so the error arm's re-check (not the loop top, which has
+    /// already passed) is what hands the turn to the ACP termination. A
+    /// reverted re-check mislabels the completed turn as Failed(Runtime).
+    #[test]
+    fn verify_bridge_engine_done_racing_reset_returns_terminated() {
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&engine_done);
+        let mut reader = RacingResetReader {
+            fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
+        };
+        let mut writer = Vec::new();
+        let verified = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &CancelToken::new(),
+            &engine_done,
+        )
+        .expect("terminated, not the reset surfacing as a serve error");
+        assert!(!verified, "the pre-auth window ended in termination");
+        assert!(writer.is_empty(), "no response on a terminated handshake");
+    }
+
+    /// Issue #911 cancel twin: the same race with the cancel token firing
+    /// inside the read that surfaces the reset.
+    #[test]
+    fn verify_bridge_cancel_racing_reset_returns_terminated() {
+        let cancel = CancelToken::new();
+        let mut reader = RacingResetReader {
+            fire: Box::new(|| cancel.request()),
+        };
+        let mut writer = Vec::new();
+        let verified = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &cancel,
+            &AtomicBool::new(false),
+        )
+        .expect("terminated, not the reset surfacing as a serve error");
+        assert!(!verified, "the pre-auth window ended in termination");
+        assert!(writer.is_empty(), "no response on a terminated handshake");
+    }
+
+    /// Issue #911 truthful-error half: a hard reset with NO termination flag
+    /// is a genuine pre-auth bridge death -- the arm re-check must not
+    /// swallow it.
+    #[test]
+    fn verify_bridge_reset_without_flags_stays_a_serve_error() {
+        let mut reader = RacingResetReader {
+            fire: Box::new(|| {}),
+        };
+        let mut writer = Vec::new();
+        let err = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &CancelToken::new(),
+            &AtomicBool::new(false),
+        )
+        .expect_err("no flag set -> the reset surfaces");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(writer.is_empty(), "no response on a refused handshake");
     }
 
     /// Issue #643: the pre-auth surface. An over-long auth line is refused
@@ -2120,6 +2260,168 @@ mod tests {
         });
         let outcome = serve_connection(handle, ctx, &engine_done)
             .expect("flags fired in the pre-auth window hand the turn to the ACP termination");
+        assert!(
+            outcome.trace.is_empty() && outcome.promotions.is_empty(),
+            "the terminated pre-auth window collects nothing: {outcome:?}"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Close a connected socket abortively so the peer's parked read surfaces
+    /// a hard reset (RST, not FIN): SO_LINGER with a zero timeout makes close
+    /// discard pending data with a reset. This is the shape the Windows
+    /// production teardown produces when it kills the bridge's spawner -- a
+    /// job-object terminate aborts the sockets into resets (issue #911's
+    /// racing error); a plain drop would only FIN and read as EOF. The POSIX
+    /// teardown (killpg SIGKILL) closes gracefully instead: its EOF surfaces
+    /// through the refusal arm, which deliberately does not re-check.
+    fn abortive_close(s: TcpStream) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawSocket;
+            use windows_sys::Win32::Networking::WinSock::{
+                setsockopt, LINGER, SOCKET, SOL_SOCKET, SO_LINGER,
+            };
+            let linger = LINGER {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            // SAFETY: the socket handle is owned by `s` and outlives the
+            // call; the option buffer points at the stack linger struct for
+            // exactly the call's length.
+            let r = unsafe {
+                setsockopt(
+                    s.as_raw_socket() as SOCKET,
+                    SOL_SOCKET,
+                    SO_LINGER,
+                    &linger as *const LINGER as *const u8,
+                    std::mem::size_of::<LINGER>() as i32,
+                )
+            };
+            // A failed option call degrades the close to a graceful FIN,
+            // which the pins below would surface as a misleading token
+            // mismatch -- fail here instead, at the fixture's seam.
+            assert_eq!(r, 0, "SO_LINGER(0) failed: {}", io::Error::last_os_error());
+            drop(s);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let linger = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            // SAFETY: same shape as the Windows arm -- an owned fd plus a
+            // stack option buffer sized for exactly the call.
+            let r = unsafe {
+                libc::setsockopt(
+                    s.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    &linger as *const libc::linger as *const libc::c_void,
+                    std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                )
+            };
+            assert_eq!(r, 0, "SO_LINGER(0) failed: {}", io::Error::last_os_error());
+            drop(s);
+        }
+    }
+
+    /// Issue #911 serve-layer pin: the #909 main scenario's tail over a real
+    /// socket -- the engine completes while serve is parked in the pre-auth
+    /// auth read, and the teardown's kill lands on the bridge as an abortive
+    /// close (RST, the Windows job-object kill's shape -- the POSIX killpg
+    /// teardown FINs and surfaces through the refusal arm instead) that
+    /// wakes the parked read BEFORE its READ_TIMEOUT fires.
+    /// The error arm's re-check (not the loop top, which the parked read has
+    /// already passed) hands the turn to the ACP termination; a reverted
+    /// re-check surfaces the reset as a serve error that mislabels the
+    /// completed turn as Failed. The #909 e2e kept the socket deliberately
+    /// open past this window, so this is the race it could not cover.
+    #[test]
+    fn serve_connection_preauth_reset_racing_engine_done_returns_empty_outcome() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&engine_done);
+
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            // Serve accepts within one poll interval (10ms) and parks in the
+            // FIRST auth read, whose READ_TIMEOUT fires at ~t=110ms -- firing
+            // at 50ms keeps the flag store + the RST (20ms later, plus timer
+            // grain) structurally inside that first park, so the reset is
+            // what wakes the read and reaches the error arm; a later firing
+            // would race the retry cadence's loop-top check instead.
+            thread::sleep(Duration::from_millis(50));
+            flag.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(20));
+            abortive_close(s);
+        });
+        let outcome = serve_connection(handle, ctx, &engine_done)
+            .expect("a reset racing a set flag hands the turn to the ACP termination");
+        assert!(
+            outcome.trace.is_empty() && outcome.promotions.is_empty(),
+            "the terminated pre-auth window collects nothing: {outcome:?}"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Issue #911 truthful-error half at the serve layer: an abortive close
+    /// with NO termination flag is a genuine pre-auth bridge death -- the
+    /// error arm's re-check must not swallow it into an empty outcome.
+    #[test]
+    fn serve_connection_preauth_reset_without_flags_surfaces_serve_error() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            // Park serve in the auth read first so the RST wakes the read
+            // itself (an early close could land inside the accept window).
+            thread::sleep(Duration::from_millis(150));
+            abortive_close(s);
+        });
+        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+            .expect_err("no flag set -> the pre-auth reset surfaces");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::ConnectionReset,
+            "the raw bridge death reaches the turn assembler"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Issue #911 cancel twin of the engine_done pin above: a bridge that
+    /// connects but stalls before writing its auth line, with the cancel
+    /// token firing mid-window -- the loop-top re-check returns the empty
+    /// outcome so the ACP termination decides the TurnOutcome. The engine
+    /// half was pinned at the serve layer by #909; the cancel half existed
+    /// only as the unit seam until now.
+    #[test]
+    fn serve_connection_preauth_stall_cancel_returns_empty_outcome() {
+        let mut ctx = fresh_ctx();
+        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
+        ctx.cancel = cancel;
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+
+        // Connect and stall -- never write the auth line. The token fires
+        // mid-window (well after accept, inside the auth read retry
+        // cadence); the socket stays open long enough for the retry
+        // loop-top check to observe the cancel before any EOF could race
+        // in as a mismatch.
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            thread::sleep(Duration::from_millis(200));
+            cancel.request();
+            thread::sleep(Duration::from_millis(200));
+            drop(s);
+        });
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false))
+            .expect("cancel fired in the pre-auth window hands the turn to the ACP termination");
         assert!(
             outcome.trace.is_empty() && outcome.promotions.is_empty(),
             "the terminated pre-auth window collects nothing: {outcome:?}"
