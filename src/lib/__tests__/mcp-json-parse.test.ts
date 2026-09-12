@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { McpServerConfig } from "../../types/mcp";
-import { configToWebJson, isSecretEnvKey, normalizeJsonToConfig } from "../mcp-json-parse";
+import {
+  configToWebJson,
+  IMPORT_SECRET_SUBSTRINGS,
+  isSecretEnvKey,
+  normalizeJsonToConfig,
+  SECRET_NAME_SUBSTRINGS,
+} from "../mcp-json-parse";
 
 describe("isSecretEnvKey", () => {
   it("detects common secret key names", () => {
@@ -21,6 +27,17 @@ describe("isSecretEnvKey", () => {
     expect(isSecretEnvKey("NODE_PATH")).toBe(false);
     expect(isSecretEnvKey("DEBUG")).toBe(false);
     expect(isSecretEnvKey("PORT")).toBe(false);
+  });
+
+  // Drift mirror of the Rust read-time lists (issue #904): every entry of
+  // BOTH lists must trip this single two-face scan. Derived from the arrays
+  // themselves (no fourth hardcoded copy): the Rust-side pin holds the array
+  // CONTENTS to the Rust lists entry for entry, this test holds the FUNCTION
+  // to consulting every entry both lists carry.
+  it("flags every entry of both secret-name lists (drift mirror)", () => {
+    for (const name of [...SECRET_NAME_SUBSTRINGS, ...IMPORT_SECRET_SUBSTRINGS]) {
+      expect(isSecretEnvKey(name)).toBe(true);
+    }
   });
 });
 

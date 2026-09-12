@@ -18,7 +18,7 @@ import {
 
 // --- Secret detection (mirrors Rust) -----------------------------------------
 // Mirrors SECRET_KEY_NAMES in src-tauri/src/app_config/io.rs.
-const SECRET_NAME_SUBSTRINGS = [
+export const SECRET_NAME_SUBSTRINGS = [
   "api_key",
   "apikey",
   "anthropic_api_key",
@@ -34,7 +34,7 @@ const SECRET_NAME_SUBSTRINGS = [
 // "authorization"/"cookie"/"session" for HTTP request headers (not in the
 // Rust import set because the Rust import path only handles stdio env vars;
 // the Rust read-time header scan carries the same additions).
-const IMPORT_SECRET_SUBSTRINGS = [
+export const IMPORT_SECRET_SUBSTRINGS = [
   "token",
   "bearer",
   "jwt",

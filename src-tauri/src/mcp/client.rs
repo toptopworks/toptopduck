@@ -1014,14 +1014,19 @@ impl SseClient {
     ///
     /// The agent never follows redirects (issue #901 guardrail; see
     /// [`HttpClient::connect_with_kill`]). When `auth_configured` is set --
-    /// ANY header configured on the server, secret-named or not (the
-    /// dispatch derives it from `transport.headers` + `keychain_header_keys`,
-    /// NOT from the merged runtime map, so a declared secret whose keychain
-    /// value is missing still trips the guard) -- the endpoint event's POST
-    /// URL must share the SSE URL's origin ([`enforce_same_origin`]): the
-    /// POST target comes from the server's own event, so without the guard a
-    /// compromised server could aim the authenticated POST (and its headers)
-    /// at any host it chooses.
+    /// ANY header configured on the server, secret-named or not -- the
+    /// endpoint event's POST URL must share the SSE URL's origin
+    /// ([`enforce_same_origin`]): the POST target comes from the server's
+    /// own event, so without the guard a compromised server could aim the
+    /// authenticated POST (and its headers) at any host it chooses.
+    ///
+    /// `auth_configured` INVARIANT (issue #904): the caller derives it from
+    /// the CONFIGURED faces via [`sse_auth_configured`] (the transport's
+    /// `headers` map and `keychain_header_keys` list), never from the merged
+    /// runtime map -- a declared secret whose keychain value is missing
+    /// still trips the guard. A future caller hand-rolling the bool must
+    /// route through the named derivation, not pass `false` alongside
+    /// credentials.
     pub fn connect_with_kill(
         url: &str,
         headers: &BTreeMap<String, String>,
@@ -1318,6 +1323,23 @@ fn check_no_redirect(response: &ureq::Response) -> Result<(), ClientError> {
     Ok(())
 }
 
+/// Whether an SSE connect counts as header-authenticated for the same-origin
+/// guardrail -- the one named derivation every caller must share (issue #904;
+/// the guardrail itself is issue #901 guardrail two). Inputs are the CONFIGURED
+/// faces (`transport.headers` + `keychain_header_keys`), NOT the merged
+/// runtime map: a declared secret name whose keychain value is missing still
+/// counts (the credential rides the POST the moment the value appears), so
+/// deriving from the merged map would silently disarm the guard. The test
+/// handshake entry [`SseClient::connect`] deliberately uses its own
+/// merged-nonempty rule (self-contained + documented there); every production
+/// caller goes through [`connect_transport_with_kill`], which routes here.
+pub(crate) fn sse_auth_configured(
+    configured_headers: &BTreeMap<String, String>,
+    declared_keys: &[String],
+) -> bool {
+    !configured_headers.is_empty() || !declared_keys.is_empty()
+}
+
 /// The SSE same-origin guardrail (issue #901): when a server carries
 /// authenticated headers, the endpoint event's POST URL must share the SSE
 /// stream URL's origin (scheme + host + port). The POST target comes from
@@ -1446,10 +1468,7 @@ pub fn connect_transport_with_kill(
                 .map(TransportClient::Stdio)
         }
         McpTransport::Sse { url, headers } => {
-            // The configured face, not the merged runtime map: a declared
-            // secret name whose keychain value is missing still counts as a
-            // header-authenticated server (issue #901 guardrail two).
-            let auth_configured = !headers.is_empty() || !config.keychain_header_keys.is_empty();
+            let auth_configured = sse_auth_configured(headers, &config.keychain_header_keys);
             SseClient::connect_with_kill(
                 url,
                 &merged_headers(headers, header_secrets),
@@ -2648,6 +2667,30 @@ mod tests {
         assert!(
             err.to_string().contains("cross-origin"),
             "scheme is part of the origin"
+        );
+    }
+
+    /// The named derivation every SSE caller shares (issue #904): an empty
+    /// configured map with a NON-empty declared keychain list still counts
+    /// as authenticated -- a declared secret whose keychain value is missing
+    /// would ride the POST the moment the value appears, so the guard must
+    /// not wait for the merged map to fill.
+    #[test]
+    fn sse_auth_configured_counts_declared_keys_without_configured_headers() {
+        let declared = vec!["X-Test-Token".to_string()];
+        assert!(
+            sse_auth_configured(&BTreeMap::new(), &declared),
+            "declared keychain header keys count even with empty configured headers"
+        );
+        assert!(
+            !sse_auth_configured(&BTreeMap::new(), &[]),
+            "no configured headers + no declarations -> not authenticated"
+        );
+        let mut configured = BTreeMap::new();
+        configured.insert("X-Plain".to_string(), "v".to_string());
+        assert!(
+            sse_auth_configured(&configured, &[]),
+            "a configured non-secret header still counts (any header arms the guard)"
         );
     }
 

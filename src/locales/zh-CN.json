@@ -292,6 +292,7 @@
   "settings.mcp.form.modeForm": "表单",
   "settings.mcp.form.modeJson": "JSON",
   "settings.mcp.form.name": "名称",
+  "settings.mcp.form.secretHint": "机密行的值留空保存将沿用已存储的值；删除行则在保存时清除对应凭据。",
   "settings.mcp.form.secretsRequireFormMode": "检测到密钥（{keys}）。请切换到表单模式输入其值后再保存。",
   "settings.mcp.form.timeoutMs": "超时（毫秒）",
   "settings.mcp.form.type": "类型",

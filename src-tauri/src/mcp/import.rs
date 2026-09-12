@@ -331,8 +331,12 @@ fn parse_codex_config(content: &str) -> Result<Vec<DiscoveredServer>, String> {
 
 /// Additional secret-name substrings checked only on the import path (see
 /// [`is_secret_env_key`]). Kept narrow to avoid false positives on legitimate
-/// env keys like `LOG_LEVEL` or `NODE_PATH`.
-const IMPORT_SECRET_SUBSTRINGS: &[&str] = &["token", "bearer", "jwt", "privatekey"];
+/// env keys like `LOG_LEVEL` or `NODE_PATH`. A deliberate SUBSET of the
+/// read-time header scan's additions ([`crate::app_config::io`]'s
+/// `HEADER_SECRET_SUBSTRINGS`) -- `authorization` / `cookie` / `session` are
+/// header-face names the stdio-only import path never sees; the subset
+/// relation is pinned in the io.rs drift test (issue #904).
+pub(crate) const IMPORT_SECRET_SUBSTRINGS: &[&str] = &["token", "bearer", "jwt", "privatekey"];
 
 /// Check whether an env key from an external config likely holds a secret.
 ///

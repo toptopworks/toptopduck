@@ -348,6 +348,14 @@ enum ScanHit {
 /// fails here rather than as a generic connect-time error. `headers` is
 /// unambiguous here -- the mcp transport header face is the only such key
 /// in the schema.
+///
+/// Deliberately NOT scanned: a `keychain_env_keys` entry starting with
+/// `header-` (the account collision the write boundary refuses, issue #904).
+/// Tripping it needs one server to carry BOTH a `header-X` env key and an
+/// `X` header secret -- a hand-edit racing the form's own write boundary,
+/// self-inflicted and last-writer-wins; refusing the whole app-config over
+/// it would nuke every unrelated preference for an asymmetrically small
+/// harm. The write boundary (upsert) is the sole guard.
 fn find_scan_hit(value: &Value) -> Option<ScanHit> {
     match value {
         Value::Object(map) => {
@@ -391,6 +399,64 @@ mod tests {
     use super::*;
     use crate::app_config::model::{EngineDefaults, Theme};
     use std::path::PathBuf;
+
+    /// Extract the string entries of one `const NAME = [ ... ];` array
+    /// literal from the frontend source (the drift pin parses the TS file
+    /// directly -- a snapshot constant would test nothing the TS compiler
+    /// does not already check).
+    fn ts_string_array(ts_source: &str, const_name: &str) -> Vec<String> {
+        let start = ts_source
+            .find(&format!("const {const_name} = ["))
+            .unwrap_or_else(|| panic!("{const_name} not found in the TS source"));
+        let rest = &ts_source[start..];
+        let end = rest.find("];").expect("array close");
+        rest[..end]
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let line = line.strip_suffix(',').unwrap_or(line);
+                line.strip_prefix('"')?
+                    .strip_suffix('"')
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// The secret-vocabulary drift pin (issue #904): three hand-maintained
+    /// copies must stay in lockstep --
+    /// - Rust read-time: [`SECRET_KEY_NAMES`] + [`HEADER_SECRET_SUBSTRINGS`]
+    ///   (their union, as [`is_secret_header_name`], must equal the
+    ///   frontend's single two-face scan);
+    /// - Frontend: the two arrays in `src/lib/mcp-json-parse.ts`;
+    /// - Rust import path: [`crate::mcp::import::IMPORT_SECRET_SUBSTRINGS`],
+    ///   a deliberate SUBSET of the header additions (the stdio-only import
+    ///   path never sees `authorization` / `cookie` / `session`).
+    ///
+    /// The `cookie` / `session` fix in #901 was applied in all three places
+    /// BY HAND; this pin exists so the next vocabulary change cannot land
+    /// halfway (either side alone goes red until the copies are synced).
+    #[test]
+    fn secret_name_lists_match_the_frontend_and_import_copies() {
+        let ts = include_str!("../../../src/lib/mcp-json-parse.ts");
+        let to_strings = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            ts_string_array(ts, "SECRET_NAME_SUBSTRINGS"),
+            to_strings(SECRET_KEY_NAMES),
+            "the frontend base list must equal SECRET_KEY_NAMES entry for entry"
+        );
+        assert_eq!(
+            ts_string_array(ts, "IMPORT_SECRET_SUBSTRINGS"),
+            to_strings(HEADER_SECRET_SUBSTRINGS),
+            "the frontend additions must equal HEADER_SECRET_SUBSTRINGS entry for entry"
+        );
+        for extra in crate::mcp::import::IMPORT_SECRET_SUBSTRINGS {
+            assert!(
+                HEADER_SECRET_SUBSTRINGS.contains(extra),
+                "the import-path list must stay a subset of the header additions ({extra})"
+            );
+        }
+    }
 
     /// A config with at least one non-default field, so a successful round-trip
     /// is distinguishable from a defaults-degrade.
