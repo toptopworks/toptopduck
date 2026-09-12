@@ -79,11 +79,12 @@ const SSE_CHANNEL_BOUND: usize = 64;
 
 /// The `tools/list` pagination guardrails (issue #900). A server may split
 /// its tool list across pages joined by `nextCursor`; a server that never
-/// stops paging (or keeps producing tools) would park the connect phase
-/// indefinitely or accumulate an unbounded catalog, so the traversal is
-/// bounded: at most [`TOOLS_LIST_PAGE_CAP`] pages and
-/// [`TOOLS_LIST_TOOL_CAP`] accumulated tools while a cursor remains. Same
-/// order of magnitude as other gateways' caps.
+/// stops paging (or keeps producing tools) would burn the entire connect
+/// budget and surface as a generic timeout, or accumulate an unbounded
+/// catalog, so the traversal is bounded: at most [`TOOLS_LIST_PAGE_CAP`]
+/// pages, and no further page is fetched once the folded count reaches
+/// [`TOOLS_LIST_TOOL_CAP`] while a cursor remains. Same order of magnitude
+/// as other gateways' caps.
 const TOOLS_LIST_PAGE_CAP: usize = 32;
 const TOOLS_LIST_TOOL_CAP: usize = 2048;
 
@@ -317,22 +318,25 @@ pub trait McpClient {
                     )))
                 }
             };
+            // The tool cap: an endless-page server that also floods tools
+            // trips here without paying for the next request. The check is
+            // post-fold, so the count routinely crosses the cap; the error
+            // carries the true folded count. Exactly at the cap with NO
+            // cursor is a complete catalog (accepted -- the cap guards
+            // unbounded traversal, not a complete response).
+            if tools.len() >= TOOLS_LIST_TOOL_CAP {
+                return Err(ClientError::ToolCap {
+                    server: server.to_string(),
+                    pages: page,
+                    tools: tools.len(),
+                });
+            }
             log::debug!(
                 target: "toptopduck::mcp",
                 "MCP server `{server}` tools/list page {page}: {} tools so far, cursor \
                  present -- continuing",
                 tools.len()
             );
-            // The tool cap: an endless-page server that also floods tools
-            // trips here without paying for the next request. Exactly at the
-            // cap with NO cursor is a complete catalog (accepted -- the cap
-            // guards unbounded traversal, not a complete response).
-            if tools.len() >= TOOLS_LIST_TOOL_CAP {
-                return Err(ClientError::ToolCap {
-                    server: server.to_string(),
-                    pages: page,
-                });
-            }
             cursor = Some(next);
         }
         // The loop spent its page budget with a cursor still outstanding --
@@ -1382,13 +1386,17 @@ pub enum ClientError {
     #[error("MCP server `{server}` tools/list still returned a cursor after {} pages (the page cap, {} tools folded); the server is not mounted -- no partial catalog", TOOLS_LIST_PAGE_CAP, tools)]
     PageCap { server: String, tools: usize },
     /// The `tools/list` traversal tripped the tool cap (issue #900): the
-    /// traversal had folded the cap's worth of entries with a cursor still
-    /// outstanding, and refused to pay for the next page. `pages` is where
-    /// the traversal stood. The connect paths record the message as the
-    /// server's failure reason -- the gateway mounts no silently-partial
-    /// catalog.
-    #[error("MCP server `{server}` tools/list folded {} tools (the tool cap) after {pages} pages, still paging; the server is not mounted -- no partial catalog", TOOLS_LIST_TOOL_CAP)]
-    ToolCap { server: String, pages: usize },
+    /// traversal had folded `tools` entries -- at or past the cap -- with a
+    /// cursor still outstanding, and refused to pay for the next page.
+    /// `pages` is where the traversal stood. The connect paths record the
+    /// message as the server's failure reason -- the gateway mounts no
+    /// silently-partial catalog.
+    #[error("MCP server `{server}` tools/list folded {tools} tools (the tool cap is {}), on page {pages}, still paging; the server is not mounted -- no partial catalog", TOOLS_LIST_TOOL_CAP)]
+    ToolCap {
+        server: String,
+        pages: usize,
+        tools: usize,
+    },
 }
 
 #[cfg(test)]
@@ -1547,9 +1555,14 @@ mod tests {
         let err = client.list_tools("cap-fake").expect_err("tool cap");
         let display = err.to_string();
         match err {
-            ClientError::ToolCap { server, pages } => {
+            ClientError::ToolCap {
+                server,
+                pages,
+                tools,
+            } => {
                 assert_eq!(server, "cap-fake");
                 assert_eq!(pages, 1, "trips on the page that reached the cap");
+                assert_eq!(tools, TOOLS_LIST_TOOL_CAP, "carries the true folded count");
             }
             other => panic!("expected ToolCap, got {other:?}"),
         }
@@ -1557,6 +1570,30 @@ mod tests {
             display.contains("tool cap"),
             "names the tripped dimension: {display}"
         );
+    }
+
+    /// The overshoot half: the cap check is post-fold, so one page can push
+    /// the count past the cap -- the error must carry the real total, not
+    /// the constant (a constant-at-the-cap report would read 2048 here).
+    #[test]
+    fn list_tools_tool_cap_carries_the_overshot_count() {
+        let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP + 100)
+            .map(|i| json!({"name": format!("tool_{i}")}))
+            .collect();
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1, "result": {
+                "tools": tools,
+                "nextCursor": "page-2"
+            }
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("cap-fake").expect_err("tool cap");
+        match err {
+            ClientError::ToolCap { tools, .. } => {
+                assert_eq!(tools, TOOLS_LIST_TOOL_CAP + 100, "the overshot total");
+            }
+            other => panic!("expected ToolCap, got {other:?}"),
+        }
     }
 
     /// The at-boundary half (the #666 at-budget pattern): exactly
@@ -1574,6 +1611,30 @@ mod tests {
             .list_tools("cap-fake")
             .expect("a complete at-cap catalog is accepted");
         assert_eq!(listed.len(), TOOLS_LIST_TOOL_CAP);
+    }
+
+    /// The page-budget at-boundary half (the #666 at-budget pattern,
+    /// mirroring the tool-cap companion above): 32 pages each carrying one
+    /// tool, with page 32 cursorless -- completing exactly ON the last
+    /// allowed page returns the full catalog; only needing a 33rd page
+    /// trips the cap.
+    #[test]
+    fn list_tools_accepts_a_cap_sized_page_run_completing_on_the_last_page() {
+        let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
+            .map(|i| {
+                let mut result = json!({"tools": [{"name": format!("tool_{i}")}]});
+                if i < TOOLS_LIST_PAGE_CAP {
+                    result["nextCursor"] = json!(format!("page-{i}"));
+                }
+                json!({"jsonrpc": "2.0", "id": i, "result": result})
+            })
+            .collect();
+        let server = wire(&pages);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client
+            .list_tools("cap-fake")
+            .expect("completing on the page budget's last page is accepted");
+        assert_eq!(listed.len(), TOOLS_LIST_PAGE_CAP);
     }
 
     /// Issue #900 AC: an empty first page that continues to an empty second

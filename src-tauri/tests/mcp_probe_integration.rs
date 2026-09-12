@@ -1,7 +1,7 @@
 //! Probe timeout + child-kill integration (issue #392).
 //!
 //! Tests the `spawn_stdio_child` + `stdio_handshake` building blocks the
-//! async `probe_mcp_server` command composes. Two scenarios:
+//! async `probe_mcp_server` command composes. Three scenarios:
 //!
 //! 1. **Responsive server** ([`mcp_fake_server`]): spawn + handshake
 //!    completes within the deadline; tool list returned; child killed +
@@ -9,6 +9,8 @@
 //! 2. **Hanging server** ([`mcp_hang_server`]): spawn succeeds, handshake
 //!    hangs (server never replies to initialize). A short `recv_timeout`
 //!    deadline fires; the child is killed + reaped, proving no process leak.
+//! 3. **Paginated server** ([`mcp_paginated_server`]): the handshake folds a
+//!    two-page `tools/list` joined by `nextCursor` (issue #900).
 //!
 //! The command layer wraps these in `tokio::time::timeout` +
 //! `spawn_blocking`; here we use `std::thread` + `mpsc::recv_timeout` to
