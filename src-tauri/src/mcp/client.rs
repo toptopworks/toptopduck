@@ -267,8 +267,9 @@ pub trait McpClient {
     /// name (first sight wins -- `query_catalog`'s catalog-fold precedent,
     /// issue #543) and bounded by the pagination guardrails: a server still
     /// paging at the page cap, or at the tool cap with a cursor outstanding,
-    /// fails with [`ClientError::PaginationCap`] so the connect paths record
-    /// an explicit failure instead of mounting a silently partial catalog.
+    /// fails with [`ClientError::PageCap`] / [`ClientError::ToolCap`] so the
+    /// connect paths record an explicit failure -- naming the tripped
+    /// dimension -- instead of mounting a silently partial catalog.
     /// The whole traversal runs inside the caller's one connect-phase
     /// deadline (the #892 shared budget).
     fn list_tools(&mut self, server: &str) -> Result<Vec<Value>, ClientError> {
@@ -327,19 +328,17 @@ pub trait McpClient {
             // cap with NO cursor is a complete catalog (accepted -- the cap
             // guards unbounded traversal, not a complete response).
             if tools.len() >= TOOLS_LIST_TOOL_CAP {
-                return Err(ClientError::PaginationCap {
+                return Err(ClientError::ToolCap {
                     server: server.to_string(),
                     pages: page,
-                    tools: tools.len(),
                 });
             }
             cursor = Some(next);
         }
         // The loop spent its page budget with a cursor still outstanding --
         // the page cap: fail the connect, mount no partial catalog.
-        Err(ClientError::PaginationCap {
+        Err(ClientError::PageCap {
             server: server.to_string(),
-            pages: TOOLS_LIST_PAGE_CAP,
             tools: tools.len(),
         })
     }
@@ -1375,18 +1374,21 @@ pub enum ClientError {
         call: String,
         timeout_ms: u64,
     },
-    /// The `tools/list` traversal tripped a pagination guardrail (issue
-    /// #900): the server still returned a `nextCursor` at the page cap, or
-    /// had accumulated the tool cap's worth of entries while still paging.
-    /// `pages`/`tools` are where the traversal stood when it tripped. The
-    /// connect paths record the message as the server's failure reason --
-    /// the gateway mounts no silently-partial catalog.
-    #[error("MCP server `{server}` tools/list exceeded the pagination guardrail ({} pages / {} tools) after {pages} pages with {tools} tools, still paging; the server is not mounted", TOOLS_LIST_PAGE_CAP, TOOLS_LIST_TOOL_CAP)]
-    PaginationCap {
-        server: String,
-        pages: usize,
-        tools: usize,
-    },
+    /// The `tools/list` traversal tripped the page cap (issue #900): the
+    /// server still returned a `nextCursor` after the page budget was spent.
+    /// `tools` is what the traversal had folded when it tripped. The connect
+    /// paths record the message as the server's failure reason -- the
+    /// gateway mounts no silently-partial catalog.
+    #[error("MCP server `{server}` tools/list still returned a cursor after {} pages (the page cap, {} tools folded); the server is not mounted -- no partial catalog", TOOLS_LIST_PAGE_CAP, tools)]
+    PageCap { server: String, tools: usize },
+    /// The `tools/list` traversal tripped the tool cap (issue #900): the
+    /// traversal had folded the cap's worth of entries with a cursor still
+    /// outstanding, and refused to pay for the next page. `pages` is where
+    /// the traversal stood. The connect paths record the message as the
+    /// server's failure reason -- the gateway mounts no silently-partial
+    /// catalog.
+    #[error("MCP server `{server}` tools/list folded {} tools (the tool cap) after {pages} pages, still paging; the server is not mounted -- no partial catalog", TOOLS_LIST_TOOL_CAP)]
+    ToolCap { server: String, pages: usize },
 }
 
 #[cfg(test)]
@@ -1494,8 +1496,8 @@ mod tests {
 
     /// Issue #900: a server that never stops paging (every page returns a
     /// fresh `nextCursor`) trips the page cap -- an explicit error naming
-    /// the server and where the traversal stood, never a silently partial
-    /// catalog (the #889 attribution shape).
+    /// the server, the tripped dimension, and where the traversal stood,
+    /// never a silently partial catalog (the #889 attribution shape).
     #[test]
     fn list_tools_page_cap_trips_on_an_endingless_cursor() {
         let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
@@ -1513,26 +1515,21 @@ mod tests {
         let err = client.list_tools("cap-fake").expect_err("page cap");
         let display = err.to_string();
         match err {
-            ClientError::PaginationCap {
-                server,
-                pages,
-                tools,
-            } => {
+            ClientError::PageCap { server, tools } => {
                 assert_eq!(server, "cap-fake");
-                assert_eq!(pages, TOOLS_LIST_PAGE_CAP);
                 assert_eq!(tools, TOOLS_LIST_PAGE_CAP);
             }
-            other => panic!("expected PaginationCap, got {other:?}"),
+            other => panic!("expected PageCap, got {other:?}"),
         }
         assert!(display.contains("cap-fake"), "names the server: {display}");
         assert!(
-            display.contains("pagination guardrail"),
-            "names the guardrail: {display}"
+            display.contains("page cap"),
+            "names the tripped dimension: {display}"
         );
     }
 
     /// Issue #900: the tool cap -- a server whose accumulated entries reach
-    /// the cap while STILL paging trips the same guardrail, without paying
+    /// the cap while STILL paging trips its own dimension, without paying
     /// for the next request. The at-cap complete-catalog companion below
     /// pins the boundary's other half.
     #[test]
@@ -1548,13 +1545,18 @@ mod tests {
         })]);
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         let err = client.list_tools("cap-fake").expect_err("tool cap");
+        let display = err.to_string();
         match err {
-            ClientError::PaginationCap { pages, tools, .. } => {
+            ClientError::ToolCap { server, pages } => {
+                assert_eq!(server, "cap-fake");
                 assert_eq!(pages, 1, "trips on the page that reached the cap");
-                assert_eq!(tools, TOOLS_LIST_TOOL_CAP);
             }
-            other => panic!("expected PaginationCap, got {other:?}"),
+            other => panic!("expected ToolCap, got {other:?}"),
         }
+        assert!(
+            display.contains("tool cap"),
+            "names the tripped dimension: {display}"
+        );
     }
 
     /// The at-boundary half (the #666 at-budget pattern): exactly

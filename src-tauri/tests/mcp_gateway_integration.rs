@@ -270,8 +270,8 @@ fn connect_all_page_cap_marks_the_server_failed_with_reason() {
         "the reason names the server: {error}"
     );
     assert!(
-        error.contains("pagination guardrail"),
-        "the reason names the guardrail: {error}"
+        error.contains("page cap"),
+        "the reason names the tripped dimension: {error}"
     );
 
     // The manifest (mcp_list_servers) carries the same failure, and the
@@ -1118,7 +1118,7 @@ fn sse_transport_connect_tools_list_and_call() {
 
     let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url).expect("sse connect");
 
-    let tools = client.list_tools("http-fake").expect("tools/list");
+    let tools = client.list_tools("sse-fake").expect("tools/list");
     assert_eq!(tools.len(), 2, "sse server advertises echo + add");
     assert_eq!(tools[0]["name"], "echo");
     assert_eq!(tools[1]["name"], "add");
