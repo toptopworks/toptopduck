@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 use crate::approval::{
     ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome, OperationKind,
 };
-use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
+use crate::bounded_line::{BoundedLineReader, LineRead, LINE_MAX_BYTES};
 use crate::cancel::CancelToken;
 use crate::mcp::aggregator::{self, McpAggregator};
 use crate::mcp::meta_tools;
@@ -223,7 +223,13 @@ pub fn serve_connection(
     let mut reader = BufReader::new(stream);
     let mut writer = writer;
 
-    verify_bridge(&mut reader, &mut writer, &token)?;
+    // The pre-auth window's termination handoff (issue #909): flags that fire
+    // between the accepted connection and the auth handshake return the empty
+    // outcome so the ACP termination decides the TurnOutcome -- the same
+    // single-source disposition as the accept arm above.
+    if !verify_bridge(&mut reader, &mut writer, &token, ctx.cancel, engine_done)? {
+        return Ok(GatewayOutcome::default());
+    }
     // The frame reader owns the stream for the serve loop's lifetime so the
     // partial frame survives read-timeout retries (issue #649): each retried
     // read resumes the same line instead of re-framing from the stream's
@@ -374,26 +380,56 @@ fn accept_bridge(
 /// that grabbed the connection -- the pre-auth surface. An over-long line,
 /// like a clean EOF, falls into the mismatch arm (empty vs expected), so it
 /// fails with the same `PermissionDenied` and no observable difference.
+///
+/// The pre-auth window (issue #909): the auth read runs under READ_TIMEOUT,
+/// and a timeout retries with the termination flags re-checked first each
+/// pass -- a bridge that connects but stalls before writing its auth line
+/// while the engine completes (or cancel fires) returns `Ok(false)`, handing
+/// the turn to the ACP termination instead of surfacing the serve error that
+/// mislabels the completed turn as Failed (the same single-source
+/// disposition as the accept and serve-loop arms). `Ok(true)`: auth
+/// verified.
 fn verify_bridge(
     reader: &mut impl BufRead,
     writer: &mut impl Write,
     expected: &str,
-) -> io::Result<()> {
-    let line = match read_line_bounded(reader, LINE_MAX_BYTES)? {
-        LineRead::Line(line) => line,
-        // An over-long or EOF-terminated empty "line" can never match the
-        // expected auth line -- refuse it exactly like a token mismatch.
-        LineRead::Overlong | LineRead::Eof => String::new(),
-    };
-    let got = line.trim_end_matches(['\r', '\n']);
-    if got == format!("BRIDGE_AUTH {expected}") {
-        writer.write_all(b"BRIDGE_OK\n")?;
-        Ok(())
-    } else {
-        Err(io::Error::new(
+    cancel: &CancelToken,
+    engine_done: &AtomicBool,
+) -> io::Result<bool> {
+    // The resumable reader keeps the partial auth line across a retried
+    // read -- the stateless form discards it on error (issue #649's
+    // documented caveat), and a resumed handshake must not lose the head.
+    let mut lines = BoundedLineReader::new(reader);
+    loop {
+        // The pre-auth window's loop-top check (issue #909): the same
+        // single-source disposition as the accept and serve-loop arms --
+        // the ACP termination decides the TurnOutcome, never the gateway.
+        if cancel.is_requested() || engine_done.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let line = match lines.read_line_bounded(LINE_MAX_BYTES) {
+            Ok(LineRead::Line(line)) => line,
+            // An over-long or EOF-terminated empty "line" can never match the
+            // expected auth line -- refuse it exactly like a token mismatch.
+            Ok(LineRead::Overlong | LineRead::Eof) => String::new(),
+            // Read timeout (READ_TIMEOUT): retry so the loop-top flag check
+            // fires, mirroring the serve loop timeout arm.
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let got = line.trim_end_matches(['\r', '\n']);
+        if got == format!("BRIDGE_AUTH {expected}") {
+            writer.write_all(b"BRIDGE_OK\n")?;
+            return Ok(true);
+        }
+        return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "bridge auth token mismatch",
-        ))
+        ));
     }
 }
 
@@ -1237,7 +1273,14 @@ mod tests {
         let input = Cursor::new(b"BRIDGE_AUTH deadbeef\n".to_vec());
         let mut reader = std::io::BufReader::new(input);
         let mut writer = Vec::new();
-        verify_bridge(&mut reader, &mut writer, "deadbeef").expect("accepted");
+        verify_bridge(
+            &mut reader,
+            &mut writer,
+            "deadbeef",
+            &CancelToken::new(),
+            &AtomicBool::new(false),
+        )
+        .expect("accepted");
         assert_eq!(writer, b"BRIDGE_OK\n");
     }
 
@@ -1246,7 +1289,14 @@ mod tests {
         let input = Cursor::new(b"BRIDGE_AUTH wrong\n".to_vec());
         let mut reader = std::io::BufReader::new(input);
         let mut writer = Vec::new();
-        let err = verify_bridge(&mut reader, &mut writer, "expected").expect_err("mismatch");
+        let err = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "expected",
+            &CancelToken::new(),
+            &AtomicBool::new(false),
+        )
+        .expect_err("mismatch");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(writer.is_empty(), "no response on a refused handshake");
     }
@@ -1259,8 +1309,98 @@ mod tests {
         let input = Cursor::new(Vec::new());
         let mut reader = std::io::BufReader::new(input);
         let mut writer = Vec::new();
-        let err = verify_bridge(&mut reader, &mut writer, "x").expect_err("eof refused");
+        let err = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "x",
+            &CancelToken::new(),
+            &AtomicBool::new(false),
+        )
+        .expect_err("eof refused");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// Issue #909 deterministic seam: a pre-auth reader whose `fill_buf`
+    /// (the read_until path) keeps surfacing the socket read-timeout error,
+    /// flipping the engine-done flag on its second stall, then turning into a
+    /// clean EOF -- a reverted flag check fails as a mismatch instead of
+    /// hanging the retry loop.
+    struct StalledPreAuthReader {
+        stalls: usize,
+        engine_done: Arc<AtomicBool>,
+    }
+    impl Read for StalledPreAuthReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            if self.stalls > 3 {
+                return Ok(0);
+            }
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "simulated read timeout",
+            ))
+        }
+    }
+    impl BufRead for StalledPreAuthReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.stalls += 1;
+            if self.stalls == 2 {
+                self.engine_done.store(true, Ordering::SeqCst);
+            }
+            if self.stalls > 3 {
+                return Ok(&[]);
+            }
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "simulated read timeout",
+            ))
+        }
+        fn consume(&mut self, _amt: usize) {}
+    }
+
+    /// Issue #909: a cancel that fired before the handshake begins terminates
+    /// the pre-auth window without touching the stream -- the turn belongs to
+    /// the ACP termination, never the gateway.
+    #[test]
+    fn verify_bridge_pre_fired_cancel_returns_terminated() {
+        let input = Cursor::new(Vec::new());
+        let mut reader = std::io::BufReader::new(input);
+        let mut writer = Vec::new();
+        let cancel = CancelToken::new();
+        cancel.request();
+        let verified = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &cancel,
+            &AtomicBool::new(false),
+        )
+        .expect("terminated, not a refused handshake");
+        assert!(!verified, "the pre-auth window ended in termination");
+        assert!(writer.is_empty(), "no response on a terminated handshake");
+    }
+
+    /// Issue #909: engine completion racing INTO the pre-auth window -- the
+    /// stalled auth read retries under READ_TIMEOUT and the loop-top re-check
+    /// hands the turn to the ACP termination (the reader flips the flag mid-
+    /// stall, so exactly one retry pass is what the assertion rides).
+    #[test]
+    fn verify_bridge_engine_done_mid_window_returns_terminated() {
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let mut reader = StalledPreAuthReader {
+            stalls: 0,
+            engine_done: Arc::clone(&engine_done),
+        };
+        let mut writer = Vec::new();
+        let verified = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &CancelToken::new(),
+            &engine_done,
+        )
+        .expect("terminated, not a refused handshake");
+        assert!(!verified, "the pre-auth window ended in termination");
+        assert!(writer.is_empty(), "no response on a terminated handshake");
     }
 
     /// Issue #643: the pre-auth surface. An over-long auth line is refused
@@ -1272,7 +1412,14 @@ mod tests {
         let input = Cursor::new(wire.into_bytes());
         let mut reader = std::io::BufReader::new(input);
         let mut writer = Vec::new();
-        let err = verify_bridge(&mut reader, &mut writer, "tok").expect_err("over-long refused");
+        let err = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &CancelToken::new(),
+            &AtomicBool::new(false),
+        )
+        .expect_err("over-long refused");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(writer.is_empty(), "no response on a refused handshake");
     }
@@ -1921,6 +2068,74 @@ mod tests {
         assert!(
             err.to_string().contains(&LINE_MAX_BYTES.to_string()),
             "the error names the cap: {err}"
+        );
+    }
+
+    /// Issue #909: a bridge that connects but stalls before writing its auth
+    /// line, racing an engine completion -- the pre-auth verify read must hand
+    /// the turn to the ACP termination (empty outcome), not surface the serve
+    /// error that mislabels the completed turn as Failed. The flag lands
+    /// mid-window: after accept has returned (an earlier flag would exit at
+    /// the accept_bridge engine_done arm instead), during the stalled auth
+    /// read retry passes.
+    #[test]
+    fn serve_connection_preauth_stall_engine_done_returns_empty_outcome() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&engine_done);
+
+        // Connect and stall -- never write the auth line. The flag fires
+        // from this thread mid-window (well after accept, inside the auth
+        // read retry cadence); the socket then stays open long enough for
+        // the retry loop-top check to observe the flag before any EOF
+        // could race in as a mismatch.
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            thread::sleep(Duration::from_millis(200));
+            flag.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(200));
+            drop(s);
+        });
+        let outcome = serve_connection(handle, ctx, &engine_done)
+            .expect("flags fired in the pre-auth window hand the turn to the ACP termination");
+        assert!(
+            outcome.trace.is_empty() && outcome.promotions.is_empty(),
+            "the terminated pre-auth window collects nothing: {outcome:?}"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Issue #909 resumable pre-auth read: an auth line split across a
+    /// READ_TIMEOUT stall completes once the retry resumes the partial line
+    /// (the stateless form discards the head, and the tail alone would be
+    /// refused as a token mismatch).
+    #[test]
+    fn serve_connection_resumes_auth_line_split_across_timeout() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let token = handle.token.clone();
+
+        let client = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let mut r = std::io::BufReader::new(s.try_clone().expect("clone"));
+            let wire = format!("BRIDGE_AUTH {token}\n");
+            let (head, tail) = wire.split_at(wire.len() / 2);
+            s.write_all(head.as_bytes()).expect("auth head");
+            thread::sleep(Duration::from_millis(300));
+            s.write_all(tail.as_bytes()).expect("auth tail");
+            let mut line = String::new();
+            r.read_line(&mut line).expect("ok line");
+            assert_eq!(line, "BRIDGE_OK\n", "the resumed line authenticated");
+        });
+
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+        client.join().expect("client thread panicked");
+        assert!(
+            outcome.trace.is_empty(),
+            "auth-only exchange leaves no trace"
         );
     }
 
