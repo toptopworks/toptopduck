@@ -531,6 +531,27 @@ impl LiveProviderConfig {
         crate::mcp::secrets::clear_mcp_secret(&self.keychain, id, env_key)
     }
 
+    /// Store one MCP server request-header secret in the OS keychain under
+    /// `mcp-<id>-header-<name>` (issue #901, the header-face counterpart of
+    /// [`Self::set_mcp_secret`]).
+    pub fn set_mcp_header_secret(
+        &self,
+        id: &McpServerId,
+        header_name: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        crate::mcp::secrets::set_mcp_header_secret(&self.keychain, id, header_name, value)
+    }
+
+    /// Remove one MCP server request-header secret (idempotent; issue #901).
+    pub fn clear_mcp_header_secret(
+        &self,
+        id: &McpServerId,
+        header_name: &str,
+    ) -> Result<(), String> {
+        crate::mcp::secrets::clear_mcp_header_secret(&self.keychain, id, header_name)
+    }
+
     /// Read-only snapshot of the configured registry (issue #301 slice
     /// C-gw): every server, enabled or not (the settings list renders the
     /// disabled rows too). The turn's effective set is the filtered
@@ -2144,6 +2165,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -2247,6 +2269,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/github-mcp", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -2272,6 +2295,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/srv", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled,
         };
@@ -2318,6 +2342,7 @@ mod tests {
             } else {
                 vec!["API_KEY".into()]
             },
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled,
         };
@@ -2357,6 +2382,7 @@ mod tests {
             } else {
                 vec!["API_KEY".into()]
             },
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled,
         };
@@ -2388,6 +2414,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/old", Vec::new()),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -2398,6 +2425,7 @@ mod tests {
             transport: McpTransport::stdio("/bin/new", vec!["--flag".into()]),
             env: BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
@@ -2429,6 +2457,7 @@ mod tests {
                     transport: McpTransport::stdio("/bin/srv", Vec::new()),
                     env: BTreeMap::new(),
                     keychain_env_keys: Vec::new(),
+                    keychain_header_keys: Vec::new(),
                     timeout_ms: None,
                     enabled: true,
                 };

@@ -4,7 +4,12 @@ import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { McpServerForm } from "../McpServerForm";
-import { probeMcpServer, setMcpServerSecret, upsertMcpServer } from "../../../api";
+import {
+  probeMcpServer,
+  setMcpServerHeaderSecret,
+  setMcpServerSecret,
+  upsertMcpServer,
+} from "../../../api";
 import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 
 // The form drives everything through IPC; mock the API so the test never
@@ -12,6 +17,7 @@ import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
 vi.mock("../../../api", () => ({
   upsertMcpServer: vi.fn(),
   setMcpServerSecret: vi.fn(),
+  setMcpServerHeaderSecret: vi.fn(),
   probeMcpServer: vi.fn(),
 }));
 
@@ -22,6 +28,7 @@ function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
     transport: { type: "stdio", command: "/bin/mcp-server", args: ["--port", "8080"] },
     env: { LOG_LEVEL: "info" },
     keychain_env_keys: ["API_KEY"],
+    keychain_header_keys: [],
     timeout_ms: null,
     enabled: true,
     ...overrides,
@@ -90,7 +97,7 @@ describe("McpServerForm (issue #388)", () => {
   it("disables Add when name is filled but url is empty (sse)", () => {
     renderWithProviders(
       <McpServerForm
-        initialServer={makeServer({ id: "", display_name: "My Server", transport: { type: "sse", url: "" } })}
+        initialServer={makeServer({ id: "", display_name: "My Server", transport: { type: "sse", url: "", headers: {} } })}
         isEdit={false}
         onSaved={vi.fn()}
         onCancel={vi.fn()}
@@ -170,7 +177,7 @@ describe("McpServerForm (issue #388)", () => {
     renderWithProviders(
       <McpServerForm
         initialServer={makeServer({
-          transport: { type: "sse", url: "http://localhost:8080/sse" },
+          transport: { type: "sse", url: "http://localhost:8080/sse", headers: {} },
         })}
         isEdit={true}
         onSaved={vi.fn()}
@@ -789,5 +796,184 @@ describe("McpServerForm (issue #388)", () => {
 
     // API_KEY should NOT be present — user deleted it from JSON.
     expect(screen.queryByDisplayValue("API_KEY")).not.toBeInTheDocument();
+  });
+
+  // --- Remote transport headers (issue #901) ----------------------------------
+
+  it("shows the headers editor (not env) on a remote transport, pre-filled from transport.headers + keychain_header_keys", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          transport: {
+            type: "http",
+            url: "https://example.com/mcp",
+            headers: { "X-Api-Version": "2024-11-05" },
+          },
+          keychain_header_keys: ["Authorization"],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    // Header rows: one plain, one secret (value empty -- keychain is one-way).
+    expect(screen.getByDisplayValue("X-Api-Version")).toBeTruthy();
+    expect(screen.getByDisplayValue("2024-11-05")).toBeTruthy();
+    expect(screen.getByDisplayValue("Authorization")).toBeTruthy();
+    // The env face is invisible on a remote transport: the row's env value
+    // (LOG_LEVEL=info from makeServer) must not render anywhere.
+    expect(screen.queryByDisplayValue("LOG_LEVEL")).toBeNull();
+    expect(screen.queryByDisplayValue("info")).toBeNull();
+  });
+
+  it("shows the env editor (not headers) on a stdio transport", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    // The stdio default from makeServer: env rows render, and the header
+    // editor (its distinctive section label) does not.
+    expect(screen.getByDisplayValue("LOG_LEVEL")).toBeTruthy();
+    expect(screen.queryByText("Request headers (optional)")).toBeNull();
+  });
+
+  it("saves remote headers split across transport.headers and keychain_header_keys (issue #901)", async () => {
+    // The finalized config Rust hands back carries the saved secret key
+    // names (the save loop reads them from the finalized shape).
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({
+        id: "minted",
+        keychain_header_keys: ["Authorization"],
+      }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          id: "",
+          display_name: "API Server",
+          transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+          env: {},
+          keychain_env_keys: [],
+        })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Add one plain header row and one secret header row. Expanding the
+    // headers section auto-adds a blank row; fill it as the plain header.
+    fireEvent.click(screen.getByText("Request headers (optional)"));
+    const nameInputs1 = screen.getAllByPlaceholderText("Header");
+    fireEvent.change(nameInputs1[0], { target: { value: "X-Api-Version" } });
+    const valueInputs1 = screen.getAllByPlaceholderText("value");
+    fireEvent.change(valueInputs1[0], { target: { value: "2024-11-05" } });
+    // Second row: the secret header.
+    fireEvent.click(screen.getByText("Add header"));
+    const nameInputs2 = screen.getAllByPlaceholderText("Header");
+    fireEvent.change(nameInputs2[1], { target: { value: "Authorization" } });
+    const valueInputs2 = screen.getAllByPlaceholderText("value");
+    fireEvent.change(valueInputs2[1], { target: { value: "Bearer abc" } });
+    // Tick the second row's Secret checkbox.
+    const secretBoxes = screen.getAllByRole("checkbox", {
+      name: /Secret \(row 2\)/i,
+    });
+    fireEvent.click(secretBoxes[0]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+
+    const saved = vi.mocked(upsertMcpServer).mock.calls[0][0];
+    expect(saved.transport).toEqual({
+      type: "http",
+      url: "https://example.com/mcp",
+      headers: { "X-Api-Version": "2024-11-05" },
+    });
+    expect(saved.keychain_header_keys).toEqual(["Authorization"]);
+    expect(saved.keychain_env_keys).toEqual([]);
+    // The secret VALUE went to the keychain (header account), never config.
+    await waitFor(() =>
+      expect(setMcpServerHeaderSecret).toHaveBeenCalledWith(
+        "minted",
+        "Authorization",
+        "Bearer abc",
+      ),
+    );
+    expect(setMcpServerSecret).not.toHaveBeenCalled();
+  });
+
+  it("preserves a legacy remote row's dormant env through an edit (issue #901)", async () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({
+        transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+      }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+          env: { LEGACY_ENV: "dormant-value" },
+          keychain_env_keys: ["LEGACY_SECRET"],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // The env values render nowhere (dormant), yet the save carries them
+    // through verbatim -- no migration, no deletion.
+    expect(screen.queryByDisplayValue("LEGACY_ENV")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+
+    const saved = vi.mocked(upsertMcpServer).mock.calls[0][0];
+    expect(saved.env).toEqual({ LEGACY_ENV: "dormant-value" });
+    expect(saved.keychain_env_keys).toEqual(["LEGACY_SECRET"]);
+  });
+
+  it("blocks a JSON-mode save when a secret HEADER key is detected", async () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          id: "",
+          display_name: "API Server",
+          transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+          env: {},
+          keychain_env_keys: [],
+        })}
+        isEdit={false}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "JSON" }));
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, {
+      target: {
+        value: JSON.stringify({
+          "api-server": {
+            type: "http",
+            url: "https://example.com/mcp",
+            headers: { Authorization: "Bearer abc" },
+          },
+        }),
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Secret keys detected \(Authorization\)/)).toBeTruthy(),
+    );
+    expect(upsertMcpServer).not.toHaveBeenCalled();
   });
 });

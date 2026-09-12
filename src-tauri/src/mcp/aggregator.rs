@@ -36,7 +36,7 @@ use crate::mcp::client::{
 };
 use crate::mcp::config::{McpServerConfig, McpServerId};
 use crate::mcp::meta_tools;
-use crate::mcp::secrets::get_mcp_secret;
+use crate::mcp::secrets::{get_mcp_header_secret, get_mcp_secret};
 use crate::mcp::McpClient;
 use crate::provider::keychain::KeychainStore;
 
@@ -304,6 +304,7 @@ impl McpAggregator {
         &mut self,
         config: &McpServerConfig,
         secrets: &[SecretEnv],
+        header_secrets: &[SecretEnv],
     ) -> ConnectResult {
         let timeout = effective_timeout(config);
         let kill_slot: KillSlot = Arc::new(ConnectKill::default());
@@ -328,6 +329,7 @@ impl McpAggregator {
         // detached thread, which demands `'static`).
         let config_for_worker = config.clone();
         let secrets_for_worker = secrets.to_vec();
+        let header_secrets_for_worker = header_secrets.to_vec();
         let outcome = run_with_deadline(
             timeout,
             move || slot_for_kill.expire(),
@@ -335,6 +337,7 @@ impl McpAggregator {
                 let mut client = connect_transport_with_kill(
                     &config_for_worker,
                     &secrets_for_worker,
+                    &header_secrets_for_worker,
                     tool_output_dir.as_deref(),
                     &kill_slot,
                 )?;
@@ -516,7 +519,8 @@ impl McpAggregator {
                     );
                 }
                 let secrets = collect_secrets(keychain, server);
-                self.connect_one(server, &secrets)
+                let header_secrets = collect_header_secrets(keychain, server);
+                self.connect_one(server, &secrets, &header_secrets)
             })
             .collect()
     }
@@ -994,6 +998,35 @@ pub(crate) fn collect_secrets(
         .collect()
 }
 
+/// Read every secret request-header value for one server from the keychain
+/// (issue #901) -- the header-face counterpart of [`collect_secrets`], with
+/// the same per-entry fault isolation (a missing entry contributes nothing;
+/// one OS keychain fault skips that header, not the server).
+pub(crate) fn collect_header_secrets(
+    keychain: &KeychainStore,
+    server: &McpServerConfig,
+) -> Vec<SecretEnv> {
+    server
+        .keychain_header_keys
+        .iter()
+        .filter_map(
+            |name| match get_mcp_header_secret(keychain, &server.id, name) {
+                Ok(Some(value)) => Some((name.clone(), value)),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} keychain read for header {} failed, skipping: {e}",
+                        server.id,
+                        name
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
 /// Build the server slug for a configured server (ADR-0076). ASCII
 /// alphanumerics are lowercased; whitespace / `_` / `-` collapse to a single
 /// `_` separator; other characters (including non-ASCII in a CJK display name)
@@ -1126,6 +1159,7 @@ mod tests {
             transport: McpTransport::stdio("unused", Vec::new()),
             env: Default::default(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms,
             enabled: true,
         }
@@ -1458,10 +1492,11 @@ mod tests {
             ),
             env: std::collections::BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
-        let result = failed.connect_one(&config, &[]);
+        let result = failed.connect_one(&config, &[], &[]);
         assert!(!result.connected, "spawn failure skips the server");
         let reason = result.error.clone().expect("failure reason");
         let entry = &failed.server_listing()["servers"][0];

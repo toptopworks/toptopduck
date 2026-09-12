@@ -159,6 +159,7 @@ fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
         transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-hang-server"), Vec::new()),
         env: BTreeMap::new(),
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         // A long budget: only the CANCEL path can unblock this test in time.
         // Cold-fixture spawn latency is paid by the harness pre-warm before
         // the turn starts, so this budget measures the cancel contract, not
@@ -812,6 +813,7 @@ fn external_cancel_unblocks_a_turn_parked_on_a_hung_mcp_call() {
         transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-fake-server"), Vec::new()),
         env,
         keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
         timeout_ms: Some(60_000),
         enabled: true,
     };

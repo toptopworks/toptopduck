@@ -33,6 +33,7 @@ function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
     transport: { type: "stdio", command: "/bin/mcp-server", args: [] },
     env: {},
     keychain_env_keys: [],
+    keychain_header_keys: [],
     timeout_ms: null,
     enabled: true,
     ...overrides,
@@ -586,12 +587,14 @@ describe("McpSection (issue #387)", () => {
       transport: { type: "stdio", command: "/bin/imported-b", args: [] },
       env: {},
       keychain_env_keys: [],
+      keychain_header_keys: [],
     };
     const discoveredNew: DiscoveredServer = {
       display_name: "Brand New",
       transport: { type: "stdio", command: "/bin/imported-new", args: [] },
       env: {},
       keychain_env_keys: [],
+      keychain_header_keys: [],
     };
     // Discovery only reports Claude Desktop (the dialog dedupes nothing
     // here — these display names are not yet configured).

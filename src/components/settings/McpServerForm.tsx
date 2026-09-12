@@ -8,7 +8,12 @@ import {
   type McpServerDraft,
   type McpTransport,
 } from "../../types/mcp";
-import { probeMcpServer, setMcpServerSecret, upsertMcpServer } from "../../api";
+import {
+  probeMcpServer,
+  setMcpServerHeaderSecret,
+  setMcpServerSecret,
+  upsertMcpServer,
+} from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import {
   configToWebJson,
@@ -30,25 +35,33 @@ import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 
 // MCP server add / edit form (issue #388). A full-page replacement for the
 // server list with Form / JSON dual-mode, bidirectional sync, and a save flow:
-// upsertMcpServer → setMcpServerSecret (per secret env key) → auto probe →
-// onSaved callback returns the finalized config + probe result to the list.
+// upsertMcpServer → setMcpServerSecret / setMcpServerHeaderSecret (per secret
+// env / header key) → auto probe → onSaved callback returns the finalized
+// config + probe result to the list.
 //
-// Secrets never appear in the JSON view — only the keychain_env_keys key names.
-// Secret values are transient form state; on save they go to the OS keychain
-// via setMcpServerSecret and are never serialized into app-config.
+// Secrets never appear in the JSON view — only the keychain_env_keys /
+// keychain_header_keys key names. Secret values are transient form state; on
+// save they go to the OS keychain and are never serialized into app-config.
+//
+// Issue #901: the key-value editors split by transport — stdio shows the env
+// editor (env + keychain_env_keys), http/sse shows the headers editor
+// (transport.headers + keychain_header_keys). A legacy remote row's env
+// entries are DORMANT: preserved through edits (dormantEnvRef below),
+// invisible in both editors, never re-routed.
 
-/** One row of the env-var editor. `isSecret` routes the value to the OS
- *  keychain (via setMcpServerSecret on save) instead of the `env` map. */
-type EnvEntry = {
+/** One row of the env-var / headers editor. `isSecret` routes the value to
+ *  the OS keychain (via setMcpServerSecret / setMcpServerHeaderSecret on
+ *  save) instead of the plain `env` / `transport.headers` map. */
+type KvEntry = {
   id: number;
   key: string;
   value: string;
   isSecret: boolean;
 };
 
-// Monotonic counter for stable EnvEntry keys (H1: index-based keys break
+// Monotonic counter for stable KvEntry keys (H1: index-based keys break
 // focus/cursor when rows are inserted or deleted mid-list).
-let envEntrySeq = 0;
+let entrySeq = 0;
 
 export type McpServerFormProps = {
   /** Blank server (empty id) for add; existing server for edit. */
@@ -65,22 +78,36 @@ export type McpServerFormProps = {
 
 type FormMode = "form" | "json";
 
-/** Build the initial env-entry list from an existing config (draft or full —
- *  enablement is not read): non-secret entries from `env`, secret entries
- *  (value empty — keychain is one-way) from `keychain_env_keys`. */
-function initEnvEntries(server: McpServerDraft): EnvEntry[] {
-  const entries: EnvEntry[] = Object.entries(server.env).map(
-    ([key, value]) => ({
-      id: envEntrySeq++,
-      key,
-      value,
-      isSecret: false,
-    }),
-  );
-  for (const key of server.keychain_env_keys) {
-    entries.push({ id: envEntrySeq++, key, value: "", isSecret: true });
+/** Build the initial key-value entry list from a plain map + its keychain
+ *  key names (value empty — the keychain is one-way): non-secret entries
+ *  from the map, secret entries from the key list. Shared by the env face
+ *  (env + keychain_env_keys) and the header face (transport.headers +
+ *  keychain_header_keys, issue #901). */
+function initKvEntries(
+  plain: Record<string, string>,
+  secretKeys: string[],
+): KvEntry[] {
+  const entries: KvEntry[] = Object.entries(plain).map(([key, value]) => ({
+    id: entrySeq++,
+    key,
+    value,
+    isSecret: false,
+  }));
+  for (const key of secretKeys) {
+    entries.push({ id: entrySeq++, key, value: "", isSecret: true });
   }
   return entries;
+}
+
+/** The header face of a draft (empty on a stdio draft — no transport
+ *  headers there, issue #901). */
+function headerFaceOf(server: McpServerDraft): {
+  plain: Record<string, string>;
+  secretKeys: string[];
+} {
+  return server.transport.type === "stdio"
+    ? { plain: {}, secretKeys: [] }
+    : { plain: server.transport.headers, secretKeys: server.keychain_header_keys };
 }
 
 export function McpServerForm({
@@ -98,8 +125,27 @@ export function McpServerForm({
 
   // Pending secret values captured before a Form→JSON switch so they survive
   // the round-trip (H2: buildConfigFromForm serializes only key names, and
-  // initEnvEntries reconstructs with empty values).
-  const pendingSecrets = useRef<Record<string, string>>({});
+  // initKvEntries reconstructs with empty values). One ref per face (issue
+  // #901): an env key and a header key may share a name.
+  const pendingEnvSecrets = useRef<Record<string, string>>({});
+  const pendingHeaderSecrets = useRef<Record<string, string>>({});
+
+  // A legacy remote row's env face rides here while the form is open
+  // (issue #901 dormancy): the env editor shows nothing on a remote
+  // transport, configToWebJson serializes none of it, but the save path
+  // puts the ORIGINAL env values + secret key names back so an edit never
+  // drops or migrates them.
+  const dormantEnvRef = useRef<{
+    env: Record<string, string>;
+    keychainEnvKeys: string[];
+  }>(
+    initialServer.transport.type === "stdio"
+      ? { env: {}, keychainEnvKeys: [] }
+      : {
+          env: initialServer.env,
+          keychainEnvKeys: initialServer.keychain_env_keys,
+        },
+  );
 
   // --- Flat form state (single source of truth for Form mode) ---------------
   const [displayName, setDisplayName] = useState(initialServer.display_name);
@@ -119,8 +165,20 @@ export function McpServerForm({
   const [url, setUrl] = useState(
     "url" in initialServer.transport ? initialServer.transport.url : "",
   );
-  const [envEntries, setEnvEntries] = useState<EnvEntry[]>(() =>
-    initEnvEntries(initialServer),
+  // The env editor's rows: populated only on a stdio transport (a remote
+  // transport's key-value face is headers, below).
+  const [envEntries, setEnvEntries] = useState<KvEntry[]>(() =>
+    initialServer.transport.type === "stdio"
+      ? initKvEntries(initialServer.env, initialServer.keychain_env_keys)
+      : [],
+  );
+  // The headers editor's rows: populated only on an http/sse transport
+  // (issue #901).
+  const headerFace = headerFaceOf(initialServer);
+  const [headerEntries, setHeaderEntries] = useState<KvEntry[]>(() =>
+    initialServer.transport.type === "stdio"
+      ? []
+      : initKvEntries(headerFace.plain, headerFace.secretKeys),
   );
   const [timeoutMs, setTimeoutMs] = useState(
     initialServer.timeout_ms !== null ? String(initialServer.timeout_ms) : "",
@@ -157,41 +215,68 @@ export function McpServerForm({
   }, [mode, jsonText, displayName, transportType, command, url, serverId]);
 
   // Build a McpServerDraft from the current form fields (no `enabled` — the
-  // save below is the single assembly point that stamps it; #659).
+  // save below is the single assembly point that stamps it; #659). The
+  // key-value editors split by transport (issue #901): stdio → env +
+  // keychain_env_keys; http/sse → transport.headers + keychain_header_keys,
+  // with the dormant env carried through untouched.
   function buildConfigFromForm(): McpServerDraft {
-    const transport: McpTransport =
-      transportType === "stdio"
-        ? {
-            type: "stdio",
-            command,
-            args: argsText.trim() ? argsText.trim().split(/\s+/) : [],
-          }
-        : { type: transportType, url };
+    // Guard against NaN: type="number" rejects most non-numeric input, but
+    // a paste / programmatic value could still produce NaN (Rust rejects it,
+    // surfacing an error — cleaner to fall back to null here).
+    const timeout_ms =
+      timeoutMs.trim() && !Number.isNaN(Number(timeoutMs))
+        ? Number(timeoutMs)
+        : null;
 
-    const env: Record<string, string> = {};
-    const keychainEnvKeys: string[] = [];
-    for (const entry of envEntries) {
-      if (!entry.key) continue;
-      if (entry.isSecret) {
-        keychainEnvKeys.push(entry.key);
-      } else {
-        env[entry.key] = entry.value;
+    if (transportType === "stdio") {
+      const env: Record<string, string> = {};
+      const keychainEnvKeys: string[] = [];
+      for (const entry of envEntries) {
+        if (!entry.key) continue;
+        if (entry.isSecret) {
+          keychainEnvKeys.push(entry.key);
+        } else {
+          env[entry.key] = entry.value;
+        }
       }
+      const transport: McpTransport = {
+        type: "stdio",
+        command,
+        args: argsText.trim() ? argsText.trim().split(/\s+/) : [],
+      };
+      return {
+        id: serverId,
+        display_name: displayName,
+        transport,
+        env,
+        keychain_env_keys: keychainEnvKeys,
+        keychain_header_keys: [],
+        timeout_ms,
+      };
     }
 
+    const headers: Record<string, string> = {};
+    const keychainHeaderKeys: string[] = [];
+    for (const entry of headerEntries) {
+      if (!entry.key) continue;
+      if (entry.isSecret) {
+        keychainHeaderKeys.push(entry.key);
+      } else {
+        headers[entry.key] = entry.value;
+      }
+    }
+    const transport: McpTransport = { type: transportType, url, headers };
     return {
       id: serverId,
       display_name: displayName,
       transport,
-      env,
-      keychain_env_keys: keychainEnvKeys,
-      // Guard against NaN: type="number" rejects most non-numeric input, but
-      // a paste / programmatic value could still produce NaN (Rust rejects it,
-      // surfacing an error — cleaner to fall back to null here).
-      timeout_ms:
-        timeoutMs.trim() && !Number.isNaN(Number(timeoutMs))
-          ? Number(timeoutMs)
-          : null,
+      // Dormancy (issue #901): the remote save restores the ORIGINAL env
+      // face the row carried in — no migration, no deletion, no editor
+      // visibility.
+      env: dormantEnvRef.current.env,
+      keychain_env_keys: dormantEnvRef.current.keychainEnvKeys,
+      keychain_header_keys: keychainHeaderKeys,
+      timeout_ms,
     };
   }
 
@@ -218,20 +303,38 @@ export function McpServerForm({
       setCommand(parsed.transport.command);
       setArgsText(parsed.transport.args.join(" "));
       setUrl("");
+      dormantEnvRef.current = { env: {}, keychainEnvKeys: [] };
+      setEnvEntries(
+        // Restore secret values captured before the Form→JSON switch so
+        // they survive the round-trip (H2).
+        initKvEntries(parsed.env, parsed.keychain_env_keys).map((entry) =>
+          entry.isSecret && pendingEnvSecrets.current[entry.key]
+            ? { ...entry, value: pendingEnvSecrets.current[entry.key] }
+            : entry,
+        ),
+      );
+      setHeaderEntries([]);
     } else {
       setUrl(parsed.transport.url);
       setCommand("");
       setArgsText("");
+      // Dormancy (issue #901): a remote draft's env face rides the ref
+      // (the flat parser leaves it empty for web-format rows; an
+      // internal-format paste may carry some), restored verbatim on save.
+      dormantEnvRef.current = {
+        env: parsed.env,
+        keychainEnvKeys: parsed.keychain_env_keys,
+      };
+      setEnvEntries([]);
+      const face = headerFaceOf(parsed);
+      setHeaderEntries(
+        initKvEntries(face.plain, face.secretKeys).map((entry) =>
+          entry.isSecret && pendingHeaderSecrets.current[entry.key]
+            ? { ...entry, value: pendingHeaderSecrets.current[entry.key] }
+            : entry,
+        ),
+      );
     }
-    setEnvEntries(
-      // Restore secret values captured before the Form→JSON switch so they
-      // survive the round-trip (H2).
-      initEnvEntries(parsed).map((entry) =>
-        entry.isSecret && pendingSecrets.current[entry.key]
-          ? { ...entry, value: pendingSecrets.current[entry.key] }
-          : entry,
-      ),
-    );
     setTimeoutMs(parsed.timeout_ms !== null ? String(parsed.timeout_ms) : "");
   }
 
@@ -241,11 +344,18 @@ export function McpServerForm({
       // Capture ALL secret key names + values before serializing so they
       // survive the JSON round-trip (H2). The web-format serializer includes
       // secret key names with blanked values; the actual values are restored
-      // from pendingSecrets on the JSON → Form switch.
-      pendingSecrets.current = {};
+      // from the pending refs on the JSON → Form switch. One ref per face
+      // (issue #901).
+      pendingEnvSecrets.current = {};
       for (const entry of envEntries) {
         if (entry.isSecret) {
-          pendingSecrets.current[entry.key] = entry.value;
+          pendingEnvSecrets.current[entry.key] = entry.value;
+        }
+      }
+      pendingHeaderSecrets.current = {};
+      for (const entry of headerEntries) {
+        if (entry.isSecret) {
+          pendingHeaderSecrets.current[entry.key] = entry.value;
         }
       }
       // Serialize into the common web format (bare server map) so the user
@@ -263,9 +373,9 @@ export function McpServerForm({
       }
       // Key names come solely from the parsed JSON (configToWebJson includes
       // secret keys as blanked entries; normalizeJsonToConfig re-detects them
-      // on parse-back). pendingSecrets only restores VALUES via syncFromJson —
-      // do NOT merge key names back, as the user may have intentionally
-      // deleted them from the JSON.
+      // on parse-back). The pending refs only restore VALUES via
+      // syncFromJson — do NOT merge key names back, as the user may have
+      // intentionally deleted them from the JSON.
       syncFromJson(result.config);
       setJsonError(null);
     }
@@ -275,7 +385,7 @@ export function McpServerForm({
   function addEnvEntry() {
     setEnvEntries((prev) => [
       ...prev,
-      { id: envEntrySeq++, key: "", value: "", isSecret: false },
+      { id: entrySeq++, key: "", value: "", isSecret: false },
     ]);
   }
 
@@ -283,8 +393,25 @@ export function McpServerForm({
     setEnvEntries((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function updateEnvEntry(index: number, patch: Partial<EnvEntry>) {
+  function updateEnvEntry(index: number, patch: Partial<KvEntry>) {
     setEnvEntries((prev) =>
+      prev.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)),
+    );
+  }
+
+  function addHeaderEntry() {
+    setHeaderEntries((prev) => [
+      ...prev,
+      { id: entrySeq++, key: "", value: "", isSecret: false },
+    ]);
+  }
+
+  function removeHeaderEntry(index: number) {
+    setHeaderEntries((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function updateHeaderEntry(index: number, patch: Partial<KvEntry>) {
+    setHeaderEntries((prev) =>
       prev.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)),
     );
   }
@@ -318,28 +445,43 @@ export function McpServerForm({
     // In JSON mode the normalizer detects secret key names but drops their
     // values (secrets must go to the OS keychain, not config). Block save
     // and prompt the user to enter values via Form mode, otherwise the
-    // config is written with keychain_env_keys that have no keychain entries.
-    if (mode === "json" && config.keychain_env_keys.length > 0) {
-      setError(
-        intl.formatMessage(
-          {
-            id: "settings.mcp.form.secretsRequireFormMode",
-            defaultMessage:
-              "Secret keys detected ({keys}). Switch to Form mode to enter their values before saving.",
-          },
-          { keys: config.keychain_env_keys.join(", ") },
-        ),
-      );
-      return;
+    // config is written with keychain keys that have no keychain entries.
+    // Both faces apply (issue #901): env secrets and header secrets.
+    if (mode === "json") {
+      const secretKeys = [
+        ...config.keychain_env_keys,
+        ...config.keychain_header_keys,
+      ];
+      if (secretKeys.length > 0) {
+        setError(
+          intl.formatMessage(
+            {
+              id: "settings.mcp.form.secretsRequireFormMode",
+              defaultMessage:
+                "Secret keys detected ({keys}). Switch to Form mode to enter their values before saving.",
+            },
+            { keys: secretKeys.join(", ") },
+          ),
+        );
+        return;
+      }
     }
 
-    // Capture secret values from the form's env entries (only populated in
-    // Form mode — JSON mode never has secret values).
+    // Capture secret values from the form's entries (only populated in
+    // Form mode — JSON mode never has secret values). One map per face
+    // (issue #901): env secrets and header secrets go to distinct keychain
+    // accounts.
     const secretsToSet: Record<string, string> = {};
+    const headerSecretsToSet: Record<string, string> = {};
     if (mode === "form") {
       for (const entry of envEntries) {
         if (entry.isSecret && entry.value) {
           secretsToSet[entry.key] = entry.value;
+        }
+      }
+      for (const entry of headerEntries) {
+        if (entry.isSecret && entry.value) {
+          headerSecretsToSet[entry.key] = entry.value;
         }
       }
     }
@@ -355,11 +497,19 @@ export function McpServerForm({
       // a second server (C1).
       setServerId(finalized.id);
 
-      // 2. Write each secret to the OS keychain (ADR-0029 one-shot transfer).
+      // 2. Write each secret to the OS keychain (ADR-0029 one-shot transfer):
+      // env secrets under `mcp-<id>-<env_key>`, header secrets under
+      // `mcp-<id>-header-<name>` (issue #901).
       for (const key of finalized.keychain_env_keys) {
         const value = secretsToSet[key];
         if (value) {
           await setMcpServerSecret(finalized.id, key, value);
+        }
+      }
+      for (const name of finalized.keychain_header_keys) {
+        const value = headerSecretsToSet[name];
+        if (value) {
+          await setMcpServerHeaderSecret(finalized.id, name, value);
         }
       }
 
@@ -470,6 +620,10 @@ export function McpServerForm({
             onAddEnv={addEnvEntry}
             onRemoveEnv={removeEnvEntry}
             onUpdateEnv={updateEnvEntry}
+            headerEntries={headerEntries}
+            onAddHeader={addHeaderEntry}
+            onRemoveHeader={removeHeaderEntry}
+            onUpdateHeader={updateHeaderEntry}
             timeoutMs={timeoutMs}
             onTimeoutMs={setTimeoutMs}
           />
@@ -578,10 +732,14 @@ type FormViewProps = {
   onArgsText: (v: string) => void;
   url: string;
   onUrl: (v: string) => void;
-  envEntries: EnvEntry[];
+  envEntries: KvEntry[];
   onAddEnv: () => void;
   onRemoveEnv: (index: number) => void;
-  onUpdateEnv: (index: number, patch: Partial<EnvEntry>) => void;
+  onUpdateEnv: (index: number, patch: Partial<KvEntry>) => void;
+  headerEntries: KvEntry[];
+  onAddHeader: () => void;
+  onRemoveHeader: (index: number) => void;
+  onUpdateHeader: (index: number, patch: Partial<KvEntry>) => void;
   timeoutMs: string;
   onTimeoutMs: (v: string) => void;
 };
@@ -601,6 +759,10 @@ function FormView({
   onAddEnv,
   onRemoveEnv,
   onUpdateEnv,
+  headerEntries,
+  onAddHeader,
+  onRemoveHeader,
+  onUpdateHeader,
   timeoutMs,
   onTimeoutMs,
 }: FormViewProps) {
@@ -731,13 +893,23 @@ function FormView({
         </SettingsRow>
       )}
 
-      <EnvEditor
-        entries={envEntries}
-        isHeaders={transportType !== "stdio"}
-        onAdd={onAddEnv}
-        onRemove={onRemoveEnv}
-        onUpdate={onUpdateEnv}
-      />
+      {transportType === "stdio" ? (
+        <EnvEditor
+          entries={envEntries}
+          isHeaders={false}
+          onAdd={onAddEnv}
+          onRemove={onRemoveEnv}
+          onUpdate={onUpdateEnv}
+        />
+      ) : (
+        <EnvEditor
+          entries={headerEntries}
+          isHeaders
+          onAdd={onAddHeader}
+          onRemove={onRemoveHeader}
+          onUpdate={onUpdateHeader}
+        />
+      )}
     </>
   );
 }
@@ -751,11 +923,11 @@ function EnvEditor({
   onRemove,
   onUpdate,
 }: {
-  entries: EnvEntry[];
+  entries: KvEntry[];
   isHeaders: boolean;
   onAdd: () => void;
   onRemove: (index: number) => void;
-  onUpdate: (index: number, patch: Partial<EnvEntry>) => void;
+  onUpdate: (index: number, patch: Partial<KvEntry>) => void;
 }) {
   const intl = useIntl();
   const [expanded, setExpanded] = useState(entries.length > 0);

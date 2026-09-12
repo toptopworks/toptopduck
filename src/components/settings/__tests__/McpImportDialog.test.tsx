@@ -21,6 +21,7 @@ function makeDiscovered(overrides: Partial<DiscoveredServer> = {}): DiscoveredSe
     transport: { type: "stdio", command: "npx", args: ["-y", "server"] },
     env: {},
     keychain_env_keys: [],
+    keychain_header_keys: [],
     ...overrides,
   };
 }
@@ -32,6 +33,7 @@ function makeFinalized(overrides: Partial<McpServerConfig> = {}): McpServerConfi
     transport: { type: "stdio", command: "npx", args: ["-y", "server"] },
     env: {},
     keychain_env_keys: [],
+    keychain_header_keys: [],
     timeout_ms: null,
     enabled: true,
     ...overrides,

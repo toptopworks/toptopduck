@@ -31,6 +31,15 @@ pub fn mcp_account(id: &McpServerId, env_key: &str) -> String {
     format!("{MCP_ACCOUNT_PREFIX}{id}-{env_key}")
 }
 
+/// The keychain account for one MCP server request-header secret:
+/// `mcp-<server_id>-header-<header_name>` (issue #901) -- the header-face
+/// counterpart of [`mcp_account`]. The explicit `header-` infix keeps a
+/// header named like an env key (`X-API-KEY`) from colliding with that env
+/// key's own account on the same server.
+pub fn mcp_header_account(id: &McpServerId, header_name: &str) -> String {
+    format!("{MCP_ACCOUNT_PREFIX}{id}-header-{header_name}")
+}
+
 /// Store one MCP server secret (ADR-0029 frontend-to-Rust one-shot). Thereafter
 /// the value never crosses IPC back out; the gateway (later slice) reads it per
 /// spawn via [`get_mcp_secret`].
@@ -65,6 +74,39 @@ pub fn clear_mcp_secret(
     store.clear_secret(&mcp_account(id, env_key))
 }
 
+/// Store one MCP server request-header secret (issue #901, the header-face
+/// counterpart of [`set_mcp_secret`]). Same one-shot ADR-0029 contract: the
+/// value never crosses IPC back out; the client reads it at connect time.
+pub fn set_mcp_header_secret(
+    store: &KeychainStore,
+    id: &McpServerId,
+    header_name: &str,
+    value: &str,
+) -> Result<(), String> {
+    store.set_secret(&mcp_header_account(id, header_name), value)
+}
+
+/// Read one MCP server request-header secret (issue #901). `Ok(None)` when
+/// nothing is stored, `Err` on an OS keychain read failure (ADR-0029 trust
+/// root). Rust-internal: the aggregator / probe read it at connect time.
+pub fn get_mcp_header_secret(
+    store: &KeychainStore,
+    id: &McpServerId,
+    header_name: &str,
+) -> Result<Option<String>, String> {
+    store.get_secret(&mcp_header_account(id, header_name))
+}
+
+/// Remove one MCP server request-header secret (idempotent). Same trust-root
+/// rule as [`clear_mcp_secret`]: a real keychain error surfaces.
+pub fn clear_mcp_header_secret(
+    store: &KeychainStore,
+    id: &McpServerId,
+    header_name: &str,
+) -> Result<(), String> {
+    store.clear_secret(&mcp_header_account(id, header_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +118,23 @@ mod tests {
         // but the format does not assume it); the env_key is the env var name.
         let id = McpServerId("abc123".into());
         assert_eq!(mcp_account(&id, "API_KEY"), "mcp-abc123-API_KEY");
+    }
+
+    #[test]
+    fn mcp_header_account_carries_the_header_infix() {
+        // The header-face account is `mcp-<id>-header-<name>`: the explicit
+        // `header-` infix keeps a header named like an env key from sharing
+        // that env key's account (issue #901).
+        let id = McpServerId("abc123".into());
+        assert_eq!(
+            mcp_header_account(&id, "X-API-KEY"),
+            "mcp-abc123-header-X-API-KEY"
+        );
+        assert_ne!(
+            mcp_header_account(&id, "X-API-KEY"),
+            mcp_account(&id, "X-API-KEY"),
+            "a header name never collides with the same-named env key's account"
+        );
     }
 
     #[test]

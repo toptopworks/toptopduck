@@ -182,6 +182,7 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
         transport: { ...discovered.transport },
         env: { ...discovered.env },
         keychain_env_keys: [...discovered.keychain_env_keys],
+        keychain_header_keys: [...discovered.keychain_header_keys],
         timeout_ms: null,
         enabled: true,
       };

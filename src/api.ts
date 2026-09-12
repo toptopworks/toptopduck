@@ -599,6 +599,25 @@ export async function clearMcpServerSecret(id: string, envKey: string): Promise<
   await invoke<void>("clear_mcp_server_secret", { id, envKey });
 }
 
+// Store one MCP server request-header secret in the OS keychain under
+// `mcp-<id>-header-<name>` (issue #901; the header- infix keeps the account
+// distinct from the same-named env key's). Same one-shot ADR-0029 contract.
+export async function setMcpServerHeaderSecret(
+  id: string,
+  headerName: string,
+  value: string,
+): Promise<void> {
+  await invoke<void>("set_mcp_server_header_secret", { id, headerName, value });
+}
+
+// Remove one MCP server request-header secret (idempotent; issue #901).
+export async function clearMcpServerHeaderSecret(
+  id: string,
+  headerName: string,
+): Promise<void> {
+  await invoke<void>("clear_mcp_server_header_secret", { id, headerName });
+}
+
 // Probe one MCP server's connectivity (issue #387). Global (not session-
 // scoped): the settings page calls this to test a server independently of any
 // agent turn. The backend spawns the server, initializes, lists tools, then

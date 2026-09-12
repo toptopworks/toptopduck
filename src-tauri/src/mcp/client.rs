@@ -46,7 +46,7 @@
 //! pure synchronous: `McpClient`'s wire methods never poll clocks or
 //! cancel tokens.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -833,26 +833,42 @@ pub fn stdio_handshake(
 /// [`SseClient`]); `Drop` has no side effects.
 pub struct HttpClient {
     url: String,
+    /// Request headers attached to every POST (issue #901) -- the transport's
+    /// configured non-secret values merged with the keychain-resolved secret
+    /// values at dispatch time.
+    headers: BTreeMap<String, String>,
     agent: ureq::Agent,
     next_id: i64,
 }
 
 impl HttpClient {
     /// Connect to the HTTP endpoint and perform the MCP initialize handshake.
-    pub fn connect(url: &str) -> Result<Self, ClientError> {
-        Self::connect_with_kill(url, &empty_kill_slot())
+    pub fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, headers, &empty_kill_slot())
     }
 
     /// [`Self::connect`] with a [`KillSlot`] (issue #889). HTTP is bounded
     /// per-read ([`HTTP_READ_TIMEOUT`]), so the slot holds the no-op handle
     /// purely for kill-shape uniformity across transports.
-    pub fn connect_with_kill(url: &str, kill_slot: &KillSlot) -> Result<Self, ClientError> {
+    ///
+    /// The agent never follows redirects (issue #901 guardrail): a 3xx
+    /// surfaces as an explicit connection error via [`map_ureq_error`] --
+    /// ureq's redirect hops only strip `authorization`/`cookie`, so following
+    /// one would forward any custom credential header to an arbitrary origin
+    /// (the #244 egress-agent precedent).
+    pub fn connect_with_kill(
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        kill_slot: &KillSlot,
+    ) -> Result<Self, ClientError> {
         let agent = ureq::AgentBuilder::new()
             .timeout_read(HTTP_READ_TIMEOUT)
+            .redirects(0)
             .build();
         kill_slot.publish(TransportKill::Http);
         let mut client = Self {
             url: url.to_string(),
+            headers: headers.clone(),
             agent,
             next_id: 1,
         };
@@ -865,6 +881,11 @@ impl HttpClient {
         TransportKill::Http
     }
 
+    /// Build the POST request with [`Self::headers`] attached (issue #901).
+    fn post(&self) -> ureq::Request {
+        apply_headers(self.agent.post(&self.url), &self.headers)
+    }
+
     /// Test-only: a client at a URL nothing listens on. The aggregator's
     /// catalog / resolve paths never touch the transport; routing against
     /// this client fails with a connection error -- exactly the failure
@@ -873,6 +894,7 @@ impl HttpClient {
     pub(crate) fn unreachable_for_test(url: &str) -> Self {
         Self {
             url: url.to_string(),
+            headers: BTreeMap::new(),
             agent: ureq::AgentBuilder::new().build(),
             next_id: 1,
         }
@@ -887,10 +909,10 @@ impl McpClient for HttpClient {
     fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         let id = req.get("id").cloned();
         let response = self
-            .agent
-            .post(&self.url)
+            .post()
             .send_json(req)
             .map_err(|e| ClientError::Http(e.to_string()))?;
+        check_no_redirect(&response)?;
 
         let content_type = response.header("Content-Type").unwrap_or("");
         if content_type.contains("text/event-stream") {
@@ -922,7 +944,7 @@ impl McpClient for HttpClient {
     }
 
     fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        post_notification(&self.agent, &self.url, notif)
+        post_notification(self.post(), notif)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -954,6 +976,10 @@ pub struct SseClient {
     response_rx: mpsc::Receiver<Result<Value, ClientError>>,
     /// The POST endpoint URL (from the server's initial `endpoint` event).
     post_url: String,
+    /// Request headers attached to the SSE GET stream and every POST
+    /// (issue #901) -- the transport's configured non-secret values merged
+    /// with the keychain-resolved secret values at dispatch time.
+    headers: BTreeMap<String, String>,
     /// HTTP agent for POST requests (the GET agent's stream is owned by the
     /// reader thread).
     agent: ureq::Agent,
@@ -969,9 +995,12 @@ pub struct SseClient {
 
 impl SseClient {
     /// Open the SSE stream, read the endpoint event, spawn the reader thread,
-    /// and perform the MCP initialize handshake.
-    pub fn connect(url: &str) -> Result<Self, ClientError> {
-        Self::connect_with_kill(url, &empty_kill_slot())
+    /// and perform the MCP initialize handshake. A caller handing a non-empty
+    /// header map is by definition header-authenticated (the same-origin
+    /// guardrail applies); the dispatch path derives the flag from the
+    /// CONFIGURED face instead (see [`Self::connect_with_kill`]).
+    pub fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, headers, !headers.is_empty(), &empty_kill_slot())
     }
 
     /// [`Self::connect`] with a [`KillSlot`] (issue #889). The stop flag is
@@ -981,19 +1010,34 @@ impl SseClient {
     /// bounds the reader's socket reads, not the channel), so without the
     /// slot a spawn that outlives its budget would park with nobody left to
     /// kill it.
-    pub fn connect_with_kill(url: &str, kill_slot: &KillSlot) -> Result<Self, ClientError> {
+    ///
+    /// The agent never follows redirects (issue #901 guardrail; see
+    /// [`HttpClient::connect_with_kill`]). When `auth_configured` is set --
+    /// ANY header configured on the server, secret-named or not (the
+    /// dispatch derives it from `transport.headers` + `keychain_header_keys`,
+    /// NOT from the merged runtime map, so a declared secret whose keychain
+    /// value is missing still trips the guard) -- the endpoint event's POST
+    /// URL must share the SSE URL's origin ([`enforce_same_origin`]): the
+    /// POST target comes from the server's own event, so without the guard a
+    /// compromised server could aim the authenticated POST (and its headers)
+    /// at any host it chooses.
+    pub fn connect_with_kill(
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        auth_configured: bool,
+        kill_slot: &KillSlot,
+    ) -> Result<Self, ClientError> {
         // The GET agent carries a read timeout so the reader thread can
         // periodically check the stop flag (the stream is otherwise blocking
         // forever between events).
         let agent = ureq::AgentBuilder::new()
             .timeout_read(SSE_READ_TIMEOUT)
+            .redirects(0)
             .build();
 
-        let response = agent
-            .get(url)
-            .set("Accept", "text/event-stream")
-            .call()
-            .map_err(|e| ClientError::Http(e.to_string()))?;
+        let get = apply_headers(agent.get(url).set("Accept", "text/event-stream"), headers);
+        let response = get.call().map_err(|e| ClientError::Http(e.to_string()))?;
+        check_no_redirect(&response)?;
 
         let content_type = response.header("Content-Type").unwrap_or("");
         if !content_type.contains("text/event-stream") {
@@ -1024,6 +1068,11 @@ impl SseClient {
         // a relative path like `/message`). Reject non-http(s) schemes to
         // prevent SSRF via a compromised server's endpoint event.
         let post_url = resolve_post_url(url, &first_event.data)?;
+        // Header-authenticated servers additionally require the POST URL to
+        // share the SSE stream's origin (issue #901 guardrail two).
+        if auth_configured {
+            enforce_same_origin(url, &post_url)?;
+        }
 
         // Spawn the background reader for subsequent events. A bounded
         // sync_channel backpressures a flooding server.
@@ -1042,6 +1091,7 @@ impl SseClient {
         let mut client = Self {
             response_rx: rx,
             post_url,
+            headers: headers.clone(),
             agent,
             stop,
             reader_thread: Some(handle),
@@ -1056,6 +1106,11 @@ impl SseClient {
     pub fn kill_handle(&self) -> TransportKill {
         TransportKill::SseStop(Arc::clone(&self.stop))
     }
+
+    /// Build the POST request with [`Self::headers`] attached (issue #901).
+    fn post(&self) -> ureq::Request {
+        apply_headers(self.agent.post(&self.post_url), &self.headers)
+    }
 }
 
 impl McpClient for SseClient {
@@ -1064,10 +1119,11 @@ impl McpClient for SseClient {
     /// (no `id`) and responses for other ids are skipped.
     fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         let id = req.get("id").cloned();
-        self.agent
-            .post(&self.post_url)
+        let response = self
+            .post()
             .send_json(req)
             .map_err(|e| ClientError::Http(e.to_string()))?;
+        check_no_redirect(&response)?;
         // The POST response is typically 202 Accepted; the actual JSON-RPC
         // response arrives on the SSE stream.
         loop {
@@ -1087,7 +1143,7 @@ impl McpClient for SseClient {
     }
 
     fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        post_notification(&self.agent, &self.post_url, notif)
+        post_notification(self.post(), notif)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -1223,12 +1279,63 @@ fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
 /// notifications are fire-and-forget; the server typically returns 202.
 /// Non-2xx status codes surface as `ClientError::Http` via `ureq`'s error
 /// channel.
-fn post_notification(agent: &ureq::Agent, url: &str, notif: Value) -> Result<(), ClientError> {
-    agent
-        .post(url)
+fn post_notification(request: ureq::Request, notif: Value) -> Result<(), ClientError> {
+    let response = request
         .send_json(notif)
-        .map(drop)
-        .map_err(|e| ClientError::Http(e.to_string()))
+        .map_err(|e| ClientError::Http(e.to_string()))?;
+    // A notification's 3xx is still an explicit redirect refusal (issue
+    // #901), not a silent drop -- the handshake ack must not quietly vanish.
+    check_no_redirect(&response)
+}
+
+/// Attach `headers` to a request (issue #901): the one injection loop shared
+/// by both remote transports' POST builders and the SSE GET open.
+fn apply_headers(mut request: ureq::Request, headers: &BTreeMap<String, String>) -> ureq::Request {
+    for (name, value) in headers {
+        request = request.set(name, value);
+    }
+    request
+}
+
+/// Guard the no-redirect agents' SUCCESS path (issue #901): ureq 2 with
+/// `redirects(0)` returns a 3xx as `Ok(response)` (only statuses >= 400
+/// surface as `Err::Status` -- verified against ureq 2.12's `do_call`), so
+/// the redirect refusal is checked on the response status itself. Following
+/// would forward custom credential headers to an arbitrary origin (the #244
+/// egress-agent lesson), so the refusal must name the redirect explicitly.
+fn check_no_redirect(response: &ureq::Response) -> Result<(), ClientError> {
+    let code = response.status();
+    if (300..400).contains(&code) {
+        let location = response
+            .header("Location")
+            .unwrap_or("<no Location header>");
+        return Err(ClientError::Http(format!(
+            "HTTP {code} redirect to {location} refused: redirects are not followed"
+        )));
+    }
+    Ok(())
+}
+
+/// The SSE same-origin guardrail (issue #901): when a server carries
+/// authenticated headers, the endpoint event's POST URL must share the SSE
+/// stream URL's origin (scheme + host + port). The POST target comes from
+/// the server's own event, so a compromised server could otherwise aim the
+/// authenticated POST at any host it chooses. The error names both origins.
+fn enforce_same_origin(sse_url: &str, post_url: &str) -> Result<(), ClientError> {
+    let parse = |raw: &str| {
+        url::Url::parse(raw).map_err(|e| ClientError::Http(format!("invalid url: {e}")))
+    };
+    let sse = parse(sse_url)?;
+    let post = parse(post_url)?;
+    if sse.origin() == post.origin() {
+        return Ok(());
+    }
+    Err(ClientError::Http(format!(
+        "SSE endpoint event advertised a cross-origin POST url {}; refusing: this server \
+         sends authenticated headers and the POST target must share the SSE origin {}",
+        post.origin().ascii_serialization(),
+        sse.origin().ascii_serialization(),
+    )))
 }
 
 /// Resolve the SSE endpoint event's POST URL relative to the SSE stream URL,
@@ -1303,18 +1410,31 @@ impl McpClient for TransportClient {
 pub fn connect_transport(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
+    header_secrets: &[SecretEnv],
     tool_output_dir: Option<&str>,
 ) -> Result<TransportClient, ClientError> {
-    connect_transport_with_kill(config, secrets, tool_output_dir, &empty_kill_slot())
+    connect_transport_with_kill(
+        config,
+        secrets,
+        header_secrets,
+        tool_output_dir,
+        &empty_kill_slot(),
+    )
 }
 
 /// [`connect_transport`] with a [`KillSlot`] the caller reads on deadline
 /// expiry (issue #889): each transport publishes its [`TransportKill`] as
 /// soon as the killable resource exists, covering the initialize-handshake
 /// park (a stdio child that spawns but never responds).
+///
+/// `header_secrets` are the keychain-resolved `(header_name, value)` pairs
+/// (issue #901), merged over the transport's configured non-secret `headers`
+/// here -- the one composition point, so both remote transports receive the
+/// complete header set and neither client type knows the keychain exists.
 pub fn connect_transport_with_kill(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
+    header_secrets: &[SecretEnv],
     tool_output_dir: Option<&str>,
     kill_slot: &KillSlot,
 ) -> Result<TransportClient, ClientError> {
@@ -1323,13 +1443,38 @@ pub fn connect_transport_with_kill(
             StdioClient::connect_with_kill(config, secrets, tool_output_dir, kill_slot)
                 .map(TransportClient::Stdio)
         }
-        McpTransport::Sse { url } => {
-            SseClient::connect_with_kill(url, kill_slot).map(TransportClient::Sse)
+        McpTransport::Sse { url, headers } => {
+            // The configured face, not the merged runtime map: a declared
+            // secret name whose keychain value is missing still counts as a
+            // header-authenticated server (issue #901 guardrail two).
+            let auth_configured = !headers.is_empty() || !config.keychain_header_keys.is_empty();
+            SseClient::connect_with_kill(
+                url,
+                &merged_headers(headers, header_secrets),
+                auth_configured,
+                kill_slot,
+            )
+            .map(TransportClient::Sse)
         }
-        McpTransport::Http { url } => {
-            HttpClient::connect_with_kill(url, kill_slot).map(TransportClient::Http)
+        McpTransport::Http { url, headers } => {
+            HttpClient::connect_with_kill(url, &merged_headers(headers, header_secrets), kill_slot)
+                .map(TransportClient::Http)
         }
     }
+}
+
+/// Merge a transport's configured non-secret headers with its keychain
+/// resolved secret values (issue #901). A secret name cannot legally sit in
+/// the configured map (the read-time scan refuses it), so the two sources
+/// never collide in practice; `extend` is simply the order-insensitive
+/// composition.
+fn merged_headers(
+    configured: &BTreeMap<String, String>,
+    secrets: &[SecretEnv],
+) -> BTreeMap<String, String> {
+    let mut merged = configured.clone();
+    merged.extend(secrets.iter().cloned());
+    merged
 }
 
 /// The short label for an unsupported transport in an error message
@@ -2287,6 +2432,7 @@ mod tests {
         SseClient {
             response_rx,
             post_url,
+            headers: BTreeMap::new(),
             agent: ureq::AgentBuilder::new()
                 .timeout_read(SSE_READ_TIMEOUT)
                 .build(),
@@ -2449,6 +2595,77 @@ mod tests {
             matches!(err, ClientError::Framing(_)),
             "neither result nor error -> Framing, got {err:?}"
         );
+    }
+
+    // --- same-origin + header merge (issue #901) -------------------------------
+
+    /// Same origin (scheme + host + port) passes the guard.
+    #[test]
+    fn enforce_same_origin_accepts_matching_origin() {
+        enforce_same_origin("http://localhost:3001/sse", "http://localhost:3001/message")
+            .expect("same origin accepted");
+        // The default-port elision shape: an https url with an explicit 443
+        // is origin-identical to the bare host form.
+        enforce_same_origin("https://example.test/sse", "https://example.test:443/m")
+            .expect("explicit default port is the same origin");
+    }
+
+    /// A different host is refused and the error names BOTH origins.
+    #[test]
+    fn enforce_same_origin_refuses_a_different_host_naming_both() {
+        let err = enforce_same_origin(
+            "http://localhost:3001/sse",
+            "http://attacker.test:8080/message",
+        )
+        .expect_err("cross-origin refused");
+        let msg = err.to_string();
+        assert!(msg.contains("cross-origin"), "names the refusal: {msg}");
+        assert!(
+            msg.contains("http://localhost:3001") && msg.contains("http://attacker.test:8080"),
+            "names both origins: {msg}"
+        );
+    }
+
+    /// A different PORT on the same host is a different origin.
+    #[test]
+    fn enforce_same_origin_refuses_a_different_port() {
+        let err = enforce_same_origin("http://localhost:3001/sse", "http://localhost:8080/message")
+            .expect_err("port difference refused");
+        assert!(
+            err.to_string().contains("cross-origin"),
+            "port is part of the origin"
+        );
+    }
+
+    /// A different SCHEME (https vs http) on the same host+port is a
+    /// different origin.
+    #[test]
+    fn enforce_same_origin_refuses_a_scheme_change() {
+        let err = enforce_same_origin("http://localhost:3001/sse", "https://localhost:3001/m")
+            .expect_err("scheme difference refused");
+        assert!(
+            err.to_string().contains("cross-origin"),
+            "scheme is part of the origin"
+        );
+    }
+
+    /// The dispatch merge: configured non-secret headers + keychain-resolved
+    /// secrets compose into one map (secret values win on a name collision,
+    /// which the read-time scan makes impossible in practice -- the extend is
+    /// just the order-insensitive composition).
+    #[test]
+    fn merged_headers_combines_configured_and_secret_values() {
+        let mut configured = BTreeMap::new();
+        configured.insert("X-Client".to_string(), "toptopduck".to_string());
+        let secrets = vec![
+            ("X-Test-Token".to_string(), "secret-value".to_string()),
+            ("X-Other".to_string(), "other".to_string()),
+        ];
+        let merged = merged_headers(&configured, &secrets);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged["X-Client"], "toptopduck");
+        assert_eq!(merged["X-Test-Token"], "secret-value");
+        assert_eq!(merged["X-Other"], "other");
     }
 
     // --- resolve_post_url SSRF guard (issue #389) -----------------------------

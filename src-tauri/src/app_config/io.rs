@@ -54,6 +54,59 @@ const SECRET_KEY_NAMES: &[&str] = &[
     "refresh_token",
 ];
 
+/// Additional secret-name substrings checked ONLY against header names
+/// (issue #901): request headers carry `Authorization` / bearer / JWT
+/// credentials far more often than config fields do, and the header face is
+/// hand-reachable (web-format JSON pasted into the form), so a secret-named
+/// header's literal value must be structurally refused at read time -- the
+/// name belongs in `keychain_header_keys`, with the value in the OS keychain.
+/// This list is the Rust mirror of the frontend's `isSecretEnvKey` header
+/// routing and the import path's `IMPORT_SECRET_SUBSTRINGS` (plus
+/// `authorization`, which env scanning deliberately avoids for
+/// false-positive reasons that do not apply to headers).
+const HEADER_SECRET_SUBSTRINGS: &[&str] =
+    &["token", "bearer", "jwt", "privatekey", "authorization"];
+
+/// Collapse a key name for substring matching: lowercase, non-alphanumerics
+/// dropped (so `apiKey` / `API_KEY` / `api-key` collapse to `apikey`).
+fn collapse_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// True if `name` matches a secret key name, ignoring case and non-alphanumeric
+/// separators, using SUBSTRING matching so prefixed variants also trip:
+/// `my_api_key`, `openai_api_key`, `claude_api_key`, `anthropic_key` all contain
+/// a known secret token after collapse. `apiKey`, `API_KEY`, `api-key`, and
+/// `apikey` collapse to the same `apikey` token. The app-config field set
+/// (`base_url`, `model`, `theme`, `window`, `engine`, ...) collapses to tokens
+/// that contain NO secret name, so substring matching stays false-positive-free
+/// across the real schema. The primary secrets-never defense is the model having
+/// no key field; this scan is the read-time backstop for hand-edited files.
+pub(crate) fn is_secret_name(name: &str) -> bool {
+    let collapsed = collapse_name(name);
+    SECRET_KEY_NAMES
+        .iter()
+        .any(|secret| collapsed.contains(&collapse_name(secret)))
+}
+
+/// True if `name` matches the EXPANDED header-secret list (issue #901):
+/// [`is_secret_name`] plus the [`HEADER_SECRET_SUBSTRINGS`] -- applied only to
+/// header names inside a `headers` object (see [`find_secret_field`]), never to
+/// env names (the env list is deliberately narrower; see
+/// `mcp::import::is_secret_env_key` for the import-path variant).
+pub(crate) fn is_secret_header_name(name: &str) -> bool {
+    if is_secret_name(name) {
+        return true;
+    }
+    let collapsed = collapse_name(name);
+    HEADER_SECRET_SUBSTRINGS
+        .iter()
+        .any(|s| collapsed.contains(&collapse_name(s)))
+}
+
 /// Why a typed parse failed. Internal: [`read_at`] maps every variant to
 /// [`AppConfig::defaults`] + a `log::warn!` for the READ consumers, while the
 /// crate's read-modify-write read source (issue #602) matches `Missing` (the
@@ -250,10 +303,28 @@ pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
 /// Recursively scan a JSON value for any object key matching a secret name
 /// (case-insensitive, non-alphanumeric-stripped comparison so `apiKey` /
 /// `API_KEY` / `api-key` all trip). Returns the offending key on the first hit.
+/// A `headers` object's DIRECT keys are header names and use the expanded
+/// [`is_secret_header_name`] list (issue #901): a secret-named header's
+/// literal value must refuse the file, exactly like a smuggled `env` entry.
+/// `headers` is unambiguous here -- the mcp transport header face is the only
+/// such key in the schema.
 fn find_secret_field(value: &Value) -> Option<String> {
     match value {
         Value::Object(map) => {
             for (k, v) in map {
+                if k == "headers" {
+                    if let Value::Object(headers) = v {
+                        for (name, sub) in headers {
+                            if is_secret_header_name(name) {
+                                return Some(name.clone());
+                            }
+                            if let Some(found) = find_secret_field(sub) {
+                                return Some(found);
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if is_secret_name(k) {
                     return Some(k.clone());
                 }
@@ -266,31 +337,6 @@ fn find_secret_field(value: &Value) -> Option<String> {
         Value::Array(items) => items.iter().find_map(find_secret_field),
         _ => None,
     }
-}
-
-/// True if `name` matches a secret key name, ignoring case and non-alphanumeric
-/// separators, using SUBSTRING matching so prefixed variants also trip:
-/// `my_api_key`, `openai_api_key`, `claude_api_key`, `anthropic_key` all contain
-/// a known secret token after collapse. `apiKey`, `API_KEY`, `api-key`, and
-/// `apikey` collapse to the same `apikey` token. The app-config field set
-/// (`base_url`, `model`, `theme`, `window`, `engine`, ...) collapses to tokens
-/// that contain NO secret name, so substring matching stays false-positive-free
-/// across the real schema. The primary secrets-never defense is the model having
-/// no key field; this scan is the read-time backstop for hand-edited files.
-pub(crate) fn is_secret_name(name: &str) -> bool {
-    let collapsed: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    SECRET_KEY_NAMES.iter().any(|secret| {
-        let s: String = secret
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-        collapsed.contains(&s)
-    })
 }
 
 #[cfg(test)]
@@ -533,6 +579,69 @@ mod tests {
         );
         fs::write(&path, &smuggled).expect("write");
         assert_eq!(read_at(&path), AppConfig::defaults());
+    }
+
+    #[test]
+    fn read_refuses_a_secret_named_header_on_a_remote_transport() {
+        // Issue #901: a hand-edited `transport.headers` entry whose NAME
+        // matches the EXPANDED header-secret list (authorization / token /
+        // bearer / jwt / privatekey, on top of the base secret names) is a
+        // smuggled plaintext credential -- the read refuses the whole file
+        // (honest degrade), exactly as it does for a smuggled env entry. The
+        // name belongs in keychain_header_keys; the value in the OS keychain.
+        for header_name in [
+            "Authorization",
+            "X-Api-Token",
+            "X-Bearer-Id",
+            "X-Jwt",
+            "API_KEY",
+        ] {
+            let (_dir, path) = temp("config.json");
+            let smuggled = format!(
+                "{{\"format_version\":{v},\"mcp_servers\":{{\"servers\":[{{\"id\":\"s\",\"display_name\":\"S\",\"transport\":{{\"type\":\"http\",\"url\":\"https://e.test\",\"headers\":{{\"{header_name}\":\"sk-leak\"}}}}}}]}}}}",
+                v = APP_CONFIG_FORMAT_VERSION,
+            );
+            fs::write(&path, &smuggled).expect("write");
+            assert_eq!(
+                read_at(&path),
+                AppConfig::defaults(),
+                "{header_name} must refuse the file"
+            );
+        }
+    }
+
+    #[test]
+    fn read_keeps_a_remote_transport_with_non_secret_headers() {
+        // The complement: ordinary header names (`X-Api-Version`,
+        // `Accept-Language`) are NOT on the expanded list -- a remote server
+        // with non-secret headers reads back faithfully (the header face is
+        // usable, not hostage to the scan).
+        let (_dir, path) = temp("config.json");
+        let legitimate = format!(
+            "{{\"format_version\":{v},\"mcp_servers\":{{\"servers\":[{{\"id\":\"s\",\"display_name\":\"S\",\"transport\":{{\"type\":\"http\",\"url\":\"https://e.test\",\"headers\":{{\"X-Api-Version\":\"2024-11-05\",\"Accept-Language\":\"en\"}}}}}}]}}}}",
+            v = APP_CONFIG_FORMAT_VERSION,
+        );
+        fs::write(&path, &legitimate).expect("write");
+        let cfg = read_at(&path);
+        assert_ne!(cfg, AppConfig::defaults(), "the file reads back");
+        assert_eq!(cfg.mcp_servers.servers.len(), 1);
+    }
+
+    #[test]
+    fn the_expanded_header_list_does_not_apply_to_env_names() {
+        // The env-face list stays narrower (issue #901: the env-name scan is
+        // unchanged): `authorization` as an ENV key does not trip the
+        // read-time scan (it is neither on the base list nor scanned with
+        // the header additions) while the same name as a HEADER does. The
+        // import path applies its own wider list at import time -- that is a
+        // separate seam, not this scan.
+        assert!(!is_secret_name("authorization"));
+        assert!(is_secret_header_name("authorization"));
+        assert!(!is_secret_header_name("X-Api-Version"));
+        assert!(
+            is_secret_header_name("x-api-key"),
+            "base list still applies"
+        );
     }
 
     #[test]

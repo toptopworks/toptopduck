@@ -1164,9 +1164,11 @@ mod tests {
             display_name: "LiveMCP".into(),
             transport: crate::mcp::config::McpTransport::Http {
                 url: url.to_string(),
+                headers: std::collections::BTreeMap::new(),
             },
             env: std::collections::BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         }
@@ -1336,6 +1338,7 @@ mod tests {
             ),
             env: std::collections::BTreeMap::new(),
             keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
             timeout_ms: None,
             enabled: true,
         };
