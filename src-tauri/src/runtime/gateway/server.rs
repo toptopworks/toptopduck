@@ -1473,6 +1473,35 @@ mod tests {
         );
     }
 
+    /// Issue #899: a pre-fired `engine_done` at the serve_connection layer
+    /// returns `Ok` with an empty outcome promptly -- the accept-side arm
+    /// hands the turn back to the ACP termination (single-source) instead
+    /// of burning `CONNECT_DEADLINE` and surfacing a serve error for a
+    /// turn whose engine already finished. Complements the per-arm unit
+    /// pins (the accept `None`, the serve-loop exit) at the wiring layer
+    /// the turn assembler actually calls.
+    #[test]
+    fn serve_connection_returns_empty_outcome_when_engine_done_prefires() {
+        let handle = bind_gateway().expect("bind");
+        let ctx = fresh_ctx();
+        let engine_done = AtomicBool::new(true);
+        let start = Instant::now();
+        let outcome = serve_connection(handle, ctx, &engine_done).expect("serve");
+        assert!(
+            outcome.trace.is_empty(),
+            "no bridge ever connected -> empty trace"
+        );
+        assert!(
+            outcome.promotions.is_empty(),
+            "no bridge ever connected -> no promotion"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "pre-fired engine_done returns promptly, not after CONNECT_DEADLINE: {:?}",
+            start.elapsed()
+        );
+    }
+
     /// The deterministic terminator (issue #357): with the bridge socket held
     /// OPEN (no EOF), serve_connection still returns promptly when
     /// `engine_done` is set -- it does not wait for the bridge to disconnect.

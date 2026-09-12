@@ -326,9 +326,10 @@ impl McpAggregator {
         // The poisoned-mutex expect has no panic producer today (the lock's
         // holders never panic while holding it), but IF one ever appears the
         // caller dies on a bare stderr write: release windows-subsystem
-        // builds drop stderr, leaving zero trace -- the connect silently
-        // degrades to its own budget (issue #899 note). Same note at the
-        // watcher's expiry pass below.
+        // builds drop stderr, leaving zero trace -- the turn thread dies
+        // mid-connect before any budget park exists (issue #899 note). The
+        // budget-degradation shape is the watcher-death consequence -- same
+        // note at the watcher's expiry pass below.
         self.kill_slots
             .lock()
             .expect("kill registry poisoned")
@@ -808,13 +809,14 @@ impl McpAggregator {
     ///
     /// The watcher is one-shot by design: on a token fire it expires the
     /// registry snapshot and exits. Known window (issue #899): a sibling
-    /// connect spawning AFTER the fire's expiry pass -- between the
-    /// between-attempts gap check and its own kill-slot publish -- parks
-    /// with no watcher left to kill it and degrades to that server's own
-    /// budget (default 120s; the session-lock floor). The window is
-    /// milliseconds wide, covers at most one server per fire, and the
-    /// budget floor is the design guarantee -- accepted over a watcher
-    /// that keeps polling through stand-down (ADR-0115).
+    /// whose between-attempts gap check passed just before the fire and
+    /// whose kill-slot publish lands after the expiry pass parks with no
+    /// watcher left to kill it and degrades to that server's own budget
+    /// (default 120s; the session-lock floor). The window is typically
+    /// milliseconds wide (it spans the keychain reads between the gap
+    /// check and the publish), covers at most one server per fire, and
+    /// the budget floor is the design guarantee -- accepted over a
+    /// watcher that keeps polling through stand-down (ADR-0115).
     pub fn arm_cancel_teardown(&mut self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
         self.cancel = Some(Arc::clone(&cancel));
         // Consume any stale request before the connects (issue #892
@@ -846,7 +848,13 @@ impl McpAggregator {
                     // watcher dies on bare stderr -- zero trace in release
                     // windows-subsystem builds -- and the turn silently
                     // degrades to budget-bounded waits (issue #899 note;
-                    // same note at the registry push in connect_one).
+                    // same note at the registry push in connect_one). The
+                    // expiry pass also runs ConnectKill's own slot-mutex
+                    // expects (publish/expire in client.rs) under this
+                    // registry guard: a producer there dies mid-pass (some
+                    // slots killed, later ones parked for their budgets)
+                    // and poisons this registry, cascading a panic into
+                    // the next connect_one push.
                     let slots = kill_slots.lock().expect("kill registry poisoned");
                     log::warn!(
                         target: "toptopduck::mcp",
@@ -870,7 +878,7 @@ impl McpAggregator {
         } else {
             // The observation surface for the same failure (issue #899):
             // the warn above is invisible without a logger; this records the
-            // arm result on the aggregator itself.
+            // spawn result on the aggregator itself.
             self.watcher_spawned = true;
         }
     }
@@ -1263,7 +1271,7 @@ mod tests {
         agg.arm_cancel_teardown(Arc::new(CancelToken::new()), watched);
         assert!(
             agg.watcher_spawned,
-            "a successful spawn records the watcher as armed"
+            "a successful spawn records the watcher as spawned"
         );
     }
 
