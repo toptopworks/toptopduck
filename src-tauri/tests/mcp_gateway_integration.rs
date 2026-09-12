@@ -1250,11 +1250,11 @@ fn connect_deadline_skips_a_never_responding_stdio_server() {
 }
 
 /// A `tools/call` parked on a swallowing server returns at the deadline with
-/// server + tool attribution, and the server is disconnected for the rest of
+/// server + tool attribution, and the server is unavailable for the rest of
 /// the turn: the next call fails fast instead of re-parking for the full
 /// budget (issue #889).
 #[test]
-fn route_deadline_attributed_and_server_disconnected_for_the_turn() {
+fn route_deadline_attributed_and_server_unavailable_for_the_turn() {
     use std::time::Instant;
     use toptopduck_lib::mcp::client::ClientError;
 

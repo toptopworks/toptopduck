@@ -46,7 +46,7 @@ use crate::provider::keychain::KeychainStore;
 /// overrides either. Same order as the whole-turn wall clock ADR-0115
 /// retired -- under the freeze semantics this bounds ONE phase or call, not
 /// the turn: a call that outlives its budget is killed and the server is
-/// disconnected for the rest of the turn (a minutes-long single call does
+/// unavailable for the rest of the turn (a minutes-long single call does
 /// NOT fit under the default cap).
 pub(crate) const DEFAULT_MCP_TIMEOUT_MS: u32 = 120_000;
 
@@ -297,7 +297,9 @@ impl McpAggregator {
     /// returned [`ConnectResult`] carries `connected: false` + the reason.
     /// The whole connect phase runs under the server's deadline; on expiry
     /// the transport is terminated through its kill handle so the parked
-    /// handshake read returns.
+    /// handshake read returns (an idle-read park on stdio/SSE -- the HTTP
+    /// kill is a no-op, that half unwinds by its per-read bound and this
+    /// deadline instead).
     pub fn connect_one(
         &mut self,
         config: &McpServerConfig,
@@ -751,7 +753,7 @@ impl McpAggregator {
                 log::warn!(
                     target: "toptopduck::mcp",
                     "MCP server {} tools/call `{}` timed out after {}ms; \
-                     disconnected for the rest of the turn",
+                     unavailable for the rest of the turn",
                     display_name,
                     tool_for_error,
                     timeout.as_millis()
@@ -770,13 +772,19 @@ impl McpAggregator {
     /// (user stop or a watchdog kill -- under ADR-0115 both are a token
     /// fire) while the turn is still live, every registry slot is expired --
     /// a completed transport's kill fires, an in-flight connect's parked
-    /// handshake read is killed -- so blocking reads parked inside the
+    /// handshake read is killed (stdio/SSE idle-read parks; the HTTP kill
+    /// is a no-op -- that transport unwinds by its read bound and the phase
+    /// budget instead) -- so blocking reads parked inside the
     /// dispatch freeze OR the connect phase return, the engine's
     /// `thread::scope` can end, and the session lock is released. Arming
     /// BEFORE `connect_all` additionally activates the between-attempts gap
     /// check there. `turn_done` is the watcher's stand-down signal: a turn
     /// that finished normally owns its teardown through the aggregator's
-    /// `Drop`, so the watcher exits without killing.
+    /// `Drop`, so the watcher exits without killing. Production callers
+    /// pass a [`TurnDoneFlag`]'s shared flag (the RAII form, which stores
+    /// on drop through any unwind); the parameter stays the bare
+    /// `Arc<AtomicBool>` so tests can arm synthetic stand-down states (an
+    /// already-stood-down flag) the owning RAII type cannot express.
     pub fn arm_cancel_teardown(&mut self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
         self.cancel = Some(Arc::clone(&cancel));
         // Consume any stale request before the connects (issue #892

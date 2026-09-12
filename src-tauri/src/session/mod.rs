@@ -1731,8 +1731,10 @@ impl Session {
             // `engine_done` remains the serve loop's exit signal
             // (`serve_connection`'s loop-top check, below). A token fire
             // while the pump is still parked (the whole CLI -> bridge ->
-            // serve chain waits on a frozen MCP call) kills the transports,
-            // the parked read returns `ServerClosed`, serve unwinds, and
+            // serve chain waits on a frozen MCP call) kills the transports
+            // (stdio/SSE idle-read parks; the HTTP kill is a no-op -- that
+            // half unwinds by its read bound and the phase budget), the
+            // parked read returns `ServerClosed`, serve unwinds, and
             // the scope can end -- the session lock is released.
             let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
             mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());

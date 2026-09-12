@@ -1283,7 +1283,7 @@ pub enum ClientError {
     /// `timeout_ms` the effective budget (per-server override or gateway
     /// default). The transport was terminated -- subsequent calls to this
     /// server fail fast for the rest of the turn.
-    #[error("MCP server `{server}` {call} timed out after {timeout_ms}ms; the server is disconnected for the rest of the turn")]
+    #[error("MCP server `{server}` {call} timed out after {timeout_ms}ms; the server is unavailable for the rest of the turn")]
     Timeout {
         server: String,
         call: String,
