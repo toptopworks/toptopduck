@@ -110,11 +110,11 @@ _Avoid_: 操作(operation)、配置变更(config change)——太泛
 _Avoid_: 后端、服务——太泛；插件——那是另一机制，未在本域定义
 
 **环境面 (Env Face)**:
-一个 MCP 服务器配置的环境变量侧——非密值住 `env`，密值仅名住 `keychain_env_keys`（值住 OS keychain）。stdio 传输的**活面**（连接时注入子进程环境）；远程传输下**面休眠**（见下条）。环境密名账户 `mcp-<id>-<env_key>`，名字以 `header-` 开头被写边界拒绝（防与头面同名账户互撞）。
+一个 MCP 服务器配置的环境变量侧——非密值住 `env`，密值仅名住 `keychain_env_keys`（值住 OS keychain）。stdio 传输的**活面**（连接时注入子进程环境）；远程传输下**面休眠**（见下条）。环境密名账户 `mcp-<id>-<env_key>`，名字以 `header-` 开头被写边界拒绝（防与头面同名账户互撞）；env 键名命中读时基表（`is_secret_name`，非扩表——扩表误拒 `SESSION_MODE` 这类读时可接受形状）亦被写边界拒绝（与读时扫描精确镜像：扫描只认对象键名、密名名单不豁免），报错指名改走 Secret 行。
 _Avoid_: 环境变量集——面是「配置侧 + 生命周期姿态」的整体，非单纯键值集合
 
 **头面 (Header Face)**:
-远程（SSE/HTTP）传输的请求头侧——非密值住 `transport.headers`，密值仅名住 `keychain_header_keys`（值住 OS keychain，账户 `mcp-<id>-header-<name>`，`header-` 中缀使其与环境面同名账户互不相撞）。远程传输的**活面**；stdio 传输无此面——写边界拒绝非空密头名单，手改文件的 stdio 形状被读时接受且连接时忽略（死配置，翻回远程名字复活，无害）。头名受写边界查护五条（规则合计六条，余二非头名之查：stdio 拒非空密头名单见上、环境密名 `header-` 前缀拒绝见环境面）：RFC 7230 token、值拒控制字符、密名明文路由密面、协议管理头（Accept/Content-Type）拒绝、配置表与密名名单间大小写折叠查重。
+远程（SSE/HTTP）传输的请求头侧——非密值住 `transport.headers`，密值仅名住 `keychain_header_keys`（值住 OS keychain，账户 `mcp-<id>-header-<name>`，`header-` 中缀使其与环境面同名账户互不相撞）。远程传输的**活面**；stdio 传输无此面——写边界拒绝非空密头名单，手改文件的 stdio 形状被读时接受且连接时忽略（死配置，翻回远程名字复活，无害）。头名受写边界查护五条（规则合计七条，余三非头名之查：stdio 拒非空密头名单见上、环境面两条写边界拒绝——`header-` 前缀与明文凭据名键——见环境面）：RFC 7230 token、值拒控制字符、密名明文路由密面、协议管理头（Accept/Content-Type）拒绝、配置表与密名名单间大小写折叠查重。
 _Avoid_: 请求头集合、HTTP 头——面含配置生命周期姿态，非线上报文
 
 **密面 (Keychain Face)**:
