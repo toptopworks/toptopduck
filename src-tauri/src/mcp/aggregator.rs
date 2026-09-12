@@ -264,7 +264,7 @@ pub struct McpAggregator {
     /// no logger -- and silently degrades the turn to budget-bounded waits
     /// (exactly the stuck-session shape the cancel chain exists to prevent),
     /// so the spawn result also lands here where a test can read it.
-    cancel_teardown_watcher_armed: bool,
+    watcher_spawned: bool,
 }
 
 impl McpAggregator {
@@ -279,7 +279,7 @@ impl McpAggregator {
             tool_output_dir: None,
             kill_slots: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
-            cancel_teardown_watcher_armed: false,
+            watcher_spawned: false,
         }
     }
 
@@ -294,7 +294,7 @@ impl McpAggregator {
             tool_output_dir: Some(tool_output_dir),
             kill_slots: Arc::new(Mutex::new(Vec::new())),
             cancel: None,
-            cancel_teardown_watcher_armed: false,
+            watcher_spawned: false,
         }
     }
 
@@ -871,7 +871,7 @@ impl McpAggregator {
             // The observation surface for the same failure (issue #899):
             // the warn above is invisible without a logger; this records the
             // arm result on the aggregator itself.
-            self.cancel_teardown_watcher_armed = true;
+            self.watcher_spawned = true;
         }
     }
 
@@ -1256,16 +1256,13 @@ mod tests {
     #[test]
     fn arm_cancel_teardown_records_the_watcher_spawn_result() {
         let mut agg = McpAggregator::empty();
-        assert!(
-            !agg.cancel_teardown_watcher_armed,
-            "an unarmed aggregator has no watcher"
-        );
+        assert!(!agg.watcher_spawned, "an unarmed aggregator has no watcher");
         let flag_holder = TurnDoneFlag::new();
         let watched = flag_holder.flag();
         drop(flag_holder);
         agg.arm_cancel_teardown(Arc::new(CancelToken::new()), watched);
         assert!(
-            agg.cancel_teardown_watcher_armed,
+            agg.watcher_spawned,
             "a successful spawn records the watcher as armed"
         );
     }
