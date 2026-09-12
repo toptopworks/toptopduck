@@ -206,10 +206,12 @@ pub fn serve_connection(
     let GatewayHandle {
         token, listener, ..
     } = handle;
-    let (stream, _peer) = match accept_bridge(&listener, ctx.cancel, CONNECT_DEADLINE)? {
-        // Cancel fired before any bridge connected: return the empty outcome so
-        // the turn assembler's termination (single-source ACP) decides the
-        // TurnOutcome (Cancelled), not a gateway serve error.
+    let (stream, _peer) = match accept_bridge(&listener, ctx.cancel, engine_done, CONNECT_DEADLINE)?
+    {
+        // Cancel or engine completion fired before any bridge connected:
+        // return the empty outcome so the turn assembler's termination
+        // (single-source ACP) decides the TurnOutcome (Cancelled, or the
+        // pump-already-returned outcome), not a gateway serve error.
         None => return Ok(GatewayOutcome::default()),
         Some(pair) => pair,
     };
@@ -299,14 +301,23 @@ pub fn serve_connection(
     }
 }
 
-/// Poll the listener non-blocking until a bridge connects, cancel fires, or
-/// `deadline` elapses. Returns `Ok(None)` on cancel (the serve returns an empty
-/// outcome + the ACP termination decides the TurnOutcome), `Ok(Some)` on a
-/// connection, and `Err(TimedOut)` on the deadline (a missing bridge is a real
-/// failure -- the engine would otherwise wait on a serve that never progresses).
+/// Poll the listener non-blocking until a bridge connects, cancel fires,
+/// engine completion fires, or `deadline` elapses. Returns `Ok(None)` on
+/// cancel or engine completion (the serve returns an empty outcome + the ACP
+/// termination decides the TurnOutcome), `Ok(Some)` on a connection, and
+/// `Err(TimedOut)` on the deadline (a missing bridge is a real failure -- the
+/// engine would otherwise wait on a serve that never progresses).
+///
+/// The `engine_done` arm (issue #899): the engine pump returned while no
+/// bridge ever connected, so there is nothing left to serve -- waiting out
+/// the deadline would burn `CONNECT_DEADLINE` and surface as a serve error,
+/// failing a turn whose engine already finished. The same single-source
+/// principle as the cancel arm: the ACP termination (already set by the
+/// pump's return) decides the TurnOutcome, not the gateway.
 fn accept_bridge(
     listener: &TcpListener,
     cancel: &CancelToken,
+    engine_done: &AtomicBool,
     deadline: Duration,
 ) -> io::Result<Option<(std::net::TcpStream, std::net::SocketAddr)>> {
     listener.set_nonblocking(true)?;
@@ -320,6 +331,16 @@ fn accept_bridge(
             log::debug!(
                 target: "toptopduck::gateway",
                 "accept_bridge exiting on the cancel flag before a bridge connected"
+            );
+            return Ok(None);
+        }
+        // Same disposition for engine completion (issue #899): the pump
+        // returned while no bridge connected, so the accept has nothing left
+        // to wait for. Companion to the serve loop's engine_done arm.
+        if engine_done.load(Ordering::SeqCst) {
+            log::debug!(
+                target: "toptopduck::gateway",
+                "accept_bridge exiting on engine completion before a bridge connected"
             );
             return Ok(None);
         }
@@ -1884,8 +1905,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let cancel = CancelToken::new();
         let start = Instant::now();
-        let err = accept_bridge(&listener, &cancel, Duration::from_millis(200))
-            .expect_err("deadline -> Err");
+        let err = accept_bridge(
+            &listener,
+            &cancel,
+            &AtomicBool::new(false),
+            Duration::from_millis(200),
+        )
+        .expect_err("deadline -> Err");
         let elapsed = start.elapsed();
         assert!(
             elapsed >= Duration::from_millis(180),
@@ -1906,12 +1932,38 @@ mod tests {
         let cancel = CancelToken::new();
         cancel.request();
         let start = Instant::now();
-        let result = accept_bridge(&listener, &cancel, Duration::from_secs(30))
-            .expect("cancel is Ok(None), not Err");
+        let result = accept_bridge(
+            &listener,
+            &cancel,
+            &AtomicBool::new(false),
+            Duration::from_secs(30),
+        )
+        .expect("cancel is Ok(None), not Err");
         assert!(result.is_none(), "cancel before connect -> None");
         assert!(
             start.elapsed() < Duration::from_millis(100),
             "cancel returns promptly: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Issue #899: engine completion before any bridge connects returns
+    /// `Ok(None)` promptly (no wait) instead of burning the connect deadline
+    /// and surfacing a serve error -- the pump already returned, so the turn's
+    /// outcome is decided by the ACP termination (single-source), never the
+    /// gateway. Mirrors the pre-fired cancel arm one test up.
+    #[test]
+    fn accept_bridge_returns_none_when_engine_done() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let cancel = CancelToken::new();
+        let engine_done = AtomicBool::new(true);
+        let start = Instant::now();
+        let result = accept_bridge(&listener, &cancel, &engine_done, Duration::from_secs(30))
+            .expect("engine_done is Ok(None), not Err");
+        assert!(result.is_none(), "engine_done before connect -> None");
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "engine_done returns promptly: {:?}",
             start.elapsed()
         );
     }
