@@ -37,8 +37,16 @@ pub fn mcp_account(id: &McpServerId, env_key: &str) -> String {
 /// header named like an env key (`X-API-KEY`) from colliding with that env
 /// key's own account on the same server.
 pub fn mcp_header_account(id: &McpServerId, header_name: &str) -> String {
-    format!("{MCP_ACCOUNT_PREFIX}{id}-header-{header_name}")
+    format!("{MCP_ACCOUNT_PREFIX}{id}-{HEADER_ACCOUNT_INFIX}{header_name}")
 }
+
+/// The infix `mcp_header_account` embeds between the server id and the
+/// header name. Rule 6 of the upsert validation refuses `keychain_env_keys`
+/// names starting with this literal (config.rs, issue #904): an env key's
+/// account is byte-identical to the same-suffixed header secret's, so the
+/// reservation must track the account format -- one constant, both sites,
+/// so the guard cannot drift from what it protects.
+pub(crate) const HEADER_ACCOUNT_INFIX: &str = "header-";
 
 /// Store one MCP server secret (ADR-0029 frontend-to-Rust one-shot). Thereafter
 /// the value never crosses IPC back out; the gateway (later slice) reads it per
@@ -129,6 +137,13 @@ mod tests {
         assert_eq!(
             mcp_header_account(&id, "X-API-KEY"),
             "mcp-abc123-header-X-API-KEY"
+        );
+        // The collision rule 6 refuses, restated as the derived identity the
+        // rule protects (issue #904): an env key literally named with the
+        // infix mints the header secret's exact account.
+        assert_eq!(
+            mcp_account(&id, &format!("{HEADER_ACCOUNT_INFIX}X")),
+            mcp_header_account(&id, "X")
         );
         assert_ne!(
             mcp_header_account(&id, "X-API-KEY"),

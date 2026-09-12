@@ -600,6 +600,13 @@ enum ServerMode {
     /// Legacy SSE answering the GET stream with `301` + a Location header —
     /// the SSE half of the no-redirect guardrail (issue #901).
     SseRedirectGet,
+    /// Legacy SSE answering ONE JSON-RPC method's POST with `301` + a
+    /// Location header (issue #904): the GET stream and every other POST
+    /// behave stock, so the handshake advances exactly far enough to reach
+    /// the parameterized method — pinning `check_no_redirect` on both POST
+    /// paths in isolation (`initialize` rides `SseClient::request`, the
+    /// `notifications/initialized` ack rides `post_notification`).
+    SseRedirectPost(&'static str),
     /// Legacy SSE whose endpoint event advertises an absolute CROSS-ORIGIN
     /// POST url — exercises the same-origin guardrail: refused when headers
     /// are configured, plain connection failure (no guard) when not
@@ -742,6 +749,10 @@ fn handle_connection(
         }
         (ServerMode::HttpRedirect, "POST") => handle_redirect(&mut stream, "/moved"),
         (ServerMode::SseRedirectGet, "GET") => handle_redirect(&mut stream, "/elsewhere"),
+        (ServerMode::SseRedirectPost(_), "GET") => handle_sse_stream(&mut stream, &state, base_url),
+        (ServerMode::SseRedirectPost(method), "POST") => {
+            handle_sse_post_redirect(&mut stream, &body, &state, method)
+        }
         (ServerMode::SseCrossOriginEndpoint, "GET") => {
             // A cross-origin absolute endpoint: port 9 (discard) is not this
             // listener's port, so the origin differs by construction.
@@ -943,6 +954,30 @@ fn handle_sse_post_handshake_silent(stream: &mut TcpStream, body: &[u8]) {
         return;
     }
     write_response(stream, 202, "application/json", "");
+}
+
+/// POST handler for the redirect-on-one-method SSE fixture (issue #904): the
+/// parameterized method's POST is answered `301` + Location, every other
+/// POST behaves stock. The redirect ALSO shuts the fixture down, closing the
+/// GET stream: a mutant client that skips the redirect check parks its
+/// `recv` on a stream that will never carry the response -- with the stream
+/// closed it surfaces a terminal `ServerClosed` instead, so the pin fails
+/// with an assertion (wrong error), not a hang.
+fn handle_sse_post_redirect(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: &ServerState,
+    redirect_method: &str,
+) {
+    let Some(req) = parse_sse_post(stream, body) else {
+        return;
+    };
+    if req.get("method").and_then(Value::as_str) == Some(redirect_method) {
+        state.shutdown.store(true, Ordering::SeqCst);
+        handle_redirect(stream, "/sse-post-redirected");
+        return;
+    }
+    enqueue_and_ack_sse_response(stream, &req, state);
 }
 
 // --- Shared JSON-RPC response builder --------------------------------------
@@ -2011,6 +2046,83 @@ fn aggregator_injects_keychain_header_secrets_into_http_requests() {
     );
 }
 
+/// The probe's remote transport entry (issue #904): `probe_mcp_server`
+/// resolves both secret faces from the keychain then hands the pairs to
+/// `connect_transport` -- the no-kill entry no other test drives (the
+/// aggregator's `connect_one` wraps the kill-slot variant). This pins that
+/// entry's header-face distribution: the declared name + resolved pair
+/// reach the wire exactly as the aggregator path delivers them (a probe
+/// regression that drops the resolved pairs here goes red, not green).
+#[test]
+fn connect_transport_injects_keychain_header_secrets_into_http_requests() {
+    let server = HttpMcpServer::spawn(ServerMode::Http);
+    let config = McpServerConfig {
+        id: McpServerId("probe-hdr".into()),
+        display_name: "ProbeHdr".into(),
+        transport: McpTransport::Http {
+            url: format!("{}/mcp", server.url()),
+            headers: BTreeMap::new(),
+        },
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        keychain_header_keys: vec!["X-Test-Token".into()],
+        timeout_ms: None,
+        enabled: true,
+    };
+    let header_secrets: Vec<SecretEnv> =
+        vec![("X-Test-Token".into(), "probe-keychain-value".into())];
+    let mut client =
+        toptopduck_lib::mcp::client::connect_transport(&config, &[], &header_secrets, None)
+            .expect("connect via the probe's transport entry");
+    client.list_tools("ProbeHdr").expect("tools/list");
+
+    assert!(
+        captured_has(&server, "x-test-token", "probe-keychain-value"),
+        "the probe entry put the keychain-resolved header on the wire, got {:?}",
+        server.state.captured_headers.lock().expect("poisoned")
+    );
+}
+
+/// The aggregator's stdio transport entry (issue #904): `connect_transport`
+/// routes a stdio config to `StdioClient::connect_with_kill`, sharing the
+/// `stdio_command` env-injection seam with the probe's `spawn_stdio_child`
+/// (which never goes through `connect_transport` -- the probe's stdio arm
+/// in commands.rs spawns and handshakes the child directly, and is not
+/// itself driven by any test). The resolved keychain env pair reaches the
+/// spawned child's environment through that shared seam (the echo_env tool
+/// reflects std::env::var). The keychain is bypassed at the documented
+/// seam: the probe resolves from the OS store in production, the resolved
+/// pair rides here.
+#[test]
+fn connect_transport_injects_keychain_env_secrets_into_the_child_env() {
+    let config = McpServerConfig {
+        id: McpServerId("probe-env".into()),
+        display_name: "ProbeEnv".into(),
+        transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: vec!["TOPTOPDUCK_TEST_MCP_SECRET".into()],
+        keychain_header_keys: Vec::new(),
+        timeout_ms: None,
+        enabled: true,
+    };
+    let secrets: Vec<SecretEnv> = vec![(
+        "TOPTOPDUCK_TEST_MCP_SECRET".into(),
+        "probe-env-value".into(),
+    )];
+    let mut client = toptopduck_lib::mcp::client::connect_transport(&config, &secrets, &[], None)
+        .expect("stdio connect via the probe's transport entry");
+    let result = client
+        .call("echo_env", &json!({"key": "TOPTOPDUCK_TEST_MCP_SECRET"}))
+        .expect("echo_env call ok");
+    let text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .expect("content text");
+    assert_eq!(text, "probe-env-value");
+}
+
 /// The SSE transport attaches headers to BOTH faces: the GET stream open and
 /// every POST to the advertised endpoint (issue #901). initialize + tools/list
 /// produce one GET and two POSTs; both faces must show the pair.
@@ -2121,6 +2233,47 @@ fn sse_transport_refuses_redirect_on_get_stream() {
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("redirect") && msg.contains("/elsewhere"),
+        "names the refused redirect, got: {msg}"
+    );
+}
+
+/// The no-redirect guardrail, SSE POST-request half (issue #904): the
+/// `initialize` POST rides `SseClient::request` -- a `301` answer is refused
+/// with the redirect named (status + target), not followed and not parked on.
+/// The GET stream and the endpoint event behave stock, so the connect
+/// reaches the POST before failing.
+#[test]
+fn sse_transport_refuses_redirect_on_initialize_post() {
+    let server = HttpMcpServer::spawn(ServerMode::SseRedirectPost("initialize"));
+    let url = format!("{}/sse", server.url());
+
+    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
+        .err()
+        .expect("a redirecting initialize POST must fail the connect");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("301") && msg.contains("redirect") && msg.contains("/sse-post-redirected"),
+        "names the refused redirect, got: {msg}"
+    );
+}
+
+/// The no-redirect guardrail, SSE notification half (issue #904): the
+/// `notifications/initialized` ack rides `post_notification` -- its `301`
+/// answer is an explicit refusal, not a silent drop of the handshake ack.
+/// Only that one POST redirects: `initialize` answers stock, so the failure
+/// is attributable to the notification path (a connect error here means the
+/// ack's redirect was refused, not the handshake request's).
+#[test]
+fn sse_transport_refuses_redirect_on_initialized_notification() {
+    let server = HttpMcpServer::spawn(ServerMode::SseRedirectPost("notifications/initialized"));
+    let url = format!("{}/sse", server.url());
+
+    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
+        .err()
+        .expect("a redirecting notification POST must fail the connect");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("301") && msg.contains("redirect") && msg.contains("/sse-post-redirected"),
         "names the refused redirect, got: {msg}"
     );
 }

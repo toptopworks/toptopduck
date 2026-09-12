@@ -102,7 +102,9 @@ export interface McpProbeResult {
   connected: boolean;
   // The tools the server advertised (empty when not connected).
   tools: McpToolInfo[];
-  // The error message when connected is false (null on success).
+  // The error message when connected is false (null on success). Also
+  // carries non-fatal post-save warnings -- e.g. a keychain clear failure
+  // after a successful upsert -- where connected stays true (issue #904).
   error: string | null;
 }
 

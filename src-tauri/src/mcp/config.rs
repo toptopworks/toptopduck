@@ -42,6 +42,7 @@
 use std::collections::BTreeMap;
 
 use crate::app_config::io::is_secret_header_name;
+use crate::mcp::secrets::HEADER_ACCOUNT_INFIX;
 
 use serde::{Deserialize, Serialize};
 
@@ -205,8 +206,15 @@ pub struct McpServerConfig {
     /// time; the values NEVER cross this config (structural + read-time scan,
     /// ADR-0029/0036/0038 -- the header-name scan uses an expanded substring
     /// list so a secret-named header's literal value is refused at read time).
-    /// Meaningless on a stdio transport (no HTTP requests); `#[serde(default)]`
-    /// so a config written before this field existed deserializes to empty.
+    /// REMOTE-ONLY (issue #904 dormancy note): meaningless on a stdio
+    /// transport (no HTTP requests) -- the upsert boundary refuses a
+    /// stdio + non-empty list, but a HAND-EDITED stdio shape parses clean and
+    /// is silently ignored at connect (the read-time scan iterates object
+    /// keys, not this array's values) -- dead config, accepted: flipping the
+    /// transport back to remote revives the names and their keychain values
+    /// (harmless, mirroring how remote env keys dormantly survive a flip to
+    /// stdio). `#[serde(default)]` so a config written before this field
+    /// existed deserializes to empty.
     #[serde(default)]
     pub keychain_header_keys: Vec<String>,
     /// Per-server call timeout in milliseconds (issue #301). `None` = the
@@ -248,7 +256,7 @@ fn is_header_tchar(c: char) -> bool {
 }
 
 /// Validate a configured server's header face at the write boundary
-/// (issue #901). Five rules:
+/// (issue #901). Six rules:
 /// 1. A stdio transport must not carry `keychain_header_keys` (it makes no
 ///    HTTP requests; a stray list means the frontend lost the transport
 ///    split -- refuse rather than persist dead config).
@@ -269,7 +277,28 @@ fn is_header_tchar(c: char) -> bool {
 /// 5. Header names are unique case-insensitively across the configured map
 ///    and the keychain list: HTTP header names fold to lowercase, and a
 ///    case-variant pair would send two headers on the wire.
+/// 6. A `keychain_env_keys` name must not start with `header-` (issue #904):
+///    such an env key's account `mcp-<id>-header-X` is byte-identical to the
+///    header secret `X`'s account on the same server -- the last writer
+///    would win and the other face would read the wrong face's credential.
 pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), String> {
+    // Transport-independent (issue #904): the account-space reservation the
+    // rule protects outlives transport flips -- a stdio server today is a
+    // remote server after the next save -- so this runs before the stdio
+    // early-return. Only keychain-declared env keys mint accounts; a plain
+    // `env` value has no conflict face. Account strings are case-sensitive,
+    // so only the lowercase-literal `header-` prefix conflicts (`Header-X`
+    // lands a different account than any header name can produce).
+    for env_key in &server.keychain_env_keys {
+        if let Some(header_name) = env_key.strip_prefix(HEADER_ACCOUNT_INFIX) {
+            return Err(format!(
+                "MCP server `{}`: env key {env_key:?} starts with `{HEADER_ACCOUNT_INFIX}` -- \
+                 its keychain account collides with the header secret named {header_name:?} on \
+                 this server; rename the env key",
+                server.id
+            ));
+        }
+    }
     let headers = match &server.transport {
         McpTransport::Stdio { .. } => {
             if !server.keychain_header_keys.is_empty() {
@@ -1054,6 +1083,60 @@ mod tests {
             err.contains("stdio"),
             "the refusal names the transport, got: {err}"
         );
+    }
+
+    /// A `keychain_env_keys` name starting with `header-` is refused at the
+    /// write boundary on BOTH transports (issue #904): such a key's account
+    /// `mcp-<id>-header-X` is byte-identical to the header secret `X`'s
+    /// account on the same server, so the two faces would overwrite each
+    /// other's credential (the last writer wins, the other face reads the
+    /// wrong value). The rule is transport-independent -- the reservation
+    /// outlives a stdio->remote flip -- and account strings are
+    /// case-sensitive, so only the lowercase-literal prefix conflicts.
+    #[test]
+    fn header_validation_refuses_header_prefixed_env_keys_on_both_transports() {
+        let mut remote = McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Sse {
+                url: "https://example.test/sse".into(),
+                headers: BTreeMap::new(),
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        remote.keychain_env_keys = vec!["header-X-Api-Token".into()];
+        let err = validate_mcp_server_headers(&remote)
+            .expect_err("a header-prefixed env key must be refused");
+        assert!(
+            err.contains("header-X-Api-Token") && err.contains("collide"),
+            "the refusal names the key and the collision, got: {err}"
+        );
+
+        // The same refusal on stdio: the account reservation is not a remote
+        // concept -- the next save may flip the transport.
+        let mut stdio = McpServerConfig {
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            ..remote
+        };
+        stdio.keychain_env_keys = vec!["header-plan".into()];
+        let err = validate_mcp_server_headers(&stdio).expect_err("stdio is refused the same way");
+        assert!(
+            err.contains("header-plan"),
+            "a benign-looking prefix still reserves the account, got: {err}"
+        );
+
+        // Case-sensitivity: `Header-X` lands a different account than any
+        // header name can produce, so it is not a collision and validates.
+        stdio.keychain_env_keys = vec!["Header-X".into()];
+        validate_mcp_server_headers(&stdio).expect("a capitalized prefix is no collision");
+        // A key merely CONTAINING the substring is fine -- only the literal
+        // leading `header-` mints the colliding account.
+        stdio.keychain_env_keys = vec!["x-header-thing".into()];
+        validate_mcp_server_headers(&stdio).expect("a non-leading substring is no collision");
     }
 
     /// A keychain-declared header NAME is a header name like any other

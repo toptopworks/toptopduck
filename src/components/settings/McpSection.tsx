@@ -841,6 +841,20 @@ function ToolList({ probeState }: { probeState: ProbeState }) {
       </div>
     );
   }
+  if (result.error) {
+    // Connected, but a non-fatal post-save warning rode the probe result
+    // (a keychain clear failure after a successful upsert, review I3): the
+    // save itself committed; the row surfaces what did not land.
+    return (
+      <div className="text-destructive mt-3 pl-7 text-xs">
+        <FormattedMessage
+          id="settings.mcp.probeWarning"
+          defaultMessage="Saved with a warning: {error}"
+          values={{ error: result.error }}
+        />
+      </div>
+    );
+  }
   if (result.tools.length === 0) {
     return (
       <div className="text-muted-foreground mt-3 pl-7 text-xs">

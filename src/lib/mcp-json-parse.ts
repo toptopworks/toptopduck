@@ -17,8 +17,12 @@ import {
 } from "../types/mcp";
 
 // --- Secret detection (mirrors Rust) -----------------------------------------
-// Mirrors SECRET_KEY_NAMES in src-tauri/src/app_config/io.rs.
-const SECRET_NAME_SUBSTRINGS = [
+// Mirrors SECRET_KEY_NAMES in src-tauri/src/app_config/io.rs. Both arrays
+// below are parsed as text by the Rust drift pin
+// (secret_name_lists_match_the_frontend_and_import_copies in io.rs, issue
+// #904): keep the `const NAME = [` opener, one double-quoted entry per
+// line, and the `];` closer, or that Rust test fails.
+export const SECRET_NAME_SUBSTRINGS = [
   "api_key",
   "apikey",
   "anthropic_api_key",
@@ -30,11 +34,13 @@ const SECRET_NAME_SUBSTRINGS = [
   "refresh_token",
 ];
 
-// Mirrors IMPORT_SECRET_SUBSTRINGS in src-tauri/src/mcp/import.rs, plus
-// "authorization"/"cookie"/"session" for HTTP request headers (not in the
-// Rust import set because the Rust import path only handles stdio env vars;
-// the Rust read-time header scan carries the same additions).
-const IMPORT_SECRET_SUBSTRINGS = [
+// Locked entry-for-entry to HEADER_SECRET_SUBSTRINGS in
+// src-tauri/src/app_config/io.rs by the io.rs drift pin (issue #904) --
+// the header-face additions on top of the base list above. Rust's
+// import-path IMPORT_SECRET_SUBSTRINGS (src-tauri/src/mcp/import.rs) is a
+// deliberate 4-entry subset of this list: same name there, different set,
+// on purpose (the stdio-only import path never sees header-face names).
+export const HEADER_SECRET_SUBSTRINGS = [
   "token",
   "bearer",
   "jwt",
@@ -59,7 +65,7 @@ export function isSecretEnvKey(name: string): boolean {
   if (SECRET_NAME_SUBSTRINGS.some((s) => collapsed.includes(collapseName(s)))) {
     return true;
   }
-  return IMPORT_SECRET_SUBSTRINGS.some((s) => collapsed.includes(s));
+  return HEADER_SECRET_SUBSTRINGS.some((s) => collapsed.includes(s));
 }
 
 // --- Normalizer --------------------------------------------------------------

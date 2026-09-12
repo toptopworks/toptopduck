@@ -5,12 +5,15 @@ import type { ReactElement } from "react";
 
 import { McpServerForm } from "../McpServerForm";
 import {
+  clearMcpServerHeaderSecret,
+  clearMcpServerSecret,
   probeMcpServer,
   setMcpServerHeaderSecret,
   setMcpServerSecret,
   upsertMcpServer,
 } from "../../../api";
 import type { McpServerConfig, McpProbeResult } from "../../../types/mcp";
+import { chooseOption, openSelect } from "./helpers";
 
 // The form drives everything through IPC; mock the API so the test never
 // touches Tauri.
@@ -18,6 +21,8 @@ vi.mock("../../../api", () => ({
   upsertMcpServer: vi.fn(),
   setMcpServerSecret: vi.fn(),
   setMcpServerHeaderSecret: vi.fn(),
+  clearMcpServerSecret: vi.fn(),
+  clearMcpServerHeaderSecret: vi.fn(),
   probeMcpServer: vi.fn(),
 }));
 
@@ -1041,5 +1046,288 @@ describe("McpServerForm (issue #388)", () => {
       expect(screen.getByText(/Secret keys detected \(Authorization\)/)).toBeTruthy(),
     );
     expect(upsertMcpServer).not.toHaveBeenCalled();
+  });
+
+  // --- Credential lifecycle (issue #904) --------------------------------------
+
+  it("clears the keychain account of a deleted secret row on save (issue #904)", async () => {
+    // The finalized config Rust hands back carries the post-deletion shape
+    // (no API_KEY), so the save's clear-filter passes the name through.
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({ env: { LOG_LEVEL: "info" }, keychain_env_keys: [] }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // API_KEY rides row 2 (secret). Remove it, then save.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove variable.*row 2/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(upsertMcpServer).mock.calls[0][0].keychain_env_keys)
+      .toEqual([]);
+    await waitFor(() =>
+      expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "API_KEY"),
+    );
+    expect(clearMcpServerHeaderSecret).not.toHaveBeenCalled();
+  });
+
+  it("keeps the account of a secret name that was deleted then re-added", async () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({ keychain_env_keys: ["API_KEY"] }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Delete the secret row, then re-add the same name as a secret row.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove variable.*row 2/ }),
+    );
+    fireEvent.click(screen.getByText("Add variable"));
+    const nameInputs = screen.getAllByPlaceholderText("KEY");
+    fireEvent.change(nameInputs[1], { target: { value: "API_KEY" } });
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /Secret \(row 2\)/i }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+
+    // The re-added name rides the finalized config, so the clear-filter
+    // spares it -- no account wipe under a row the user rebuilt.
+    await waitFor(() => expect(probeMcpServer).toHaveBeenCalled());
+    expect(clearMcpServerSecret).not.toHaveBeenCalled();
+  });
+
+  it("clears nothing when the edit is canceled", () => {
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove variable.*row 2/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(clearMcpServerSecret).not.toHaveBeenCalled();
+    expect(upsertMcpServer).not.toHaveBeenCalled();
+  });
+
+  it("a transport flip to stdio does not clear header credentials (issue #904)", async () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({
+        transport: { type: "stdio", command: "/bin/srv", args: [] },
+        env: {},
+        keychain_env_keys: [],
+        keychain_header_keys: [],
+      }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          transport: {
+            type: "sse",
+            url: "https://example.com/sse",
+            headers: {},
+          },
+          env: {},
+          keychain_env_keys: [],
+          keychain_header_keys: ["Authorization"],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Flip the transport remote → stdio: the headers editor (and its rows)
+    // vanish without any row-removal event, so nothing may be cleared --
+    // the credentials stay dormant for a flip back.
+    const combobox = screen.getByRole("combobox", { name: "Type" });
+    openSelect(combobox);
+    chooseOption("stdio");
+    fireEvent.change(screen.getByLabelText("Command"), {
+      target: { value: "/bin/srv" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(upsertMcpServer).mock.calls[0][0].transport.type)
+      .toBe("stdio");
+    await waitFor(() => expect(probeMcpServer).toHaveBeenCalled());
+    expect(clearMcpServerHeaderSecret).not.toHaveBeenCalled();
+    expect(clearMcpServerSecret).not.toHaveBeenCalled();
+  });
+
+  it("keeps the stored value when an existing secret row is saved empty (issue #904)", async () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({ keychain_env_keys: ["API_KEY"] }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Save without touching the API_KEY row (value stays empty).
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+
+    // No value entered -> no keychain write; no deletion -> no clear. The
+    // stored value is preserved by inaction on both sides.
+    await waitFor(() => expect(probeMcpServer).toHaveBeenCalled());
+    expect(setMcpServerSecret).not.toHaveBeenCalled();
+    expect(clearMcpServerSecret).not.toHaveBeenCalled();
+  });
+
+  it("clears the keychain account of a deleted header secret row on save, surviving a mode switch (issue #904)", async () => {
+    // The header-face twin of the env clear test, plus the mode-switch
+    // survival the module doc claims: the recorded deletion rides the
+    // Form -> JSON switch and clears at the JSON-mode save (either mode).
+    const sseTransport = {
+      type: "sse",
+      url: "https://example.com/sse",
+      headers: {},
+    } as const;
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({
+        transport: sseTransport,
+        env: {},
+        keychain_env_keys: [],
+        keychain_header_keys: [],
+      }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          transport: sseTransport,
+          env: {},
+          keychain_env_keys: [],
+          keychain_header_keys: ["Authorization"],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Remove the header secret row, then switch to JSON mode before
+    // saving: the recorded deletion must survive the mode switch.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove header (row 1)" }),
+    );
+    fireEvent.click(screen.getByText("JSON"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+    expect(
+      vi.mocked(upsertMcpServer).mock.calls[0][0].keychain_header_keys,
+    ).toEqual([]);
+    await waitFor(() =>
+      expect(clearMcpServerHeaderSecret).toHaveBeenCalledWith(
+        "srv-1",
+        "Authorization",
+      ),
+    );
+    expect(clearMcpServerSecret).not.toHaveBeenCalled();
+  });
+
+  it("still hands off to the list and warns when a clear fails after the save (issue #904)", async () => {
+    // The upsert already committed, so the handoff must still run (the
+    // list's mirror must not diverge from disk) and the failure rides the
+    // probe result's error channel -- connected stays true, only the
+    // cleanup did not land.
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({ env: { LOG_LEVEL: "info" }, keychain_env_keys: [] }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+    vi.mocked(clearMcpServerSecret).mockRejectedValue(
+      new Error("keychain locked"),
+    );
+    const onSaved = vi.fn();
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={onSaved}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove variable.*row 2/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    const [, probeResult] = onSaved.mock.calls[0];
+    expect(probeResult.connected).toBe(true);
+    expect(probeResult.error).toContain("keychain locked");
+  });
+
+  it("shows the keep/clear hint only when a secret row exists (issue #904)", () => {
+    const { unmount } = renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer()}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    // The editor carries the API_KEY secret row -> the hint is visible.
+    expect(
+      screen.getByText(/Leave a secret row's value empty/),
+    ).toBeInTheDocument();
+    unmount();
+
+    // A fresh render with plain rows only -> no hint (the entry state is
+    // mount-initialized, so the no-secret shape needs its own mount).
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          env: { LOG_LEVEL: "info" },
+          keychain_env_keys: [],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByText(/Leave a secret row's value empty/),
+    ).not.toBeInTheDocument();
   });
 });

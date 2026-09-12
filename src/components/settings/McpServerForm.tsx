@@ -9,6 +9,8 @@ import {
   type McpTransport,
 } from "../../types/mcp";
 import {
+  clearMcpServerHeaderSecret,
+  clearMcpServerSecret,
   probeMcpServer,
   setMcpServerHeaderSecret,
   setMcpServerSecret,
@@ -48,6 +50,20 @@ import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 // (transport.headers + keychain_header_keys). A legacy remote row's env
 // entries are DORMANT: preserved through edits (dormantEnvRef below),
 // invisible in both editors, never re-routed.
+//
+// Issue #904 credential lifecycle, two semantics per secret row:
+// - DELETED row → the keychain account is cleared at save (the form's
+//   pending-deleted list drives clearMcpServer*Secret; only an explicit row
+//   removal records a name — a transport flip or a JSON paste never does, so
+//   dormancy survives, which is also why the cleanup lives here and not in
+//   the backend upsert's blind diff. A recorded deletion survives a mode
+//   switch and clears at the next save of either mode — explicit deletion
+//   intent is honored wherever the save happens).
+// - EXISTING row left EMPTY → the stored keychain value is kept (a save only
+//   writes non-empty values); the editor shows this hint.
+// A pure JSON save (no row deleted this session) clears nothing: pasting
+// replaces the config shape without any credential-management action —
+// accepted gap.
 
 /** One row of the env-var / headers editor. `isSecret` routes the value to
  *  the OS keychain (via setMcpServerSecret / setMcpServerHeaderSecret on
@@ -110,6 +126,84 @@ function headerFaceOf(server: McpServerDraft): {
     : { plain: server.transport.headers, secretKeys: server.keychain_header_keys };
 }
 
+/** The add / remove / update triplet one key-value editor drives. Shared by
+ *  both faces (env / headers, issue #904 fold) so the row lifecycle exists
+ *  exactly once. */
+type KvEntryActions = {
+  add: () => void;
+  remove: (index: number) => void;
+  // The row id is minted once at add-time and keys the row for its whole
+  // life (H1 stable-row-key); the patch type excludes it so the type
+  // system rejects an id-overwriting update.
+  update: (index: number, patch: Partial<Omit<KvEntry, "id">>) => void;
+};
+
+/** Build one face's row-action triplet over its state setter (issue #904
+ *  fold: the six per-face handlers collapse to two factory calls). The
+ *  updater stays pure — face-specific side effects (deletion recording)
+ *  wrap these in the component. */
+function kvEntryActions(
+  setEntries: React.Dispatch<React.SetStateAction<KvEntry[]>>,
+): KvEntryActions {
+  return {
+    add: () =>
+      setEntries((prev) => [
+        ...prev,
+        { id: entrySeq++, key: "", value: "", isSecret: false },
+      ]),
+    remove: (index) => setEntries((prev) => prev.filter((_, i) => i !== index)),
+    update: (index, patch) =>
+      setEntries((prev) =>
+        prev.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)),
+      ),
+  };
+}
+
+/** Capture one face's secret values before a Form→JSON switch so they
+ *  survive the round-trip (H2; one call per face since #901 split them). */
+function capturePendingSecrets(entries: KvEntry[]): Record<string, string> {
+  const pending: Record<string, string> = {};
+  for (const entry of entries) {
+    if (entry.isSecret) {
+      pending[entry.key] = entry.value;
+    }
+  }
+  return pending;
+}
+
+/** Restore captured secret values onto a freshly rebuilt entry list (the
+ *  JSON→Form switch half of the H2 round-trip). */
+function restorePendingSecrets(
+  entries: KvEntry[],
+  pending: Record<string, string>,
+): KvEntry[] {
+  return entries.map((entry) =>
+    entry.isSecret && pending[entry.key]
+      ? { ...entry, value: pending[entry.key] }
+      : entry,
+  );
+}
+
+/** Split one face's rows into its config shape: plain values into a map,
+ *  secret names into a key list (the values ride the keychain, never the
+ *  config). Shared by buildConfigFromForm's two faces (issue #904 fold). */
+function partitionKvEntries(entries: KvEntry[]): {
+  plain: Record<string, string>;
+  secretKeys: string[];
+} {
+  const plain: Record<string, string> = {};
+  const secretKeys: string[] = [];
+  for (const entry of entries) {
+    if (!entry.key) continue;
+    if (entry.isSecret) {
+      secretKeys.push(entry.key);
+    } else {
+      plain[entry.key] = entry.value;
+    }
+  }
+  return { plain, secretKeys };
+}
+
 export function McpServerForm({
   initialServer,
   isEdit,
@@ -129,6 +223,18 @@ export function McpServerForm({
   // #901): an env key and a header key may share a name.
   const pendingEnvSecrets = useRef<Record<string, string>>({});
   const pendingHeaderSecrets = useRef<Record<string, string>>({});
+
+  // Secret names whose keychain accounts a deleted row must clear at save
+  // (issue #904). Only an EXPLICIT Form-mode row removal records a name: a
+  // transport flip (remote→stdio swaps the editor, headers go dormant) and a
+  // JSON-mode paste replace the entry lists without deletion intent, so they
+  // record nothing — the backend upsert's blind diff would misread a flip as
+  // deletions; that is why this cleanup lives in the form. A recorded name
+  // survives mode switches and clears at the next save of either mode.
+  const deletedSecretKeysRef = useRef<{ env: string[]; header: string[] }>({
+    env: [],
+    header: [],
+  });
 
   // A legacy remote row's env face rides here while the form is open
   // (issue #901 dormancy): the env editor shows nothing on a remote
@@ -229,16 +335,8 @@ export function McpServerForm({
         : null;
 
     if (transportType === "stdio") {
-      const env: Record<string, string> = {};
-      const keychainEnvKeys: string[] = [];
-      for (const entry of envEntries) {
-        if (!entry.key) continue;
-        if (entry.isSecret) {
-          keychainEnvKeys.push(entry.key);
-        } else {
-          env[entry.key] = entry.value;
-        }
-      }
+      const { plain: env, secretKeys: keychainEnvKeys } =
+        partitionKvEntries(envEntries);
       const transport: McpTransport = {
         type: "stdio",
         command,
@@ -255,16 +353,8 @@ export function McpServerForm({
       };
     }
 
-    const headers: Record<string, string> = {};
-    const keychainHeaderKeys: string[] = [];
-    for (const entry of headerEntries) {
-      if (!entry.key) continue;
-      if (entry.isSecret) {
-        keychainHeaderKeys.push(entry.key);
-      } else {
-        headers[entry.key] = entry.value;
-      }
-    }
+    const { plain: headers, secretKeys: keychainHeaderKeys } =
+      partitionKvEntries(headerEntries);
     const transport: McpTransport = { type: transportType, url, headers };
     return {
       id: serverId,
@@ -324,10 +414,9 @@ export function McpServerForm({
       setEnvEntries(
         // Restore secret values captured before the Form→JSON switch so
         // they survive the round-trip (H2).
-        initKvEntries(parsed.env, parsed.keychain_env_keys).map((entry) =>
-          entry.isSecret && pendingEnvSecrets.current[entry.key]
-            ? { ...entry, value: pendingEnvSecrets.current[entry.key] }
-            : entry,
+        restorePendingSecrets(
+          initKvEntries(parsed.env, parsed.keychain_env_keys),
+          pendingEnvSecrets.current,
         ),
       );
       setHeaderEntries([]);
@@ -352,10 +441,9 @@ export function McpServerForm({
       setEnvEntries([]);
       const face = headerFaceOf(parsed);
       setHeaderEntries(
-        initKvEntries(face.plain, face.secretKeys).map((entry) =>
-          entry.isSecret && pendingHeaderSecrets.current[entry.key]
-            ? { ...entry, value: pendingHeaderSecrets.current[entry.key] }
-            : entry,
+        restorePendingSecrets(
+          initKvEntries(face.plain, face.secretKeys),
+          pendingHeaderSecrets.current,
         ),
       );
     }
@@ -370,18 +458,8 @@ export function McpServerForm({
       // secret key names with blanked values; the actual values are restored
       // from the pending refs on the JSON → Form switch. One ref per face
       // (issue #901).
-      pendingEnvSecrets.current = {};
-      for (const entry of envEntries) {
-        if (entry.isSecret) {
-          pendingEnvSecrets.current[entry.key] = entry.value;
-        }
-      }
-      pendingHeaderSecrets.current = {};
-      for (const entry of headerEntries) {
-        if (entry.isSecret) {
-          pendingHeaderSecrets.current[entry.key] = entry.value;
-        }
-      }
+      pendingEnvSecrets.current = capturePendingSecrets(envEntries);
+      pendingHeaderSecrets.current = capturePendingSecrets(headerEntries);
       // Serialize into the common web format (bare server map) so the user
       // sees and edits the same shape they'd copy from online docs.
       const config = buildConfigFromForm();
@@ -406,38 +484,25 @@ export function McpServerForm({
     setMode(next);
   }
 
-  function addEnvEntry() {
-    setEnvEntries((prev) => [
-      ...prev,
-      { id: entrySeq++, key: "", value: "", isSecret: false },
-    ]);
-  }
+  // One action triplet per face (issue #904 fold of the six per-face
+  // handlers); the remove wrappers layer deletion recording on top.
+  const envActions = kvEntryActions(setEnvEntries);
+  const headerActions = kvEntryActions(setHeaderEntries);
 
   function removeEnvEntry(index: number) {
-    setEnvEntries((prev) => prev.filter((_, i) => i !== index));
-  }
-
-  function updateEnvEntry(index: number, patch: Partial<KvEntry>) {
-    setEnvEntries((prev) =>
-      prev.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)),
-    );
-  }
-
-  function addHeaderEntry() {
-    setHeaderEntries((prev) => [
-      ...prev,
-      { id: entrySeq++, key: "", value: "", isSecret: false },
-    ]);
+    const entry = envEntries[index];
+    if (entry?.isSecret && entry.key) {
+      deletedSecretKeysRef.current.env.push(entry.key);
+    }
+    envActions.remove(index);
   }
 
   function removeHeaderEntry(index: number) {
-    setHeaderEntries((prev) => prev.filter((_, i) => i !== index));
-  }
-
-  function updateHeaderEntry(index: number, patch: Partial<KvEntry>) {
-    setHeaderEntries((prev) =>
-      prev.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)),
-    );
+    const entry = headerEntries[index];
+    if (entry?.isSecret && entry.key) {
+      deletedSecretKeysRef.current.header.push(entry.key);
+    }
+    headerActions.remove(index);
   }
 
   async function handleSave() {
@@ -547,7 +612,41 @@ export function McpServerForm({
         }
       }
 
-      // 3. Auto-probe so the list shows an immediate status. A probe failure
+      // 3. Clear the keychain accounts behind rows the user deleted this
+      // session (issue #904), filtered against the finalized config so a
+      // re-added name keeps its (possibly re-entered) value. Only Form-mode
+      // row removals recorded names — flips and pastes record nothing, and a
+      // pure JSON save (no recorded deletion) clears nothing.
+      const envClears = [...new Set(deletedSecretKeysRef.current.env)].filter(
+        (key) => !finalized.keychain_env_keys.includes(key),
+      );
+      const headerClears = [
+        ...new Set(deletedSecretKeysRef.current.header),
+      ].filter((name) => !finalized.keychain_header_keys.includes(name));
+      // Non-fatal the way the probe below is (C2): the upsert already
+      // committed, and aborting before onSaved would leave the list's
+      // mirror stale -- any later full-config commit (a theme change, an
+      // engine save) would silently revert this save (review I3). Each
+      // failure is collected and appended to the probe result's error
+      // channel so the row surfaces it; connected stays true -- the
+      // server itself is fine, only the cleanup did not land.
+      const clearWarnings: string[] = [];
+      for (const key of envClears) {
+        try {
+          await clearMcpServerSecret(finalized.id, key);
+        } catch (clearErr) {
+          clearWarnings.push(fmtError(clearErr, intl));
+        }
+      }
+      for (const name of headerClears) {
+        try {
+          await clearMcpServerHeaderSecret(finalized.id, name);
+        } catch (clearErr) {
+          clearWarnings.push(fmtError(clearErr, intl));
+        }
+      }
+
+      // 4. Auto-probe so the list shows an immediate status. A probe failure
       // is non-fatal — the server is already saved; surface it as a
       // disconnected probe result so the parent still commits the config
       // and switches to the list view (C2).
@@ -561,8 +660,19 @@ export function McpServerForm({
           error: fmtError(probeErr, intl),
         };
       }
+      if (clearWarnings.length > 0) {
+        // A deleted credential may still sit in the OS keychain -- the row
+        // tells the user instead of the save silently half-completing.
+        const warning = clearWarnings.join("; ");
+        probeResult = {
+          ...probeResult,
+          error: probeResult.error
+            ? `${probeResult.error}; ${warning}`
+            : warning,
+        };
+      }
 
-      // 4. Hand the finalized config + probe result back to the list.
+      // 5. Hand the finalized config + probe result back to the list.
       onSaved(finalized, probeResult);
     } catch (e) {
       setError(fmtError(e, intl));
@@ -651,13 +761,17 @@ export function McpServerForm({
             url={url}
             onUrl={setUrl}
             envEntries={envEntries}
-            onAddEnv={addEnvEntry}
-            onRemoveEnv={removeEnvEntry}
-            onUpdateEnv={updateEnvEntry}
+            envActions={{
+              add: envActions.add,
+              remove: removeEnvEntry,
+              update: envActions.update,
+            }}
             headerEntries={headerEntries}
-            onAddHeader={addHeaderEntry}
-            onRemoveHeader={removeHeaderEntry}
-            onUpdateHeader={updateHeaderEntry}
+            headerActions={{
+              add: headerActions.add,
+              remove: removeHeaderEntry,
+              update: headerActions.update,
+            }}
             timeoutMs={timeoutMs}
             onTimeoutMs={setTimeoutMs}
           />
@@ -767,13 +881,9 @@ type FormViewProps = {
   url: string;
   onUrl: (v: string) => void;
   envEntries: KvEntry[];
-  onAddEnv: () => void;
-  onRemoveEnv: (index: number) => void;
-  onUpdateEnv: (index: number, patch: Partial<KvEntry>) => void;
+  envActions: KvEntryActions;
   headerEntries: KvEntry[];
-  onAddHeader: () => void;
-  onRemoveHeader: (index: number) => void;
-  onUpdateHeader: (index: number, patch: Partial<KvEntry>) => void;
+  headerActions: KvEntryActions;
   timeoutMs: string;
   onTimeoutMs: (v: string) => void;
 };
@@ -790,13 +900,9 @@ function FormView({
   url,
   onUrl,
   envEntries,
-  onAddEnv,
-  onRemoveEnv,
-  onUpdateEnv,
+  envActions,
   headerEntries,
-  onAddHeader,
-  onRemoveHeader,
-  onUpdateHeader,
+  headerActions,
   timeoutMs,
   onTimeoutMs,
 }: FormViewProps) {
@@ -928,40 +1034,28 @@ function FormView({
       )}
 
       {transportType === "stdio" ? (
-        <EnvEditor
-          entries={envEntries}
-          isHeaders={false}
-          onAdd={onAddEnv}
-          onRemove={onRemoveEnv}
-          onUpdate={onUpdateEnv}
-        />
+        <KvEditor entries={envEntries} isHeaders={false} actions={envActions} />
       ) : (
-        <EnvEditor
+        <KvEditor
           entries={headerEntries}
           isHeaders
-          onAdd={onAddHeader}
-          onRemove={onRemoveHeader}
-          onUpdate={onUpdateHeader}
+          actions={headerActions}
         />
       )}
     </>
   );
 }
 
-// --- Env var / headers editor ------------------------------------------------
+// --- Key-value editor (env vars / request headers) ---------------------------
 
-function EnvEditor({
+function KvEditor({
   entries,
   isHeaders,
-  onAdd,
-  onRemove,
-  onUpdate,
+  actions,
 }: {
   entries: KvEntry[];
   isHeaders: boolean;
-  onAdd: () => void;
-  onRemove: (index: number) => void;
-  onUpdate: (index: number, patch: Partial<KvEntry>) => void;
+  actions: KvEntryActions;
 }) {
   const intl = useIntl();
   const [expanded, setExpanded] = useState(entries.length > 0);
@@ -971,7 +1065,7 @@ function EnvEditor({
     // Auto-add a blank row when expanding with no entries so the user has
     // an immediate input to fill in.
     if (entries.length === 0) {
-      onAdd();
+      actions.add();
     }
   }
 
@@ -1058,7 +1152,7 @@ function EnvEditor({
       };
 
   return (
-    <div data-testid="mcp-env-editor" className="px-4 py-2.5">
+    <div data-testid="mcp-kv-editor" className="px-4 py-2.5">
       {/* Collapsible header — click to expand/collapse */}
       {!expanded ? (
         <button
@@ -1090,7 +1184,12 @@ function EnvEditor({
                 {L.section}
               </span>
             </button>
-            <Button type="button" variant="ghost" size="sm" onClick={onAdd}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={actions.add}
+            >
               <Plus className="size-4" aria-hidden />
               {L.add}
             </Button>
@@ -1105,14 +1204,16 @@ function EnvEditor({
                   <Input
                     className="w-40 font-mono text-xs"
                     value={entry.key}
-                    onChange={(e) => onUpdate(i, { key: e.target.value })}
+                    onChange={(e) =>
+                      actions.update(i, { key: e.target.value })}
                     placeholder={isHeaders ? "Header" : "KEY"}
                     aria-label={L.keyLabel(i + 1)}
                   />
                   <Input
                     className="flex-1 font-mono text-xs"
                     value={entry.value}
-                    onChange={(e) => onUpdate(i, { value: e.target.value })}
+                    onChange={(e) =>
+                      actions.update(i, { value: e.target.value })}
                     placeholder={
                       entry.isSecret ? "Stored in keychain" : "value"
                     }
@@ -1124,7 +1225,7 @@ function EnvEditor({
                       type="checkbox"
                       checked={entry.isSecret}
                       onChange={(e) =>
-                        onUpdate(i, { isSecret: e.target.checked })}
+                        actions.update(i, { isSecret: e.target.checked })}
                       className="size-3.5 cursor-pointer accent-primary"
                       aria-label={intl.formatMessage(
                         {
@@ -1144,13 +1245,21 @@ function EnvEditor({
                     variant="ghost"
                     size="icon"
                     className="text-muted-foreground hover:text-destructive size-7 shrink-0"
-                    onClick={() => onRemove(i)}
+                    onClick={() => actions.remove(i)}
                     aria-label={L.removeLabel(i + 1)}
                   >
                     <Trash2 className="size-3.5" aria-hidden />
                   </Button>
                 </div>
               ))}
+              {entries.some((entry) => entry.isSecret) && (
+                <p className="text-muted-foreground text-xs">
+                  <FormattedMessage
+                    id="settings.mcp.form.secretHint"
+                    defaultMessage="Leave a secret row's value empty to keep its stored value; deleting a row clears the stored value when you save."
+                  />
+                </p>
+              )}
             </div>
           )}
         </>
