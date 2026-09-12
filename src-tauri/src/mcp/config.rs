@@ -41,7 +41,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::app_config::io::is_secret_header_name;
+use crate::app_config::io::{is_secret_header_name, is_secret_name};
 use crate::mcp::secrets::HEADER_ACCOUNT_INFIX;
 
 use serde::{Deserialize, Serialize};
@@ -256,7 +256,7 @@ fn is_header_tchar(c: char) -> bool {
 }
 
 /// Validate a configured server's header face at the write boundary
-/// (issue #901). Six rules:
+/// (issue #901). Seven rules:
 /// 1. A stdio transport must not carry `keychain_header_keys` (it makes no
 ///    HTTP requests; a stray list means the frontend lost the transport
 ///    split -- refuse rather than persist dead config).
@@ -281,6 +281,14 @@ fn is_header_tchar(c: char) -> bool {
 ///    such an env key's account `mcp-<id>-header-X` is byte-identical to the
 ///    header secret `X`'s account on the same server -- the last writer
 ///    would win and the other face would read the wrong face's credential.
+/// 7. A configured `env` key must not look like a secret -- the read-time
+///    env BASE list, not the expanded header list (issue #906): the value
+///    belongs in the OS keychain behind the form's Secret row, and a
+///    persisted plaintext literal would be refused by the read-time scan at
+///    the next launch, degrading the whole app-config to defaults. The
+///    keychain list is irrelevant here: the read-time scan keys off the env
+///    name alone, and `keychain_env_keys` entries are array elements, not
+///    object keys, so they never trip it.
 pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), String> {
     // Transport-independent (issue #904): the account-space reservation the
     // rule protects outlives transport flips -- a stdio server today is a
@@ -295,6 +303,24 @@ pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), Strin
                 "MCP server `{}`: env key {env_key:?} starts with `{HEADER_ACCOUNT_INFIX}` -- \
                  its keychain account collides with the header secret named {header_name:?} on \
                  this server; rename the env key",
+                server.id
+            ));
+        }
+    }
+    // Transport-independent (issue #906): a plain env key whose NAME looks
+    // like a secret is the env face of the credential-name rule. Parity is
+    // with the read-time env BASE list (`is_secret_name`) -- the expanded
+    // header list would mis-refuse read-valid shapes like `SESSION_MODE`,
+    // and the read-time scan keys off the name alone (never
+    // `keychain_env_keys`), so the write boundary mirrors it exactly: any
+    // configured `env` key matching the base list is refused, exempting
+    // nothing. Runs before the stdio early-return because the dormant env
+    // face of a remote server outlives flips.
+    for env_key in server.env.keys() {
+        if is_secret_name(env_key) {
+            return Err(format!(
+                "MCP server `{}`: env key {env_key:?} looks like a credential -- check the \
+                 Secret row so the value goes to the OS keychain instead of the config file",
                 server.id
             ));
         }
@@ -1137,6 +1163,71 @@ mod tests {
         // leading `header-` mints the colliding account.
         stdio.keychain_env_keys = vec!["x-header-thing".into()];
         validate_mcp_server_headers(&stdio).expect("a non-leading substring is no collision");
+    }
+
+    /// A plain (non-keychain) env key whose NAME looks like a secret is
+    /// refused at the write boundary (issue #906) -- the env face of the
+    /// credential-name rule. The form's Secret row is the intended route
+    /// (the value rides the OS keychain); a persisted plaintext literal
+    /// would sail through the save and be refused by the read-time env scan
+    /// at the NEXT launch -- degrading the whole app-config to defaults.
+    #[test]
+    fn header_validation_refuses_plaintext_secret_named_env_keys_on_both_transports() {
+        // stdio (env's active face): a base-list secret name in plain `env`
+        // is refused, and the message names the key and the Secret row.
+        let mut stdio = McpServerConfig {
+            id: McpServerId("github".into()),
+            display_name: "GitHub".into(),
+            transport: McpTransport::stdio("/bin/srv", Vec::new()),
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        stdio
+            .env
+            .insert("GITHUB_API_KEY".into(), "ghp_plaintext".into());
+        let err = validate_mcp_server_headers(&stdio)
+            .expect_err("a plaintext secret-named env key must be refused");
+        assert!(
+            err.contains("GITHUB_API_KEY") && err.contains("Secret"),
+            "the refusal names the key and the Secret row, got: {err}"
+        );
+
+        // The read-time-acceptable shape stays savable: `SESSION_MODE` trips
+        // the expanded header list (`session`) but not the env base list, so
+        // the write boundary must not refuse it either.
+        stdio.env.clear();
+        stdio.env.insert("SESSION_MODE".into(), "dev".into());
+        validate_mcp_server_headers(&stdio)
+            .expect("an expanded-list-only name stays acceptable on the env face");
+
+        // The same refusal on a remote transport: the dormant env face
+        // outlives transport flips, so the guard is transport-independent.
+        let mut remote = McpServerConfig {
+            transport: McpTransport::Sse {
+                url: "https://example.test/sse".into(),
+                headers: BTreeMap::new(),
+            },
+            ..stdio
+        };
+        remote.env.clear();
+        remote
+            .env
+            .insert("GITHUB_API_KEY".into(), "ghp_plaintext".into());
+        let err = validate_mcp_server_headers(&remote)
+            .expect_err("the dormant env face of a remote server is refused the same way");
+        assert!(
+            err.contains("GITHUB_API_KEY"),
+            "the refusal names the dormant key, got: {err}"
+        );
+
+        // A keychain-declared key is unaffected: its value rides the OS
+        // keychain, so the name may freely match the base list.
+        remote.env.clear();
+        remote.keychain_env_keys = vec!["GITHUB_API_KEY".into()];
+        validate_mcp_server_headers(&remote).expect("a keychain-declared secret name validates");
     }
 
     /// A keychain-declared header NAME is a header name like any other
