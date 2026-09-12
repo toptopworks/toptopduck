@@ -8,7 +8,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 
 import { McpSection } from "../McpSection";
 import { upsertMirror } from "../mcp-mirror";
-import { clearMcpServerSecret, discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../../api";
+import { clearMcpServerHeaderSecret, clearMcpServerSecret, discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type {
   DiscoveredServer,
@@ -20,10 +20,12 @@ import type {
 // touches Tauri.
 vi.mock("../../../api", () => ({
   clearMcpServerSecret: vi.fn(),
+  clearMcpServerHeaderSecret: vi.fn(),
   discoverMcpServers: vi.fn(),
   probeMcpServer: vi.fn(),
   upsertMcpServer: vi.fn(),
   setMcpServerSecret: vi.fn(),
+  setMcpServerHeaderSecret: vi.fn(),
 }));
 
 function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
@@ -226,9 +228,12 @@ describe("McpSection (issue #387)", () => {
     const server = makeServer({
       id: "srv-1",
       display_name: "My Server",
+      transport: { type: "http", url: "https://example.com/mcp", headers: {} },
       keychain_env_keys: ["API_KEY", "WEBHOOK_SECRET"],
+      keychain_header_keys: ["X-Test-Token"],
     });
     vi.mocked(clearMcpServerSecret).mockResolvedValue(undefined);
+    vi.mocked(clearMcpServerHeaderSecret).mockResolvedValue(undefined);
 
     const onCommit = vi.fn().mockResolvedValue(null);
     renderWithProviders(
@@ -249,10 +254,12 @@ describe("McpSection (issue #387)", () => {
       expect(mutated.mcp_servers.servers).toHaveLength(0);
     });
 
-    // Keychain secrets are cleared after the config removal succeeds.
+    // Keychain secrets are cleared after the config removal succeeds --
+    // both account families (env and header, issue #901).
     await waitFor(() => {
       expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "API_KEY");
       expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "WEBHOOK_SECRET");
+      expect(clearMcpServerHeaderSecret).toHaveBeenCalledWith("srv-1", "X-Test-Token");
     });
   });
 
@@ -278,8 +285,10 @@ describe("McpSection (issue #387)", () => {
 
     // Dialog should still be visible (deleteTarget not cleared).
     expect(screen.getByText("Delete MCP server My Server?")).toBeInTheDocument();
-    // Keychain secret should NOT have been cleared (config removal failed).
+    // Keychain secret should NOT have been cleared (config removal failed) --
+    // either family (env or header, issue #901).
     expect(clearMcpServerSecret).not.toHaveBeenCalled();
+    expect(clearMcpServerHeaderSecret).not.toHaveBeenCalled();
   });
 
   it("proceeds with config removal when keychain clear fails (best effort)", async () => {

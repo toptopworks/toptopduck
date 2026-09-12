@@ -1179,11 +1179,10 @@ pub fn upsert_mcp_server(
     live: State<'_, LiveProviderConfig>,
     server: McpServerConfig,
 ) -> Result<McpServerConfig, StoreCommandError> {
-    // Header-charset guard at the write boundary (issue #901): refuse the
-    // save (user-correctable) rather than persisting a header-injection
-    // vector the HTTP client would only trip over at connect time.
-    crate::mcp::config::validate_mcp_server_headers(&server)
-        .map_err(StoreCommandError::ConfigWriteFailure)?;
+    // The header-face guard runs inside `live.upsert_mcp_server` (issue
+    // #901): the deepest write boundary, so every path that persists a
+    // server refuses an invalid header face, and the user-correctable
+    // message surfaces through ConfigWriteFailure.
     live.upsert_mcp_server(server)
         .map_err(|e| StoreCommandError::ConfigWriteFailure(e.to_string()))
 }
@@ -1441,13 +1440,12 @@ pub async fn probe_mcp_server(
     // HTTP agents carry HTTP_READ_TIMEOUT so the task eventually resolves;
     // SSE has a per-read timeout on its reader thread (SSE_READ_TIMEOUT).
     let server_for_blocking = server.clone();
-    let header_secrets_for_blocking = header_secrets.clone();
     let result = tokio::time::timeout(deadline, async {
         tauri::async_runtime::spawn_blocking(move || {
             let mut client = crate::mcp::client::connect_transport(
                 &server_for_blocking,
                 &secrets,
-                &header_secrets_for_blocking,
+                &header_secrets,
                 None,
             )?;
             client.list_tools(&server_for_blocking.display_name)

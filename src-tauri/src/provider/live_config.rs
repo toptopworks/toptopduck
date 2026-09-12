@@ -246,6 +246,14 @@ impl LiveProviderConfig {
         &self,
         server: McpServerConfig,
     ) -> Result<McpServerConfig, app_config::WriteError> {
+        // Header-face guard at the deepest write boundary (issue #901): every
+        // path that persists a server (the IPC upsert command, any future
+        // internal writer) refuses an invalid header face here -- a save the
+        // read-time scan would later nuke the whole file over must never
+        // succeed in the first place. Before the write lock: fail fast, no
+        // file touched.
+        crate::mcp::config::validate_mcp_server_headers(&server)
+            .map_err(app_config::WriteError::Validation)?;
         // Hold write_lock across the full load -> mutate -> store so a concurrent
         // upsert cannot interleave and drop this server (a lost update
         // would orphan its keychain anchor). store_inner -- not store -- because
@@ -2142,6 +2150,50 @@ mod tests {
         assert_eq!(
             live.last_model_posture("gemini-cli"),
             ModelPosture::default()
+        );
+    }
+
+    // --- MCP header-face write boundary (issue #901) ---------------------------
+
+    #[test]
+    fn upsert_refuses_an_invalid_header_face_leaving_the_file_untouched() {
+        // The deepest write boundary (issue #901): an MCP server whose header
+        // face is invalid (a control-char value, or a secret-named configured
+        // header that the read-time scan would nuke the whole file over at
+        // the next launch) is refused BEFORE any file write -- pinning the
+        // call site inside `upsert_mcp_server`, not just the validator.
+        let (_dir, live) = live();
+        let make = |headers: BTreeMap<String, String>| McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers,
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        let mut cr_value = BTreeMap::new();
+        cr_value.insert("X-Ok-Name".to_string(), "a\rb".to_string());
+        let mut secret_named = BTreeMap::new();
+        secret_named.insert("Authorization".to_string(), "Bearer literal".to_string());
+        for server in [make(cr_value), make(secret_named)] {
+            let err = live
+                .upsert_mcp_server(server)
+                .expect_err("an invalid header face must be refused");
+            assert!(
+                matches!(err, app_config::WriteError::Validation(_)),
+                "the refusal is a named validation, got: {err}"
+            );
+        }
+        // Fail-fast: the validation runs before the write, so a first launch
+        // (no file yet) never materializes one.
+        assert!(
+            !live.path().exists(),
+            "a refused upsert must not create the config file"
         );
     }
 

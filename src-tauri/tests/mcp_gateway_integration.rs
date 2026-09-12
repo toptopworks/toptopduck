@@ -806,9 +806,6 @@ fn handle_jsonrpc_sse_malformed_post(stream: &mut TcpStream) {
 
 // --- Legacy SSE handlers ---------------------------------------------------
 
-/// GET handler for SSE transport that sends `event: message` as the first
-/// event instead of `event: endpoint` — exercises `SseClient`'s first-event
-/// rejection guard (H1, issue #389 I4).
 /// Answer with `301` + a Location header and hold the connection briefly
 /// (issue #901): the no-redirect guardrail pins must see the redirect status,
 /// not a followed second hop.
@@ -837,6 +834,9 @@ fn handle_sse_stream_with_endpoint(stream: &mut TcpStream, endpoint_url: &str) {
     thread::sleep(Duration::from_secs(5));
 }
 
+/// GET handler for SSE transport that sends `event: message` as the first
+/// event instead of `event: endpoint` — exercises `SseClient`'s first-event
+/// rejection guard (H1, issue #389 I4).
 fn handle_sse_stream_bad_first_event(stream: &mut TcpStream, base_url: &str) {
     let header = "HTTP/1.1 200 OK\r\n\
                   Content-Type: text/event-stream\r\n\

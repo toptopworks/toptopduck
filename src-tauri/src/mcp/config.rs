@@ -41,6 +41,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::app_config::io::is_secret_header_name;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -245,8 +247,8 @@ fn is_header_tchar(c: char) -> bool {
     c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c)
 }
 
-/// Validate a configured server's header face at the upsert boundary
-/// (issue #901). Two rules:
+/// Validate a configured server's header face at the write boundary
+/// (issue #901). Five rules:
 /// 1. A stdio transport must not carry `keychain_header_keys` (it makes no
 ///    HTTP requests; a stray list means the frontend lost the transport
 ///    split -- refuse rather than persist dead config).
@@ -254,6 +256,19 @@ fn is_header_tchar(c: char) -> bool {
 ///    must contain no control characters -- a CR/LF (or any control byte) in
 ///    either position is a header-injection vector, so the refusal is at the
 ///    write boundary, not at request time (fail the save, not the turn).
+/// 3. A configured name must not look like a credential (the expanded
+///    read-time scan list): the value belongs in the OS keychain behind the
+///    form's Secret row. A persisted literal would sail through the save and
+///    be refused by the read-time scan at the NEXT launch -- degrading the
+///    whole app-config to defaults -- so the write boundary must reject
+///    what the read boundary would nuke the file over.
+/// 4. `Accept` and `Content-Type` are protocol-managed: the transports set
+///    them per request shape (the event-stream Accept on the SSE GET, the
+///    JSON Content-Type on every POST), and a configured copy silently
+///    breaks the protocol handshake with a far-away error.
+/// 5. Header names are unique case-insensitively across the configured map
+///    and the keychain list: HTTP header names fold to lowercase, and a
+///    case-variant pair would send two headers on the wire.
 pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), String> {
     let headers = match &server.transport {
         McpTransport::Stdio { .. } => {
@@ -276,6 +291,20 @@ pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), Strin
                 server.id
             ));
         }
+        if is_secret_header_name(name) {
+            return Err(format!(
+                "MCP server `{}`: header name {name:?} looks like a credential -- check the \
+                 Secret row so the value goes to the OS keychain instead of the config file",
+                server.id
+            ));
+        }
+        if is_protocol_header(name) {
+            return Err(format!(
+                "MCP server `{}`: header {name:?} is protocol-managed (the transport sets \
+                 Accept / Content-Type per request); remove it from the configured headers",
+                server.id
+            ));
+        }
         if value.chars().any(char::is_control) {
             return Err(format!(
                 "MCP server `{}`: header {name:?} value contains a control character \
@@ -285,8 +314,8 @@ pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), Strin
         }
     }
     // A keychain-declared name is a header name too (it reaches the wire the
-    // moment the keychain value resolves) -- the same token rule applies at
-    // the same boundary (review c-2, issue #901).
+    // moment the keychain value resolves) -- the token and protocol rules
+    // apply at the same boundary (issue #901).
     for name in &server.keychain_header_keys {
         if !is_valid_header_name(name) {
             return Err(format!(
@@ -295,14 +324,42 @@ pub fn validate_mcp_server_headers(server: &McpServerConfig) -> Result<(), Strin
                 server.id
             ));
         }
+        if is_protocol_header(name) {
+            return Err(format!(
+                "MCP server `{}`: keychain header name {name:?} is protocol-managed (the \
+                 transport sets Accept / Content-Type per request); remove it",
+                server.id
+            ));
+        }
+    }
+    // Case-insensitive uniqueness across both name sources (issue #901):
+    // HTTP header names fold to lowercase, so a case-variant pair (configured
+    // `X-Custom` + keychain `x-custom`) would send two headers on the wire.
+    let mut folded: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for name in headers.keys().chain(server.keychain_header_keys.iter()) {
+        if !folded.insert(name.to_ascii_lowercase()) {
+            return Err(format!(
+                "MCP server `{}`: duplicate header name {name:?} (HTTP header names are \
+                 case-insensitive; a case-variant pair sends two headers on the wire)",
+                server.id
+            ));
+        }
     }
     Ok(())
 }
 
 /// A header NAME is valid when it is a non-empty RFC 7230 token: every char
-/// is a `tchar` (see [`is_header_tchar`]).
-fn is_valid_header_name(name: &str) -> bool {
+/// is a `tchar` (see [`is_header_tchar`]). Shared with the read-time scan's
+/// charset backstop (app_config::io).
+pub(crate) fn is_valid_header_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(is_header_tchar)
+}
+
+/// Protocol-managed header names the transports set per request shape
+/// (issue #901): a configured copy silently overrides the SSE stream's
+/// `Accept: text/event-stream` or the POST's JSON `Content-Type`.
+fn is_protocol_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("accept") || name.eq_ignore_ascii_case("content-type")
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1083,139 @@ mod tests {
         );
         server.keychain_header_keys = vec!["X-Test-Token".into()];
         validate_mcp_server_headers(&server).expect("a token keychain name validates");
+    }
+
+    /// A configured header NAME that looks like a credential is refused at
+    /// the write boundary (issue #901): a persisted literal would be refused
+    /// by the read-time scan at the next launch -- degrading the whole
+    /// app-config to defaults -- so the save must reject it first, pointing
+    /// the user at the Secret row / keychain face. The same name declared in
+    /// `keychain_header_keys` is exactly where it belongs and validates.
+    #[test]
+    fn header_validation_routes_secret_named_headers_to_the_keychain_face() {
+        for secret_named in ["Authorization", "X-Api-Token", "Cookie", "X-Session-Id"] {
+            let mut headers = BTreeMap::new();
+            headers.insert(secret_named.into(), "literal-credential".into());
+            let server = McpServerConfig {
+                id: McpServerId("remote".into()),
+                display_name: "Remote".into(),
+                transport: McpTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers,
+                },
+                env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
+                timeout_ms: None,
+                enabled: true,
+            };
+            let err = validate_mcp_server_headers(&server)
+                .expect_err("a secret-named configured header must be refused");
+            assert!(
+                err.contains("credential"),
+                "the refusal routes to the keychain face, got: {err}"
+            );
+        }
+        // The same names on the KEYCHAIN face are the intended shape.
+        let mut server = McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers: BTreeMap::new(),
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        server.keychain_header_keys = vec!["Authorization".into(), "X-Session-Id".into()];
+        validate_mcp_server_headers(&server).expect("keychain-declared secret names validate");
+    }
+
+    /// `Accept` and `Content-Type` are protocol-managed (issue #901): the
+    /// transports set them per request shape, and a configured copy silently
+    /// breaks the protocol handshake -- refused on both name sources,
+    /// case-insensitively.
+    #[test]
+    fn header_validation_refuses_protocol_managed_headers() {
+        for protocol_named in ["Accept", "accept", "Content-Type", "content-type"] {
+            let mut headers = BTreeMap::new();
+            headers.insert(protocol_named.into(), "v".into());
+            let configured = McpServerConfig {
+                id: McpServerId("remote".into()),
+                display_name: "Remote".into(),
+                transport: McpTransport::Sse {
+                    url: "https://example.test/sse".into(),
+                    headers,
+                },
+                env: BTreeMap::new(),
+                keychain_env_keys: Vec::new(),
+                keychain_header_keys: Vec::new(),
+                timeout_ms: None,
+                enabled: true,
+            };
+            let err = validate_mcp_server_headers(&configured)
+                .expect_err("a protocol-managed configured header must be refused");
+            assert!(
+                err.contains("protocol-managed"),
+                "the refusal names the class, got: {err}"
+            );
+
+            let mut keychain = McpServerConfig {
+                transport: McpTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers: BTreeMap::new(),
+                },
+                ..configured
+            };
+            keychain.keychain_header_keys = vec![protocol_named.into()];
+            let err = validate_mcp_server_headers(&keychain)
+                .expect_err("a protocol-managed keychain header name must be refused");
+            assert!(
+                err.contains("protocol-managed"),
+                "the refusal names the class, got: {err}"
+            );
+        }
+    }
+
+    /// Header names must be unique case-insensitively across the configured
+    /// map and the keychain list (issue #901): HTTP header names fold to
+    /// lowercase, so a case-variant pair would send two headers on the wire.
+    #[test]
+    fn header_validation_refuses_case_folded_duplicate_names() {
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Custom".into(), "configured".into());
+        let server = McpServerConfig {
+            id: McpServerId("remote".into()),
+            display_name: "Remote".into(),
+            transport: McpTransport::Http {
+                url: "https://example.test/mcp".into(),
+                headers,
+            },
+            env: BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: vec!["x-custom".into()],
+            timeout_ms: None,
+            enabled: true,
+        };
+        let err = validate_mcp_server_headers(&server)
+            .expect_err("a case-folded cross-face duplicate must be refused");
+        assert!(
+            err.contains("case-insensitive"),
+            "the refusal names the fold, got: {err}"
+        );
+
+        // The same fold inside the keychain list alone.
+        let mut server = McpServerConfig { ..server };
+        server.keychain_header_keys = vec!["X-Trace".into(), "x-trace".into()];
+        let err = validate_mcp_server_headers(&server)
+            .expect_err("a case-folded keychain-internal duplicate must be refused");
+        assert!(
+            err.contains("case-insensitive"),
+            "the refusal names the fold, got: {err}"
+        );
     }
 
     // --- keychain_env_keys (C0) ---------------------------------------------

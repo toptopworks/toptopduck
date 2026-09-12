@@ -31,14 +31,17 @@ const SECRET_NAME_SUBSTRINGS = [
 ];
 
 // Mirrors IMPORT_SECRET_SUBSTRINGS in src-tauri/src/mcp/import.rs, plus
-// "authorization" for HTTP request headers (not in the Rust set because the
-// Rust import path only handles stdio env vars).
+// "authorization"/"cookie"/"session" for HTTP request headers (not in the
+// Rust import set because the Rust import path only handles stdio env vars;
+// the Rust read-time header scan carries the same additions).
 const IMPORT_SECRET_SUBSTRINGS = [
   "token",
   "bearer",
   "jwt",
   "privatekey",
   "authorization",
+  "cookie",
+  "session",
 ];
 
 function collapseName(name: string): string {

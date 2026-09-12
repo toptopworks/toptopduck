@@ -55,17 +55,26 @@ const SECRET_KEY_NAMES: &[&str] = &[
 ];
 
 /// Additional secret-name substrings checked ONLY against header names
-/// (issue #901): request headers carry `Authorization` / bearer / JWT
-/// credentials far more often than config fields do, and the header face is
-/// hand-reachable (web-format JSON pasted into the form), so a secret-named
-/// header's literal value must be structurally refused at read time -- the
-/// name belongs in `keychain_header_keys`, with the value in the OS keychain.
-/// This list is the Rust mirror of the frontend's `isSecretEnvKey` header
-/// routing and the import path's `IMPORT_SECRET_SUBSTRINGS` (plus
-/// `authorization`, which env scanning deliberately avoids for
-/// false-positive reasons that do not apply to headers).
-const HEADER_SECRET_SUBSTRINGS: &[&str] =
-    &["token", "bearer", "jwt", "privatekey", "authorization"];
+/// (issue #901): request headers carry credentials far more often than
+/// config fields do (`Authorization`, bearer/JWT tokens, `Cookie` session
+/// values), and the header face is hand-reachable (web-format JSON pasted
+/// into the form), so a secret-named header's literal value must be
+/// structurally refused at read time -- the name belongs in
+/// `keychain_header_keys`, with the value in the OS keychain. The effective
+/// set matches the frontend's single `isSecretEnvKey` scan (one scan applied
+/// to both faces there -- there is no separate frontend header routing);
+/// relative to the Rust import path's `IMPORT_SECRET_SUBSTRINGS` it adds
+/// `authorization` / `cookie` / `session`, which the two Rust env scans
+/// deliberately omit.
+const HEADER_SECRET_SUBSTRINGS: &[&str] = &[
+    "token",
+    "bearer",
+    "jwt",
+    "privatekey",
+    "authorization",
+    "cookie",
+    "session",
+];
 
 /// Collapse a key name for substring matching: lowercase, non-alphanumerics
 /// dropped (so `apiKey` / `API_KEY` / `api-key` collapse to `apikey`).
@@ -94,9 +103,10 @@ pub(crate) fn is_secret_name(name: &str) -> bool {
 
 /// True if `name` matches the EXPANDED header-secret list (issue #901):
 /// [`is_secret_name`] plus the [`HEADER_SECRET_SUBSTRINGS`] -- applied only to
-/// header names inside a `headers` object (see [`find_secret_field`]), never to
-/// env names (the env list is deliberately narrower; see
-/// `mcp::import::is_secret_env_key` for the import-path variant).
+/// header names inside a `headers` object (see [`find_scan_hit`]), never to
+/// env names (the env list is deliberately narrower; [`is_secret_name`] is
+/// the read-time env scan, and `mcp::import::is_secret_env_key` the separate
+/// import-time variant).
 pub(crate) fn is_secret_header_name(name: &str) -> bool {
     if is_secret_name(name) {
         return true;
@@ -137,6 +147,10 @@ pub(crate) enum AppConfigReadError {
     LowerVersion { found: u32, supported: u32 },
     /// A secret-named key was detected in the raw JSON. Refuse the file.
     SecretField(String),
+    /// A malformed header name or value (bad token charset or a control
+    /// character) was detected inside a `headers` object. Refuse the file
+    /// (issue #901: the hand-edit backstop for the write boundary's checks).
+    InvalidHeader(String),
 }
 
 impl std::fmt::Display for AppConfigReadError {
@@ -156,6 +170,12 @@ impl std::fmt::Display for AppConfigReadError {
             ),
             Self::SecretField(name) => {
                 write!(f, "secret-named field `{name}` refused (secrets-never)")
+            }
+            Self::InvalidHeader(name) => {
+                write!(
+                    f,
+                    "malformed header `{name}` refused (bad token or control character)"
+                )
             }
         }
     }
@@ -212,6 +232,10 @@ pub enum WriteError {
     Serialize(String),
     Io(String),
     Rename(String),
+    /// The write was refused before touching the file: the payload failed a
+    /// domain validation (issue #901 -- e.g. an MCP server's header face).
+    /// Carries the user-correctable message.
+    Validation(String),
 }
 
 impl std::fmt::Display for WriteError {
@@ -221,6 +245,7 @@ impl std::fmt::Display for WriteError {
             Self::Serialize(d) => write!(f, "serialize app-config failed: {d}"),
             Self::Io(d) => write!(f, "write app-config temp file failed: {d}"),
             Self::Rename(d) => write!(f, "replace app-config failed: {d}"),
+            Self::Validation(d) => write!(f, "invalid MCP server config: {d}"),
         }
     }
 }
@@ -269,8 +294,11 @@ pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
     // deserializing. serde would otherwise silently drop an unknown `api_key`
     // field on the floor -- the value would never reach Rust, but the plaintext
     // key would sit on disk. Refusing here makes the invariant enforceable.
-    if let Some(found) = find_secret_field(&value) {
-        return Err(AppConfigReadError::SecretField(found));
+    if let Some(found) = find_scan_hit(&value) {
+        return Err(match found {
+            ScanHit::Secret(name) => AppConfigReadError::SecretField(name),
+            ScanHit::MalformedHeader(name) => AppConfigReadError::InvalidHeader(name),
+        });
     }
 
     let raw = value
@@ -300,15 +328,27 @@ pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
     Ok(cfg)
 }
 
-/// Recursively scan a JSON value for any object key matching a secret name
-/// (case-insensitive, non-alphanumeric-stripped comparison so `apiKey` /
-/// `API_KEY` / `api-key` all trip). Returns the offending key on the first hit.
-/// A `headers` object's DIRECT keys are header names and use the expanded
-/// [`is_secret_header_name`] list (issue #901): a secret-named header's
-/// literal value must refuse the file, exactly like a smuggled `env` entry.
-/// `headers` is unambiguous here -- the mcp transport header face is the only
-/// such key in the schema.
-fn find_secret_field(value: &Value) -> Option<String> {
+/// Why the read-time scan refused a file (issue #901).
+enum ScanHit {
+    /// A secret-named key on any face: a smuggled plaintext credential.
+    Secret(String),
+    /// A header name or value that cannot legally reach the wire (bad token
+    /// charset or a control character) -- the hand-edit backstop mirroring
+    /// the write boundary's charset checks.
+    MalformedHeader(String),
+}
+
+/// Recursively scan a JSON value for refuse-worthy content: any object key
+/// matching a secret name (case-insensitive, non-alphanumeric-stripped
+/// comparison so `apiKey` / `API_KEY` / `api-key` all trip), and -- inside a
+/// `headers` object's DIRECT keys -- a secret-named header (the expanded
+/// [`is_secret_header_name`] list) or a malformed header name/value
+/// (issue #901): a secret-named header's literal value must refuse the file
+/// exactly like a smuggled `env` entry, and a hand-edited malformed header
+/// fails here rather than as a generic connect-time error. `headers` is
+/// unambiguous here -- the mcp transport header face is the only such key
+/// in the schema.
+fn find_scan_hit(value: &Value) -> Option<ScanHit> {
     match value {
         Value::Object(map) => {
             for (k, v) in map {
@@ -316,9 +356,16 @@ fn find_secret_field(value: &Value) -> Option<String> {
                     if let Value::Object(headers) = v {
                         for (name, sub) in headers {
                             if is_secret_header_name(name) {
-                                return Some(name.clone());
+                                return Some(ScanHit::Secret(name.clone()));
                             }
-                            if let Some(found) = find_secret_field(sub) {
+                            if !crate::mcp::config::is_valid_header_name(name)
+                                || sub
+                                    .as_str()
+                                    .is_some_and(|value| value.chars().any(char::is_control))
+                            {
+                                return Some(ScanHit::MalformedHeader(name.clone()));
+                            }
+                            if let Some(found) = find_scan_hit(sub) {
                                 return Some(found);
                             }
                         }
@@ -326,15 +373,15 @@ fn find_secret_field(value: &Value) -> Option<String> {
                     }
                 }
                 if is_secret_name(k) {
-                    return Some(k.clone());
+                    return Some(ScanHit::Secret(k.clone()));
                 }
-                if let Some(found) = find_secret_field(v) {
+                if let Some(found) = find_scan_hit(v) {
                     return Some(found);
                 }
             }
             None
         }
-        Value::Array(items) => items.iter().find_map(find_secret_field),
+        Value::Array(items) => items.iter().find_map(find_scan_hit),
         _ => None,
     }
 }
@@ -595,6 +642,8 @@ mod tests {
             "X-Bearer-Id",
             "X-Jwt",
             "API_KEY",
+            "Cookie",
+            "X-Session-Id",
         ] {
             let (_dir, path) = temp("config.json");
             let smuggled = format!(
@@ -607,6 +656,30 @@ mod tests {
                 AppConfig::defaults(),
                 "{header_name} must refuse the file"
             );
+        }
+    }
+
+    #[test]
+    fn read_refuses_a_malformed_header_on_a_remote_transport() {
+        // Issue #901: a hand-edited `transport.headers` entry whose NAME is
+        // not an RFC 7230 token, or whose VALUE carries a control character
+        // (the JSON `\r` escape parses to a real CR), is malformed -- the
+        // read-time backstop mirrors the write boundary's charset checks so
+        // the failure is a named refusal here, not a generic connect-time
+        // `BadHeader`.
+        for (name, value) in [("X Bad", "v"), ("X-Ok", "a\\rb"), ("X-Ok", "a\\nb")] {
+            let (_dir, path) = temp("config.json");
+            let smuggled = format!(
+                "{{\"format_version\":{v},\"mcp_servers\":{{\"servers\":[{{\"id\":\"s\",\"display_name\":\"S\",\"transport\":{{\"type\":\"http\",\"url\":\"https://e.test\",\"headers\":{{\"{name}\":\"{value}\"}}}}}}]}}}}",
+                v = APP_CONFIG_FORMAT_VERSION,
+            );
+            fs::write(&path, &smuggled).expect("write");
+            assert_eq!(
+                parse_at(&path),
+                Err(AppConfigReadError::InvalidHeader(name.into())),
+                "{name:?}={value:?} must refuse the file as malformed"
+            );
+            assert_eq!(read_at(&path), AppConfig::defaults());
         }
     }
 
@@ -637,6 +710,8 @@ mod tests {
         // separate seam, not this scan.
         assert!(!is_secret_name("authorization"));
         assert!(is_secret_header_name("authorization"));
+        assert!(is_secret_header_name("cookie"));
+        assert!(is_secret_header_name("X-Session-Id"));
         assert!(!is_secret_header_name("X-Api-Version"));
         assert!(
             is_secret_header_name("x-api-key"),

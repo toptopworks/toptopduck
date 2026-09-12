@@ -940,6 +940,72 @@ describe("McpServerForm (issue #388)", () => {
     expect(saved.keychain_env_keys).toEqual(["LEGACY_SECRET"]);
   });
 
+  it("preserves a legacy remote row's dormant env through a JSON round trip (issue #901)", async () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({
+        transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+      }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+          env: { LEGACY_ENV: "dormant-value" },
+          keychain_env_keys: ["LEGACY_SECRET"],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Switch to JSON and back with no edits: the web format has no field for
+    // a remote row's env, and that absence must read as "unchanged", not as
+    // a deletion -- the save still carries the dormant face verbatim.
+    fireEvent.click(screen.getByText("JSON"));
+    fireEvent.click(screen.getByText("Form"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+
+    const saved = vi.mocked(upsertMcpServer).mock.calls[0][0];
+    expect(saved.env).toEqual({ LEGACY_ENV: "dormant-value" });
+    expect(saved.keychain_env_keys).toEqual(["LEGACY_SECRET"]);
+  });
+
+  it("preserves a legacy remote row's dormant env on a JSON-mode save (issue #901)", async () => {
+    vi.mocked(upsertMcpServer).mockResolvedValue(
+      makeServer({
+        transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+      }),
+    );
+    vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
+
+    renderWithProviders(
+      <McpServerForm
+        initialServer={makeServer({
+          transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+          env: { LEGACY_ENV: "dormant-value" },
+          keychain_env_keys: ["LEGACY_SECRET"],
+        })}
+        isEdit={true}
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // Save straight from JSON mode: the parsed draft's empty env face (the
+    // web format cannot express it) keeps the ref's dormant face.
+    fireEvent.click(screen.getByText("JSON"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(upsertMcpServer).toHaveBeenCalledTimes(1));
+
+    const saved = vi.mocked(upsertMcpServer).mock.calls[0][0];
+    expect(saved.env).toEqual({ LEGACY_ENV: "dormant-value" });
+    expect(saved.keychain_env_keys).toEqual(["LEGACY_SECRET"]);
+  });
+
   it("blocks a JSON-mode save when a secret HEADER key is detected", async () => {
     renderWithProviders(
       <McpServerForm

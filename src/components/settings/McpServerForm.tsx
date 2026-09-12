@@ -295,6 +295,23 @@ export function McpServerForm({
     }
   }
 
+  /** Keep a remote draft's dormant env face across a JSON-mode parse
+   *  (issue #901): the web format cannot express it, so an EMPTY parsed
+   *  face means "unchanged" (the ref's face rides through); only an
+   *  internal-format paste that explicitly carries env entries replaces
+   *  it. Stdio drafts pass through untouched (env is their live face). */
+  function withDormantEnv(draft: McpServerDraft): McpServerDraft {
+    if (draft.transport.type === "stdio") return draft;
+    if (Object.keys(draft.env).length > 0 || draft.keychain_env_keys.length > 0) {
+      return draft;
+    }
+    return {
+      ...draft,
+      env: dormantEnvRef.current.env,
+      keychain_env_keys: dormantEnvRef.current.keychainEnvKeys,
+    };
+  }
+
   /** Sync FROM JSON text → flat form state (called when switching JSON → Form). */
   function syncFromJson(parsed: McpServerDraft): void {
     setDisplayName(parsed.display_name);
@@ -318,13 +335,20 @@ export function McpServerForm({
       setUrl(parsed.transport.url);
       setCommand("");
       setArgsText("");
-      // Dormancy (issue #901): a remote draft's env face rides the ref
-      // (the flat parser leaves it empty for web-format rows; an
-      // internal-format paste may carry some), restored verbatim on save.
-      dormantEnvRef.current = {
-        env: parsed.env,
-        keychainEnvKeys: parsed.keychain_env_keys,
-      };
+      // Dormancy (issue #901): a remote draft's env face rides the ref.
+      // The web format cannot express a remote row's env (configToWebJson
+      // serializes headers only), so an EMPTY parsed face means "unchanged"
+      // -- keep the ref across the round trip. Only an internal-format
+      // paste that explicitly carries env entries replaces it.
+      if (
+        Object.keys(parsed.env).length > 0 ||
+        parsed.keychain_env_keys.length > 0
+      ) {
+        dormantEnvRef.current = {
+          env: parsed.env,
+          keychainEnvKeys: parsed.keychain_env_keys,
+        };
+      }
       setEnvEntries([]);
       const face = headerFaceOf(parsed);
       setHeaderEntries(
@@ -420,13 +444,27 @@ export function McpServerForm({
     // Build the draft from the active mode (no `enabled` — neither mode
     // edits it; the assembly below stamps the real value).
     let draft: McpServerDraft;
+    // Secret keys the JSON TEXT itself declared (issue #901): only these
+    // need the Form-mode value entry below -- a remote row's dormant
+    // keychain keys (restored out-of-band by withDormantEnv) already have
+    // keychain values and must not block the save.
+    let jsonSecretKeys: string[] = [];
     if (mode === "json") {
       const result = tryParseConfig(jsonText);
       if (!result.ok) {
         setJsonError(result.error);
         return;
       }
-      draft = result.config;
+      jsonSecretKeys = [
+        ...result.config.keychain_env_keys,
+        ...result.config.keychain_header_keys,
+      ];
+      // Dormancy (issue #901): the JSON text cannot carry a remote row's
+      // dormant env face (the web format has no field for it), so an empty
+      // parsed face keeps the ref's face -- the same preservation the Form
+      // path's buildConfigFromForm applies. An internal-format paste that
+      // explicitly carries env entries wins.
+      draft = withDormantEnv(result.config);
     } else {
       draft = buildConfigFromForm();
     }
@@ -446,25 +484,21 @@ export function McpServerForm({
     // values (secrets must go to the OS keychain, not config). Block save
     // and prompt the user to enter values via Form mode, otherwise the
     // config is written with keychain keys that have no keychain entries.
-    // Both faces apply (issue #901): env secrets and header secrets.
-    if (mode === "json") {
-      const secretKeys = [
-        ...config.keychain_env_keys,
-        ...config.keychain_header_keys,
-      ];
-      if (secretKeys.length > 0) {
-        setError(
-          intl.formatMessage(
-            {
-              id: "settings.mcp.form.secretsRequireFormMode",
-              defaultMessage:
-                "Secret keys detected ({keys}). Switch to Form mode to enter their values before saving.",
-            },
-            { keys: secretKeys.join(", ") },
-          ),
-        );
-        return;
-      }
+    // Both faces apply (issue #901): env secrets and header secrets -- but
+    // only keys the JSON text itself declared; a legacy remote row's
+    // dormant keychain keys already have keychain values.
+    if (jsonSecretKeys.length > 0) {
+      setError(
+        intl.formatMessage(
+          {
+            id: "settings.mcp.form.secretsRequireFormMode",
+            defaultMessage:
+              "Secret keys detected ({keys}). Switch to Form mode to enter their values before saving.",
+          },
+          { keys: jsonSecretKeys.join(", ") },
+        ),
+      );
+      return;
     }
 
     // Capture secret values from the form's entries (only populated in

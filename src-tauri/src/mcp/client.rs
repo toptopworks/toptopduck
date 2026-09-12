@@ -852,7 +852,8 @@ impl HttpClient {
     /// purely for kill-shape uniformity across transports.
     ///
     /// The agent never follows redirects (issue #901 guardrail): a 3xx
-    /// surfaces as an explicit connection error via [`map_ureq_error`] --
+    /// returns `Ok` under `redirects(0)` and surfaces as an explicit
+    /// connection error via [`check_no_redirect`] on the response status --
     /// ureq's redirect hops only strip `authorization`/`cookie`, so following
     /// one would forward any custom credential header to an arbitrary origin
     /// (the #244 egress-agent precedent).
@@ -1277,8 +1278,9 @@ fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
 /// POST a JSON-RPC notification (no `id`, no response awaited) over an HTTP
 /// transport. The response body is intentionally discarded — MCP
 /// notifications are fire-and-forget; the server typically returns 202.
-/// Non-2xx status codes surface as `ClientError::Http` via `ureq`'s error
-/// channel.
+/// Statuses >= 400 surface as `ClientError::Http` via `ureq`'s error
+/// channel; a 3xx returns `Ok` under `redirects(0)` and is refused by
+/// [`check_no_redirect`] (issue #901).
 fn post_notification(request: ureq::Request, notif: Value) -> Result<(), ClientError> {
     let response = request
         .send_json(notif)
