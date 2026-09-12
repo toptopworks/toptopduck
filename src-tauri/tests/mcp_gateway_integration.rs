@@ -24,6 +24,10 @@ use toptopduck_lib::provider::keychain::KeychainStore;
 /// the `[[bin]]` declaration in Cargo.toml is what makes it available).
 const FAKE_BIN: &str = env!("CARGO_BIN_EXE_mcp-fake-server");
 
+/// Path to the compiled paginated MCP server fixture (issue #900): a
+/// two-page `tools/list` answer joined by `nextCursor`.
+const PAGINATED_BIN: &str = env!("CARGO_BIN_EXE_mcp-paginated-server");
+
 /// Build a stdio `McpServerConfig` pointing at the fake server fixture. No
 /// keychain env keys, so `connect_all` injects no secrets -- the keychain read
 /// path is exercised by the slice B unit tests, not here.
@@ -33,6 +37,38 @@ fn fake_config(id: &str, display: &str) -> McpServerConfig {
         display_name: display.into(),
         transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
         env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+        enabled: true,
+    }
+}
+
+/// A two-page `tools/list` fixture config (issue #900): page 1 returns
+/// `echo` + `add` with a `nextCursor`, page 2 returns `fetch_page2` -- the
+/// tool only a cursor-following client can ever see.
+fn paginated_config(id: &str, display: &str) -> McpServerConfig {
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: display.into(),
+        transport: McpTransport::stdio(PAGINATED_BIN, Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        timeout_ms: None,
+        enabled: true,
+    }
+}
+
+/// A fake-server config that never stops paging (`FAKE_CURSOR_LOOP=1` in the
+/// child env): every `tools/list` page returns a tool plus a fresh cursor --
+/// the page-cap shape (issue #900).
+fn cursor_loop_config(id: &str, display: &str) -> McpServerConfig {
+    let mut env = BTreeMap::new();
+    env.insert("FAKE_CURSOR_LOOP".to_string(), "1".to_string());
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: display.into(),
+        transport: McpTransport::stdio(FAKE_BIN, Vec::new()),
+        env,
         keychain_env_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
@@ -172,6 +208,83 @@ fn connect_all_mounts_the_trio_and_discovers_by_handle() {
         .and_then(|t| t.as_str())
         .expect("echo content");
     assert_eq!(echo_text, "Echo: hi");
+}
+
+/// Issue #900: a multi-page server's SECOND page reaches the aggregated
+/// catalog -- pre-#900 the client read one page and silently dropped the
+/// rest, so `fetch_page2` was unfindable and invokable-nowhere. The full
+/// mount surface: Connected result, catalog handles (page-2 tool included,
+/// advertised order), invoke resolution, and the manifest.
+#[test]
+fn connect_all_folds_a_multi_page_server_into_the_catalog() {
+    let keychain = KeychainStore::new();
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(&[paginated_config("srv-pages", "PageMCP")], &keychain);
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].connected, "two pages are a healthy server");
+    assert_eq!(results[0].tool_count, 3, "both pages' tools count");
+
+    let catalog = agg.search_catalog("");
+    let handles = catalog_handles(&catalog);
+    assert_eq!(
+        handles,
+        vec![
+            "mcp__pagemcp__echo",
+            "mcp__pagemcp__add",
+            "mcp__pagemcp__fetch_page2"
+        ],
+        "the page-2-only tool is in the catalog, in advertised order"
+    );
+
+    // The page-2 tool resolves for invoke too -- it is a first-class catalog
+    // citizen, not a search-only ghost.
+    assert!(agg
+        .resolve_invoke(&json!({"tool": "mcp__pagemcp__fetch_page2"}))
+        .is_ok());
+
+    let listing = agg.server_listing();
+    assert_eq!(listing["servers"][0]["server"], "PageMCP");
+    assert_eq!(listing["servers"][0]["connected"], true);
+    assert_eq!(listing["servers"][0]["tool_count"], 3);
+}
+
+/// Issue #900: a server that never stops paging trips the page cap; the
+/// connect path records it as the server's failure (an explicit
+/// `ConnectOutcome::Failed` with the guardrail reason -- no
+/// silently-partial catalog) and the manifest carries the outcome.
+#[test]
+fn connect_all_page_cap_marks_the_server_failed_with_reason() {
+    let keychain = KeychainStore::new();
+    let mut agg = McpAggregator::empty();
+    let results = agg.connect_all(&[cursor_loop_config("srv-loop", "LoopMCP")], &keychain);
+
+    assert_eq!(results.len(), 1);
+    assert!(
+        !results[0].connected,
+        "the cap is a failure, not a truncation"
+    );
+    let error = results[0].error.as_deref().expect("the failure reason");
+    assert!(
+        error.contains("LoopMCP"),
+        "the reason names the server: {error}"
+    );
+    assert!(
+        error.contains("pagination guardrail"),
+        "the reason names the guardrail: {error}"
+    );
+
+    // The manifest (mcp_list_servers) carries the same failure, and the
+    // catalog stays empty -- nothing from the looping server was mounted.
+    let listing = agg.server_listing();
+    assert_eq!(listing["servers"][0]["server"], "LoopMCP");
+    assert_eq!(listing["servers"][0]["connected"], false);
+    let catalog = agg.search_catalog("");
+    let catalog_tools = catalog["tools"].as_array().expect("catalog tools array");
+    assert!(
+        catalog_tools.is_empty(),
+        "no silently-partial catalog: {catalog_tools:?}"
+    );
 }
 
 #[test]
@@ -870,7 +983,7 @@ fn http_transport_connect_tools_list_and_call() {
 
     let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url).expect("http connect");
 
-    let tools = client.list_tools().expect("tools/list");
+    let tools = client.list_tools("http-fake").expect("tools/list");
     assert_eq!(tools.len(), 2, "http server advertises echo + add");
     assert_eq!(tools[0]["name"], "echo");
     assert_eq!(tools[1]["name"], "add");
@@ -933,7 +1046,9 @@ fn http_transport_handles_sse_response_branch() {
     let mut client =
         toptopduck_lib::mcp::client::HttpClient::connect(&url).expect("http-sse connect");
 
-    let tools = client.list_tools().expect("tools/list via SSE response");
+    let tools = client
+        .list_tools("http-sse-fake")
+        .expect("tools/list via SSE response");
     assert_eq!(tools.len(), 2, "http-sse server advertises echo + add");
 
     let result = client
@@ -1003,7 +1118,7 @@ fn sse_transport_connect_tools_list_and_call() {
 
     let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url).expect("sse connect");
 
-    let tools = client.list_tools().expect("tools/list");
+    let tools = client.list_tools("http-fake").expect("tools/list");
     assert_eq!(tools.len(), 2, "sse server advertises echo + add");
     assert_eq!(tools[0]["name"], "echo");
     assert_eq!(tools[1]["name"], "add");

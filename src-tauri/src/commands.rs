@@ -1383,11 +1383,14 @@ pub async fn probe_mcp_server(
         };
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
+        // The blocking task needs an owned attribution label (issue #900).
+        let server_label = server.display_name.clone();
 
         let join = tauri::async_runtime::spawn_blocking(move || {
             let stdin = stdin.ok_or_else(|| "child stdin not available".to_string())?;
             let stdout = stdout.ok_or_else(|| "child stdout not available".to_string())?;
-            crate::mcp::client::stdio_handshake(stdin, stdout).map_err(|e| e.to_string())
+            crate::mcp::client::stdio_handshake(stdin, stdout, &server_label)
+                .map_err(|e| e.to_string())
         });
 
         let outcome = tokio::time::timeout(deadline, async {
@@ -1409,7 +1412,7 @@ pub async fn probe_mcp_server(
         tauri::async_runtime::spawn_blocking(move || {
             let mut client =
                 crate::mcp::client::connect_transport(&server_for_blocking, &secrets, None)?;
-            client.list_tools()
+            client.list_tools(&server_for_blocking.display_name)
         })
         .await
         .map_err(|e| e.to_string())

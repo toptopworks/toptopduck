@@ -338,7 +338,7 @@ impl McpAggregator {
                     tool_output_dir.as_deref(),
                     &kill_slot,
                 )?;
-                let tools = client.list_tools()?;
+                let tools = client.list_tools(&config_for_worker.display_name)?;
                 Ok::<(TransportClient, Vec<Value>), ClientError>((client, tools))
             },
         );

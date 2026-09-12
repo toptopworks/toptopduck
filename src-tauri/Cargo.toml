@@ -90,6 +90,17 @@ path = "tests/fixtures/mcp_fake_server.rs"
 name = "mcp-hang-server"
 path = "tests/fixtures/mcp_hang_server.rs"
 
+# MCP paginated fake server fixture (issue #900): a stdio MCP server whose
+# `tools/list` answer spans two pages joined by `nextCursor` -- the gateway +
+# probe integration tests pin that `list_tools` folds every page into the
+# catalog (pre-#900 the second page was silently dropped). Lives under
+# `tests/fixtures/` (subdir, no auto-discovery); pure serde_json (no lib
+# import) so the fixture stays self-contained. The Tauri bundler ships only
+# `main.rs`, so this fixture never reaches end users.
+[[bin]]
+name = "mcp-paginated-server"
+path = "tests/fixtures/mcp_paginated_server.rs"
+
 # ACP bridge process (ADR-0085, issue #299 slice 9b): a thin stdio<->TCP proxy
 # the external CLI launches as its MCP server (per the McpServer::stdio_bridge
 # descriptor). Pure std -- no lib import, no serde, no JSON parsing: it forwards
