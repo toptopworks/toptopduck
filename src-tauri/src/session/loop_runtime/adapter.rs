@@ -26,7 +26,7 @@
 //! strategy).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use crate::model::{Promotion, TurnPhase};
@@ -110,10 +110,13 @@ impl SharedTurnState {
     }
 }
 
-/// Mint the per-dispatch call id: sequential, prefixed so an id can never be
-/// mistaken for a provider-issued handle (the gateway mints its own).
-pub(crate) fn next_call_id(counter: &AtomicU64) -> String {
-    format!("gateway-{}", counter.fetch_add(1, Ordering::Relaxed))
+/// Mint the per-dispatch call id: uuid-backed, prefixed so an id can never
+/// be mistaken for a provider-issued handle (the gateway mints its own).
+/// Uniqueness is intrinsic to the mint, never an artifact of counter scope:
+/// the runtime rebuilds per turn, so a scoped counter would mint colliding
+/// `gateway-0`s across a session (#922).
+pub(crate) fn next_call_id() -> String {
+    format!("gateway-{}", uuid::Uuid::new_v4())
 }
 
 /// Build the per-catalog-entry gateway adapter (ADR-0116 Decision 4): a
@@ -124,7 +127,6 @@ pub(crate) fn gateway_dynamic_tool(
     def: ToolDefinition,
     state: Arc<SharedTurnState>,
     dispatch: mpsc::Sender<DispatchRequest>,
-    call_ids: Arc<AtomicU64>,
 ) -> rig_agent::tool::DynamicTool {
     let name = def.name.clone();
     rig_agent::tool::DynamicTool::new(
@@ -133,7 +135,7 @@ pub(crate) fn gateway_dynamic_tool(
         def.input_schema.clone(),
         move |_context, args| {
             let call = ToolUse {
-                id: next_call_id(&call_ids),
+                id: next_call_id(),
                 name: name.clone(),
                 input: args,
             };

@@ -22,9 +22,7 @@ use rig_core::completion::{
     CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Message, Usage,
 };
 use rig_core::message::{AssistantContent, Reasoning, ReasoningContent, ToolCall, ToolFunction};
-use rig_core::streaming::{
-    RawStreamingChoice, StreamFinal, StreamingCompletionResponse, StreamingResult,
-};
+use rig_core::streaming::{RawStreamingChoice, StreamFinal, StreamingCompletionResponse};
 use rig_core::ProviderResponseError;
 
 use crate::provider::tool_calling::{
@@ -42,11 +40,16 @@ const BRIDGE_PROVIDER: &str = "app-provider";
 /// fault: the bridge writes it, the terminal classification strips it back
 /// into `Termination::InvalidConfig` -- both sides live in this module tree,
 /// so the contract cannot drift (the same write/read pairing the yoagent
-/// layer's `INVALID_CONFIG_PREFIX` has). `NotWired` needs no encoding: the
-/// bridge raises it as an honest HTTP 401 provider-response error, which the
-/// status-based classification (ADR-0116 Decision 5) already maps to
-/// `NotWired` -- the same rule that covers live rig providers.
-pub(crate) const INVALID_CONFIG_PREFIX: &str = "invalid config: ";
+/// layer's `INVALID_CONFIG_PREFIX` has). Control-character-led: no real
+/// provider error body (JSON, HTML, or any error text) leads with a
+/// control character, so a body that merely phrases like the payload
+/// strips nowhere -- the ambiguity class is eliminated, not documented
+/// (#922). `NotWired` needs no encoding: the bridge raises it as an
+/// honest HTTP 401
+/// provider-response error, which the status-based classification
+/// (ADR-0116 Decision 5) already maps to `NotWired` -- the same rule that
+/// covers live rig providers.
+pub(crate) const INVALID_CONFIG_PREFIX: &str = "\u{1}invalid-config: ";
 
 /// The reply-length floor when the request carried no cap (rig leaves
 /// `max_tokens` optional; the app's own adapters always sent one).
@@ -148,7 +151,7 @@ impl CompletionModel for ProviderCompletionModel {
         )));
         Ok(StreamingCompletionResponse::stream(
             BRIDGE_PROVIDER,
-            SingleShotStream { events }.boxed(),
+            Box::pin(SingleShotStream { events }),
         ))
     }
 }
@@ -169,20 +172,6 @@ impl Stream for SingleShotStream {
             None => Poll::Ready(None),
         }
     }
-}
-
-/// The single-shot stream pinned into the provider-stream type box.
-trait StreamBoxExt:
-    Stream<Item = Result<RawStreamingChoice, CompletionError>> + Sized + Send + 'static
-{
-    fn boxed(self) -> StreamingResult {
-        Box::pin(self)
-    }
-}
-
-impl<S> StreamBoxExt for S where
-    S: Stream<Item = Result<RawStreamingChoice, CompletionError>> + Send + 'static
-{
 }
 
 /// Translate a rig completion request onto the app's protocol-neutral turn
@@ -378,27 +367,7 @@ pub(crate) fn to_rig_history(messages: &[ToolTurnMessage]) -> Vec<Message> {
             } => {
                 let mut content = Vec::new();
                 for block in thinking {
-                    match block {
-                        ThinkingBlock::Thinking {
-                            thinking,
-                            signature,
-                        } => content.push(AssistantContent::Reasoning(
-                            Reasoning::new_with_signature(
-                                thinking,
-                                if signature.is_empty() {
-                                    None
-                                } else {
-                                    Some(signature.clone())
-                                },
-                            ),
-                        )),
-                        ThinkingBlock::Redacted { data } => {
-                            content.push(AssistantContent::Reasoning(Reasoning {
-                                id: None,
-                                content: vec![ReasoningContent::Redacted { data: data.clone() }],
-                            }))
-                        }
-                    }
+                    content.push(thinking_to_reasoning(block));
                 }
                 if let Some(t) = text {
                     content.push(AssistantContent::text(t.clone()));
@@ -426,30 +395,36 @@ fn flush_results(converted: &mut Vec<Message>, pending: &mut Vec<rig_core::messa
     }
 }
 
+/// One thinking block onto rig's reasoning vocabulary -- the single
+/// conversion both directions consume. A paired signature rides only when
+/// non-empty (the empty-string <-> absent boundary), and redacted data
+/// passes through verbatim.
+fn thinking_to_reasoning(block: &ThinkingBlock) -> AssistantContent {
+    match block {
+        ThinkingBlock::Thinking {
+            thinking,
+            signature,
+        } => AssistantContent::Reasoning(Reasoning::new_with_signature(
+            thinking.as_str(),
+            if signature.is_empty() {
+                None
+            } else {
+                Some(signature.clone())
+            },
+        )),
+        ThinkingBlock::Redacted { data } => AssistantContent::Reasoning(Reasoning {
+            id: None,
+            content: vec![ReasoningContent::Redacted { data: data.clone() }],
+        }),
+    }
+}
+
 /// The app provider's outcome onto a rig completion response: reasoning
 /// blocks, then prose, then tool calls (rig's canonical replay order).
 fn from_app_outcome(outcome: crate::provider::tool_calling::ToolTurnOutcome) -> CompletionResponse {
     let mut choice = Vec::new();
     for block in &outcome.thinking {
-        match block {
-            ThinkingBlock::Thinking {
-                thinking,
-                signature,
-            } => choice.push(AssistantContent::Reasoning(Reasoning::new_with_signature(
-                thinking.as_str(),
-                if signature.is_empty() {
-                    None
-                } else {
-                    Some(signature.clone())
-                },
-            ))),
-            ThinkingBlock::Redacted { data } => {
-                choice.push(AssistantContent::Reasoning(Reasoning {
-                    id: None,
-                    content: vec![ReasoningContent::Redacted { data: data.clone() }],
-                }))
-            }
-        }
+        choice.push(thinking_to_reasoning(block));
     }
     match outcome.reply {
         ToolTurnReply::Text(text) => choice.push(AssistantContent::text(text)),
