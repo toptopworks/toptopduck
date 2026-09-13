@@ -92,11 +92,16 @@ impl LoopRuntime {
         }
     }
 
-    /// Stamp the live protocol (the live factory's second input): picks the
-    /// wire shape the thought level renders into.
-    pub(crate) fn with_protocol(mut self, protocol: crate::model::Protocol) -> Self {
-        self.protocol = Some(protocol);
-        self
+    /// The live construction -- the live factory's two inputs in one step
+    /// (the model handle and the wire-shape protocol the thought level
+    /// renders into), so no half-stamped live runtime exists between them
+    /// (issue #926; the bridged / mock faces keep [`LoopRuntime::new`]'s
+    /// protocol-less shape).
+    pub(crate) fn live(model: ModelHandle, protocol: crate::model::Protocol) -> Self {
+        Self {
+            protocol: Some(protocol),
+            ..Self::new(model)
+        }
     }
 
     /// Override the caps (the test seam). Test-only at the call sites: the
@@ -266,7 +271,15 @@ impl LoopRuntime {
                 // rides back as the error result the model self-corrects
                 // from (ADR-0028), recorded as the call's failed trace
                 // entry so every model-issued call keeps an honest row.
-                if let Some((refusal, abort)) = detector.screen(&call) {
+                let (refusal, abort) = match detector.screen(&call) {
+                    ScreenDecision::Dispatch => (None, None),
+                    ScreenDecision::Steer(text) => (Some(text), None),
+                    ScreenDecision::Abort {
+                        refusal,
+                        termination,
+                    } => (Some(refusal), Some(termination)),
+                };
+                if let Some(refusal) = refusal {
                     if let Some(termination) = abort {
                         *state.aborted.lock().expect("aborted lock poisoned") = Some(termination);
                     }
@@ -424,60 +437,80 @@ impl LoopRuntime {
 /// signature's history.
 #[derive(Default)]
 struct LoopDetector {
-    /// Per (tool name, argument signature): arrivals this turn.
-    counts: std::collections::HashMap<(String, String), u32>,
-    /// The pairs already refused once (the steer); their next repeat
-    /// latches the abort.
-    steered: std::collections::HashSet<(String, String)>,
+    /// Per (tool name, argument signature): the pair's counting state --
+    /// one key, one entry, so arrivals and the steer flag can never drift
+    /// apart.
+    calls: std::collections::HashMap<(String, String), CallState>,
+}
+
+/// One exact call's counting state. Carrying the steer flag beside the
+/// arrival count expresses the pair invariant (`steered ⇒ arrivals >=
+/// IDENTICAL_STEER_AT`) by structure rather than construction order, and
+/// saves the whole-key clone and second hash lookup the two-container
+/// shape paid on every screen (issue #926).
+#[derive(Default)]
+struct CallState {
+    /// Arrivals this turn.
+    arrivals: u32,
+    /// Already refused once (the steer); the next repeat latches the
+    /// abort.
+    steered: bool,
 }
 
 /// Refuse first at this many arrivals of one exact call.
 const IDENTICAL_STEER_AT: u32 = 3;
 
+/// One screened call's verdict: dispatch it, steer it (first refusal --
+/// the text feeds back as the error result the model self-corrects from),
+/// or abort (the repeat after the nudge -- the refusal feeds back AND the
+/// termination latches for the watcher to stop the run at its next
+/// checkpoint).
+enum ScreenDecision {
+    Dispatch,
+    Steer(String),
+    Abort {
+        refusal: String,
+        termination: Termination,
+    },
+}
+
 impl LoopDetector {
-    /// Screen one call: `None` dispatches it; `Some((refusal_text,
-    /// abort))` refuses it -- the text feeds back as the error result, and
-    /// a present `abort` latches the run's termination (the watcher stops
-    /// the run at its next checkpoint).
-    fn screen(
-        &mut self,
-        call: &crate::provider::tool_calling::ToolUse,
-    ) -> Option<(String, Option<Termination>)> {
+    /// Screen one call against the identical-arguments history (issue
+    /// #926: the verdict is a flat three-state enum, not a nested Option).
+    fn screen(&mut self, call: &crate::provider::tool_calling::ToolUse) -> ScreenDecision {
         let signature = serde_json::to_string(&call.input).unwrap_or_default();
         let key = (call.name.clone(), signature);
-        let count = self.counts.entry(key.clone()).or_insert(0);
-        *count += 1;
-        if *count < IDENTICAL_STEER_AT {
-            return None;
+        let state = self.calls.entry(key).or_default();
+        state.arrivals += 1;
+        let repetitions = state.arrivals;
+        if repetitions < IDENTICAL_STEER_AT {
+            return ScreenDecision::Dispatch;
         }
         let tool_name = call.name.as_str();
-        let repetitions = *count;
-        if self.steered.insert(key) {
+        if !state.steered {
             // First refusal: the steer -- the call does not run, the text
             // routes back as the error result the model can self-correct
             // from (ADR-0028).
-            Some((
-                format!(
-                    "tool call refused: `{tool_name}` was called {repetitions} times with \
-                     identical arguments. The result will not change -- change approach, or \
-                     say why the repetition is needed."
-                ),
-                None,
+            state.steered = true;
+            ScreenDecision::Steer(format!(
+                "tool call refused: `{tool_name}` was called {repetitions} times with \
+                 identical arguments. The result will not change -- change approach, or \
+                 say why the repetition is needed."
             ))
         } else {
             // The repeat after the nudge: the honest abort, latched for
             // the watcher to stop the run at its next checkpoint.
-            Some((
-                format!(
+            ScreenDecision::Abort {
+                refusal: format!(
                     "tool call refused: the run was stopped -- `{tool_name}` was called \
                      {repetitions} times with identical arguments after being asked to \
                      change approach"
                 ),
-                Some(Termination::Transient(format!(
+                termination: Termination::Transient(format!(
                     "loop detection aborted the run: `{tool_name}` repeated {repetitions} \
                      times with identical arguments after being asked to change approach"
-                ))),
-            ))
+                )),
+            }
         }
     }
 }
