@@ -1,5 +1,7 @@
 # 内置运行时实现形态：yoagent 进程内 agent 循环 crate 取代自写循环与协议适配器
 
+> 部分被 [ADR-0116](./0116-builtin-runtime-rig-in-process-engine-crates.md) 取代：本 ADR 的实现选型（yoagent crate、`ExecutionLimits` / `CancellationToken` 映射、接纳上游循环检测、重试交上游）**重写**为 rig 进程内双 crate；本 ADR 的集成形态决策（每轮无状态全量窗口、工具面单一适配器走网关、执行轨迹完全等价、帽值与取消语义）**继承保留**——本次替换换实现、不动架构。详见 ADR-0116。
+
 ## Decision
 
 1. **循环与协议层整体移交 yoagent。** 内置运行时的实现形态从自写 Rust agent 循环 + 自写协议适配器，换为 yoagent crate（crates.io 依赖，minor 闸门 `"0.18"` + Cargo.lock 精确钉版，MIT，MSRV 1.86）。自写 agent 循环与 anthropic/openai 两个协议适配器退役；app 保留 prompt 装配、窗口化、网关、preflight、配置面与钥匙串——这些是领域差异层，不外委。
