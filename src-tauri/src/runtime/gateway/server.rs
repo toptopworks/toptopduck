@@ -389,11 +389,24 @@ fn preauth_termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> 
     cancel.is_requested() || engine_done.load(Ordering::SeqCst)
 }
 
+/// The log label naming which termination flag fired, shared by the arms
+/// that log a pre-auth exit (the loop-top check, the EOF arm, and the error
+/// arm's re-check) so the twin labels cannot drift -- the
+/// [`preauth_termination_fired`] rationale.
+fn preauth_termination_source(cancel: &CancelToken) -> &'static str {
+    if cancel.is_requested() {
+        "the cancel flag"
+    } else {
+        "engine completion"
+    }
+}
+
 /// The auth line is read through the shared byte cap (issue #643): this read
 /// happens BEFORE the token check, so the peer is an unauthenticated prober
 /// that grabbed the connection -- the pre-auth surface. An over-long line,
-/// like a clean EOF, falls into the mismatch arm (empty vs expected), so it
-/// fails with the same `PermissionDenied` and no observable difference.
+/// like a clean EOF under no termination flag, falls into the mismatch arm
+/// (empty vs expected), so it fails with the same `PermissionDenied` and no
+/// observable difference.
 ///
 /// The pre-auth window (issue #909): the auth read runs under READ_TIMEOUT,
 /// and a timeout retries with the termination flags re-checked first each
@@ -404,9 +417,12 @@ fn preauth_termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> 
 /// disposition as the accept and serve-loop arms). A hard read error takes
 /// the same re-check in the error arm itself (issue #911): the teardown's
 /// reset landing on the parked read after a flag already fired returns
-/// `Ok(false)` too, while a reset with no flag stays a truthful error (and
-/// the mismatch arm never re-checks -- a wrong token is a genuine
-/// bridge-side defect). `Ok(true)`: auth
+/// `Ok(false)` too, while a reset with no flag stays a truthful error. A
+/// clean EOF takes the same flag re-check in its own arm (issue #913): the
+/// POSIX teardown FINs where the Windows kill resets, so a graceful close
+/// racing a set flag hands the turn to the ACP termination the same way.
+/// And the mismatch arm never re-checks -- a wrong token is a genuine
+/// bridge-side defect. `Ok(true)`: auth
 /// verified. The retry cadence leans on a caller-side precondition: the
 /// stream must carry a bounded read timeout (`serve_connection` sets
 /// `READ_TIMEOUT` before the call) -- a blocking-forever reader parks in
@@ -435,19 +451,37 @@ fn verify_bridge(
             log::debug!(
                 target: "toptopduck::gateway",
                 "verify_bridge exiting on {} in the pre-auth window",
-                if cancel.is_requested() {
-                    "the cancel flag"
-                } else {
-                    "engine completion"
-                }
+                preauth_termination_source(cancel)
             );
             return Ok(false);
         }
         let line = match lines.read_line_bounded(LINE_MAX_BYTES) {
             Ok(LineRead::Line(line)) => line,
-            // An over-long or EOF-terminated empty "line" can never match the
-            // expected auth line -- refuse it exactly like a token mismatch.
-            Ok(LineRead::Overlong | LineRead::Eof) => String::new(),
+            // The POSIX teardown's graceful close (issue #913): killpg
+            // SIGKILL FINs the bridge's socket where the Windows job-object
+            // kill resets it (#911's error arm), so the parked auth read
+            // wakes as a clean EOF. With a termination flag already set the
+            // turn is decided and the EOF takes the same single-source
+            // disposition (the error arm's class rule: the flag, not the
+            // close's shape, owns the turn); with no flag a bridge that
+            // died pre-auth without sending its line stays the truthful
+            // refusal below.
+            Ok(LineRead::Eof) => {
+                if preauth_termination_fired(cancel, engine_done) {
+                    log::debug!(
+                        target: "toptopduck::gateway",
+                        "verify_bridge exiting on {} in the pre-auth window after a clean EOF",
+                        preauth_termination_source(cancel)
+                    );
+                    return Ok(false);
+                }
+                String::new()
+            }
+            // An over-long "line" can never match the expected auth line --
+            // refuse it exactly like a token mismatch in any flag state (a
+            // genuinely over-long line from the peer is a real signal, not
+            // a teardown artifact).
+            Ok(LineRead::Overlong) => String::new(),
             // Read timeout (READ_TIMEOUT): retry so the loop-top flag check
             // fires, mirroring the serve loop timeout arm.
             Err(e) if is_read_timeout(e.kind()) => {
@@ -459,9 +493,9 @@ fn verify_bridge(
             // already decided the turn -- the arm re-check gives it the same
             // single-source disposition as the loop top instead of surfacing
             // a serve error that mislabels the completed turn as Failed. The
-            // mismatch / over-long / EOF arms above deliberately do NOT
-            // re-check (a wrong token is a genuine bridge-side defect and
-            // must surface), and with no flag set this is a pre-auth hard
+            // mismatch / over-long arms below deliberately do NOT re-check
+            // (a wrong token is a genuine bridge-side defect and must
+            // surface), and with no flag set this is a pre-auth hard
             // death that stays a truthful error. The class rule is
             // kind-agnostic: a non-UTF-8 auth line surfaces as InvalidData
             // from the bounded reader and rides this arm's re-check too -- a
@@ -472,11 +506,7 @@ fn verify_bridge(
                     log::debug!(
                         target: "toptopduck::gateway",
                         "verify_bridge exiting on {} in the pre-auth window after a read error ({})",
-                        if cancel.is_requested() {
-                            "the cancel flag"
-                        } else {
-                            "engine completion"
-                        },
+                        preauth_termination_source(cancel),
                         e.kind()
                     );
                     return Ok(false);
@@ -1450,6 +1480,64 @@ mod tests {
         fn consume(&mut self, _amt: usize) {}
     }
 
+    /// Issue #913 deterministic seam: the graceful twin of the #911 racing
+    /// reset -- the fire closure runs (setting `engine_done` or requesting
+    /// cancel) and the SAME fill_buf call returns a clean EOF (the POSIX
+    /// teardown's killpg SIGKILL closes the bridge's socket gracefully: FIN,
+    /// not RST), so the EOF reaches the pre-auth EOF arm with the flag
+    /// already set. A reverted arm re-check fails by refusing the handshake
+    /// as a token mismatch.
+    struct RacingEofReader<'a> {
+        fire: Box<dyn Fn() + 'a>,
+    }
+    impl Read for RacingEofReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+    impl BufRead for RacingEofReader<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            (self.fire)();
+            Ok(&[])
+        }
+        fn consume(&mut self, _amt: usize) {}
+    }
+
+    /// Issue #913 refusal-stance seam: the fire closure runs on the fill_buf
+    /// that DELIVERS the wrong auth line -- the flag is set by the time the
+    /// mismatch arm decides (past the loop top, which saw it clear), exactly
+    /// the state a mutation adding a flag gate to the refusal would act on.
+    /// Pre-firing the flag outside the read would never reach the arm (the
+    /// loop top hands the turn to the termination first).
+    struct RacingWrongLineReader<'a> {
+        line: Vec<u8>,
+        fire: Box<dyn Fn() + 'a>,
+    }
+    impl Read for RacingWrongLineReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+    impl BufRead for RacingWrongLineReader<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if !self.line.is_empty() {
+                (self.fire)();
+            }
+            Ok(&self.line)
+        }
+        fn consume(&mut self, amt: usize) {
+            self.line.drain(..amt);
+        }
+    }
+
     /// Issue #909: a cancel that fired before the handshake begins terminates
     /// the pre-auth window without touching the stream -- the turn belongs to
     /// the ACP termination, never the gateway.
@@ -1560,6 +1648,107 @@ mod tests {
         )
         .expect_err("no flag set -> the reset surfaces");
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(writer.is_empty(), "no response on a refused handshake");
+    }
+
+    /// Issue #913: engine completion racing the POSIX teardown's graceful
+    /// close OUT of the parked auth read -- the flag fires inside the read
+    /// that then returns a clean EOF (killpg SIGKILL FINs where the Windows
+    /// job-object kill resets), so the EOF arm's flag check (not the loop
+    /// top, which has already passed) hands the turn to the ACP
+    /// termination. A reverted check mislabels the completed turn as
+    /// Failed(Runtime) via the token-mismatch refusal.
+    #[test]
+    fn verify_bridge_engine_done_racing_eof_returns_terminated() {
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&engine_done);
+        let mut reader = RacingEofReader {
+            fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
+        };
+        let mut writer = Vec::new();
+        let verified = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &CancelToken::new(),
+            &engine_done,
+        )
+        .expect("terminated, not the EOF surfacing as a refused handshake");
+        assert!(!verified, "the pre-auth window ended in termination");
+        assert!(writer.is_empty(), "no response on a terminated handshake");
+    }
+
+    /// Issue #913 cancel twin: the same race with the cancel token firing
+    /// inside the read that returns the clean EOF.
+    #[test]
+    fn verify_bridge_cancel_racing_eof_returns_terminated() {
+        let cancel = CancelToken::new();
+        let mut reader = RacingEofReader {
+            fire: Box::new(|| cancel.request()),
+        };
+        let mut writer = Vec::new();
+        let verified = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &cancel,
+            &AtomicBool::new(false),
+        )
+        .expect("terminated, not the EOF surfacing as a refused handshake");
+        assert!(!verified, "the pre-auth window ended in termination");
+        assert!(writer.is_empty(), "no response on a terminated handshake");
+    }
+
+    /// Issue #913 refusal-stance pin: a wrong token with the termination
+    /// flags already set still refuses -- the mismatch arm never re-checks
+    /// (a wrong token is a genuine bridge-side defect that must surface in
+    /// any flag state), so a mutation giving the refusal a flag gate dies
+    /// here.
+    #[test]
+    fn verify_bridge_wrong_token_with_flags_set_stays_refused() {
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&engine_done);
+        let mut reader = RacingWrongLineReader {
+            line: b"BRIDGE_AUTH wrong\n".to_vec(),
+            fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
+        };
+        let mut writer = Vec::new();
+        let err = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "expected",
+            &CancelToken::new(),
+            &engine_done,
+        )
+        .expect_err("a wrong token refuses in any flag state");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(writer.is_empty(), "no response on a refused handshake");
+    }
+
+    /// Issue #913 refusal-stance pin, over-long half: the same stance as
+    /// the wrong-token pin one test up, for the sibling refusal clause -- an
+    /// over-long line with the termination flag set still refuses, so a
+    /// copy-paste mutation adding the EOF arm's flag gate to the over-long
+    /// arm dies here.
+    #[test]
+    fn verify_bridge_overlong_with_flags_set_stays_refused() {
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&engine_done);
+        let wire = format!("{}\n", "x".repeat(LINE_MAX_BYTES));
+        let mut reader = RacingWrongLineReader {
+            line: wire.into_bytes(),
+            fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
+        };
+        let mut writer = Vec::new();
+        let err = verify_bridge(
+            &mut reader,
+            &mut writer,
+            "tok",
+            &CancelToken::new(),
+            &engine_done,
+        )
+        .expect_err("an over-long line refuses in any flag state");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(writer.is_empty(), "no response on a refused handshake");
     }
 
@@ -2273,8 +2462,8 @@ mod tests {
     /// production teardown produces when it kills the bridge's spawner -- a
     /// job-object terminate aborts the sockets into resets (issue #911's
     /// racing error); a plain drop would only FIN and read as EOF. The POSIX
-    /// teardown (killpg SIGKILL) closes gracefully instead: its EOF surfaces
-    /// through the refusal arm, which deliberately does not re-check.
+    /// teardown (killpg SIGKILL) closes gracefully instead: its EOF takes the
+    /// flag-checked disposition of its own arm (issue #913).
     fn abortive_close(s: TcpStream) {
         #[cfg(windows)]
         {
@@ -2331,7 +2520,7 @@ mod tests {
     /// socket -- the engine completes while serve is parked in the pre-auth
     /// auth read, and the teardown's kill lands on the bridge as an abortive
     /// close (RST, the Windows job-object kill's shape -- the POSIX killpg
-    /// teardown FINs and surfaces through the refusal arm instead) that
+    /// teardown FINs instead, pinned by the #913 EOF twin below) that
     /// wakes the parked read BEFORE its READ_TIMEOUT fires.
     /// The error arm's re-check (not the loop top, which the parked read has
     /// already passed) hands the turn to the ACP termination; a reverted
@@ -2390,6 +2579,77 @@ mod tests {
             err.kind(),
             io::ErrorKind::ConnectionReset,
             "the raw bridge death reaches the turn assembler"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Issue #913 serve-layer pin: the POSIX teardown shape over a real
+    /// socket -- the engine completes while serve is parked in the pre-auth
+    /// auth read, and the teardown's killpg SIGKILL closes the bridge's
+    /// socket gracefully (FIN -- the plain-drop counterpart of
+    /// `abortive_close`'s RST), waking the parked read as a clean EOF. The
+    /// EOF arm's flag check (not the loop top, which the parked read has
+    /// already passed) hands the turn to the ACP termination; a reverted
+    /// check surfaces the EOF as a token mismatch that mislabels the
+    /// completed turn as Failed.
+    #[test]
+    fn serve_connection_preauth_eof_racing_engine_done_returns_empty_outcome() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+        let engine_done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&engine_done);
+
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            // Same first-park-window shape as the RST pin above (serve
+            // accepts within one poll interval and parks in the FIRST auth
+            // read, whose READ_TIMEOUT fires at ~t=110ms): firing at 50ms
+            // and closing 20ms later keeps the flag store + the FIN
+            // structurally inside that park, so the EOF is what wakes the
+            // read and reaches the EOF arm. The plain drop FINs because the
+            // gateway has written nothing pre-auth for the client to leave
+            // unread (unread data would turn the close into an RST).
+            thread::sleep(Duration::from_millis(50));
+            flag.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(20));
+            drop(s);
+        });
+        let outcome = serve_connection(handle, ctx, &engine_done)
+            .expect("a graceful EOF racing a set flag hands the turn to the ACP termination");
+        assert!(
+            outcome.trace.is_empty() && outcome.promotions.is_empty(),
+            "the terminated pre-auth window collects nothing: {outcome:?}"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Issue #913 cancel twin of the #911 serve-layer RST pin: the token
+    /// fires inside the first park window, then the abortive close wakes
+    /// the parked read as a reset that reaches the error arm with the flag
+    /// already set. Until now this disjunction of the error arm existed
+    /// only at the unit seam.
+    #[test]
+    fn serve_connection_preauth_reset_racing_cancel_returns_empty_outcome() {
+        let mut ctx = fresh_ctx();
+        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
+        ctx.cancel = cancel;
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            // First-park-window shape (see the engine_done twins above).
+            thread::sleep(Duration::from_millis(50));
+            cancel.request();
+            thread::sleep(Duration::from_millis(20));
+            abortive_close(s);
+        });
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false))
+            .expect("a reset racing a set cancel hands the turn to the ACP termination");
+        assert!(
+            outcome.trace.is_empty() && outcome.promotions.is_empty(),
+            "the terminated pre-auth window collects nothing: {outcome:?}"
         );
         client.join().expect("client thread panicked");
     }
