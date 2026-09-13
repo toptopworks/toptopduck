@@ -248,9 +248,9 @@ pub fn serve_connection(
     let mut outcome = GatewayOutcome::default();
     loop {
         if ctx.cancel.is_requested() {
-            // The serve's one visible trace on a cancel exit (issue #849:
-            // this arm firing with no user cancel in the window was the
-            // invisible gateway drop).
+            // The cancel exit's visible trace (issue #849: this arm firing
+            // with no user cancel in the window was the invisible gateway
+            // drop).
             log::debug!(
                 target: "toptopduck::gateway",
                 "serve loop exiting on the cancel flag"
@@ -265,6 +265,14 @@ pub fn serve_connection(
         // connection open (e.g. a stdio-spawn fd leak on Linux); the loop-top
         // check fires within one READ_TIMEOUT of the flag being set.
         if engine_done.load(Ordering::SeqCst) {
+            // The engine-completion twin of the cancel arm's log above
+            // (issue #849's invisible-exit lesson): without this line this
+            // exit is the only silent one among the flag-driven Ok exits
+            // (issue #915).
+            log::debug!(
+                target: "toptopduck::gateway",
+                "serve loop exiting on engine completion"
+            );
             return Ok(outcome);
         }
         let msg = match frames.read_message() {
@@ -409,7 +417,9 @@ fn preauth_termination_source(cancel: &CancelToken) -> &'static str {
 /// that grabbed the connection -- the pre-auth surface. An over-long line,
 /// like a clean EOF under no termination flag, falls into the mismatch arm
 /// (empty vs expected), so it fails with the same `PermissionDenied` and no
-/// observable difference.
+/// observable difference -- a contract that governs the prober's wire view
+/// (zero response bytes), not the operator's: a debug log at the refusal
+/// distinguishes the three arrival shapes (issue #915).
 ///
 /// The pre-auth window (issue #909): the auth read runs under READ_TIMEOUT,
 /// and a timeout retries with the termination flags re-checked first each
@@ -458,8 +468,8 @@ fn verify_bridge(
             );
             return Ok(false);
         }
-        let line = match lines.read_line_bounded(LINE_MAX_BYTES) {
-            Ok(LineRead::Line(line)) => line,
+        let (line, refusal) = match lines.read_line_bounded(LINE_MAX_BYTES) {
+            Ok(LineRead::Line(line)) => (line, "a token mismatch"),
             // The POSIX teardown's graceful close (issue #913): killpg
             // SIGKILL FINs the bridge's socket where the Windows job-object
             // kill resets it (#911's error arm), so the parked auth read
@@ -478,13 +488,13 @@ fn verify_bridge(
                     );
                     return Ok(false);
                 }
-                String::new()
+                (String::new(), "a clean EOF with no auth line")
             }
             // An over-long "line" can never match the expected auth line --
             // refuse it exactly like a token mismatch in any flag state (a
             // genuinely over-long line from the peer is a real signal, not
             // a teardown artifact).
-            Ok(LineRead::Overlong) => String::new(),
+            Ok(LineRead::Overlong) => (String::new(), "an over-long line"),
             // Read timeout (READ_TIMEOUT): retry so the loop-top flag check
             // fires, mirroring the serve loop timeout arm.
             Err(e) if is_read_timeout(e.kind()) => {
@@ -522,6 +532,15 @@ fn verify_bridge(
             writer.write_all(b"BRIDGE_OK\n")?;
             return Ok(true);
         }
+        // The three arrival shapes share one error and one zero-byte wire
+        // view (the prober's, issue #643); the debug label is the
+        // operator's only attribution (issue #915) -- without it a bridge
+        // that died alone in the pre-auth window reads as a token mismatch
+        // when no line ever arrived.
+        log::debug!(
+            target: "toptopduck::gateway",
+            "verify_bridge refused the pre-auth handshake: {refusal}"
+        );
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "bridge auth token mismatch",
@@ -2688,6 +2707,73 @@ mod tests {
         assert!(
             outcome.trace.is_empty() && outcome.promotions.is_empty(),
             "the terminated pre-auth window collects nothing: {outcome:?}"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Issue #915 FIN twin of the #913 cancel+RST pin: the cancel token
+    /// fires inside the first park window, then the plain drop FINs -- the
+    /// EOF arm's cancel disjunct over a real graceful close. Until now the
+    /// disjunct existed only at the unit seam (the racing-EOF cancel twin)
+    /// and the serve-level cancel wiring only in its RST flavor; this pin
+    /// composes the two.
+    #[test]
+    fn serve_connection_preauth_eof_racing_cancel_returns_empty_outcome() {
+        let mut ctx = fresh_ctx();
+        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
+        ctx.cancel = cancel;
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            // Same first-park-window shape as the engine_done FIN twin
+            // above (the parked auth read's READ_TIMEOUT fires at
+            // ~t=110ms): firing at 50ms and closing 20ms later keeps the
+            // cancel store + the FIN structurally inside that park, so the
+            // EOF is what wakes the read and reaches the EOF arm with the
+            // flag already set. The plain drop FINs because the gateway
+            // has written nothing pre-auth for the client to leave unread.
+            thread::sleep(Duration::from_millis(50));
+            cancel.request();
+            thread::sleep(Duration::from_millis(20));
+            drop(s);
+        });
+        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false))
+            .expect("a graceful EOF racing a set cancel hands the turn to the ACP termination");
+        assert!(
+            outcome.trace.is_empty() && outcome.promotions.is_empty(),
+            "the terminated pre-auth window collects nothing: {outcome:?}"
+        );
+        client.join().expect("client thread panicked");
+    }
+
+    /// Issue #915 FIN counterpart of the #911 no-flag RST pin: a probing
+    /// client that connects and closes gracefully under no termination flag
+    /// stays the truthful refusal -- the EOF arm's else branch falls into
+    /// the mismatch arm and the PermissionDenied propagates out of
+    /// serve_connection. Until now the refusal face had no serve-level pin
+    /// (the RST pin owns the truthful-error face), so the Err propagation
+    /// here is the refusal's first.
+    #[test]
+    fn serve_connection_preauth_eof_without_flags_surfaces_serve_error() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
+
+        let client = thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            // Park serve in the auth read first (the RST twin's shape), so
+            // the FIN wakes the parked read itself.
+            thread::sleep(Duration::from_millis(150));
+            drop(s);
+        });
+        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+            .expect_err("no flag set -> the flagless EOF stays the refusal");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied,
+            "the clean close without a line surfaces as the mismatch refusal"
         );
         client.join().expect("client thread panicked");
     }
