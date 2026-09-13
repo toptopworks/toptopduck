@@ -748,7 +748,7 @@ fn mid_batch_cancel_gates_the_remaining_calls() {
     let outcome = h.run_with_caps(
         &h.request("batch then cancel"),
         mock_runtime(model),
-        Arc::clone(&token),
+        token,
         24,
         None,
     );
@@ -782,7 +782,10 @@ fn mid_batch_cancel_gates_the_remaining_calls() {
 /// post-`spawn_blocking` recording segment was never polled and the trace
 /// row vanished. The executed call's trace entry must still land, through
 /// the dispatch-side record-before-send and the finish-time drain of the
-/// queue the abandoned stream left behind.
+/// queue the abandoned stream left behind. The call is a materialize so
+/// the recording site's promotion half rides the same window: a revert
+/// of the promotion push back into the callback's abandoned segment
+/// would drop it with no other pin noticing.
 #[test]
 fn cancelled_in_flight_call_still_lands_its_trace() {
     let mut h = Harness::new();
@@ -811,14 +814,14 @@ fn cancelled_in_flight_call_still_lands_its_trace() {
         None,
         &[(
             "tu_1",
-            "explore",
-            json!({"sql": "SELECT count(*) FROM result_1"}),
+            "materialize",
+            json!({"sql": "SELECT count(*) AS n FROM result_1"}),
         )],
     )]);
     let outcome = h.run_with_caps(
         &h.request("cancel my single call"),
         mock_runtime(model),
-        Arc::clone(&token),
+        token,
         24,
         None,
     );
@@ -833,8 +836,64 @@ fn cancelled_in_flight_call_still_lands_its_trace() {
         1,
         "the executed call's trace row lands despite the abandoned stream"
     );
-    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    assert_eq!(outcome.trace[0].calls[0].name, "materialize");
     assert!(outcome.trace[0].calls[0].success);
+    assert_eq!(
+        outcome.promotions.len(),
+        1,
+        "the interrupted materialize's promotion lands despite the abandoned stream"
+    );
+}
+
+/// A driver-thread panic after a call's result event has folded lands the
+/// honest Transient termination (issue #321) without tripping the
+/// finish-time exactly-once pairing: the join arm replaces the fold the
+/// dead driver had been consuming (its landed calls go with it), while
+/// `recorded_calls` survives on the shared state -- the pairing is
+/// exempted for the replaced fold, and the drain still salvages whatever
+/// the dead stream left queued. The panic rides the phase hook at the
+/// second turn's `Thinking` (a DRIVER-side phase, folded on the driver
+/// thread -- unlike `ToolCallCompleted`, which the dispatch server emits
+/// and whose panics the #321 dispatch guard catches, a path its own pin
+/// already covers); the first turn's call has already folded by then,
+/// which is what makes the pre-fix assert's arithmetic diverge (0 landed
+/// vs 1 recorded).
+#[test]
+fn driver_panic_after_a_folded_call_lands_transient_cleanly() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let fired = Arc::new(AtomicBool::new(false));
+    h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| {
+        if matches!(phase, TurnPhase::Thinking { attempt: 2.. })
+            && !fired.swap(true, Ordering::SeqCst)
+        {
+            panic!("injected driver failure after the call folded");
+        }
+    }));
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        text_turn("late prose that never lands"),
+    ]);
+    let outcome = h.run_with_caps(
+        &h.request("fold one call then die"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        24,
+        None,
+    );
+    assert!(
+        matches!(outcome.termination, Termination::Transient(_)),
+        "the driver panic lands the honest Transient, not a crash: {:?}",
+        outcome.termination
+    );
 }
 
 /// The no-progress watchdog's kill (ADR-0115): a generation that goes

@@ -303,7 +303,11 @@ impl LoopRuntime {
             // a bare Cancelled would; then cancel (a cancel that arrived
             // during the run wins over any reply, ADR-0021); then the run's
             // own exit -- its error vocabulary mapped, else the reply.
-            let DriveOutcome { mut fold, exit } = driver.join().unwrap_or_else(|payload| {
+            let joined = driver.join();
+            // A driver panic swaps in a fresh fold below: the finish-time
+            // pairing assert is exempted for the replacement (#321).
+            let fold_replaced = joined.is_err();
+            let DriveOutcome { mut fold, exit } = joined.unwrap_or_else(|payload| {
                 *state.aborted.lock().expect("aborted lock poisoned") =
                     Some(panic_to_transient("loop runtime driver", &*payload));
                 DriveOutcome {
@@ -316,13 +320,18 @@ impl LoopRuntime {
             // outlive the scope.
             drive_done.store(true, Ordering::SeqCst);
             if let Some(termination) = state.aborted.lock().expect("aborted lock poisoned").take() {
-                return finish(fold, &state, termination);
+                return finish(fold, &state, termination, fold_replaced);
             }
             if state.turn_over(&cancel) {
                 // ADR-0115: the clock latches whether the cancel is the
                 // watchdog's (generation silence past the cap) or a user /
                 // close cancel -- same landing, different reason.
-                return finish(fold, &state, ProgressClock::cancel_landing(clock.as_ref()));
+                return finish(
+                    fold,
+                    &state,
+                    ProgressClock::cancel_landing(clock.as_ref()),
+                    fold_replaced,
+                );
             }
             let termination = match exit {
                 // The select race abandoned the wait -- the token is
@@ -341,7 +350,7 @@ impl LoopRuntime {
                     }
                 },
             };
-            finish(fold, &state, termination)
+            finish(fold, &state, termination, fold_replaced)
         })
     }
 }
@@ -481,12 +490,16 @@ fn finish(
     mut fold: EventFold,
     state: &Arc<SharedTurnState>,
     termination: Termination,
+    fold_replaced: bool,
 ) -> LoopOutcome {
     let drained = fold.drain_residual(state);
     let recorded_calls = state.recorded_calls.load(Ordering::SeqCst);
-    debug_assert_eq!(
-        fold.landed_calls,
-        recorded_calls,
+    // A driver panic swaps in a fresh fold: the entries the dead fold had
+    // already landed go with it (#321's honest Transient landing), so the
+    // exactly-once pairing has no baseline to check against -- the drain
+    // above still salvages the residual queue onto the fresh fold.
+    debug_assert!(
+        fold_replaced || fold.landed_calls == recorded_calls,
         "every executed call's trace entry must land exactly once: {recorded_calls} recorded, {} landed by result event, {drained} drained at finish",
         fold.landed_calls - drained,
     );
