@@ -417,12 +417,13 @@ impl LoopRuntime {
 /// plain fields, no locking.
 ///
 /// Counting is per (tool name, argument signature), accumulated over the
-/// whole turn rather than reset by interleaving: the yoagent tracker
-/// counted per batch and a mixed batch re-issuing [A, B] every round was
-/// still a stuck loop, so a sibling call with different arguments (which
-/// resets a last-signature-seen design -- found by the merged-batch wire
-/// pin running to the step cap) must not erase another signature's
-/// history.
+/// whole turn rather than reset by interleaving: the yoagent tracker was
+/// a single last-signature streak -- any different call reset it (its own
+/// limits doc calls the word "consecutive" load-bearing), so a mixed
+/// batch re-issuing [A, B] every round evaded detection though it was
+/// just as stuck (found by the merged-batch wire pin running to the step
+/// cap) -- so here a sibling call with different arguments must not erase
+/// another signature's history.
 #[derive(Default)]
 struct LoopDetector {
     /// Per (tool name, argument signature): arrivals this turn.

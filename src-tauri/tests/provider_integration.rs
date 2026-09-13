@@ -758,24 +758,20 @@ fn a_protocol_switch_between_turns_reroutes_the_next_turn() {
 //
 // The probe path has its own redirect pin (`egress_agent_does_not_follow_
 // cross_host_redirect` in provider::http, the shared ureq agent with
-// redirects disabled). The PRODUCTION turn path instead rides the upstream
-// yoagent HTTP client (reqwest + tower-http), whose redirect behavior this
-// repo cannot configure -- `Client::new()` is constructed inside yoagent and
-// the versions are held by the 0.18 minor pin. What the locked stack
-// actually does on a 301, verified against its sources and pinned here,
-// splits by credential header: `authorization` is stripped on a cross-host
-// hop (reqwest's `remove_sensitive_headers`), so the openai bearer face is
-// safe and pinned as such; `x-api-key` is NOT on the strip list, and
-// tower-http rewrites a 301'd POST into a GET (RFC 7231), so the
-// anthropic face's key IS delivered to the redirect host as a GET. That
-// exposure is inherent to the pinned upstream versions; the anthropic pin
-// asserts the delivery so an upstream fix flips it red and the assertion
-// can tighten back to zero. Both faces additionally pin the honest turn
-// failure, and each redirect mock matches only when the first hop actually
-// carried the credential -- a redirect served without the key on board pins
-// nothing. `127.0.0.1` and `localhost` are distinct hosts for the client's
-// cross-origin judgment, so two mockito servers + a rewritten Location give
-// a true cross-host hop without a network.
+// redirects disabled). The production turn path is in the same posture
+// since the loop-runtime swap (ADR-0116 Decision 6, issue #918): the live
+// factory injects an app-constructed reqwest client with redirects pinned
+// off (`Policy::none`), so a cross-host 3xx is never followed -- whatever
+// credential header it would have carried. The pins below assert the
+// refusal: each redirect mock matches only when the first hop actually
+// carried the credential (the falsifiable premise -- a redirect served
+// without the key on board pins nothing), the sentinels on the redirect
+// target hold a zero expectation for both method spellings of the hop,
+// and both faces additionally pin the honest turn failure with the
+// surfaced 3xx status in the transient's detail. `127.0.0.1` and
+// `localhost` are distinct hosts for the client's cross-origin judgment,
+// so two mockito servers + a rewritten Location give a true cross-host
+// hop without a network.
 
 /// Wire the two mockito hosts for one protocol's API path (`/v1/messages`
 /// for anthropic, `/chat/completions` for openai-compat): `first` 301-
@@ -804,10 +800,11 @@ fn redirect_hosts(
 }
 
 /// One leak sentinel on `second`: a mock that matches ONLY when a request
-/// spelled with `method` carries the named credential header. tower-http
-/// rewrites the 301'd POST into a GET, so both method spellings must be
-/// watched separately -- mockito's method match is exact and takes no
-/// wildcard. The caller sets `expect` (or `expect_at_least`) and `create`s.
+/// spelled with `method` carries the named credential header. Both method
+/// spellings are watched separately -- mockito's method match is exact and
+/// takes no wildcard -- so the refusal is pinned regardless of how a
+/// future client would have spelled the hop. The caller sets `expect` (or
+/// `expect_at_least`) and `create`s.
 fn leak_sentinel(
     second: &mut mockito::ServerGuard,
     method: &str,
@@ -845,7 +842,7 @@ fn anthropic_turn_path_cross_host_redirect_is_refused() {
     match session.ask("redirect probe") {
         TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
             assert!(
-                detail.contains("301"),
+                detail.contains("status 301"),
                 "the surfaced 3xx lands in the honest transient: {detail:?}"
             );
         }
@@ -875,7 +872,7 @@ fn openai_turn_path_cross_host_redirect_is_refused() {
     match session.ask("redirect probe") {
         TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
             assert!(
-                detail.contains("301"),
+                detail.contains("status 301"),
                 "the surfaced 3xx lands in the honest transient: {detail:?}"
             );
         }
@@ -895,7 +892,10 @@ fn openai_turn_path_cross_host_redirect_is_refused() {
 /// regex pins the merged-only adjacency -- one `tool_result` block's
 /// closing brace followed directly by the next block's opening inside one
 /// content array (rig serializes fields alphabetically, so the block
-/// head is `"content"`, not `"type"`). The split shape the
+/// head is `"content"`, not `"type"` -- an ordering that holds under
+/// serde_json's default BTreeMap map and would flip only if some crate
+/// in the graph enabled its order-preserving feature, which would make
+/// this pin go red, fail-closed). The split shape the
 /// yoagent constructor emitted interleaves `]},{"role":"user",...`
 /// between the blocks, misses the mock, and the turn dies on the 501:
 /// split → refused, merged → 200, the red/green probe the diagnostic
@@ -930,7 +930,6 @@ fn anthropic_batched_tool_results_ride_one_user_message() {
         other => panic!("expected people.csv to load, got {other:?}"),
     }
     let outcome = session.ask("看看数据");
-    text_mock.assert();
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
         "the merged shape answers; the split shape would have missed the text mock: {outcome:?}"
@@ -1009,4 +1008,72 @@ fn anthropic_versioned_base_url_normalizes_to_the_same_endpoint() {
         "the versioned base normalizes onto the same endpoint: {outcome:?}"
     );
     _mock.assert();
+}
+
+/// The live anthropic face renders the posture's thought level in the
+/// adaptive shape the retired yoagent seam actually wrote (its compat
+/// default turned adaptive thinking on, so the wire carried a thinking
+/// type of adaptive plus an output-config effort -- never the legacy
+/// budget numbers, which its legacy-only branch the app never enabled
+/// held): a posture at high rides the request as both matchers below
+/// (an AND), and the merge of additional params into the upstream body
+/// is pinned on the same hop. A runtime that renders the legacy budget
+/// shape instead misses the mock and the turn dies.
+#[test]
+fn anthropic_thought_level_rides_the_adaptive_shape() {
+    use toptopduck_lib::session::PosturePair;
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/messages")
+        .match_body(mockito::Matcher::Regex(r#""type":"adaptive""#.into()))
+        .match_body(mockito::Matcher::Regex(r#""effort":"high""#.into()))
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(anthropic_text_body("done"))
+        .create();
+    let provider = anthropic_live_provider(server.url(), Some("sk-test"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session.set_external_model_config(PosturePair {
+        model: None,
+        thought_level: Some("high".into()),
+    });
+    let outcome = session.ask("anything");
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "the adaptive shape answers; the legacy budget shape would have missed the mock: {outcome:?}"
+    );
+    mock.assert();
+}
+
+/// The live openai face renders the posture's thought level as the
+/// reasoning effort on the wire (the same values the retired seam wrote),
+/// and the additional-params merge into the upstream body is pinned here:
+/// a layer that drops the parameter misses the mock and the turn dies.
+#[test]
+fn openai_thought_level_rides_the_reasoning_effort() {
+    use toptopduck_lib::session::PosturePair;
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .match_body(mockito::Matcher::Regex(
+            r#""reasoning_effort":"high""#.into(),
+        ))
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(openai_text_body("done"))
+        .create();
+    let provider = openai_live_provider(server.url(), Some("sk-test"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session.set_external_model_config(PosturePair {
+        model: None,
+        thought_level: Some("high".into()),
+    });
+    let outcome = session.ask("anything");
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "the effort parameter answers; a dropped parameter would have missed the mock: {outcome:?}"
+    );
+    mock.assert();
 }

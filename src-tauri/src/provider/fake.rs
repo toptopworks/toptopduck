@@ -239,9 +239,9 @@ fn asking_question(request: &ToolTurnRequest) -> String {
     // last-wins keys the script on the current question across every
     // round-trip of the turn. The upstream's own injected User turns (the
     // loop-detection nudge, the stop marker) never reach this shape -- the
-    // yoagent bridge (session::yoagent::live) drops them, keeping the bridged
-    // request's conversation identical to what the self-written loop fed this
-    // fake pre-swap (ADR-0107, issue #669).
+    // loop-runtime bridge (session::loop_runtime::model) drops them, keeping
+    // the bridged request's conversation identical to what the self-written
+    // loop fed this fake pre-swap (ADR-0107, issue #669).
     request
         .messages
         .iter()

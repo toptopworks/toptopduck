@@ -105,25 +105,32 @@ fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
 pub(crate) const BRIDGED_THOUGHT_LEVEL_KEY: &str = "app_thought_level";
 
 /// Render the posture's thought level onto the request's additional
-/// params (ADR-0103 / #918): the anthropic face carries the thinking
-/// budget and the openai face the reasoning effort, bit-for-bit the
-/// values the yoagent providers wrote onto the same wires; the bridged
-/// face carries the app-private key instead. An absent level (thinking
-/// off) contributes nothing -- no parameter on either wire, the status
-/// quo the yoagent seam held for `Off`.
+/// params (ADR-0103 / #918): the anthropic face carries the adaptive
+/// thinking shape the retired yoagent seam actually wrote -- its compat
+/// default turned adaptive thinking on, so the wire carried a thinking
+/// type of adaptive plus an output-config effort, and the legacy budget
+/// numbers lived only in a branch the app never enabled -- and the openai
+/// face carries the reasoning effort, the same values that seam wrote;
+/// the bridged face carries the app-private key instead. An absent level
+/// (thinking off) contributes nothing, and an unknown posture id
+/// contributes nothing either -- the same Off the retired seam's mapping
+/// held for ids it did not recognize, on every face.
 pub(crate) fn thought_level_params(
     protocol: Option<Protocol>,
     level: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
-    let Some(level) = level else {
+    // Unknown ids degrade to Off, not to a guessed tier: the app does not
+    // second-guess a level it cannot interpret.
+    let Some(level) = level.filter(|l| matches!(*l, "minimal" | "low" | "medium" | "high")) else {
         return serde_json::Map::new();
     };
     let params = match protocol {
         Some(Protocol::Anthropic) => serde_json::json!({
-            "thinking": {"type": "enabled", "budget_tokens": anthropic_thinking_budget(level)},
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": effort_tier(level)},
         }),
         Some(Protocol::Openai) => serde_json::json!({
-            "reasoning_effort": openai_reasoning_effort(level),
+            "reasoning_effort": effort_tier(level),
         }),
         // The bridged face: the completion-model bridge reads the key back
         // so the app provider's request keeps its `thought_level` stamp.
@@ -132,21 +139,10 @@ pub(crate) fn thought_level_params(
     params.as_object().cloned().unwrap_or_default()
 }
 
-/// The anthropic thinking budget per posture id -- the yoagent provider's
-/// mapping, held bit-for-bit (minimal shares low's floor: the wire has no
+/// The effort tier per known posture id -- the retired seam's mapping on
+/// both live faces (minimal shares low's tier: neither wire carries a
 /// tier below it).
-fn anthropic_thinking_budget(level: &str) -> u32 {
-    match level {
-        "medium" => 2048,
-        "high" => 8192,
-        // minimal / low / (unknown ids honest-degrade to the low tier)
-        _ => 1024,
-    }
-}
-
-/// The openai reasoning effort per posture id -- the yoagent provider's
-/// mapping (minimal honest-degrades to low, as there).
-fn openai_reasoning_effort(level: &str) -> &'static str {
+fn effort_tier(level: &str) -> &'static str {
     match level {
         "medium" => "medium",
         "high" => "high",
@@ -234,32 +230,30 @@ mod thought_level_tests {
     use super::*;
     use crate::model::Protocol;
 
-    /// The live anthropic rendering: the posture id maps onto the thinking
-    /// budget the yoagent provider wrote (minimal shares low's floor,
-    /// unknown ids honest-degrade to it).
+    /// The live anthropic rendering: the adaptive shape the retired seam
+    /// wrote (a thinking type of adaptive plus an output-config effort;
+    /// minimal shares low's tier).
     #[test]
-    fn anthropic_renders_the_thinking_budget() {
+    fn anthropic_renders_the_adaptive_effort() {
         let params = thought_level_params(Some(Protocol::Anthropic), Some("high"));
         assert_eq!(
             params.get("thinking").unwrap(),
-            &serde_json::json!({"type": "enabled", "budget_tokens": 8192})
+            &serde_json::json!({"type": "adaptive"})
         );
         assert_eq!(
-            thought_level_params(Some(Protocol::Anthropic), Some("medium"))
-                .get("thinking")
-                .unwrap(),
-            &serde_json::json!({"type": "enabled", "budget_tokens": 2048})
+            params.get("output_config").unwrap(),
+            &serde_json::json!({"effort": "high"})
         );
         assert_eq!(
             thought_level_params(Some(Protocol::Anthropic), Some("low"))
-                .get("thinking")
+                .get("output_config")
                 .unwrap(),
-            &serde_json::json!({"type": "enabled", "budget_tokens": 1024})
+            &serde_json::json!({"effort": "low"})
         );
     }
 
-    /// The live openai rendering: reasoning_effort, the yoagent provider's
-    /// mapping.
+    /// The live openai rendering: reasoning_effort, the retired seam's
+    /// mapping (minimal shares low's tier).
     #[test]
     fn openai_renders_reasoning_effort() {
         let params = thought_level_params(Some(Protocol::Openai), Some("high"));
@@ -272,10 +266,12 @@ mod thought_level_tests {
         );
     }
 
-    /// Off (no level) contributes nothing on any face, and the bridged
-    /// face carries the app-private key -- never a real wire parameter.
+    /// Off (no level) and unknown posture ids contribute nothing on any
+    /// face -- the same Off the retired seam's mapping held for
+    /// unrecognized ids -- and the bridged face carries the app-private
+    /// key, never a real wire parameter.
     #[test]
-    fn off_contributes_nothing_and_the_bridge_carries_the_private_key() {
+    fn off_and_unknown_ids_contribute_nothing_and_the_bridge_carries_the_private_key() {
         assert!(
             thought_level_params(Some(Protocol::Anthropic), None).is_empty(),
             "thinking off: no parameter on the wire"
@@ -283,6 +279,14 @@ mod thought_level_tests {
         assert!(
             thought_level_params(None, None).is_empty(),
             "thinking off: nothing for the bridge either"
+        );
+        assert!(
+            thought_level_params(Some(Protocol::Anthropic), Some("max")).is_empty(),
+            "an unknown id degrades to Off, not a guessed tier"
+        );
+        assert!(
+            thought_level_params(None, Some("old-level")).is_empty(),
+            "an unknown id stamps nothing on the bridge either"
         );
         let bridged = thought_level_params(None, Some("high"));
         assert_eq!(
