@@ -444,10 +444,11 @@ struct LoopDetector {
 }
 
 /// One exact call's counting state. Carrying the steer flag beside the
-/// arrival count expresses the pair invariant (`steered ⇒ arrivals >=
-/// IDENTICAL_STEER_AT`) by structure rather than construction order, and
-/// saves the whole-key clone and second hash lookup the two-container
-/// shape paid on every screen (issue #926).
+/// arrival count in one entry keeps the pair from drifting apart across
+/// containers (the flag can never detach from its count) and saves the
+/// whole-key clone and second hash lookup the two-container shape paid on
+/// every screen (issue #926). The threshold invariant (`steered ⇒
+/// arrivals >= IDENTICAL_STEER_AT`) still rides screen's control flow.
 #[derive(Default)]
 struct CallState {
     /// Arrivals this turn.

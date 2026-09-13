@@ -149,8 +149,12 @@ fn effort_tier(level: &str) -> &'static str {
 }
 
 /// Test-only construction counter for the shared egress client (issue
-/// #926): proves the client is built at most once across the process, so
-/// every live turn draws from one shared connection pool. Read by
+/// #926): proves a completed build is not duplicated by subsequent calls,
+/// so every live turn after the first draws from one shared connection
+/// pool. The claim stops short of one-build-per-process on purpose: a
+/// failed build legitimately retries (only successful builds are cached),
+/// and the init race may double-build -- the ureq precedent's stronger
+/// wording held because its builder cannot fail. Read by
 /// `egress_client_builds_only_once_across_calls`; compiled out of release
 /// builds (the probe face's `EGRESS_AGENT` counter is the precedent).
 #[cfg(test)]
@@ -167,12 +171,17 @@ static EGRESS_CLIENT_BUILDS: std::sync::atomic::AtomicU32 = std::sync::atomic::A
 /// carries no per-profile state (key and base ride each turn's provider
 /// builder), so sharing it costs no profile freshness while restoring
 /// keep-alive reuse for BYOK multi-turn sessions -- the per-turn rebuild
-/// dropped the connection pool and TLS sessions with every round. Clones
-/// share the pool (`reqwest::Client` is `Arc` internally); the probe
-/// face's `EGRESS_AGENT` singleton is the precedent. Only a successful
-/// build is cached: a construction failure refuses its turn as an honest
-/// transient and stays uncached, so the next turn retries the build --
-/// the per-turn retry posture survives the sharing.
+/// dropped the connection pool and TLS sessions with every round. The one
+/// thing sharing freezes is proxy resolution: reqwest snapshots env vars
+/// and OS-configured proxies at Client build time, so a mid-session proxy
+/// or VPN change is not picked up until process exit (the per-turn rebuild
+/// re-read the snapshot every turn). Clones share the pool
+/// (`reqwest::Client` is `Arc` internally); the probe face's `EGRESS_AGENT`
+/// singleton -- which accepts the same frozen-proxy posture -- is the
+/// precedent. Only a successful build is cached: a construction failure
+/// refuses its turn as an honest transient and stays uncached, so the next
+/// turn retries the build -- the per-turn retry posture survives the
+/// sharing.
 static EGRESS_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
 /// Hand out the shared egress client (issue #926): a clone per call, one
@@ -187,7 +196,8 @@ fn egress_client() -> Result<reqwest::Client, reqwest::Error> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     // First-wins under a race (two turns' first calls racing the init):
-    // both built, one pool wins, the loser's drops unused -- once, harmless.
+    // both built, one pool wins; the loser keeps its own client for its
+    // one turn -- only its set() clone drops unused. Once, harmless.
     let _ = EGRESS_CLIENT.set(client.clone());
     Ok(client)
 }
@@ -238,7 +248,12 @@ mod tests {
     /// the 2nd+ call, regardless of whether another test already
     /// initialized the client (tests run in parallel, so `before` may
     /// already be non-zero) -- the probe face's `EGRESS_AGENT` pin is the
-    /// precedent this mirrors.
+    /// precedent this mirrors. The `<= 1` bound is deterministic only
+    /// under this suite's shape: `egress_client` has no other caller here
+    /// (the other live tests refuse at the key/scheme gates before any
+    /// build), so a racing first build cannot land between the snapshots;
+    /// a future concurrent caller would need the bound loosened to
+    /// tolerate the init race's double build.
     #[test]
     fn egress_client_builds_only_once_across_calls() {
         let before = EGRESS_CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
