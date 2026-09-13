@@ -382,9 +382,10 @@ fn accept_bridge(
 /// only error path -- the stream is dropped without a response so a probing
 /// client learns nothing beyond "refused" (ADR-0085 security model).
 ///
-/// The termination predicate shared by verify_bridge's two arms -- the
-/// loop-top check and the post-error re-check (issue #911) -- so the twin
-/// flag sets cannot drift apart (the is_read_timeout rationale).
+/// The termination predicate shared by verify_bridge's three arms -- the
+/// loop-top check, the EOF arm (issue #913), and the error arm's re-check
+/// (issue #911) -- so the twin flag sets cannot drift apart (the
+/// is_read_timeout rationale).
 fn preauth_termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> bool {
     cancel.is_requested() || engine_done.load(Ordering::SeqCst)
 }
@@ -392,7 +393,9 @@ fn preauth_termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> 
 /// The log label naming which termination flag fired, shared by the arms
 /// that log a pre-auth exit (the loop-top check, the EOF arm, and the error
 /// arm's re-check) so the twin labels cannot drift -- the
-/// [`preauth_termination_fired`] rationale.
+/// [`preauth_termination_fired`] rationale. Precondition: call only where
+/// `preauth_termination_fired` has already returned true -- the else branch
+/// asserts engine completion by elimination, not by observation.
 fn preauth_termination_source(cancel: &CancelToken) -> &'static str {
     if cancel.is_requested() {
         "the cancel flag"
