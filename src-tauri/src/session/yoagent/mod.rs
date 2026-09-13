@@ -24,12 +24,18 @@
 //! async loop on a dedicated single-threaded runtime. Only owned data
 //! crosses (channels + shared state).
 
+//! Superseded as the production runtime (ADR-0116, issue #918): the wiring
+//! seam now routes through `session::loop_runtime`, so nothing outside this
+//! module tree names its runtime anymore. The layer stays in place for its
+//! own offline pins until the retirement slice (#919) deletes it -- the
+//! dead_code allowance below is that transition's marker, the same one the
+//! loop runtime carried until this swap.
+#![cfg_attr(not(test), allow(dead_code))]
+
 mod adapter;
 mod fold;
 mod live;
 mod model_config;
-
-pub(crate) use live::turn_loop_for;
 
 #[cfg(test)]
 mod tests;

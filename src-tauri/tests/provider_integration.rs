@@ -1,11 +1,11 @@
 //! Real-provider integration (issue #29, ADR-0007/0029; rewired onto the
-//! yoagent loop by ADR-0107 / issue #669): wires a LiveProvider into a
+//! rig loop runtime by ADR-0116 / issue #918): wires a LiveProvider into a
 //! Session and drives one ask -> tool-call -> materialize turn against a
 //! mockito server standing in for the configured provider. Both protocols
 //! are covered -- Anthropic (issue #29) and OpenAI (issue #160), each
-//! exercising its REAL upstream stream client (the provider construction
-//! sealed inside session::yoagent, selected per protocol by the wiring
-//! seam), so the wire format is the upstream one: SSE streams on both
+//! exercising its REAL upstream client (the construction sealed inside
+//! session::loop_runtime, selected per protocol by the wiring seam), so
+//! the wire format is the upstream one: SSE streams on both
 //! protocols (`"stream": true`), which the fixtures below render. Verifies
 //! the full chain the unit tests cannot -- window assembly -> the upstream
 //! stateless loop -> native tool-calling HTTP round-trips -> tool dispatch
@@ -92,6 +92,62 @@ fn anthropic_tool_use_body_with_leading(leading: &[(&str, serde_json::Value)]) -
 
 fn anthropic_tool_use_body() -> String {
     anthropic_tool_use_body_with_leading(&[])
+}
+
+/// The Anthropic SSE stream carrying a TWO-call batch (first round-trip of
+/// the merged-`tool_result` regression pin): two tool_use blocks resolved
+/// from their `input_json_delta` accumulations, closed by a `tool_use`
+/// stop reason. Distinct SQL per call keeps the identical-arguments
+/// detector out of the picture -- this pin is about the wire shape of the
+/// NEXT request, not about repetition.
+fn anthropic_two_tool_use_body() -> String {
+    let calls = [
+        (
+            "tu_1",
+            "explore",
+            r#"SELECT COUNT(*) AS n FROM "people".data"#,
+        ),
+        ("tu_2", "explore", r#"SELECT "name" FROM "people".data"#),
+    ];
+    let mut events: Vec<(&str, serde_json::Value)> = vec![(
+        "message_start",
+        serde_json::json!({"type": "message_start"}),
+    )];
+    for (index, (id, name, sql)) in calls.iter().enumerate() {
+        let partial = serde_json::json!({"sql": sql}).to_string();
+        events.extend([
+            (
+                "content_block_start",
+                serde_json::json!({
+                    "type": "content_block_start", "index": index,
+                    "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}},
+                }),
+            ),
+            (
+                "content_block_delta",
+                serde_json::json!({
+                    "type": "content_block_delta", "index": index,
+                    "delta": {"type": "input_json_delta", "partial_json": partial},
+                }),
+            ),
+            (
+                "content_block_stop",
+                serde_json::json!({"type": "content_block_stop", "index": index}),
+            ),
+        ]);
+    }
+    events.extend([
+        (
+            "message_delta",
+            serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 10},
+            }),
+        ),
+        ("message_stop", serde_json::json!({"type": "message_stop"})),
+    ]);
+    sse(&events)
 }
 
 /// The Anthropic SSE terminal-text stream ending the turn (second
@@ -200,6 +256,40 @@ fn openai_text_body(text: &str) -> String {
         serde_json::json!({
             "id": "chatcmpl-1", "object": "chat.completion.chunk",
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }),
+    )
+}
+
+/// The OpenAI chat-completions SSE stream with a reasoning segment ahead of
+/// the tool call (first round-trip of the `reasoning_content` re-feed pin):
+/// the model streams its thinking as `delta.reasoning_content` -- the alias
+/// the openai-compatible endpoints that MANDATE thinking re-feeding read
+/// back on the next request.
+fn openai_reasoning_tool_calls_body() -> String {
+    let arguments = serde_json::json!({ "sql": COUNT_SQL }).to_string();
+    format!(
+        "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "reasoning_content": "count the rows first"},
+                "finish_reason": null,
+            }],
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0, "delta": {"role": "assistant", "tool_calls": [{
+                    "index": 0, "id": "tu_1", "type": "function",
+                    "function": {"name": "materialize", "arguments": arguments},
+                }]},
+                "finish_reason": null,
+            }],
+        }),
+        serde_json::json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
         }),
     )
 }
@@ -435,23 +525,21 @@ fn real_openai_provider_end_to_end_materializes_result() {
     text_mock.assert();
 }
 
-/// Issue #668 tail item 1, verified on the wire (issue #669): a
-/// `redacted_thinking` block in the model's reply. The upstream anthropic
-/// stream client has NO redacted variant (its content-block enum carries
-/// text / thinking / tool_use only), so the block is silently dropped at
-/// parse time -- the turn survives, the tool batch executes, and nothing
-/// rides the re-feed. That is a known equivalence gap against the retired
-/// self-written adapter (which re-fed redacted blocks verbatim as
-/// `redacted_thinking`), upstream-owned and tracked with the minor-gated
-/// `yoagent = "0.18"` pin: this pin exists so a future upstream variant
-/// surface CHANGES this test's observable (the block would start landing)
-/// rather than silently half-working.
+/// Issue #668 tail item 1, the rig-side face (issue #918): a
+/// `redacted_thinking` block in the model's reply rides the re-feed
+/// verbatim -- the turn survives, the tool batch executes, and the second
+/// round-trip's body carries the block (the dual matcher below is an
+/// AND), the parity the retired self-written adapter had and the yoagent
+/// stream client lost (it parsed no redacted variant, silently dropping
+/// the block). The re-fed-block assertion is the pin: a runtime that
+/// drops the block again misses the text mock and the turn dies.
 #[test]
-fn anthropic_redacted_thinking_block_is_dropped_but_the_turn_survives() {
+fn anthropic_redacted_thinking_block_rides_the_re_feed() {
     let mut server = mockito::Server::new();
     let text_mock = server
         .mock("POST", "/v1/messages")
         .match_body(mockito::Matcher::Regex("tool_result".into()))
+        .match_body(mockito::Matcher::Regex("redacted_thinking".into()))
         .expect(1)
         .with_status(200)
         .with_header("content-type", "text/event-stream")
@@ -733,19 +821,21 @@ fn leak_sentinel(
         .with_body("{}")
 }
 
-/// The anthropic face (the app's default protocol): the cross-host 301
-/// delivery is pinned as the locked upstream stack actually behaves. The
-/// key rides `x-api-key`, which reqwest does not strip cross-host, and
-/// tower-http rewrites the POST into a GET -- so the GET sentinel asserts
-/// the delivery (an accepted exposure inherent to the pinned versions; an
-/// upstream fix flips this red and the assertion tightens back to zero),
-/// while the POST sentinel asserts the delivery stays GET-shaped. The turn
-/// fails honestly either way.
+/// The anthropic face (the app's default protocol): redirects are pinned
+/// OFF at the injected client (ADR-0116 Decision 6 -- the client rides
+/// `Policy::none`, so a cross-host 301 is never followed, whatever headers
+/// it would have carried). The refusal is the asserted behavior: the first
+/// hop serves the 301 with the key on board (the redirect mock's premise),
+/// the turn fails honestly on the surfaced 3xx status, and neither method
+/// spelling of the redirect target ever sees a request. This replaces the
+/// pre-swap delivered-key recorder, which pinned the then-accepted
+/// exposure; the injection point removed the exposure, so the pin flipped
+/// from recorder to asserter.
 #[test]
-fn anthropic_turn_path_cross_host_redirect_x_api_key_delivery_is_pinned() {
+fn anthropic_turn_path_cross_host_redirect_is_refused() {
     let (first, mut second, redirect) = redirect_hosts("/v1/messages", "x-api-key");
     let api_key_get = leak_sentinel(&mut second, "GET", "/v1/messages", "x-api-key")
-        .expect_at_least(1)
+        .expect(0)
         .create();
     let api_key_post = leak_sentinel(&mut second, "POST", "/v1/messages", "x-api-key")
         .expect(0)
@@ -753,20 +843,26 @@ fn anthropic_turn_path_cross_host_redirect_x_api_key_delivery_is_pinned() {
     let provider = anthropic_live_provider(first.url(), Some("sk-secret-redirect"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     match session.ask("redirect probe") {
-        TurnOutcome::Failed(_) => {}
+        TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+            assert!(
+                detail.contains("301"),
+                "the surfaced 3xx lands in the honest transient: {detail:?}"
+            );
+        }
         other => panic!("expected an honest Failed, got {other:?}"),
     }
-    // The 301 was actually served with the key on board -- the pin is live.
+    // The 301 was actually served with the key on board -- the pin is
+    // live; the redirect target stayed untouched either way.
     redirect.assert();
     api_key_get.assert();
     api_key_post.assert();
 }
 
-/// The openai face (Bearer auth): the bearer token rides `authorization`,
-/// which reqwest strips on the cross-host hop -- neither method spelling of
-/// the redirect target may ever see it, and the turn fails honestly.
+/// The openai face (Bearer auth): the same refusal posture -- the
+/// injected no-redirect client makes the cross-host hop structurally
+/// unreachable, method spellings aside, and the turn fails honestly.
 #[test]
-fn openai_turn_path_cross_host_redirect_does_not_leak_the_key() {
+fn openai_turn_path_cross_host_redirect_is_refused() {
     let (first, mut second, redirect) = redirect_hosts("/chat/completions", "authorization");
     let bearer_get = leak_sentinel(&mut second, "GET", "/chat/completions", "authorization")
         .expect(0)
@@ -777,11 +873,140 @@ fn openai_turn_path_cross_host_redirect_does_not_leak_the_key() {
     let provider = openai_live_provider(first.url(), Some("sk-secret-redirect"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     match session.ask("redirect probe") {
-        TurnOutcome::Failed(_) => {}
+        TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+            assert!(
+                detail.contains("301"),
+                "the surfaced 3xx lands in the honest transient: {detail:?}"
+            );
+        }
         other => panic!("expected an honest Failed, got {other:?}"),
     }
-    // The 301 was actually served with the token on board -- the pin is live.
+    // The 301 was actually served with the token on board -- the pin is
+    // live; the redirect target stayed untouched either way.
     redirect.assert();
     bearer_get.assert();
     bearer_post.assert();
+}
+
+/// The batched-`tool_result` wire regression pin (ADR-0116, the
+/// replacement's motivating fault turned into a standing sentinel): a
+/// two-call batch's results must ride the NEXT request as ONE user
+/// message whose content array carries BOTH `tool_result` blocks. The
+/// regex pins the merged-only adjacency -- one `tool_result` block's
+/// closing brace followed directly by the next block's opening inside one
+/// content array (rig serializes fields alphabetically, so the block
+/// head is `"content"`, not `"type"`). The split shape the
+/// yoagent constructor emitted interleaves `]},{"role":"user",...`
+/// between the blocks, misses the mock, and the turn dies on the 501:
+/// split → refused, merged → 200, the red/green probe the diagnostic
+/// session ran by hand, standing. (The exact history shape is separately
+/// pinned off the mock model in the loop-runtime suites; this is the
+/// wire-serialization half.)
+#[test]
+fn anthropic_batched_tool_results_ride_one_user_message() {
+    let mut server = mockito::Server::new();
+    let merged_shape = r#""type":"tool_result"\},\{"content""#;
+    let text_mock = server
+        .mock("POST", "/v1/messages")
+        .match_body(mockito::Matcher::Regex(merged_shape.into()))
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(anthropic_text_body("两列都看过了"))
+        .create();
+    let tool_mock = server
+        .mock("POST", "/v1/messages")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(anthropic_two_tool_use_body())
+        .create();
+
+    let provider = anthropic_live_provider(server.url(), Some("sk-test"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    let people = fixtures_dir().join("people.csv");
+    match session.ingest(&people) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected people.csv to load, got {other:?}"),
+    }
+    let outcome = session.ask("看看数据");
+    text_mock.assert();
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "the merged shape answers; the split shape would have missed the text mock: {outcome:?}"
+    );
+    tool_mock.assert();
+    text_mock.assert();
+}
+
+/// The thinking-re-feed regression pin on the openai face (the second
+/// motivating fault): a model that streamed `reasoning_content` must get
+/// it back on the next request -- the endpoints that mandate thinking
+/// re-feeding 400 on its absence, the fault that made the yoagent
+/// constructor unservable. The second round-trip's mock matches ONLY a
+/// body carrying `reasoning_content`; a layer that drops the segment
+/// misses the mock and the turn dies.
+#[test]
+fn openai_reasoning_content_rides_back_on_the_next_request() {
+    let mut server = mockito::Server::new();
+    let text_mock = server
+        .mock("POST", "/chat/completions")
+        .match_body(mockito::Matcher::Regex("reasoning_content".into()))
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(openai_text_body("共 5 人"))
+        .create();
+    let tool_mock = server
+        .mock("POST", "/chat/completions")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(openai_reasoning_tool_calls_body())
+        .create();
+
+    let provider = openai_live_provider(server.url(), Some("sk-test"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    let people = fixtures_dir().join("people.csv");
+    match session.ingest(&people) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected people.csv to load, got {other:?}"),
+    }
+    let outcome = session.ask("多少人");
+    assert!(
+        matches!(outcome, TurnOutcome::Materialized { .. }),
+        "the re-fed reasoning answers; a dropped segment would have missed the text mock: {outcome:?}"
+    );
+    tool_mock.assert();
+    text_mock.assert();
+}
+
+/// The base-url normalization alignment pin (ADR-0116's implementation-
+/// time item): a profile base that already carries the `/v1` version
+/// segment still lands on `{host}/v1/messages` exactly once -- rig's
+/// normalization strips the segment and re-appends its own, where the
+/// yoagent resolution appended blindly and would have doubled it. The
+/// normalization runs only after the scheme gate admitted the base (the
+/// unit pins in `loop_runtime::live`), so this wire pin covers the
+/// idempotence half of the alignment.
+#[test]
+fn anthropic_versioned_base_url_normalizes_to_the_same_endpoint() {
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/v1/messages")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(anthropic_text_body("done"))
+        .create();
+    // The base carries the version segment the adapter contract treats as
+    // host-root-only: one `/v1` in the URL, not two.
+    let provider = anthropic_live_provider(format!("{}/v1", server.url()), Some("sk-test"));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    let outcome = session.ask("anything");
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "the versioned base normalizes onto the same endpoint: {outcome:?}"
+    );
+    _mock.assert();
 }

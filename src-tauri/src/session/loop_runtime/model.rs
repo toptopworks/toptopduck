@@ -179,7 +179,22 @@ impl Stream for SingleShotStream {
 /// the app provider behind the bridge reads its own configuration.
 fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
     ToolTurnRequest {
-        system: request.preamble.clone().unwrap_or_default(),
+        // rig 0.42 carries the preamble as a `System` entry at the head of
+        // the chat history (the `preamble` field is a legacy compatibility
+        // slot); take the legacy value when present, else lift the history
+        // entry -- either way the app provider's request keeps the yoagent
+        // seam's shape: system as its own field, never a user turn.
+        system: request.preamble.clone().unwrap_or_else(|| {
+            request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::System { content } => Some(content.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        }),
         messages: to_app_messages(&request.chat_history),
         tools: request
             .tools
@@ -191,7 +206,15 @@ fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
             })
             .collect(),
         max_tokens: request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS as u64) as u32,
-        thought_level: None,
+        // ADR-0103 (#918): the bridged face carries the posture's thought
+        // level under the app-private key (the drive thread stamps it);
+        // read it back so the app provider's request keeps its stamp.
+        thought_level: request
+            .additional_params
+            .as_ref()
+            .and_then(|params| params.get(super::live::BRIDGED_THOUGHT_LEVEL_KEY))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -205,13 +228,11 @@ pub(super) fn to_app_messages(history: &[Message]) -> Vec<ToolTurnMessage> {
     let mut converted = Vec::with_capacity(history.len());
     for message in history {
         match message {
-            Message::System { content } => {
-                // The preamble is the system-prompt carrier; a System
-                // message in history (not one this runtime writes) degrades
-                // to a user turn so no instruction silently vanishes.
-                converted.push(ToolTurnMessage::User {
-                    content: content.clone(),
-                });
+            Message::System { .. } => {
+                // The preamble's carrier (rig 0.42): `to_app_request` lifts
+                // it into the app request's `system` field, so it must not
+                // ALSO ride the conversation as a user turn -- skipping is
+                // the whole point, not a silent drop.
             }
             Message::User { content } => {
                 for block in content {

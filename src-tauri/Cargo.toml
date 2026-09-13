@@ -275,8 +275,17 @@ tokio-util = "0.7"
 # framework surfaces (hooks/memory/ToolContext/model selection all stay
 # inert; every tool call routes the app gateway, ADR-0105) -- borrow the
 # kernel, not the framework.
-rig-core = { version = "0.42", default-features = false }
+rig-core = { version = "0.42", default-features = false, features = ["rustls"] }
 rig-agent = { version = "0.42", default-features = false }
+# The live turn path (ADR-0116 Decision 6, issue #918): the app constructs
+# the reqwest client injected into rig's client builder -- redirects pinned
+# off at the client (`Policy::none`), so a cross-host 3xx lands as an
+# honest transient instead of following the `Location` with the credential
+# still on board. Same 0.13 line rig-core rides (already in the lock via
+# rig); `default-features = false` suppresses reqwest's default native-tls
+# so the only TLS backend is rig-core's `rustls` feature above -- the same
+# pure-Rust TLS posture ureq carries.
+reqwest = { version = "0.13", default-features = false }
 # Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
 # log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring
 # tracing with the `log` feature turns on tracing's log bridge via feature

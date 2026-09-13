@@ -1325,14 +1325,15 @@ impl Session {
                 question, &turns, locale, adapter, approval, sink, on_phase, inputs,
             ),
             None => {
-                // Built-in runtime turn (ADR-0081, swapped onto the yoagent
-                // loop by ADR-0107 / issue #669): assemble the windowed
-                // tool-calling request exactly as before (ADR-0023 windowing
-                // is the app's), then drive the UPSTREAM stateless loop with
-                // the shared session state and map the structured LoopOutcome
-                // onto TurnOutcome. Single track by decision: the self-written
-                // the self-written loop is retired (the yoagent loop is the
-                // #670); there is no runtime switch and no fallback.
+                // Built-in runtime turn (ADR-0081, driven by the loop
+                // runtime since ADR-0116 / issue #918): assemble the
+                // windowed tool-calling request exactly as before
+                // (ADR-0023 windowing is the app's), then drive the
+                // UPSTREAM stateless loop with the shared session state and
+                // map the structured LoopOutcome onto TurnOutcome. Single
+                // track by decision: the self-written loop retired with
+                // #670, the yoagent layer retires with #919; there is no
+                // runtime switch and no fallback.
                 let mut request = window::assemble_tool_turn(
                     question,
                     &self.working_set,
@@ -1457,12 +1458,12 @@ impl Session {
                         activated: inputs.activated,
                         root: inputs.skills_root,
                     };
-                    // The switchover (ADR-0107 Decision 2, issue #669):
-                    // `turn_loop_for` is the seam's single entry -- a
-                    // profile-backed provider constructs the upstream streamer
-                    // (sealed inside `session::yoagent`; no upstream type is
-                    // named here), a refused facts resolution short-circuits
-                    // into the same terminal vocabulary the adapters used.
+                    // The switchover (ADR-0116, issue #918): `turn_loop_for`
+                    // is the seam's single entry -- a profile-backed provider
+                    // constructs the upstream model (sealed inside
+                    // `session::loop_runtime`; no upstream type is named
+                    // here), a refused facts resolution short-circuits into
+                    // the same terminal vocabulary the adapters used.
                     //
                     // Live-phase ordering (issue #668 tail, decided at wiring
                     // time): phases flow from two threads (this thread's
@@ -1475,28 +1476,28 @@ impl Session {
                     // couple the dispatch server to the driver's fold cadence
                     // -- a cross-thread round-trip per phase that buys spinner
                     // stability at real deadlock surface.
-                    let mut loop_outcome = match yoagent::turn_loop_for(Arc::clone(&self.provider))
-                    {
-                        Err(termination) => LoopOutcome {
-                            termination,
-                            promotions: Vec::new(),
-                            trace: Vec::new(),
-                            discovered_runtime: None,
-                        },
-                        Ok(runner) => runner.run(
-                            &request,
-                            &mut deps,
-                            &mut *self.materializer,
-                            &mut mcp,
-                            inputs.cli_tools,
-                            &mut skill_channel,
-                            &read_gate,
-                            approval,
-                            sink,
-                            Arc::clone(&self.cancel),
-                            on_phase,
-                        ),
-                    };
+                    let mut loop_outcome =
+                        match loop_runtime::turn_loop_for(Arc::clone(&self.provider)) {
+                            Err(termination) => LoopOutcome {
+                                termination,
+                                promotions: Vec::new(),
+                                trace: Vec::new(),
+                                discovered_runtime: None,
+                            },
+                            Ok(runner) => runner.run(
+                                &request,
+                                &mut deps,
+                                &mut *self.materializer,
+                                &mut mcp,
+                                inputs.cli_tools,
+                                &mut skill_channel,
+                                &read_gate,
+                                approval,
+                                sink,
+                                Arc::clone(&self.cancel),
+                                on_phase,
+                            ),
+                        };
                     // The MCP cancel-teardown watcher stands down through
                     // `mcp_turn_done`'s Drop at block end (issue #889) --
                     // no manual store to skip on an unwinding path.
@@ -4603,11 +4604,14 @@ mod tests {
     }
 
     /// AC2: a turn whose only tool call routes to an external (MCP) tool
-    /// never touches the engine. The key is pre-trusted so the call actually
-    /// dispatches (an untrusted PerCall key would suspend on the approval
-    /// gate until the watchdog): the empty aggregator surfaces the
-    /// unknown-server route error as a tool result, and the model answers on
-    /// top of it -- the real external-only shape, ending Textual.
+    /// never touches the engine. Under the loop runtime (ADR-0116) the
+    /// tool table rig was given does not carry the external server's entry
+    /// (the inputs are empty here), so the model's call lands as the
+    /// unknown-tool terminal (Decision 5's honest transient -- the yoagent
+    /// seam used to route it to the gateway's unknown-server error result
+    /// and let the model answer on top; the terminal form is the calibrated
+    /// replacement) -- and the engine stays at zero instances either way,
+    /// which is the materialization assertion this AC pins.
     #[test]
     fn external_tool_only_turn_does_not_materialize_the_engine() {
         let provider = FakeProvider::new().scripted_tool_turn_seq(
@@ -4637,8 +4641,13 @@ mod tests {
             &inputs,
         );
         match outcome {
-            TurnOutcome::Textual { .. } => {}
-            other => panic!("expected a textual turn after the routed error, got {other:?}"),
+            TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+                assert!(
+                    detail.contains("unknown tool") && detail.contains("mcp__weather__lookup"),
+                    "the unknown-tool terminal carries the honest name: {detail:?}"
+                );
+            }
+            other => panic!("expected the unknown-tool Execute failure, got {other:?}"),
         }
         assert!(
             !session.admin_engine.is_materialized(),
