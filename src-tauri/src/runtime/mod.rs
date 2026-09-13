@@ -1,6 +1,6 @@
 //! External runtime (ADR-0076 / ADR-0081, issue #299).
 //!
-//! The external runtime is the second of the two并存 runtimes (the built-in is
+//! The external runtime is the second of the two coexisting runtimes (the built-in is
 //! the loop runtime, [`crate::session::loop_runtime`]). The app spawns a third-party CLI
 //! agent process and drives it over stdio: the ACP adapters (gemini-cli,
 //! qwen-code, opencode) speak ACP v1 JSON-RPC; codex speaks its native

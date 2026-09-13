@@ -47,9 +47,8 @@ use std::sync::Arc;
 pub(crate) struct EventFold {
     pub(crate) rounds: Vec<LoopRound>,
     /// Count of model turns opened -- the `Thinking` phase's attempt
-    /// number, keyed on turns opened. Documented
-    /// divergence: a hook-rejected turn retried by the runtime opens a fresh
-    /// turn and counts again.
+    /// number, keyed on turns opened: a hook-rejected turn retried by the
+    /// runtime opens a fresh turn and counts again.
     pub(crate) round_trips: u32,
     /// The terminal reply's text, set by the run's `FinalResponse`.
     pub(crate) final_output: Option<String>,
@@ -138,8 +137,7 @@ impl EventFold {
                 // thinking-only round the failed attempt parked at its close
                 // still lands here (the attempted thinking is recorded
                 // honesty, not rolled back).
-                // The retry opens a fresh turn (counted on its first item,
-                // the documented retry divergence).
+                // The retry opens a fresh turn (counted on its first item).
                 self.reset_call();
             }
             MultiTurnStreamItem::FinalResponse(response) => {
@@ -340,10 +338,10 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// `round_trips` counts completed model calls -- the driver of the
+    /// `round_trips` counts model turns opened -- the driver of the
     /// `Thinking` phase's attempt number. A hook-retried turn discards its
     /// provisional content and the retry opens a fresh turn with the next
-    /// attempt number (the documented divergence). Pinned through the phase rail: two `Thinking`
+    /// attempt number. Pinned through the phase rail: two `Thinking`
     /// markers, the second at attempt 2. The event script mirrors the real
     /// streamed-driver order -- content items, then the turn's
     /// `CompletionCall` close (the gated `Final` item is deliberately absent,

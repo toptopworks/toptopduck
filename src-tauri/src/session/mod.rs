@@ -1326,8 +1326,8 @@ impl Session {
             None => {
                 // Built-in runtime turn (ADR-0081, driven by the loop
                 // runtime since ADR-0116 / issue #918): assemble the
-                // windowed tool-calling request exactly as before
-                // (ADR-0023 windowing is the app's), then drive the
+                // windowed tool-calling request (ADR-0023 windowing is
+                // the app's), then drive the
                 // UPSTREAM stateless loop with the shared session state and
                 // map the structured LoopOutcome onto TurnOutcome. Single
                 // track by decision: the loop runtime is the only built-in
@@ -4607,10 +4607,9 @@ mod tests {
     /// never touches the engine. Under the loop runtime (ADR-0116) the
     /// tool table rig was given does not carry the external server's entry
     /// (the inputs are empty here), so the model's call lands as the
-    /// unknown-tool terminal (Decision 5's honest transient -- the retired
-    /// seam used to route it to the gateway's unknown-server error result
-    /// and let the model answer on top; the terminal form is the calibrated
-    /// replacement) -- and the engine stays at zero instances either way,
+    /// unknown-tool terminal (Decision 5's honest transient -- terminal,
+    /// not an error result fed back for the model to answer on top) -- and
+    /// the engine stays at zero instances either way,
     /// which is the materialization assertion this AC pins.
     #[test]
     fn external_tool_only_turn_does_not_materialize_the_engine() {

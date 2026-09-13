@@ -1010,6 +1010,58 @@ fn mid_batch_cancel_gates_the_remaining_calls() {
     );
 }
 
+/// The empty-round drop (`loop_contract`'s `retain_landed_rounds`): a
+/// round with no thinking, no prose, and no completed call must not
+/// survive to the recorded trace -- the frontend fold cannot see such a
+/// round (none of its events ever fired), so the recorded trace must
+/// match it. The shape is a cancellation between the reply and the first
+/// dispatch: the turn opens with an empty-text item (the `Thinking`
+/// wait marker fires; empty prose leaves no field), the batch's single
+/// call commits the round, and the per-call gate -- which sees the
+/// requested token before the executor ever starts -- answers it without
+/// running it, so no row lands and the round drops on its way out. The
+/// port of the retired layer's trace-empty pin (its suite asserted an
+/// un-dispatched round leaves no entry at all); the grouping half is
+/// pinned separately by `multi_step_success_groups_rounds_and_promotes`.
+#[test]
+fn a_fully_gated_round_drops_from_the_trace() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let token = Arc::new(CancelToken::new());
+    let fired = Arc::new(AtomicBool::new(false));
+    {
+        let token = Arc::clone(&token);
+        let fired = Arc::clone(&fired);
+        h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| {
+            if matches!(phase, TurnPhase::Thinking { .. }) && !fired.swap(true, Ordering::SeqCst) {
+                token.request();
+            }
+        }));
+    }
+    let model = MockCompletionModel::from_stream_turns([batch_turn(
+        "",
+        Some(""),
+        &[(
+            "tu_1",
+            "explore",
+            json!({"sql": "SELECT count(*) FROM result_1"}),
+        )],
+    )]);
+    let outcome = h.run_with_caps(
+        &h.request("gate the batch before the first dispatch"),
+        mock_runtime(model),
+        token,
+        24,
+        None,
+    );
+    assert_eq!(outcome.termination, Termination::Cancelled);
+    assert!(
+        outcome.trace.is_empty(),
+        "the fully-gated round drops: {:?}",
+        outcome.trace
+    );
+}
+
 /// An executed call interrupted by the cancel still accounts (issue #921):
 /// the token fires at the first call's completion phase and the hook then
 /// HOLDS the dispatch rail open past the watcher's 25ms poll, so the

@@ -389,9 +389,10 @@ fn real_provider_cancel_during_http_block_lands_cancelled() {
     // AC7 (ADR-0021/0028/0081): a cancel during the real provider's blocking
     // HTTP round-trip lands the turn as Cancelled. Under the loop runtime
     // (which calibrates ADR-0021 for the built-in path) the cancel
-    // is immediate: the wiring seam's watcher maps the app token onto the
-    // upstream task token, which aborts the in-flight SSE read mid-stream --
-    // no soft-cancel wait for the HTTP call to run to completion. This
+    // is immediate: the cancel-watcher hook stops the run at the next
+    // stream checkpoint and the driver's select race abandons the
+    // in-flight SSE read -- no soft-cancel wait for the HTTP call to run
+    // to completion. This
     // exercises the real HTTP path, which the non-blocking FakeProvider
     // cannot represent.
     let mut server = mockito::Server::new();
@@ -615,8 +616,8 @@ fn openai_auth_rejection_yields_not_wired() {
 
 /// Spec axis gap (issue #669 AC2): the cancel case on the OpenAI wire --
 /// mid-stream abort on the second protocol, mirroring the anthropic cancel
-/// pin: the cancel watcher maps the app token onto the upstream task token,
-/// which aborts the in-flight SSE read.
+/// pin: the cancel-watcher hook stops the run at the next stream checkpoint
+/// and the driver's select race abandons the in-flight SSE read.
 #[test]
 fn openai_cancel_during_http_block_lands_cancelled() {
     let mut server = mockito::Server::new();
