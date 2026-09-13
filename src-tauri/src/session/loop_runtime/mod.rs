@@ -36,7 +36,7 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -208,7 +208,6 @@ impl LoopRuntime {
                         phases,
                         notify,
                         req_tx,
-                        call_ids: Arc::new(AtomicU64::new(0)),
                         step_cap,
                         clock: clock.clone(),
                         token,
@@ -334,7 +333,6 @@ struct DriveInputs {
     phases: PhaseSink,
     notify: Arc<tokio::sync::Notify>,
     req_tx: mpsc::Sender<DispatchRequest>,
-    call_ids: Arc<AtomicU64>,
     step_cap: u32,
     /// The turn's no-progress clock (ADR-0115): the fold touches it on every
     /// inbound stream event -- the generation segment's liveness signal.
@@ -372,7 +370,6 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         phases,
         notify,
         req_tx,
-        call_ids,
         step_cap,
         clock,
         token,
@@ -405,14 +402,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         .tools
         .iter()
         .cloned()
-        .map(|def| {
-            adapter::gateway_dynamic_tool(
-                def,
-                Arc::clone(&state),
-                req_tx.clone(),
-                Arc::clone(&call_ids),
-            )
-        })
+        .map(|def| adapter::gateway_dynamic_tool(def, Arc::clone(&state), req_tx.clone()))
         .collect::<Vec<_>>();
     let agent = AgentBuilder::new(model)
         .preamble(request.system.as_str())

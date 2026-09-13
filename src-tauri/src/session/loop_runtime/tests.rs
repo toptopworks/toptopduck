@@ -68,18 +68,13 @@ fn text_turn(text: &str) -> Vec<MockStreamEvent> {
     ]
 }
 
-/// A recording approval sink (mirrors the yoagent suites').
-#[derive(Default)]
-struct RecordingSink {
-    _request_ids: Mutex<Vec<uuid::Uuid>>,
-}
+/// A no-op approval sink: these suites never exercise approval flows, so
+/// the sink only satisfies the gate's constructor (the recording sink it
+/// retires kept a request-id ledger nothing ever read, #922).
+struct NoopSink;
 
-impl ApprovalSink for RecordingSink {
-    fn emit_request(&self, body: &crate::approval::ApprovalRequestBody) {
-        if let Ok(id) = uuid::Uuid::parse_str(&body.request_id) {
-            self._request_ids.lock().unwrap().push(id);
-        }
-    }
+impl ApprovalSink for NoopSink {
+    fn emit_request(&self, _body: &crate::approval::ApprovalRequestBody) {}
     fn emit_resolved(
         &self,
         _body: &crate::approval::ApprovalRequestBody,
@@ -249,7 +244,7 @@ impl Harness {
         );
         let mut mcp = McpAggregator::empty();
         let approval = ApprovalState::new();
-        let sink = RecordingSink::default();
+        let sink = NoopSink;
         let phases = Arc::clone(&self.phases);
         let read = crate::skills::read::SkillReadGate {
             fragments: &self.read_fragments,
@@ -485,6 +480,47 @@ fn terminal_faults_classify_by_status_and_encoding() {
     );
 }
 
+/// A provider-owned 400 body must never strip into the app's
+/// `InvalidConfig` class, even when its text happens to start with the
+/// legacy human-readable prefix phrase: the live encoding is
+/// control-character-led, a shape no provider error body structurally
+/// takes, so phrase-shaped text classifies as the honest transient it is.
+/// The ambiguity this pin kills: phrase-prefix matching would turn a live
+/// provider's own 400 into a permanent fault class (#922).
+#[test]
+fn provider_owned_400_body_is_transient_even_when_prefix_shaped() {
+    let err = rig_core::completion::CompletionError::ProviderResponse(
+        rig_core::ProviderResponseError::new(
+            http::StatusCode::BAD_REQUEST,
+            "invalid config: scheme `file` is not http/https",
+        ),
+    );
+    assert!(
+        matches!(
+            super::termination_for_completion(&err),
+            Termination::Transient(_)
+        ),
+        "a provider-owned 400 body must not classify as InvalidConfig"
+    );
+}
+
+/// Dispatch call ids mint uuid-backed: uniqueness is intrinsic to the
+/// mint, never an artifact of counter scope (#922 retired the per-turn
+/// `gateway-0` collisions a scoped counter minted). This pin holds the
+/// mint's contract -- one distinct id per call, `gateway-` prefixed
+/// against provider-issued handles; the retired collision shape is no
+/// longer constructible to replay.
+#[test]
+fn call_ids_mint_distinct_ids() {
+    let round_one = super::adapter::next_call_id();
+    let round_two = super::adapter::next_call_id();
+    assert_ne!(
+        round_one, round_two,
+        "the mint itself yields distinct ids -- uniqueness rides the mint, not counter scope"
+    );
+    assert!(round_one.starts_with("gateway-"));
+}
+
 /// The step cap maps onto the rig `max_turns` budget: a turn that never
 /// converges exhausts it and lands `StepCap` carrying the configured cap.
 #[test]
@@ -675,6 +711,76 @@ fn to_rig_history_merges_batch_results_into_one_user_message() {
     assert_eq!(
         result_blocks, 2,
         "both batch results ride ONE user message, never split"
+    );
+}
+
+/// The empty-string-to-absent signature boundary the shared
+/// thinking_to_reasoning helper exists to enforce, driven directly in the
+/// history direction: a paired signature rides through as Some, an empty
+/// signature converts to absent (never Some("")), and redacted data
+/// passes through verbatim. The helper being shared, the same shape
+/// governs the outcome direction; the reverse round-trip pin below
+/// covers the opposite conversion without routing through the helper.
+#[test]
+fn to_rig_history_maps_empty_signature_to_absent_and_keeps_signed() {
+    use crate::provider::tool_calling::ThinkingBlock;
+    use crate::session::loop_runtime::model::to_rig_history;
+    use rig_core::message::{AssistantContent, Reasoning, ReasoningContent};
+
+    let messages = vec![ToolTurnMessage::Assistant {
+        text: None,
+        tool_calls: vec![],
+        thinking: vec![
+            ThinkingBlock::Thinking {
+                thinking: "signed".into(),
+                signature: "sig".into(),
+            },
+            ThinkingBlock::Thinking {
+                thinking: "unsigned".into(),
+                signature: String::new(),
+            },
+            ThinkingBlock::Redacted {
+                data: "opaque".into(),
+            },
+        ],
+    }];
+    let history = to_rig_history(&messages);
+    let Message::Assistant { content, .. } = &history[0] else {
+        panic!("the assistant turn converts to one rig assistant message");
+    };
+    let reasoning: Vec<&Reasoning> = content
+        .iter()
+        .filter_map(|c| match c {
+            AssistantContent::Reasoning(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning.len(), 3, "one reasoning entry per thinking block");
+    assert!(
+        matches!(
+            &reasoning[0].content[..],
+            [ReasoningContent::Text { text, signature }]
+                if text == "signed" && signature == &Some("sig".to_string())
+        ),
+        "a paired signature rides through: {:?}",
+        reasoning[0]
+    );
+    assert!(
+        matches!(
+            &reasoning[1].content[..],
+            [ReasoningContent::Text { text, signature }]
+                if text == "unsigned" && signature.is_none()
+        ),
+        "an empty signature becomes absent, never Some(empty): {:?}",
+        reasoning[1]
+    );
+    assert!(
+        matches!(
+            &reasoning[2].content[..],
+            [ReasoningContent::Redacted { data }] if data == "opaque"
+        ),
+        "redacted data passes through verbatim: {:?}",
+        reasoning[2]
     );
 }
 
