@@ -268,6 +268,29 @@ async-trait = "0.1"
 # (issue #668): the upstream `CancellationToken` type is named in our runner's
 # signatures, so it is declared here rather than reached transitively.
 tokio-util = "0.7"
+# Builtin runtime (ADR-0116, issue #917): the in-process loop borrows rig's
+# kernel only -- rig-core + rig-agent, direct deps, `default-features = false`
+# (drops the `derive` proc-macro), minor-gated "0.42" with the Cargo.lock
+# exact pin as the revert floor. The app registers NONE of the crate's
+# framework surfaces (hooks/memory/ToolContext/model selection all stay
+# inert; every tool call routes the app gateway, ADR-0105) -- borrow the
+# kernel, not the framework.
+rig-core = { version = "0.42", default-features = false }
+rig-agent = { version = "0.42", default-features = false }
+# Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
+# log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring
+# tracing with the `log` feature turns on tracing's log bridge via feature
+# unification, so upstream logs land in stdout + app_log_dir instead of a
+# silent diagnostic blind spot (an ADR-0116 consequence: the rig crates log
+# through tracing).
+tracing = { version = "0.1", features = ["log"] }
+# The loop runtime consumes rig's streaming surface as a plain
+# `Pin<Box<dyn Stream>>` (rig-core's `StreamingResult`); `futures` is already
+# a transitive dep of rig-core, and declaring it explicitly gives the
+# consumer's `StreamExt` an intentional home (the `select!`-based cancel race
+# in the driver also rides tokio's own macros -- no futures executor).
+futures = "0.3"
+http = "1"
 
 # Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
 # non-mobile targets to mirror lib.rs `#[cfg(desktop)]` -- these plugins have
@@ -314,6 +337,14 @@ rust_xlsxwriter = "0.92"
 # FakeProvider; this tests the HTTP + auth paths deterministically, no real
 # key, no real endpoint.
 mockito = "1"
+# rig's offline mock model (ADR-0116, issue #917): `MockCompletionModel` /
+# `MockStreamEvent` script the loop runtime's behavior-contract pins with no
+# network, no key -- the same role `ScriptedProvider` plays for the yoagent
+# layer's offline suites. dev-only feature: the production build keeps
+# `default-features = false`.
+rig-core = { version = "0.42", default-features = false, features = [
+    "test-utils",
+] }
 
 [profile.dev]
 incremental = true

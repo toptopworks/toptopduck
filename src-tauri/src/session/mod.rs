@@ -7,6 +7,7 @@ pub(crate) mod engine;
 pub mod ingest;
 pub mod inline_materialize;
 pub mod loop_contract;
+pub mod loop_runtime;
 pub mod materializer;
 pub(crate) mod progress;
 pub mod recipe_persister;
