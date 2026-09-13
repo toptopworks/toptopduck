@@ -16,7 +16,7 @@
 //! Call identity: rig's [`DynamicTool`] callback receives no tool-call id
 //! (the context it hands over is a blank typed map, ADR-0116 Decision 2's
 //! inert `ToolContext`), so each dispatch carries a locally minted
-//! sequential id. The rig-side correlation of a result back to its call
+//! uuid-backed id. The rig-side correlation of a result back to its call
 //! never crosses this boundary -- rig assembles that itself from the call
 //! it issued; the app's trace entries pair with the event stream by
 //! completion order (single-concurrency execution makes dispatch order ==

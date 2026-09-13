@@ -45,10 +45,9 @@ const BRIDGE_PROVIDER: &str = "app-provider";
 /// control character, so a body that merely phrases like the payload
 /// strips nowhere -- the ambiguity class is eliminated, not documented
 /// (#922). `NotWired` needs no encoding: the bridge raises it as an
-/// honest HTTP 401
-/// provider-response error, which the status-based classification
-/// (ADR-0116 Decision 5) already maps to `NotWired` -- the same rule that
-/// covers live rig providers.
+/// honest HTTP 401 provider-response error, which the status-based
+/// classification (ADR-0116 Decision 5) already maps to `NotWired` --
+/// the same rule that covers live rig providers.
 pub(crate) const INVALID_CONFIG_PREFIX: &str = "\u{1}invalid-config: ";
 
 /// The reply-length floor when the request carried no cap (rig leaves

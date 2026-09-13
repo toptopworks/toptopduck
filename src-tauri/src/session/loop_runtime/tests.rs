@@ -511,12 +511,12 @@ fn provider_owned_400_body_is_transient_even_when_prefix_shaped() {
 /// against provider-issued handles; the retired collision shape is no
 /// longer constructible to replay.
 #[test]
-fn call_ids_stay_unique_across_turn_windows() {
+fn call_ids_mint_distinct_ids() {
     let round_one = super::adapter::next_call_id();
     let round_two = super::adapter::next_call_id();
     assert_ne!(
         round_one, round_two,
-        "ids collide when the turn window rebuilds"
+        "the mint itself yields distinct ids -- uniqueness rides the mint, not counter scope"
     );
     assert!(round_one.starts_with("gateway-"));
 }
@@ -711,6 +711,76 @@ fn to_rig_history_merges_batch_results_into_one_user_message() {
     assert_eq!(
         result_blocks, 2,
         "both batch results ride ONE user message, never split"
+    );
+}
+
+/// The empty-string-to-absent signature boundary the shared
+/// thinking_to_reasoning helper exists to enforce, driven directly in the
+/// history direction: a paired signature rides through as Some, an empty
+/// signature converts to absent (never Some("")), and redacted data
+/// passes through verbatim. The helper being shared, the same shape
+/// governs the outcome direction; the reverse round-trip pin below
+/// covers the opposite conversion without routing through the helper.
+#[test]
+fn to_rig_history_maps_empty_signature_to_absent_and_keeps_signed() {
+    use crate::provider::tool_calling::ThinkingBlock;
+    use crate::session::loop_runtime::model::to_rig_history;
+    use rig_core::message::{AssistantContent, Reasoning, ReasoningContent};
+
+    let messages = vec![ToolTurnMessage::Assistant {
+        text: None,
+        tool_calls: vec![],
+        thinking: vec![
+            ThinkingBlock::Thinking {
+                thinking: "signed".into(),
+                signature: "sig".into(),
+            },
+            ThinkingBlock::Thinking {
+                thinking: "unsigned".into(),
+                signature: String::new(),
+            },
+            ThinkingBlock::Redacted {
+                data: "opaque".into(),
+            },
+        ],
+    }];
+    let history = to_rig_history(&messages);
+    let Message::Assistant { content, .. } = &history[0] else {
+        panic!("the assistant turn converts to one rig assistant message");
+    };
+    let reasoning: Vec<&Reasoning> = content
+        .iter()
+        .filter_map(|c| match c {
+            AssistantContent::Reasoning(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning.len(), 3, "one reasoning entry per thinking block");
+    assert!(
+        matches!(
+            &reasoning[0].content[..],
+            [ReasoningContent::Text { text, signature }]
+                if text == "signed" && signature == &Some("sig".to_string())
+        ),
+        "a paired signature rides through: {:?}",
+        reasoning[0]
+    );
+    assert!(
+        matches!(
+            &reasoning[1].content[..],
+            [ReasoningContent::Text { text, signature }]
+                if text == "unsigned" && signature.is_none()
+        ),
+        "an empty signature becomes absent, never Some(empty): {:?}",
+        reasoning[1]
+    );
+    assert!(
+        matches!(
+            &reasoning[2].content[..],
+            [ReasoningContent::Redacted { data }] if data == "opaque"
+        ),
+        "redacted data passes through verbatim: {:?}",
+        reasoning[2]
     );
 }
 
