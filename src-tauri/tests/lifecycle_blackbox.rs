@@ -705,8 +705,8 @@ fn new_question_referencing_stale_result_is_rejected() {
             ],
         )
         // No terminal answer: the stale-referencing call clamps, re-issued
-        // every round-trip until a safety net fails the turn -- under the
-        // yoagent loop (ADR-0107) the identical-repeat trajectory is stopped
+        // every round-trip until a safety net fails the turn -- the
+        // identical-repeat trajectory is stopped
         // by loop detection well before the step cap.
         .scripted_tool_turn("again", materialize(r#"SELECT * FROM "result_1""#));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");

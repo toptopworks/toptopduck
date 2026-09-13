@@ -8,7 +8,7 @@
 //! aggregator, and the gateway all speak these types (the self-written
 //! protocol adapters that consumed them retired with the built-in loop,
 //! ADR-0107 Decision 1, issue #670; the upstream provider construction now
-//! lives sealed inside `session::yoagent`). The reply is either a batch of
+//! lives sealed inside `session::loop_runtime`). The reply is either a batch of
 //! tool invocations to execute or the model's final text answer.
 //!
 //! ADR-0029 invariant 3 holds: the request never carries the API key -- the
@@ -212,8 +212,8 @@ impl ToolTurnReply {
     }
 
     /// Construct a tool-call batch with its connective prose, normalizing an
-    /// empty string to `None` (issue #617): the conversion points (the yoagent
-    /// bridge's outcome mapping) route through here so the empty-text ->
+    /// empty string to `None` (issue #617): every construction site routes
+    /// through here so the empty-text ->
     /// no-prose contract lives once -- a
     /// later construction site passing a parsed `Some("")` cannot emit an
     /// empty `RoundText` event and persist `"text": ""` in the recipe round.

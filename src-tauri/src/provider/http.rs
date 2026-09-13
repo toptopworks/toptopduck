@@ -1,7 +1,7 @@
 //! Shared HTTP egress helpers for the provider adapters (issue #244).
 //!
 //! Two security invariants live here, applied to every outbound LLM call
-//! (preflight and the yoagent model-config resolution) so the paths cannot drift:
+//! (preflight and the loop runtime's model-config resolution) so the paths cannot drift:
 //!
 //! 1. **base_url scheme is http/https** -- see [`validate_http_base_url`].
 //!    Rejects `file:`, `data:`, and scheme-less strings at the boundary,

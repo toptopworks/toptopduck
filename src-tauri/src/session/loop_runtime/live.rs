@@ -1,6 +1,5 @@
 //! The live construction path (ADR-0116, issue #918 -- the swap slice): the
-//! wiring seam's single entry, the rig-backed twin of the yoagent layer's
-//! `turn_loop_for`. Live facts (a profile-backed provider) construct the
+//! wiring seam's single entry. Live facts (a profile-backed provider) construct the
 //! REAL upstream model through rig's anthropic / openai clients -- sealed
 //! here, so the wiring point names no upstream type beyond what the
 //! integration layer's doc contract already allows (upstream types and
@@ -11,14 +10,14 @@
 //! runtime, no second execution path).
 //!
 //! Configuration gates run BEFORE any client is built, in the order the
-//! adapters and the yoagent resolution both held (ADR-0044 classification,
+//! adapters held (ADR-0044 classification,
 //! ADR-0029 key handling): a keyless profile refuses as `NotWired`, a
 //! non-http base as `InvalidConfig`. rig's anthropic base-url
 //! normalization (it strips a trailing `/v1` / `/messages` / `/v1/messages`
 //! and re-appends `/v1/messages` itself) therefore runs only on a base the
 //! scheme gate already admitted -- normalization cannot bypass the gate,
 //! and a user-configured base that already carries `/v1` is idempotent
-//! under it (where the yoagent resolution would have doubled the segment).
+//! under it.
 //!
 //! HTTP client injection (ADR-0116 Decision 6): the app constructs the
 //! reqwest client with redirects pinned off (`Policy::none`), so a
@@ -42,10 +41,10 @@ use crate::session::loop_contract::Termination;
 use super::LoopRuntime;
 
 /// Build the per-turn runner from an app provider object (the wiring seam's
-/// single entry, the rig-backed twin). `Err` carries the turn's terminal
+/// single entry). `Err` carries the turn's terminal
 /// outcome for a facts resolution that refused before any round-trip -- a
 /// keyless profile (`NotWired`) or a non-http base (`InvalidConfig`) -- with
-/// the same vocabulary the adapters and the yoagent seam surfaced; the
+/// the same vocabulary the adapters surfaced; the
 /// caller lands it as a zero-round-trip `LoopOutcome`.
 pub(crate) fn turn_loop_for(provider: Arc<dyn Provider>) -> Result<LoopRuntime, Termination> {
     match provider.turn_model_facts() {
@@ -55,11 +54,11 @@ pub(crate) fn turn_loop_for(provider: Arc<dyn Provider>) -> Result<LoopRuntime, 
 }
 
 /// Construct the real upstream client + model handle from live facts. The
-/// per-turn construction keeps the profile freshness the yoagent seam held
+/// per-turn construction keeps profile freshness
 /// (a mid-session profile switch reroutes the very next turn -- the
 /// protocol-flip pin rides the wire-level integration tests).
 fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
-    // Key first, then scheme -- the order the yoagent resolution held, so
+    // Key first, then scheme, so
     // a misconfigured profile surfaces the same first refusal it always
     // did (a keyless https base reports NotWired, not InvalidConfig).
     let api_key = facts.api_key.ok_or(Termination::NotWired)?;
@@ -106,15 +105,12 @@ pub(crate) const BRIDGED_THOUGHT_LEVEL_KEY: &str = "app_thought_level";
 
 /// Render the posture's thought level onto the request's additional
 /// params (ADR-0103 / #918): the anthropic face carries the adaptive
-/// thinking shape the retired yoagent seam actually wrote -- its compat
-/// default turned adaptive thinking on, so the wire carried a thinking
-/// type of adaptive plus an output-config effort, and the legacy budget
-/// numbers lived only in a branch the app never enabled -- and the openai
-/// face carries the reasoning effort, the same values that seam wrote;
+/// thinking shape -- a thinking type of adaptive plus an output-config
+/// effort -- and the openai
+/// face carries the reasoning effort;
 /// the bridged face carries the app-private key instead. An absent level
 /// (thinking off) contributes nothing, and an unknown posture id
-/// contributes nothing either -- the same Off the retired seam's mapping
-/// held for ids it did not recognize, on every face.
+/// contributes nothing either -- Off on every face.
 pub(crate) fn thought_level_params(
     protocol: Option<Protocol>,
     level: Option<&str>,

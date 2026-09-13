@@ -21,9 +21,7 @@
 //! it issued; the app's trace entries pair with the event stream by
 //! completion order (single-concurrency execution makes dispatch order ==
 //! call order == result-forwarding order -- the ordering guarantee
-//! ADR-0116 Decision 4 pins here with `tool_concurrency = 1`; the yoagent
-//! layer got the same ordering from its own sequential execution
-//! strategy).
+//! ADR-0116 Decision 4 pins here with `tool_concurrency = 1`).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -47,8 +45,7 @@ pub(crate) struct DispatchRequest {
 
 /// The dispatch server's reply for one call. The executed call's trace
 /// entry and promotion never ride this channel: the server records them on
-/// the shared state BEFORE the reply crosses (record-before-send, the
-/// yoagent layer's record-before-return invariant, #921) -- a driver-side
+/// the shared state BEFORE the reply crosses (record-before-send, #921) -- a driver-side
 /// cancellation that abandons the callback's async segment cannot strand
 /// an executed call's accounting.
 pub(crate) enum DispatchOutcome {
@@ -94,8 +91,7 @@ impl SharedTurnState {
     /// The mid-run turn-over verdict the dispatch server's per-call gate and
     /// the cancel watcher's checkpoints share: an honest abort latched, a
     /// gate cancel, or the app token requested. One implementation so the
-    /// two surfaces cannot drift (the yoagent layer spelled this predicate
-    /// out twice; the twin keeps its own copy until its retirement).
+    /// two surfaces cannot drift.
     pub(crate) fn turn_over(&self, token: &crate::cancel::CancelToken) -> bool {
         self.aborted
             .lock()
@@ -150,8 +146,7 @@ pub(crate) fn gateway_dynamic_tool(
             Box::pin(async move {
                 // The blocking dispatch round-trip (channel send + the
                 // caller thread's gated execution) must not sit on the async
-                // runtime's thread, mirroring the yoagent adapter's
-                // spawn_blocking hop.
+                // runtime's thread.
                 let outcome = tokio::task::spawn_blocking(move || {
                     let (resp_tx, resp_rx) = mpsc::channel::<DispatchOutcome>();
                     if dispatch

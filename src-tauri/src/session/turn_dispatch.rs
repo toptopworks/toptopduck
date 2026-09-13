@@ -182,8 +182,8 @@ pub(crate) enum DispatchAbort {
 }
 
 /// Route one tool call through the approval gateway + dispatch (ADR-0080 /
-/// ADR-0076): the shared dispatch core behind the yoagent integration layer's
-/// gateway tool adapter (issue #668, ADR-0107). The gate classification,
+/// ADR-0076): the shared dispatch core behind the loop runtime's gateway
+/// tool adapter (ADR-0116). The gate classification,
 /// meta-tool resolution, and `result_N` numbering cannot drift between the
 /// runtimes -- the adapter calls THIS, never a re-assembly -- while the
 /// routing arms and the trace-entry assembly stay per-side (the gateway's
@@ -451,7 +451,7 @@ fn dispatch_gated_call_inner(
 /// never touch a backend server, so there is no gate suspension (catalog
 /// reads carry the built-in read tools' trust shape). Returns the result
 /// paired with its trace entry -- the push into the runtime's outputs
-/// belongs to the caller (the yoagent dispatcher).
+/// belongs to the caller (the loop runtime's dispatcher).
 fn local_meta_call(
     call: &ToolUse,
     summary: &str,

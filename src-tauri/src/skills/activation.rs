@@ -11,7 +11,7 @@
 //!
 //! Like the MCP discovery trio ([`crate::mcp::meta_tools`]), this is a
 //! gateway-local meta call served BEFORE the approval gate: both dispatch
-//! faces (the yoagent dispatch server and the bridge gateway) intercept the
+//! faces (the loop runtime's dispatch server and the bridge gateway) intercept the
 //! name beside `resolve_meta_call`'s match and map the returned
 //! [`SkillActivationOutcome`] onto their own envelope -- the same
 //! Local/Refused mapping they serve the trio's [`crate::mcp::meta_tools::MetaDispatch`] through.

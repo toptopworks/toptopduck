@@ -4,8 +4,8 @@
 //! (a blocking scripted provider) -- no network, no key, no `Session`.
 //! Scripted trajectory + the real materializer + an in-memory DuckDB
 //! engine, asserting the `LoopOutcome` shapes these suites pin -- the
-//! termination vocabulary, round grouping, and dispatch contract the #918
-//! swap is measured against. The yoagent layer's loop-detection
+//! termination vocabulary, round grouping, and dispatch contract.
+//! Loop-detection
 //! steer-and-abort is ported at the dispatch seam (issue #918): the steer
 //! rides the ADR-0028 error channel -- the refused call genuinely does
 //! not run -- and the post-nudge repeat latches the honest abort, so
@@ -157,8 +157,7 @@ impl Provider for BlockingProvider {
 type PhaseHook = Arc<dyn Fn(&TurnPhase) + Send + Sync>;
 
 /// One turn's harness state: the engine + working set + temp dir + deps
-/// stand-ins the real materializer needs (the yoagent suites' harness,
-/// mirrored).
+/// stand-ins the real materializer needs.
 struct Harness {
     engine: AdminEngine,
     ws: WorkingSet,
@@ -293,7 +292,7 @@ fn bridged_runtime(provider: Arc<dyn Provider>) -> LoopRuntime {
 }
 
 /// Multi-step success with thinking, prose, and two dispatch rounds: the
-/// trace is round-grouped exactly as the yoagent layer groups it (thinking
+/// trace is round-grouped (thinking
 /// and prose on round 1, the batch's entries in dispatch order), the
 /// promotion carries the materializer's `result_N` name, and the terminal
 /// text lands verbatim. The dispatch path is the shared gateway core, so
@@ -399,8 +398,8 @@ fn multi_step_success_groups_rounds_and_promotes() {
 
 /// The batched-`tool_result` wire contract (ADR-0116's diagnostic-probe
 /// pin): a two-call batch's results ride the NEXT model request as ONE user
-/// message carrying both `ToolResult` blocks -- the merge whose absence in
-/// the yoagent path was the >=2-tool-calls 400 fault. Asserted off the
+/// message carrying both `ToolResult` blocks -- the merge whose absence
+/// was the >=2-tool-calls 400 fault. Asserted off the
 /// mock's recorded requests (the exact history rig's providers serialize).
 #[test]
 fn multi_call_batch_merges_results_into_one_user_message() {
@@ -624,7 +623,7 @@ fn step_cap_wiring_feeds_the_configured_budget() {
 /// call verbatim executes it twice, the seam then refuses to dispatch
 /// (the refusal text rides back as the error result the model can
 /// self-correct from -- rig has no mid-run message-injection surface for
-/// the yoagent layer's nudge phrasing, so the steer rides the ADR-0028
+/// a nudge, so the steer rides the ADR-0028
 /// error channel), and the repeat after that nudge latches an honest
 /// abort the cancel watcher stops the run with -- long before the step
 /// cap, with the loop's own reason in the termination.
@@ -755,8 +754,8 @@ fn two_arrivals_of_each_signature_sit_below_the_refusal_threshold() {
 /// call, so arrivals accumulate per (tool name, argument signature)
 /// across the whole turn and the interleaved repeats steer on each
 /// pair's third arrival, abort on the fourth. A last-signature-seen
-/// design -- the retired yoagent tracker was exactly that, a single
-/// streak any different call reset -- would take the alternation for
+/// design -- a single
+/// streak any different call resets -- would take the alternation for
 /// progress and release the run to the step cap; this pin is what keeps
 /// that design out.
 #[test]
@@ -1011,6 +1010,58 @@ fn mid_batch_cancel_gates_the_remaining_calls() {
     );
 }
 
+/// The empty-round drop (`loop_contract`'s `retain_landed_rounds`): a
+/// round with no thinking, no prose, and no completed call must not
+/// survive to the recorded trace -- the frontend fold cannot see such a
+/// round (none of its events ever fired), so the recorded trace must
+/// match it. The shape is a cancellation between the reply and the first
+/// dispatch: the turn opens with an empty-text item (the `Thinking`
+/// wait marker fires; empty prose leaves no field), the batch's single
+/// call commits the round, and the per-call gate -- which sees the
+/// requested token before the executor ever starts -- answers it without
+/// running it, so no row lands and the round drops on its way out. The
+/// port of the retired layer's trace-empty pin (its suite asserted an
+/// un-dispatched round leaves no entry at all); the grouping half is
+/// pinned separately by `multi_step_success_groups_rounds_and_promotes`.
+#[test]
+fn a_fully_gated_round_drops_from_the_trace() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let token = Arc::new(CancelToken::new());
+    let fired = Arc::new(AtomicBool::new(false));
+    {
+        let token = Arc::clone(&token);
+        let fired = Arc::clone(&fired);
+        h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| {
+            if matches!(phase, TurnPhase::Thinking { .. }) && !fired.swap(true, Ordering::SeqCst) {
+                token.request();
+            }
+        }));
+    }
+    let model = MockCompletionModel::from_stream_turns([batch_turn(
+        "",
+        Some(""),
+        &[(
+            "tu_1",
+            "explore",
+            json!({"sql": "SELECT count(*) FROM result_1"}),
+        )],
+    )]);
+    let outcome = h.run_with_caps(
+        &h.request("gate the batch before the first dispatch"),
+        mock_runtime(model),
+        token,
+        24,
+        None,
+    );
+    assert_eq!(outcome.termination, Termination::Cancelled);
+    assert!(
+        outcome.trace.is_empty(),
+        "the fully-gated round drops: {:?}",
+        outcome.trace
+    );
+}
+
 /// An executed call interrupted by the cancel still accounts (issue #921):
 /// the token fires at the first call's completion phase and the hook then
 /// HOLDS the dispatch rail open past the watcher's 25ms poll, so the
@@ -1188,7 +1239,7 @@ fn unknown_tool_call_lands_honest_transient() {
 /// fresh conversations, so rig-assembled histories never exercise this
 /// conversion; this pin drives it directly. Consecutive tool results from
 /// one assistant batch merge into ONE rig user message, never split across
-/// user turns -- the wire shape whose yoagent-layer absence was the
+/// user turns -- the wire shape whose absence was the
 /// >=2-tool-calls 400 fault (a split here is exactly that fault's return).
 #[test]
 fn to_rig_history_merges_batch_results_into_one_user_message() {

@@ -3,9 +3,9 @@ name = "toptopduck"
 version = "0.1.0"
 description = "Local-first AI data analysis desktop tool"
 edition = "2021"
-# MSRV raised from 1.80 for yoagent 0.18 (ADR-0107, issue #668): the crate's
-# own floor (1.86 at 0.18.1) becomes ours. CI runs stable (no toolchain pin),
-# so only the declaration moves.
+# MSRV 1.86 (ADR-0116): rig's edition-2024 crates floor at 1.85, and one step
+# of headroom is kept deliberately (top-out risk recorded there). CI
+# runs stable (no toolchain pin), so the declaration is the only gate.
 rust-version = "1.86"
 # The crate declares multiple [[bin]] targets below (acp-fake-cli / mcp-fake-server
 # test fixtures + toptopduck-acp-bridge process), so a bare `cargo run` -- and
@@ -200,10 +200,9 @@ tauri-plugin-log = "2"
 # (issue #392). Only the `time` feature is needed — the runtime itself is
 # managed by Tauri's async_runtime. Zero additional code is shipped: the
 # tokio shared object is already linked.
-# `rt` + `sync` (issue #668): the yoagent integration layer drives the
-# upstream agent loop on a dedicated per-turn runtime and consumes its event
-# channel (`tokio::sync::mpsc`); `macros` backs `select!` in the layer's
-# offline tests.
+# `rt` + `sync` (ADR-0116, issue #917): the loop runtime drives the upstream agent loop
+# on a dedicated per-turn current-thread runtime and parks/wakes through
+# `tokio::sync::Notify`; `macros` backs the runner's `select!` race floor.
 tokio = { version = "1", features = ["time", "rt", "sync", "macros"] }
 # `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
 # for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
@@ -249,25 +248,6 @@ sys-locale = "0.3"
 # Codex CLI config parsing for the MCP import wizard (issue #390): reads the
 # `[mcp_servers.*]` tables from `~/.codex/config.toml`. MSRV 1.76 (<= 1.80).
 toml = "0.9"
-# In-process agent loop + protocol adapter crate (ADR-0107, issue #668): the
-# self-written loop and anthropic/openai adapters converge onto this linked-in
-# crate -- same process, so the API key stays an explicit parameter (ADR-0029
-# invariant 3; never an env-var path). Minor gate "0.18" per ADR-0107: the 0.x
-# single-org supply-chain exposure is taken on via the gate + the Cargo.lock
-# exact pin + the revert floor. The app keeps its domain layers (prompt
-# assembly, gateway, windowing, preflight, config) and registers NONE of the
-# crate's own built-in tools / MCP client / skills / subagents / compaction --
-# every tool call routes the app gateway (ADR-0105), the single enforcement
-# point.
-yoagent = "0.18"
-# Impl-block `async fn` for our gateway tool adapter: yoagent's `AgentTool`
-# trait is `#[async_trait]`-declared, so an implementing crate needs the same
-# macro in scope as a direct dependency (issue #668).
-async-trait = "0.1"
-# Task cancellation token bridging the app's `CancelToken` into yoagent's loop
-# (issue #668): the upstream `CancellationToken` type is named in our runner's
-# signatures, so it is declared here rather than reached transitively.
-tokio-util = "0.7"
 # Builtin runtime (ADR-0116, issue #917): the in-process loop borrows rig's
 # kernel only -- rig-core + rig-agent, direct deps, `default-features = false`
 # (drops the `derive` proc-macro), minor-gated "0.42" with the Cargo.lock
@@ -284,8 +264,12 @@ rig-agent = { version = "0.42", default-features = false }
 # still on board. Same 0.13 line rig-core rides (already in the lock via
 # rig); `default-features = false` suppresses reqwest's default native-tls
 # so the only TLS backend is rig-core's `rustls` feature above -- the same
-# pure-Rust TLS posture ureq carries.
-reqwest = { version = "0.13", default-features = false }
+# pure-Rust TLS posture ureq carries. The explicit feature set restores the
+# wire posture the egress client had before the retired loop layer's removal
+# (its defaults-on reqwest used to contribute these through the feature
+# union): OS-configured proxy resolution (GUI-launched desktop apps rarely
+# carry proxy env vars), HTTP/2, and charset decoding.
+reqwest = { version = "0.13", default-features = false, features = ["http2", "system-proxy", "charset"] }
 # Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
 # log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring
 # tracing with the `log` feature turns on tracing's log bridge via feature
@@ -348,8 +332,9 @@ rust_xlsxwriter = "0.92"
 mockito = "1"
 # rig's offline mock model (ADR-0116, issue #917): `MockCompletionModel` /
 # `MockStreamEvent` script the loop runtime's behavior-contract pins with no
-# network, no key -- the same role `ScriptedProvider` plays for the yoagent
-# layer's offline suites. dev-only feature: the production build keeps
+# network, no key -- the same role the scripted `FakeProvider`
+# (provider::fake) plays for the session pipeline's offline suites.
+# dev-only feature: the production build keeps
 # `default-features = false`.
 rig-core = { version = "0.42", default-features = false, features = [
     "test-utils",
