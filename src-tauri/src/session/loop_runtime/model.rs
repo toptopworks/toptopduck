@@ -180,18 +180,22 @@ fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
         // the chat history (the `preamble` field is a legacy compatibility
         // slot); take the legacy value when present, else lift the history
         // entry -- either way the app provider's request keeps the contract:
-        // system as its own field, never a user turn.
-        system: request.preamble.clone().unwrap_or_else(|| {
-            request
-                .chat_history
-                .iter()
-                .rev()
-                .find_map(|message| match message {
-                    Message::System { content } => Some(content.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
-        }),
+        // system as its own field, never a user turn. The scan runs forward
+        // so it short-circuits at that head entry -- the only `System`
+        // this module's history assembly ever emits (#926).
+        system: request
+            .preamble
+            .clone()
+            .or_else(|| {
+                request
+                    .chat_history
+                    .iter()
+                    .find_map(|message| match message {
+                        Message::System { content } => Some(content.clone()),
+                        _ => None,
+                    })
+            })
+            .unwrap_or_default(),
         messages: to_app_messages(&request.chat_history),
         tools: request
             .tools

@@ -99,6 +99,11 @@ struct BlockingProvider {
     /// answer with a transient nobody reads (the driver has abandoned).
     block_until_cancel: Option<Arc<CancelToken>>,
     calls: Mutex<usize>,
+    /// Every app request the bridge handed over, in arrival order -- the
+    /// recording face the module-local translation guards read (issue #926:
+    /// system lift + thought-level read-back must redden inside this suite,
+    /// not only in the blackbox layers).
+    requests: Mutex<Vec<ToolTurnRequest>>,
 }
 
 impl BlockingProvider {
@@ -108,6 +113,7 @@ impl BlockingProvider {
             fire_cancel_on: None,
             block_until_cancel: None,
             calls: Mutex::new(0),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -125,8 +131,9 @@ impl BlockingProvider {
 impl Provider for BlockingProvider {
     fn generate_tool_turn(
         &self,
-        _request: &ToolTurnRequest,
+        request: &ToolTurnRequest,
     ) -> Result<ToolTurnOutcome, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
         let turn = {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
@@ -516,6 +523,54 @@ fn provider_owned_400_body_is_transient_even_when_prefix_shaped() {
             Termination::Transient(_)
         ),
         "a provider-owned 400 body must not classify as InvalidConfig"
+    );
+}
+
+/// The bridged face's request-translation guards (issue #926): the loop
+/// runtime feeds rig the system prompt through the preamble slot, and the
+/// bridge must lift it back onto the app request's own `system` field;
+/// the drive thread stamps the posture's thought level under the
+/// app-private key, and the bridge must read it back onto
+/// `thought_level`. Asserted off the scripted provider's recorded
+/// requests, INSIDE the module suite -- the blackbox layers pin the same
+/// paths, but a module-local revert (the lift's fallback dropped, the
+/// read-back dropped) must redden here first, not only there.
+#[test]
+fn bridged_requests_keep_the_system_prompt_and_thought_level() {
+    let mut h = Harness::new();
+    let provider = Arc::new(BlockingProvider::new(vec![Ok(ToolTurnOutcome {
+        thinking: Vec::new(),
+        reply: ToolTurnReply::Text("ok".into()),
+    })]));
+    let mut request = h.request("guarded");
+    request.thought_level = Some("high".into());
+    let outcome = h.run(
+        &request,
+        bridged_runtime(Arc::clone(&provider) as Arc<dyn Provider>),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(outcome.termination, Termination::Text("ok".into()));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one round-trip: the reply ends the turn");
+    let seen = &requests[0];
+    assert_eq!(
+        seen.system, "system prompt",
+        "the preamble lifts back onto the app request's own system field"
+    );
+    assert_eq!(
+        seen.thought_level.as_deref(),
+        Some("high"),
+        "the app-private key's stamp reads back onto thought_level"
+    );
+    // The lifted system prompt must not ALSO ride the conversation as a
+    // user turn -- the contract: system as its own field, never a user turn.
+    assert!(
+        !seen.messages.iter().any(|m| matches!(
+            m,
+            ToolTurnMessage::User { content } if content == "system prompt"
+        )),
+        "the system prompt never leaks into the message list: {:?}",
+        seen.messages
     );
 }
 

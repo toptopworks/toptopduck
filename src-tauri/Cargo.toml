@@ -268,7 +268,11 @@ rig-agent = { version = "0.42", default-features = false }
 # wire posture the egress client had before the retired loop layer's removal
 # (its defaults-on reqwest used to contribute these through the feature
 # union): OS-configured proxy resolution (GUI-launched desktop apps rarely
-# carry proxy env vars), HTTP/2, and charset decoding.
+# carry proxy env vars), HTTP/2, and charset decoding. The egress client
+# this builds is process-shared (issue #926), so the proxy snapshot
+# freezes at the first successful build -- a mid-session proxy change
+# waits for process restart, the same posture the probe face's egress
+# singleton accepts.
 reqwest = { version = "0.13", default-features = false, features = ["http2", "system-proxy", "charset"] }
 # Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
 # log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring
