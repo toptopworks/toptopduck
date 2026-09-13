@@ -26,7 +26,7 @@
 //! strategy).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use crate::model::{Promotion, TurnPhase};
@@ -45,18 +45,16 @@ pub(crate) struct DispatchRequest {
     pub(crate) resp: mpsc::Sender<DispatchOutcome>,
 }
 
-/// The dispatch server's reply for one call.
-// One message crosses per tool call (never a hot loop), so the variant size
-// spread between `Done` and the two abort arms is not worth boxing.
-#[allow(clippy::large_enum_variant)]
+/// The dispatch server's reply for one call. The executed call's trace
+/// entry and promotion never ride this channel: the server records them on
+/// the shared state BEFORE the reply crosses (record-before-send, the
+/// yoagent layer's record-before-return invariant, #921) -- a driver-side
+/// cancellation that abandons the callback's async segment cannot strand
+/// an executed call's accounting.
 pub(crate) enum DispatchOutcome {
-    /// The routed outcome: the model-facing result, its trace entry (`None`
-    /// for a meta-tool resolution failure that never reached a tool), and
-    /// any promotion.
+    /// The routed outcome's model-facing result.
     Done {
         result: crate::provider::tool_calling::ToolResult,
-        entry: Option<crate::session::loop_contract::TraceEntry>,
-        promotion: Option<Promotion>,
     },
     /// The approval gate was cancelled mid-call -- the whole turn aborts
     /// (the built-in loop's `GateCancelled` semantics).
@@ -83,6 +81,13 @@ pub(crate) struct SharedTurnState {
     /// An honest termination overriding the fold's derivation (a dispatch
     /// panic, issue #321).
     pub(crate) aborted: Mutex<Option<Termination>>,
+    /// Count of trace entries recorded for executed calls (incremented at
+    /// the record-before-send site). The accounting side of the
+    /// exactly-once pairing the runner's finish asserts against the fold's
+    /// `landed_calls`: every recorded entry lands on the trace once -- by
+    /// its result event, or drained at finish when a cancellation left the
+    /// event stream abandoned (#921).
+    pub(crate) recorded_calls: AtomicUsize,
 }
 
 impl SharedTurnState {
@@ -106,6 +111,7 @@ impl SharedTurnState {
             promotions: Mutex::new(Vec::new()),
             gate_cancelled: AtomicBool::new(false),
             aborted: Mutex::new(None),
+            recorded_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -170,29 +176,15 @@ pub(crate) fn gateway_dynamic_tool(
                 })
                 .await;
                 match outcome {
-                    Ok(DispatchOutcome::Done {
-                        result,
-                        entry,
-                        promotion,
-                    }) => {
-                        if let Some(entry) = entry {
-                            state
-                                .completed
-                                .lock()
-                                .expect("completed lock poisoned")
-                                .push_back(entry);
-                        }
-                        if let Some(promotion) = promotion {
-                            state
-                                .promotions
-                                .lock()
-                                .expect("promotions lock poisoned")
-                                .push(promotion);
-                        }
+                    Ok(DispatchOutcome::Done { result }) => {
                         // Always Ok, error results included: the content
                         // string IS the error text the model self-corrects
                         // from (ADR-0077); rig's fail-fast channel stays
-                        // unreachable by construction.
+                        // unreachable by construction. The trace entry and
+                        // promotion already landed on the shared state at
+                        // the server's record-before-send site, so this
+                        // segment's abandonment (a cancel that drops the
+                        // callback future) strands nothing (#921).
                         Ok(rig_agent::tool::ToolOutput::text(result.content))
                     }
                     Ok(DispatchOutcome::GateCancelled) => {

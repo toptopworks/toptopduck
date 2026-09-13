@@ -11,6 +11,7 @@
 //! claimed for the pinned surfaces, not as a blanket equivalence.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -148,6 +149,11 @@ impl Provider for BlockingProvider {
     }
 }
 
+/// The harness's optional per-phase test hook: fires on every phase, on
+/// the caller thread, before the phase lands in the collected log -- how
+/// the mid-batch gate pins request the token at dispatch time.
+type PhaseHook = Arc<dyn Fn(&TurnPhase) + Send + Sync>;
+
 /// One turn's harness state: the engine + working set + temp dir + deps
 /// stand-ins the real materializer needs (the yoagent suites' harness,
 /// mirrored).
@@ -162,6 +168,7 @@ struct Harness {
     read_fragments: Vec<crate::skills::SkillPromptFragment>,
     read_activated: Vec<String>,
     read_root: std::path::PathBuf,
+    phase_hook: Option<PhaseHook>,
 }
 
 impl Harness {
@@ -177,6 +184,7 @@ impl Harness {
             read_fragments: Vec::new(),
             read_activated: Vec::new(),
             read_root: std::path::PathBuf::new(),
+            phase_hook: None,
         }
     }
 
@@ -246,6 +254,7 @@ impl Harness {
         let approval = ApprovalState::new();
         let sink = NoopSink;
         let phases = Arc::clone(&self.phases);
+        let phase_hook = self.phase_hook.clone();
         let read = crate::skills::read::SkillReadGate {
             fragments: &self.read_fragments,
             activated: &self.read_activated,
@@ -263,7 +272,12 @@ impl Harness {
             &approval,
             &sink,
             cancel,
-            move |phase| phases.lock().unwrap().push(phase),
+            move |phase| {
+                if let Some(hook) = &phase_hook {
+                    hook(&phase);
+                }
+                phases.lock().unwrap().push(phase);
+            },
         )
     }
 }
@@ -557,6 +571,52 @@ fn step_cap_exhaustion_lands_step_cap() {
     assert_eq!(outcome.termination, Termination::StepCap(1));
 }
 
+/// The step-cap wiring seam (issue #921): a cap of 2 with a two-batch
+/// script must run BOTH batches before landing `StepCap` -- asserted off
+/// the trace's round count, because the termination alone renders off the
+/// configured cap either way. A wiring that silently dropped the
+/// `.max_turns` handoff would run rig's default budget of 1 turn and
+/// surface only one round, which this pin catches; the sibling pin above
+/// (cap 1) shares that default's value and so cannot.
+#[test]
+fn step_cap_wiring_feeds_the_configured_budget() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_2",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+    ]);
+    let outcome = h.run_with_caps(
+        &h.request("never converges"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        2,
+        None,
+    );
+    assert_eq!(outcome.termination, Termination::StepCap(2));
+    assert_eq!(
+        outcome.trace.len(),
+        2,
+        "both capped batches ran: the configured budget crossed the wiring seam, not rig's default"
+    );
+}
+
 /// A user cancel mid-run wins over any reply (ADR-0021): the token fires
 /// inside the second generation; the driver's select race abandons the
 /// silent wait and the landing is a plain `Cancelled`.
@@ -592,6 +652,248 @@ fn user_cancel_wins_over_the_reply() {
         None,
     );
     assert_eq!(outcome.termination, Termination::Cancelled);
+}
+
+/// A user cancel wins over a SUCCESS reply too (issue #921): the token
+/// fires inside the second generation and the provider then returns a
+/// text answer -- the in-flight-reply shape the sibling
+/// `user_cancel_wins_over_the_reply` pin cannot reach (its blocking
+/// provider only ever surfaces an error once unblocked). The win rides
+/// the cancel machinery's layered channels: the watcher's text-delta
+/// checkpoint stops the run as the reply's content starts flowing, the
+/// driver's select race covers the silent stretch, and the runner's
+/// post-join turn-over check is the last line. Mutating any single
+/// channel is masked by the others (deliberate depth); this pin holds
+/// the behavioral contract -- a scripted success reply in flight never
+/// lands as the turn's text once the token is requested.
+#[test]
+fn user_cancel_wins_over_a_late_success_reply() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let token = Arc::new(CancelToken::new());
+    let provider = BlockingProvider::new(vec![
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::ToolCalls {
+                text: None,
+                calls: vec![crate::provider::tool_calling::ToolUse {
+                    id: "tu_1".into(),
+                    name: "explore".into(),
+                    input: json!({"sql": "SELECT count(*) FROM result_1"}),
+                }],
+            },
+        }),
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::Text("late reply after cancel".into()),
+        }),
+    ])
+    .with_fire_cancel_on(2, Arc::clone(&token));
+    let outcome = h.run_with_caps(
+        &h.request("cancel me"),
+        bridged_runtime(Arc::new(provider) as Arc<dyn Provider>),
+        token,
+        24,
+        None,
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Cancelled,
+        "the cancel overrides the in-flight success reply, not just error exits"
+    );
+}
+
+/// The mid-batch gate (issue #921): a user cancel landing between the
+/// calls of a two-call batch -- fired at the first call's completion, the
+/// last dispatch-side phase before the queue moves on -- must answer the
+/// remaining queued calls instead of running them (the per-call gate the
+/// rig executor lacks between one batch's calls). The executed call still
+/// accounts (its trace entry lands on the trace); the gated remainder
+/// neither lands a trace row nor promotes. Fired at completion rather
+/// than start because the tool executors honor the token directly: a
+/// start-time fire would short-circuit the call instead of executing it.
+#[test]
+fn mid_batch_cancel_gates_the_remaining_calls() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let token = Arc::new(CancelToken::new());
+    let fired = Arc::new(AtomicBool::new(false));
+    {
+        let token = Arc::clone(&token);
+        let fired = Arc::clone(&fired);
+        h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| {
+            if matches!(phase, TurnPhase::ToolCallCompleted(_))
+                && !fired.swap(true, Ordering::SeqCst)
+            {
+                token.request();
+            }
+        }));
+    }
+    let model = MockCompletionModel::from_stream_turns([batch_turn(
+        "",
+        None,
+        &[
+            (
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            ),
+            (
+                "tu_2",
+                "materialize",
+                json!({"sql": "SELECT count(*) AS n FROM result_1"}),
+            ),
+        ],
+    )]);
+    let outcome = h.run_with_caps(
+        &h.request("batch then cancel"),
+        mock_runtime(model),
+        token,
+        24,
+        None,
+    );
+    assert_eq!(outcome.termination, Termination::Cancelled);
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "the interrupted batch's round survives"
+    );
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "only the executed call lands"
+    );
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    assert!(
+        outcome.trace[0].calls[0].success,
+        "the executed call completed before the gate saw the token"
+    );
+    assert!(
+        outcome.promotions.is_empty(),
+        "the never-run materialize promotes nothing"
+    );
+}
+
+/// An executed call interrupted by the cancel still accounts (issue #921):
+/// the token fires at the first call's completion phase and the hook then
+/// HOLDS the dispatch rail open past the watcher's 25ms poll, so the
+/// driver's select race is guaranteed to abandon the silent wait with the
+/// call's reply still unsent -- the window where the old adapter's
+/// post-`spawn_blocking` recording segment was never polled and the trace
+/// row vanished. The executed call's trace entry must still land, through
+/// the dispatch-side record-before-send and the finish-time drain of the
+/// queue the abandoned stream left behind. The call is a materialize so
+/// the recording site's promotion half rides the same window: a revert
+/// of the promotion push back into the callback's abandoned segment
+/// would drop it with no other pin noticing.
+#[test]
+fn cancelled_in_flight_call_still_lands_its_trace() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let token = Arc::new(CancelToken::new());
+    let fired = Arc::new(AtomicBool::new(false));
+    {
+        let token = Arc::clone(&token);
+        let fired = Arc::clone(&fired);
+        h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| {
+            if matches!(phase, TurnPhase::ToolCallCompleted(_))
+                && !fired.swap(true, Ordering::SeqCst)
+            {
+                token.request();
+                // Hold the completed call's reply unsent: the watcher
+                // thread (25ms poll) resolves the driver's select on the
+                // notification while the stream still waits for this
+                // call's result -- deterministic, not a race the
+                // assertion hopes to lose.
+                std::thread::sleep(Duration::from_millis(120));
+            }
+        }));
+    }
+    let model = MockCompletionModel::from_stream_turns([batch_turn(
+        "",
+        None,
+        &[(
+            "tu_1",
+            "materialize",
+            json!({"sql": "SELECT count(*) AS n FROM result_1"}),
+        )],
+    )]);
+    let outcome = h.run_with_caps(
+        &h.request("cancel my single call"),
+        mock_runtime(model),
+        token,
+        24,
+        None,
+    );
+    assert_eq!(outcome.termination, Termination::Cancelled);
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "the round survives the interruption"
+    );
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "the executed call's trace row lands despite the abandoned stream"
+    );
+    assert_eq!(outcome.trace[0].calls[0].name, "materialize");
+    assert!(outcome.trace[0].calls[0].success);
+    assert_eq!(
+        outcome.promotions.len(),
+        1,
+        "the interrupted materialize's promotion lands despite the abandoned stream"
+    );
+}
+
+/// A driver-thread panic after a call's result event has folded lands the
+/// honest Transient termination (issue #321) without tripping the
+/// finish-time exactly-once pairing: the join arm replaces the fold the
+/// dead driver had been consuming (its landed calls go with it), while
+/// `recorded_calls` survives on the shared state -- the pairing is
+/// exempted for the replaced fold, and the drain still salvages whatever
+/// the dead stream left queued. The panic rides the phase hook at the
+/// second turn's `Thinking` (a DRIVER-side phase, folded on the driver
+/// thread -- unlike `ToolCallCompleted`, which the dispatch server emits
+/// and whose panics the #321 dispatch guard catches, a path its own pin
+/// already covers); the first turn's call has already folded by then,
+/// which is what makes the pre-fix assert's arithmetic diverge (0 landed
+/// vs 1 recorded).
+#[test]
+fn driver_panic_after_a_folded_call_lands_transient_cleanly() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let fired = Arc::new(AtomicBool::new(false));
+    h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| {
+        if matches!(phase, TurnPhase::Thinking { attempt: 2.. })
+            && !fired.swap(true, Ordering::SeqCst)
+        {
+            panic!("injected driver failure after the call folded");
+        }
+    }));
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        text_turn("late prose that never lands"),
+    ]);
+    let outcome = h.run_with_caps(
+        &h.request("fold one call then die"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        24,
+        None,
+    );
+    assert!(
+        matches!(outcome.termination, Termination::Transient(_)),
+        "the driver panic lands the honest Transient, not a crash: {:?}",
+        outcome.termination
+    );
 }
 
 /// The no-progress watchdog's kill (ADR-0115): a generation that goes

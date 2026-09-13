@@ -159,8 +159,15 @@ mod tests {
         };
 
         // The watchdog's own kill: its cap lapses un-touched, it fires the
-        // token and latches the reason slot.
-        std::thread::sleep(Duration::from_millis(80));
+        // token and latches the reason slot. Polled with a generous bound
+        // rather than one fixed sleep: the fire time is the cap (30ms) plus
+        // up to one poll interval (25ms) plus scheduler latency, which
+        // parallel test load stretches (#921) -- a busy wait to a deadline
+        // keeps the pin deterministic however loaded the run.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while !token.is_requested() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(token.is_requested(), "the watchdog fired the token");
         assert!(clock.is_timed_out(), "the armed clock latched");
 

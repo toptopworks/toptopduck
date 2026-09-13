@@ -263,11 +263,34 @@ impl LoopRuntime {
                 ) {
                     Err(DispatchAbort::Gate) => DispatchOutcome::GateCancelled,
                     Err(DispatchAbort::Panic(termination)) => DispatchOutcome::Aborted(termination),
-                    Ok((result, entry, promotion)) => DispatchOutcome::Done {
-                        result,
-                        entry,
-                        promotion,
-                    },
+                    Ok((result, entry, promotion)) => {
+                        // Record-before-send (#921, the yoagent layer's
+                        // record-before-return invariant): the executed
+                        // call's trace entry and promotion land on the
+                        // shared state HERE, on the executing thread, before
+                        // the reply crosses -- strictly ahead of any
+                        // driver-side cancellation that abandons the
+                        // callback's post-`spawn_blocking` async segment.
+                        // The interrupted call still accounts; the fold
+                        // drains its entry by result event, or the finish
+                        // drains the queue the abandoned stream left.
+                        if let Some(entry) = entry {
+                            state
+                                .completed
+                                .lock()
+                                .expect("completed lock poisoned")
+                                .push_back(entry);
+                            state.recorded_calls.fetch_add(1, Ordering::SeqCst);
+                        }
+                        if let Some(promotion) = promotion {
+                            state
+                                .promotions
+                                .lock()
+                                .expect("promotions lock poisoned")
+                                .push(promotion);
+                        }
+                        DispatchOutcome::Done { result }
+                    }
                 };
                 // A closed response channel means the driver is gone; the
                 // remaining requests are dropped with it.
@@ -280,7 +303,11 @@ impl LoopRuntime {
             // a bare Cancelled would; then cancel (a cancel that arrived
             // during the run wins over any reply, ADR-0021); then the run's
             // own exit -- its error vocabulary mapped, else the reply.
-            let DriveOutcome { mut fold, exit } = driver.join().unwrap_or_else(|payload| {
+            let joined = driver.join();
+            // A driver panic swaps in a fresh fold below: the finish-time
+            // pairing assert is exempted for the replacement (#321).
+            let fold_replaced = joined.is_err();
+            let DriveOutcome { mut fold, exit } = joined.unwrap_or_else(|payload| {
                 *state.aborted.lock().expect("aborted lock poisoned") =
                     Some(panic_to_transient("loop runtime driver", &*payload));
                 DriveOutcome {
@@ -293,13 +320,18 @@ impl LoopRuntime {
             // outlive the scope.
             drive_done.store(true, Ordering::SeqCst);
             if let Some(termination) = state.aborted.lock().expect("aborted lock poisoned").take() {
-                return finish(fold, &state, termination);
+                return finish(fold, &state, termination, fold_replaced);
             }
             if state.turn_over(&cancel) {
                 // ADR-0115: the clock latches whether the cancel is the
                 // watchdog's (generation silence past the cap) or a user /
                 // close cancel -- same landing, different reason.
-                return finish(fold, &state, ProgressClock::cancel_landing(clock.as_ref()));
+                return finish(
+                    fold,
+                    &state,
+                    ProgressClock::cancel_landing(clock.as_ref()),
+                    fold_replaced,
+                );
             }
             let termination = match exit {
                 // The select race abandoned the wait -- the token is
@@ -318,7 +350,7 @@ impl LoopRuntime {
                     }
                 },
             };
-            finish(fold, &state, termination)
+            finish(fold, &state, termination, fold_replaced)
         })
     }
 }
@@ -449,14 +481,28 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
 }
 
 /// Assemble the final [`LoopOutcome`] -- the layer's mirror of the yoagent
-/// loop's `finish` fn: drop rounds nothing landed on, carry promotions in
-/// dispatch order, and report no discovered runtime (the built-in protocol
-/// surface has no handshake catalog, ADR-0095).
+/// loop's `finish` fn: drain the completed queue a cancellation may have
+/// left behind (the executed-but-unconsumed calls, #921), drop rounds
+/// nothing landed on, carry promotions in dispatch order, and report no
+/// discovered runtime (the built-in protocol surface has no handshake
+/// catalog, ADR-0095).
 fn finish(
     mut fold: EventFold,
     state: &Arc<SharedTurnState>,
     termination: Termination,
+    fold_replaced: bool,
 ) -> LoopOutcome {
+    let drained = fold.drain_residual(state);
+    let recorded_calls = state.recorded_calls.load(Ordering::SeqCst);
+    // A driver panic swaps in a fresh fold: the entries the dead fold had
+    // already landed go with it (#321's honest Transient landing), so the
+    // exactly-once pairing has no baseline to check against -- the drain
+    // above still salvages the residual queue onto the fresh fold.
+    debug_assert!(
+        fold_replaced || fold.landed_calls == recorded_calls,
+        "every executed call's trace entry must land exactly once: {recorded_calls} recorded, {} landed by result event, {drained} drained at finish",
+        fold.landed_calls - drained,
+    );
     retain_landed_rounds(&mut fold.rounds);
     LoopOutcome {
         termination,
