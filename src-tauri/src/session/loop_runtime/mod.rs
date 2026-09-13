@@ -20,17 +20,16 @@
 //! upstream's name never escapes this module (ADR-0116 Decision 7), so the
 //! NEXT runtime swap, if any, touches no type or path outside it.
 //!
-//! Not yet wired: the integration slice (issue #917) lands the runtime
-//! offline-verified with the wiring seam untouched; the swap slice (#918)
-//! points `turn_loop_for` here and removes this attribute with it. Until
-//! then only the `#[cfg(test)]` suites reference the module, so normal lib
-//! builds would fire dead_code lints (the runtime/gateway slice-9b
-//! precedent).
-#![allow(dead_code)]
+//! Wired since the swap slice (issue #918): `turn_loop_for` (in `live`)
+//! is the wiring seam's single entry -- live facts construct the real
+//! upstream model with the app-injected no-redirect client; facts-less
+//! providers bridge onto the completion face. The yoagent layer it
+//! replaces stays in place only until its retirement slice (#919).
 
 mod adapter;
 mod cancel;
 mod fold;
+mod live;
 mod model;
 
 #[cfg(test)]
@@ -51,19 +50,22 @@ use crate::mcp::aggregator::McpAggregator;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::ToolTurnRequest;
 use crate::session::loop_contract::{
-    retain_landed_rounds, LoopOutcome, Termination, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP,
+    retain_landed_rounds, truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry,
+    DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::session::progress::ProgressClock;
 use crate::session::skills::SkillActivationCtx;
 use crate::session::turn_dispatch::{
-    dispatch_gated_call, panic_to_transient, DispatchAbort, GateCtx,
+    classify_call, dispatch_gated_call, panic_to_transient, DispatchAbort, GateCtx,
 };
 
 use adapter::{DispatchOutcome, DispatchRequest, PhaseSink, SharedTurnState};
 use cancel::CancelWatcher;
 use fold::EventFold;
 use model::INVALID_CONFIG_PREFIX;
+
+pub(crate) use live::turn_loop_for;
 
 /// The per-turn loop runner -- the rig-backed twin of the yoagent layer's
 /// `YoagentLoop`. Built per turn (cheap): the erased model handle and the
@@ -72,6 +74,11 @@ pub(crate) struct LoopRuntime {
     model: ModelHandle,
     step_cap: u32,
     no_progress_cap: Option<Duration>,
+    /// The live face's protocol: the posture's thought level renders onto
+    /// the wire in a protocol-specific shape (anthropic thinking budget vs
+    /// openai reasoning effort, ADR-0103 / #918), while the bridged face
+    /// (`None`) carries it under an app-private key instead.
+    protocol: Option<crate::model::Protocol>,
 }
 
 impl LoopRuntime {
@@ -81,7 +88,15 @@ impl LoopRuntime {
             model,
             step_cap: DEFAULT_STEP_CAP,
             no_progress_cap: Some(DEFAULT_NO_PROGRESS_CAP),
+            protocol: None,
         }
+    }
+
+    /// Stamp the live protocol (the live factory's second input): picks the
+    /// wire shape the thought level renders into.
+    pub(crate) fn with_protocol(mut self, protocol: crate::model::Protocol) -> Self {
+        self.protocol = Some(protocol);
+        self
     }
 
     /// Override the caps (the test seam). Test-only at the call sites: the
@@ -182,6 +197,7 @@ impl LoopRuntime {
                 let req_tx = req_tx.clone();
                 let request = request.clone();
                 let step_cap = self.step_cap;
+                let protocol = self.protocol;
                 let clock = clock.clone();
                 let token = Arc::clone(&cancel);
                 scope.spawn(move || {
@@ -209,6 +225,7 @@ impl LoopRuntime {
                         notify,
                         req_tx,
                         step_cap,
+                        protocol,
                         clock: clock.clone(),
                         token,
                     }))
@@ -229,6 +246,7 @@ impl LoopRuntime {
                 sink,
                 cancel: &cancel,
             };
+            let mut detector = LoopDetector::default();
             for DispatchRequest { call, resp } in req_rx {
                 // Mid-batch stop check -- the per-call cancel gate: the rig
                 // executor checks neither cancel nor steering BETWEEN the
@@ -241,6 +259,38 @@ impl LoopRuntime {
                 // for real -- break-on-cancel semantics.
                 if state.turn_over(&cancel) {
                     let _ = resp.send(DispatchOutcome::GateCancelled);
+                    continue;
+                }
+                // The identical-arguments screen (#918): a call the
+                // detector refuses never dispatches -- the refusal text
+                // rides back as the error result the model self-corrects
+                // from (ADR-0028), recorded as the call's failed trace
+                // entry so every model-issued call keeps an honest row.
+                if let Some((refusal, abort)) = detector.screen(&call) {
+                    if let Some(termination) = abort {
+                        *state.aborted.lock().expect("aborted lock poisoned") = Some(termination);
+                    }
+                    let (_, operation_kind, summary) = classify_call(&call);
+                    state
+                        .completed
+                        .lock()
+                        .expect("completed lock poisoned")
+                        .push_back(TraceEntry::failed(
+                            call.id.clone(),
+                            call.name.clone(),
+                            operation_kind,
+                            summary,
+                            truncate_trace_excerpt(&refusal, TRACE_EXCERPT_MAX),
+                        ));
+                    state.recorded_calls.fetch_add(1, Ordering::SeqCst);
+                    let result = crate::provider::tool_calling::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: refusal,
+                        is_error: true,
+                    };
+                    if resp.send(DispatchOutcome::Done { result }).is_err() {
+                        break;
+                    }
                     continue;
                 }
                 let phases = Arc::clone(&phases);
@@ -355,6 +405,86 @@ impl LoopRuntime {
     }
 }
 
+/// The identical-arguments loop detector (issue #918, the #920-review-I4
+/// disposition): the yoagent layer's steer-then-abort ported at the
+/// dispatch seam. rig offers neither loop detection nor a mid-run
+/// message-injection surface for the yoagent nudge phrasing, so the steer
+/// rides the ADR-0028 error channel instead -- the call is genuinely
+/// refused, its refusal text feeds back for self-correction -- and the
+/// repeat after that nudge latches an honest abort the cancel watcher
+/// stops the run with, long before the step cap burns the API budget.
+/// Detector state is per-turn and owned by the dispatch server's thread --
+/// plain fields, no locking.
+///
+/// Counting is per (tool name, argument signature), accumulated over the
+/// whole turn rather than reset by interleaving: the yoagent tracker was
+/// a single last-signature streak -- any different call reset it (its own
+/// limits doc calls the word "consecutive" load-bearing), so a mixed
+/// batch re-issuing [A, B] every round evaded detection though it was
+/// just as stuck (found by the merged-batch wire pin running to the step
+/// cap) -- so here a sibling call with different arguments must not erase
+/// another signature's history.
+#[derive(Default)]
+struct LoopDetector {
+    /// Per (tool name, argument signature): arrivals this turn.
+    counts: std::collections::HashMap<(String, String), u32>,
+    /// The pairs already refused once (the steer); their next repeat
+    /// latches the abort.
+    steered: std::collections::HashSet<(String, String)>,
+}
+
+/// Refuse first at this many arrivals of one exact call (the yoagent
+/// layer's threshold, inherited).
+const IDENTICAL_STEER_AT: u32 = 3;
+
+impl LoopDetector {
+    /// Screen one call: `None` dispatches it; `Some((refusal_text,
+    /// abort))` refuses it -- the text feeds back as the error result, and
+    /// a present `abort` latches the run's termination (the watcher stops
+    /// the run at its next checkpoint).
+    fn screen(
+        &mut self,
+        call: &crate::provider::tool_calling::ToolUse,
+    ) -> Option<(String, Option<Termination>)> {
+        let signature = serde_json::to_string(&call.input).unwrap_or_default();
+        let key = (call.name.clone(), signature);
+        let count = self.counts.entry(key.clone()).or_insert(0);
+        *count += 1;
+        if *count < IDENTICAL_STEER_AT {
+            return None;
+        }
+        let tool_name = call.name.as_str();
+        let repetitions = *count;
+        if self.steered.insert(key) {
+            // First refusal: the steer -- the call does not run, the text
+            // routes back as the error result the model can self-correct
+            // from (ADR-0028).
+            Some((
+                format!(
+                    "tool call refused: `{tool_name}` was called {repetitions} times with \
+                     identical arguments. The result will not change -- change approach, or \
+                     say why the repetition is needed."
+                ),
+                None,
+            ))
+        } else {
+            // The repeat after the nudge: the honest abort, latched for
+            // the watcher to stop the run at its next checkpoint.
+            Some((
+                format!(
+                    "tool call refused: the run was stopped -- `{tool_name}` was called \
+                     {repetitions} times with identical arguments after being asked to \
+                     change approach"
+                ),
+                Some(Termination::Transient(format!(
+                    "loop detection aborted the run: `{tool_name}` repeated {repetitions} \
+                     times with identical arguments after being asked to change approach"
+                ))),
+            ))
+        }
+    }
+}
+
 /// Everything the driver thread needs, bundled so the spawn site stays
 /// readable. Owned data only (the non-`Sync` session collaborators stay on
 /// the caller thread).
@@ -366,6 +496,9 @@ struct DriveInputs {
     notify: Arc<tokio::sync::Notify>,
     req_tx: mpsc::Sender<DispatchRequest>,
     step_cap: u32,
+    /// The live face's protocol (thought-level wire rendering); `None` on
+    /// the bridged face.
+    protocol: Option<crate::model::Protocol>,
     /// The turn's no-progress clock (ADR-0115): the fold touches it on every
     /// inbound stream event -- the generation segment's liveness signal.
     clock: Option<Arc<ProgressClock>>,
@@ -403,6 +536,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         notify,
         req_tx,
         step_cap,
+        protocol,
         clock,
         token,
     } = inputs;
@@ -444,6 +578,15 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
     let mut stream = StreamingPromptRequest::from_agent(&agent, prompt)
         .history(history)
         .max_turns(step_cap as usize)
+        // ADR-0103 (#918): the posture's thought level rides the request
+        // in the protocol's wire shape (anthropic budget / openai effort)
+        // or, on the bridged face, an app-private key the completion-model
+        // bridge reads back -- the same stamp every built-in round-trip
+        // carried under the yoagent seam.
+        .merge_additional_params(live::thought_level_params(
+            protocol,
+            request.thought_level.as_deref(),
+        ))
         .tool_concurrency(1)
         // Memoryless by construction, stated explicitly: the app owns the
         // windowed history (ADR-0116 Decision 2), so rig's session memory
@@ -587,6 +730,14 @@ fn termination_for_completion(err: &rig_core::completion::CompletionError) -> Te
                 }
             }
         }
+    }
+    // The bridge's transport faults ride this variant with the app's own
+    // detail as the whole payload -- surfaced verbatim, not re-prefixed by
+    // the variant's Display ("ProviderError: ..."), so a bridged
+    // `Unavailable("connection reset")` still lands as exactly that string
+    // (the #669 verbatim classification contract the yoagent seam held).
+    if let rig_core::completion::CompletionError::ProviderError(detail) = err {
+        return Termination::Transient(detail.clone());
     }
     Termination::Transient(err.to_string())
 }

@@ -6,9 +6,11 @@
 //! engine, asserting the `LoopOutcome` shapes these suites pin -- the
 //! termination vocabulary, round grouping, and dispatch contract the #918
 //! swap is measured against. The yoagent layer's loop-detection
-//! steer-and-abort has no counterpart in this module; its disposition
-//! (port or calibrated drop) is #918's to decide, so interchangeability is
-//! claimed for the pinned surfaces, not as a blanket equivalence.
+//! steer-and-abort is ported at the dispatch seam (issue #918): the steer
+//! rides the ADR-0028 error channel -- the refused call genuinely does
+//! not run -- and the post-nudge repeat latches the honest abort, so
+//! interchangeability is claimed for the pinned surfaces plus this
+//! ported seam, never as a blanket equivalence.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -615,6 +617,241 @@ fn step_cap_wiring_feeds_the_configured_budget() {
         2,
         "both capped batches ran: the configured budget crossed the wiring seam, not rig's default"
     );
+}
+
+/// The identical-arguments loop detection, ported at the dispatch seam
+/// (issue #918, the #920-review-I4 disposition): a model re-issuing one
+/// call verbatim executes it twice, the seam then refuses to dispatch
+/// (the refusal text rides back as the error result the model can
+/// self-correct from -- rig has no mid-run message-injection surface for
+/// the yoagent layer's nudge phrasing, so the steer rides the ADR-0028
+/// error channel), and the repeat after that nudge latches an honest
+/// abort the cancel watcher stops the run with -- long before the step
+/// cap, with the loop's own reason in the termination.
+#[test]
+fn loop_detection_refuses_identical_arguments_then_aborts() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let call = (
+        "tu_1",
+        "materialize",
+        json!({"sql": "SELECT count(*) AS n FROM result_1"}),
+    );
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn("t1", None, std::slice::from_ref(&call)),
+        batch_turn("t2", None, std::slice::from_ref(&call)),
+        batch_turn("t3", None, std::slice::from_ref(&call)),
+        batch_turn("t4", None, &[call]),
+        text_turn("never reached: the abort stops the next model call"),
+    ]);
+    let outcome = h.run(
+        &h.request("stuck"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    match &outcome.termination {
+        Termination::Transient(detail) => {
+            assert!(
+                detail.contains("loop detection aborted the run"),
+                "the abort carries the loop's own reason: {detail:?}"
+            );
+            assert!(
+                detail.contains("identical arguments"),
+                "the repetition detail rides the termination: {detail:?}"
+            );
+            assert!(
+                detail.contains("after being asked to change approach"),
+                "the nudge history is part of the honest reason: {detail:?}"
+            );
+        }
+        other => panic!("expected the loop-detection abort, got {other:?}"),
+    }
+    // Execution-side discrimination: only the first two calls ran (each
+    // promoting once); the refused repeats promote nothing.
+    assert_eq!(
+        outcome.promotions.len(),
+        2,
+        "the steered and aborted repeats must not execute"
+    );
+    // Trace-side: every model-issued call keeps an honest row -- the first
+    // two succeed, the refused pair land as failed entries carrying the
+    // refusal.
+    let calls: Vec<&crate::session::loop_contract::TraceEntry> =
+        outcome.trace.iter().flat_map(|r| r.calls.iter()).collect();
+    assert_eq!(calls.len(), 4, "one row per model-issued call");
+    assert_eq!(
+        calls.iter().filter(|c| c.success).count(),
+        2,
+        "the identical pair executed, the refused pair did not"
+    );
+    let refused = calls.iter().filter(|c| !c.success).collect::<Vec<_>>();
+    assert!(refused
+        .iter()
+        .all(|c| c.result_excerpt.contains("identical arguments")));
+}
+
+/// The detector counts arrivals per (tool name, argument signature)
+/// cumulatively over the whole turn: two arrivals of each of two
+/// signatures sit below the refuse-at-3 threshold, so a model iterating
+/// towards different queries never trips the refusal here. The count is
+/// never reset by interleaving -- the mixed-batch pin below pins that
+/// half; this one pins only the below-threshold side.
+#[test]
+fn two_arrivals_of_each_signature_sit_below_the_refusal_threshold() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "t1",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        batch_turn(
+            "t2",
+            None,
+            &[(
+                "tu_2",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        batch_turn(
+            "t3",
+            None,
+            &[("tu_3", "explore", json!({"sql": "SELECT id FROM result_1"}))],
+        ),
+        batch_turn(
+            "t4",
+            None,
+            &[("tu_4", "explore", json!({"sql": "SELECT id FROM result_1"}))],
+        ),
+        text_turn("done"),
+    ]);
+    let outcome = h.run(
+        &h.request("iterating"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("done".into()),
+        "per-signature counts sit below the threshold: nothing refused"
+    );
+    assert!(outcome
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .all(|c| c.success));
+}
+
+/// The cumulative semantics of the mixed batch -- the ADR-0116
+/// calibration's core behavioral claim: a model re-issuing the SAME
+/// two-call batch every round is just as stuck as a single repeated
+/// call, so arrivals accumulate per (tool name, argument signature)
+/// across the whole turn and the interleaved repeats steer on each
+/// pair's third arrival, abort on the fourth. A last-signature-seen
+/// design -- the retired yoagent tracker was exactly that, a single
+/// streak any different call reset -- would take the alternation for
+/// progress and release the run to the step cap; this pin is what keeps
+/// that design out.
+#[test]
+fn mixed_batch_repetitions_accumulate_across_rounds() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "t1",
+            None,
+            &[
+                (
+                    "tu_1",
+                    "explore",
+                    json!({"sql": "SELECT count(*) FROM result_1"}),
+                ),
+                ("tu_2", "explore", json!({"sql": "SELECT id FROM result_1"})),
+            ],
+        ),
+        batch_turn(
+            "t2",
+            None,
+            &[
+                (
+                    "tu_3",
+                    "explore",
+                    json!({"sql": "SELECT count(*) FROM result_1"}),
+                ),
+                ("tu_4", "explore", json!({"sql": "SELECT id FROM result_1"})),
+            ],
+        ),
+        batch_turn(
+            "t3",
+            None,
+            &[
+                (
+                    "tu_5",
+                    "explore",
+                    json!({"sql": "SELECT count(*) FROM result_1"}),
+                ),
+                ("tu_6", "explore", json!({"sql": "SELECT id FROM result_1"})),
+            ],
+        ),
+        batch_turn(
+            "t4",
+            None,
+            &[
+                (
+                    "tu_7",
+                    "explore",
+                    json!({"sql": "SELECT count(*) FROM result_1"}),
+                ),
+                ("tu_8", "explore", json!({"sql": "SELECT id FROM result_1"})),
+            ],
+        ),
+        text_turn("never reached: the abort stops the next model call"),
+    ]);
+    let outcome = h.run(
+        &h.request("stuck-batch"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    match &outcome.termination {
+        Termination::Transient(detail) => {
+            assert!(
+                detail.contains("loop detection aborted the run"),
+                "the mixed batch aborts, not the step cap: {detail:?}"
+            );
+            assert!(
+                detail.contains("identical arguments"),
+                "the repetition detail rides the termination: {detail:?}"
+            );
+        }
+        other => panic!("expected the loop-detection abort, got {other:?}"),
+    }
+    // Honest rows: the first two rounds execute both calls (four
+    // successes), the third round's arrivals both refuse (two failed
+    // rows), and the fourth round's first arrival refuses and latches
+    // the abort -- its sibling lands gate-cancelled at the loop top (the
+    // run is over; the mid-batch check precedes the screen), owing no
+    // row of its own.
+    let calls: Vec<&crate::session::loop_contract::TraceEntry> =
+        outcome.trace.iter().flat_map(|r| r.calls.iter()).collect();
+    assert_eq!(calls.len(), 7, "one row per screened call");
+    assert_eq!(
+        calls.iter().filter(|c| c.success).count(),
+        4,
+        "the first two rounds executed; the refused repeats did not"
+    );
+    let refused = calls.iter().filter(|c| !c.success).collect::<Vec<_>>();
+    assert_eq!(refused.len(), 3, "two steers and the abort that latched");
+    assert!(refused
+        .iter()
+        .all(|c| c.result_excerpt.contains("identical arguments")));
 }
 
 /// A user cancel mid-run wins over any reply (ADR-0021): the token fires
