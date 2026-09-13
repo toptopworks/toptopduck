@@ -263,11 +263,34 @@ impl LoopRuntime {
                 ) {
                     Err(DispatchAbort::Gate) => DispatchOutcome::GateCancelled,
                     Err(DispatchAbort::Panic(termination)) => DispatchOutcome::Aborted(termination),
-                    Ok((result, entry, promotion)) => DispatchOutcome::Done {
-                        result,
-                        entry,
-                        promotion,
-                    },
+                    Ok((result, entry, promotion)) => {
+                        // Record-before-send (#921, the yoagent layer's
+                        // record-before-return invariant): the executed
+                        // call's trace entry and promotion land on the
+                        // shared state HERE, on the executing thread, before
+                        // the reply crosses -- strictly ahead of any
+                        // driver-side cancellation that abandons the
+                        // callback's post-`spawn_blocking` async segment.
+                        // The interrupted call still accounts; the fold
+                        // drains its entry by result event, or the finish
+                        // drains the queue the abandoned stream left.
+                        if let Some(entry) = entry {
+                            state
+                                .completed
+                                .lock()
+                                .expect("completed lock poisoned")
+                                .push_back(entry);
+                            state.recorded_calls.fetch_add(1, Ordering::SeqCst);
+                        }
+                        if let Some(promotion) = promotion {
+                            state
+                                .promotions
+                                .lock()
+                                .expect("promotions lock poisoned")
+                                .push(promotion);
+                        }
+                        DispatchOutcome::Done { result }
+                    }
                 };
                 // A closed response channel means the driver is gone; the
                 // remaining requests are dropped with it.
@@ -449,14 +472,24 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
 }
 
 /// Assemble the final [`LoopOutcome`] -- the layer's mirror of the yoagent
-/// loop's `finish` fn: drop rounds nothing landed on, carry promotions in
-/// dispatch order, and report no discovered runtime (the built-in protocol
-/// surface has no handshake catalog, ADR-0095).
+/// loop's `finish` fn: drain the completed queue a cancellation may have
+/// left behind (the executed-but-unconsumed calls, #921), drop rounds
+/// nothing landed on, carry promotions in dispatch order, and report no
+/// discovered runtime (the built-in protocol surface has no handshake
+/// catalog, ADR-0095).
 fn finish(
     mut fold: EventFold,
     state: &Arc<SharedTurnState>,
     termination: Termination,
 ) -> LoopOutcome {
+    let drained = fold.drain_residual(state);
+    let recorded_calls = state.recorded_calls.load(Ordering::SeqCst);
+    debug_assert_eq!(
+        fold.landed_calls,
+        recorded_calls,
+        "every executed call's trace entry must land exactly once: {recorded_calls} recorded, {} landed by result event, {drained} drained at finish",
+        fold.landed_calls - drained,
+    );
     retain_landed_rounds(&mut fold.rounds);
     LoopOutcome {
         termination,

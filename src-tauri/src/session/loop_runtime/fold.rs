@@ -25,7 +25,10 @@
 //! turn opens, at the run's `FinalResponse`, or when the stream ends.
 //! Completed calls land on the open round from the shared state's
 //! completion queue, one per executed-tool-result event, in the sequential
-//! strategy's stable call order.
+//! strategy's stable call order -- and, for the entries a cancellation
+//! leaves queued when it abandons the stream mid-call, through the
+//! finish-time residual drain (#921), so an executed call accounts
+//! whichever way the run ended.
 
 use rig_agent::agent::MultiTurnStreamItem;
 use rig_core::message::ReasoningContent;
@@ -51,6 +54,11 @@ pub(crate) struct EventFold {
     pub(crate) round_trips: u32,
     /// The terminal reply's text, set by the run's `FinalResponse`.
     pub(crate) final_output: Option<String>,
+    /// Count of dispatch-recorded trace entries landed on the trace (by
+    /// result event below, or by the finish-time residual drain). The
+    /// landed side of the exactly-once pairing the runner's finish
+    /// asserts against the shared state's record count (#921).
+    pub(crate) landed_calls: usize,
     /// --- Per-model-call accumulation (replaced at each turn open) ---
     call_open: bool,
     reasoning_committed: Vec<String>,
@@ -74,6 +82,7 @@ impl EventFold {
             rounds: Vec::new(),
             round_trips: 0,
             final_output: None,
+            landed_calls: 0,
             call_open: false,
             reasoning_committed: Vec::new(),
             reasoning_deltas: Vec::new(),
@@ -112,6 +121,7 @@ impl EventFold {
                     .pop_front()
                 {
                     push_call(&mut self.rounds, entry);
+                    self.landed_calls += 1;
                 }
             }
             MultiTurnStreamItem::CompletionCall(_) => {
@@ -146,6 +156,22 @@ impl EventFold {
     /// The stream is over: land whatever the last turn left waiting.
     pub(crate) fn finish(&mut self) {
         self.flush_trailing();
+    }
+
+    /// Drain residual completed entries onto the open round (#921): a
+    /// cancellation that abandoned the event stream mid-call leaves
+    /// executed calls' entries queued with no result event ever coming for
+    /// them -- the record-before-send site already accounted them, so the
+    /// runner's finish lands them here instead. Returns how many entries
+    /// it landed (the pairing accounting).
+    pub(crate) fn drain_residual(&mut self, state: &Arc<SharedTurnState>) -> usize {
+        let mut queue = state.completed.lock().expect("completed lock poisoned");
+        let drained = queue.len();
+        for entry in queue.drain(..) {
+            push_call(&mut self.rounds, entry);
+        }
+        self.landed_calls += drained;
+        drained
     }
 
     /// One streamed assistant item.
