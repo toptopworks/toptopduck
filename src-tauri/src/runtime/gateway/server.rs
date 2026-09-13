@@ -278,6 +278,13 @@ pub fn serve_connection(
         let msg = match frames.read_message() {
             Ok(Some(m)) => m,
             Ok(None) => {
+                // The post-auth companions (issue #915): the bridge-death
+                // exits below leave a trace too, so no serve-loop exit is
+                // silent.
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "serve loop exiting on the bridge's close"
+                );
                 return Ok(outcome);
             } // bridge closed
             // Read timeout (READ_TIMEOUT): retry so the loop-top cancel check
@@ -298,6 +305,10 @@ pub fn serve_connection(
             // turn (the same single-source principle the loop-top cancel
             // arm follows).
             Err(e) if is_bridge_gone(e.kind()) => {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "serve loop exiting on the bridge's read-side reset"
+                );
                 return Ok(outcome);
             }
             Err(e) => return Err(e),
@@ -313,6 +324,10 @@ pub fn serve_connection(
                 // fate belongs to the ACP engine.
                 if let Err(e) = framing::write_message(&mut writer, &envelope) {
                     if is_bridge_gone(e.kind()) {
+                        log::debug!(
+                            target: "toptopduck::gateway",
+                            "serve loop exiting on the bridge's write-side reset"
+                        );
                         return Ok(outcome);
                     }
                     return Err(e);
@@ -418,8 +433,8 @@ fn preauth_termination_source(cancel: &CancelToken) -> &'static str {
 /// like a clean EOF under no termination flag, falls into the mismatch arm
 /// (empty vs expected), so it fails with the same `PermissionDenied` and no
 /// observable difference -- a contract that governs the prober's wire view
-/// (zero response bytes), not the operator's: a debug log at the refusal
-/// distinguishes the three arrival shapes (issue #915).
+/// (zero response bytes), not the operator's: a warn log at the refusal
+/// distinguishes the four arrival shapes (issue #915).
 ///
 /// The pre-auth window (issue #909): the auth read runs under READ_TIMEOUT,
 /// and a timeout retries with the termination flags re-checked first each
@@ -469,7 +484,18 @@ fn verify_bridge(
             return Ok(false);
         }
         let (line, refusal) = match lines.read_line_bounded(LINE_MAX_BYTES) {
-            Ok(LineRead::Line(line)) => (line, "a token mismatch"),
+            // The raw line keeps its newline, so a Line without one is a
+            // bridge that died mid-write: the bounded reader hands a
+            // pending non-empty partial out as the final unterminated line
+            // (issue #915's truncated shape) -- the token never completed
+            // rather than mismatched.
+            Ok(LineRead::Line(line)) => {
+                if line.ends_with('\n') {
+                    (line, "a token mismatch")
+                } else {
+                    (line, "a truncated auth line")
+                }
+            }
             // The POSIX teardown's graceful close (issue #913): killpg
             // SIGKILL FINs the bridge's socket where the Windows job-object
             // kill resets it (#911's error arm), so the parked auth read
@@ -532,12 +558,14 @@ fn verify_bridge(
             writer.write_all(b"BRIDGE_OK\n")?;
             return Ok(true);
         }
-        // The three arrival shapes share one error and one zero-byte wire
-        // view (the prober's, issue #643); the debug label is the
-        // operator's only attribution (issue #915) -- without it a bridge
-        // that died alone in the pre-auth window reads as a token mismatch
-        // when no line ever arrived.
-        log::debug!(
+        // The four arrival shapes share one error and one zero-byte wire
+        // view (the prober's, issue #643); the label is the operator's
+        // only attribution (issue #915) -- without it a bridge that died
+        // alone in the pre-auth window reads as a token mismatch when no
+        // line ever arrived. Logged at warn, not debug: release builds
+        // filter debug, and a refusal is an abnormal actionable event --
+        // unlike the lifecycle exits, which stay debug.
+        log::warn!(
             target: "toptopduck::gateway",
             "verify_bridge refused the pre-auth handshake: {refusal}"
         );
@@ -2715,7 +2743,8 @@ mod tests {
     /// fires inside the first park window, then the plain drop FINs -- the
     /// EOF arm's cancel disjunct over a real graceful close. Until now the
     /// disjunct existed only at the unit seam (the racing-EOF cancel twin)
-    /// and the serve-level cancel wiring only in its RST flavor; this pin
+    /// and the serve-level cancel close race only in its RST flavor (a
+    /// reset rides the error arm's re-check, never the EOF arm); this pin
     /// composes the two.
     #[test]
     fn serve_connection_preauth_eof_racing_cancel_returns_empty_outcome() {
@@ -2727,13 +2756,12 @@ mod tests {
 
         let client = thread::spawn(move || {
             let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-            // Same first-park-window shape as the engine_done FIN twin
-            // above (the parked auth read's READ_TIMEOUT fires at
-            // ~t=110ms): firing at 50ms and closing 20ms later keeps the
-            // cancel store + the FIN structurally inside that park, so the
-            // EOF is what wakes the read and reaches the EOF arm with the
-            // flag already set. The plain drop FINs because the gateway
-            // has written nothing pre-auth for the client to leave unread.
+            // First-park-window shape (see the engine_done FIN twin above
+            // for the window arithmetic): the cancel store and the FIN
+            // both land inside that park, so the EOF is what wakes the
+            // read and reaches the EOF arm with the flag already set. The
+            // plain drop FINs because the gateway has written nothing
+            // pre-auth for the client to leave unread.
             thread::sleep(Duration::from_millis(50));
             cancel.request();
             thread::sleep(Duration::from_millis(20));
