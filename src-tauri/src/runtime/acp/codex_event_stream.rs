@@ -2003,7 +2003,7 @@ mod tests {
     /// Two reasoning items landing in the same call-less stretch share
     /// the round and concatenate verbatim, separator-less -- the
     /// whole-block join convention the agent_message path and the
-    /// yoagent fold also use. The wire's two-item-per-round shape is
+    /// loop runtime fold also use. The wire's two-item-per-round shape is
     /// unmeasured (the capture carries one), so this pins today's
     /// behavior, not an observed shape.
     #[test]

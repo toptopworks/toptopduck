@@ -2,7 +2,7 @@
 //! to preset tool-turn outcomes, so the session pipeline is testable offline,
 //! deterministically, with no network and no real LLM. The shared test base of
 //! the black-box suites -- it implements `Provider::generate_tool_turn`, and
-//! the wiring seam bridges it onto the yoagent loop as-is (its
+//! the wiring seam bridges it onto the loop runtime as-is (its
 //! `turn_model_facts` stays `None`, the bridge's signal).
 //!
 //! A question maps to a queue of canned outcomes: the first round-trip returns

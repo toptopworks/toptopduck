@@ -279,7 +279,7 @@ fn land_skill_activation(
 /// prompt fragments. Mirrors [`super::materializer::TurnDeps`]'s
 /// disjoint-borrow construction: built at the turn boundary while the other
 /// session fields are lent to `TurnDeps`, moved into the dispatch layer (the
-/// yoagent dispatch server / the bridge gateway -- both runtimes share one
+/// loop runtime's dispatch server / the bridge gateway -- both runtimes share one
 /// channel by construction), dropped before `record_turn` re-borrows the
 /// session. The fragments are the TURN-START resolution: mounts are
 /// turn-external (the agent channel is activation-only), so the snapshot is

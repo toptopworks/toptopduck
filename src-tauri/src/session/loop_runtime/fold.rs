@@ -15,9 +15,9 @@
 //! batch rig routed (they follow the turn assembly), with
 //! `ToolExecutionCommitted` / `StreamUserItem` pairs settling afterwards,
 //! in call order. So: a model turn opens at its first streamed item
-//! (`Thinking` -- the yoagent layer's `MessageStart` equivalent), its
-//! thinking finalizes at its `CompletionCall` record (`ThinkingCompleted`
-//! -- the `MessageEnd` equivalent; the usage record arrives exactly once
+//! (`Thinking`), its
+//! thinking finalizes at its `CompletionCall` record (`ThinkingCompleted`;
+//! the usage record arrives exactly once
 //! per turn, text-bearing or not, which the gated `Final` item does not),
 //! and the round boundary is the FIRST committed `ToolCall` after it --
 //! the moment the batch is known. A terminal reply (no calls) never opens
@@ -46,9 +46,8 @@ use std::sync::Arc;
 /// abort state -- reads it when no cancel intervened).
 pub(crate) struct EventFold {
     pub(crate) rounds: Vec<LoopRound>,
-    /// Count of model turns opened -- the yoagent layer's `round_trips`
-    /// analogue (the `Thinking` phase's attempt number, keyed on turns
-    /// opened the way `MessageStart` counted streams). Same documented
+    /// Count of model turns opened -- the `Thinking` phase's attempt
+    /// number, keyed on turns opened. Documented
     /// divergence: a hook-rejected turn retried by the runtime opens a fresh
     /// turn and counts again.
     pub(crate) round_trips: u32,
@@ -138,8 +137,7 @@ impl EventFold {
                 // The turn's provisional deltas are discarded; a
                 // thinking-only round the failed attempt parked at its close
                 // still lands here (the attempted thinking is recorded
-                // honesty, not rolled back -- the one deliberate divergence
-                // from the yoagent twin, which discards the whole attempt).
+                // honesty, not rolled back).
                 // The retry opens a fresh turn (counted on its first item,
                 // the documented retry divergence).
                 self.reset_call();
@@ -345,8 +343,7 @@ mod tests {
     /// `round_trips` counts completed model calls -- the driver of the
     /// `Thinking` phase's attempt number. A hook-retried turn discards its
     /// provisional content and the retry opens a fresh turn with the next
-    /// attempt number (the documented divergence, matching the yoagent
-    /// layer's count). Pinned through the phase rail: two `Thinking`
+    /// attempt number (the documented divergence). Pinned through the phase rail: two `Thinking`
     /// markers, the second at attempt 2. The event script mirrors the real
     /// streamed-driver order -- content items, then the turn's
     /// `CompletionCall` close (the gated `Final` item is deliberately absent,

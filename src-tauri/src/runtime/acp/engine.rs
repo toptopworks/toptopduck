@@ -2,7 +2,7 @@
 //!
 //! [`AcpEngine::run`] drives one agent turn against an external CLI over ACP v1
 //! (stdio JSON-RPC). It is the external-runtime counterpart to
-//! built-in runner ([`crate::session::yoagent`]): it takes a windowed turn
+//! built-in runner ([`crate::session::loop_runtime`]): it takes a windowed turn
 //! input and returns the SAME [`LoopOutcome`] shape, so the wiring seam
 //! (`Session::ask_with_phase`, slice 9c) maps either runtime's outcome onto
 //! `TurnOutcome` identically.
@@ -1003,7 +1003,7 @@ impl RoundTracker {
     /// starting the duration clock: the codex path's completed whole-block
     /// arrival carries no measurable window, so
     /// [`freeze_trailing_thinking`]'s `unwrap_or(0)` lands the duration at
-    /// zero by construction (issue #807) -- pinned like the yoagent path's
+    /// zero by construction (issue #807) -- pinned like the loop runtime's
     /// `thinking_trace`. `push_thought` is wrong here: its clock would
     /// measure a fabricated reasoning-arrival-to-freeze window.
     pub(super) fn push_thought_pinned(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {

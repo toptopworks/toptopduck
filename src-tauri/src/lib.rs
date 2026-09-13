@@ -6,7 +6,7 @@
 //!
 //! Query loop (PRD #1, ADR-0077/0081): ask -> outcome. The session facade
 //! (session::Session::ask) drives the native agent loop
-//! (session::yoagent) over the provider abstraction (provider::Provider,
+//! (session::loop_runtime) over the provider abstraction (provider::Provider,
 //! ADR-0007): tool-calling round-trips (explore / materialize / describe /
 //! sample) dispatched on the session DuckDB, tool-level errors routed back to
 //! the model for self-correction, and one ADR-0028 outcome (result / textual

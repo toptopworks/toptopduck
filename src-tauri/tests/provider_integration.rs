@@ -387,8 +387,8 @@ fn real_provider_missing_key_yields_failed_turn() {
 #[test]
 fn real_provider_cancel_during_http_block_lands_cancelled() {
     // AC7 (ADR-0021/0028/0081): a cancel during the real provider's blocking
-    // HTTP round-trip lands the turn as Cancelled. Under the yoagent loop
-    // (ADR-0107, which calibrates ADR-0021 for the built-in path) the cancel
+    // HTTP round-trip lands the turn as Cancelled. Under the loop runtime
+    // (which calibrates ADR-0021 for the built-in path) the cancel
     // is immediate: the wiring seam's watcher maps the app token onto the
     // upstream task token, which aborts the in-flight SSE read mid-stream --
     // no soft-cancel wait for the HTTP call to run to completion. This
@@ -529,9 +529,9 @@ fn real_openai_provider_end_to_end_materializes_result() {
 /// `redacted_thinking` block in the model's reply rides the re-feed
 /// verbatim -- the turn survives, the tool batch executes, and the second
 /// round-trip's body carries the block (the dual matcher below is an
-/// AND), the parity the retired self-written adapter had and the yoagent
-/// stream client lost (it parsed no redacted variant, silently dropping
-/// the block). The re-fed-block assertion is the pin: a runtime that
+/// AND), the parity the retired self-written adapter had and the 0.18
+/// loop crate it gave way to lost (that crate parsed no redacted variant,
+/// silently dropping the block). The re-fed-block assertion is the pin: a runtime that
 /// drops the block again misses the text mock and the turn dies.
 #[test]
 fn anthropic_redacted_thinking_block_rides_the_re_feed() {
@@ -895,8 +895,8 @@ fn openai_turn_path_cross_host_redirect_is_refused() {
 /// head is `"content"`, not `"type"` -- an ordering that holds under
 /// serde_json's default BTreeMap map and would flip only if some crate
 /// in the graph enabled its order-preserving feature, which would make
-/// this pin go red, fail-closed). The split shape the
-/// yoagent constructor emitted interleaves `]},{"role":"user",...`
+/// this pin go red, fail-closed). A split shape
+/// interleaves `]},{"role":"user",...}`
 /// between the blocks, misses the mock, and the turn dies on the 501:
 /// split → refused, merged → 200, the red/green probe the diagnostic
 /// session ran by hand, standing. (The exact history shape is separately
@@ -941,8 +941,8 @@ fn anthropic_batched_tool_results_ride_one_user_message() {
 /// The thinking-re-feed regression pin on the openai face (the second
 /// motivating fault): a model that streamed `reasoning_content` must get
 /// it back on the next request -- the endpoints that mandate thinking
-/// re-feeding 400 on its absence, the fault that made the yoagent
-/// constructor unservable. The second round-trip's mock matches ONLY a
+/// re-feeding 400 on its absence, the fault that made the retired loop
+/// unservable. The second round-trip's mock matches ONLY a
 /// body carrying `reasoning_content`; a layer that drops the segment
 /// misses the mock and the turn dies.
 #[test]
@@ -983,9 +983,8 @@ fn openai_reasoning_content_rides_back_on_the_next_request() {
 /// The base-url normalization alignment pin (ADR-0116's implementation-
 /// time item): a profile base that already carries the `/v1` version
 /// segment still lands on `{host}/v1/messages` exactly once -- rig's
-/// normalization strips the segment and re-appends its own, where the
-/// yoagent resolution appended blindly and would have doubled it. The
-/// normalization runs only after the scheme gate admitted the base (the
+/// normalization strips the segment and re-appends its own, idempotently.
+/// The normalization runs only after the scheme gate admitted the base (the
 /// unit pins in `loop_runtime::live`), so this wire pin covers the
 /// idempotence half of the alignment.
 #[test]
@@ -1011,11 +1010,10 @@ fn anthropic_versioned_base_url_normalizes_to_the_same_endpoint() {
 }
 
 /// The live anthropic face renders the posture's thought level in the
-/// adaptive shape the retired yoagent seam actually wrote (its compat
-/// default turned adaptive thinking on, so the wire carried a thinking
-/// type of adaptive plus an output-config effort -- never the legacy
-/// budget numbers, which its legacy-only branch the app never enabled
-/// held): a posture at high rides the request as both matchers below
+/// adaptive shape the wire contract pins -- a thinking
+/// type of adaptive plus an output-config effort, never the legacy
+/// budget numbers:
+/// a posture at high rides the request as both matchers below
 /// (an AND), and the merge of additional params into the upstream body
 /// is pinned on the same hop. A runtime that renders the legacy budget
 /// shape instead misses the mock and the turn dies.

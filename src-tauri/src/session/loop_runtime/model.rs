@@ -1,8 +1,7 @@
 //! The completion-model bridge (ADR-0116, issue #917 -- the borrow-the-
 //! kernel shape of Decision 2): adapts an
 //! app [`Provider`] (the scripted fake / `UnwiredProvider`) onto rig's
-//! [`CompletionModel`] trait -- whole messages, no deltas, the same shape the
-//! yoagent layer's `ProviderBridge` gave its upstream loop. Each `completion`
+//! [`CompletionModel`] trait -- whole messages, no deltas. Each `completion`
 //! call is one `generate_tool_turn` round-trip translated in both
 //! directions; `stream` synthesizes the same reply as a committed-block
 //! event sequence (one event per content block + the terminal record), the
@@ -10,8 +9,7 @@
 //!
 //! Threading: the app provider contract is synchronous and blocking, so the
 //! call rides `spawn_blocking` -- the driver's single-threaded runtime never
-//! carries the gateway's synchronous work (the same hop the yoagent adapter
-//! makes for dispatches).
+//! carries the gateway's synchronous work.
 
 use futures::Stream;
 use std::pin::Pin;
@@ -39,8 +37,7 @@ const BRIDGE_PROVIDER: &str = "app-provider";
 /// The provider-response error body prefix encoding an app `InvalidConfig`
 /// fault: the bridge writes it, the terminal classification strips it back
 /// into `Termination::InvalidConfig` -- both sides live in this module tree,
-/// so the contract cannot drift (the same write/read pairing the yoagent
-/// layer's `INVALID_CONFIG_PREFIX` has). Control-character-led: no real
+/// so the contract cannot drift. Control-character-led: no real
 /// provider error body (JSON, HTML, or any error text) leads with a
 /// control character, so a body that merely phrases like the payload
 /// strips nowhere -- the ambiguity class is eliminated, not documented
@@ -78,7 +75,7 @@ impl ProviderCompletionModel {
                 // A panicking provider implementation surfaces as an honest
                 // completion error, never a thread-unwinding panic: the
                 // driver's fold keeps every round it already landed (the
-                // yoagent layer's rounds-stay-alive posture) and the run
+                // rounds-stay-alive posture) and the run
                 // ends in a Transient carrying the panic message.
                 Err(join_err) => {
                     return Err(CompletionError::ProviderError(format!(
@@ -182,8 +179,8 @@ fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
         // rig 0.42 carries the preamble as a `System` entry at the head of
         // the chat history (the `preamble` field is a legacy compatibility
         // slot); take the legacy value when present, else lift the history
-        // entry -- either way the app provider's request keeps the yoagent
-        // seam's shape: system as its own field, never a user turn.
+        // entry -- either way the app provider's request keeps the contract:
+        // system as its own field, never a user turn.
         system: request.preamble.clone().unwrap_or_else(|| {
             request
                 .chat_history
@@ -221,8 +218,7 @@ fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
 /// rig chat history onto the app message vocabulary. User messages split
 /// back apart: a user turn's content list re-expands into the app's
 /// per-message shapes (one `User` per text, one `ToolResult` per result
-/// block) -- the inverse of the batch merge [`to_rig_history`] performs, so
-/// the app provider sees the same conversation the yoagent bridge fed it.
+/// block) -- the inverse of the batch merge [`to_rig_history`] performs.
 /// `pub(super)` for the module suite's direct conversion pins.
 pub(super) fn to_app_messages(history: &[Message]) -> Vec<ToolTurnMessage> {
     let mut converted = Vec::with_capacity(history.len());
@@ -339,9 +335,9 @@ fn text_of_result(result: &rig_core::message::ToolResult) -> String {
 /// `ToolResult` messages from one assistant batch merge into a single rig
 /// user message (one `ToolResult` content block each) -- the wire shape
 /// every provider builds off this history renders as ONE user turn per
-/// batch, the merge the yoagent path never performed and ADR-0116 pins as
+/// batch, the merge ADR-0116 pins as
 /// the diagnostic-probe contract (splitting the blocks across user turns is
-/// the >=2-tool-calls 400 fault the replacement exists to root out).
+/// the >=2-tool-calls 400 fault the replacement rooted out).
 pub(crate) fn to_rig_history(messages: &[ToolTurnMessage]) -> Vec<Message> {
     let mut converted: Vec<Message> = Vec::with_capacity(messages.len());
     let mut pending_results: Vec<rig_core::message::UserContent> = Vec::new();

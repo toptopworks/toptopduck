@@ -17,7 +17,6 @@ pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
 pub(crate) mod turn_dispatch;
-pub mod yoagent;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
@@ -444,7 +443,7 @@ pub struct Session {
     /// [`Self::ask_with_phase`] reads the live response locale off it for the
     /// system prompt and hands the Arc to the wiring seam each turn (ADR-0107,
     /// issue #669): a profile-backed provider constructs the upstream
-    /// streamer inside `session::yoagent`, anything else bridges onto the
+    /// streamer inside the loop runtime, anything else bridges onto the
     /// loop -- either way the provider crosses into the loop's driver thread,
     /// which is why the handle is `Arc` (a `Box` cannot be shared across the
     /// `std::thread::scope` boundary). Built (converted from the `Box` the
@@ -554,7 +553,7 @@ pub struct Session {
     /// `send` return Err, which Drop swallows (Drop must not panic).
     drop_signal: Option<std::sync::mpsc::Sender<()>>,
     /// The per-session external-runtime selector (issue #299 slice 9c). `None`
-    /// drives the built-in (yoagent) loop; `Some(spec)` drives the external ACP
+    /// drives the built-in loop runtime; `Some(spec)` drives the external ACP
     /// engine for one CLI on the next turn. Issue #353 wired this to the
     /// composer runtime picker: the command layer mirrors the session's
     /// handle-held runtime choice into this field at each turn top (see the
@@ -1331,8 +1330,8 @@ impl Session {
                 // (ADR-0023 windowing is the app's), then drive the
                 // UPSTREAM stateless loop with the shared session state and
                 // map the structured LoopOutcome onto TurnOutcome. Single
-                // track by decision: the self-written loop retired with
-                // #670, the yoagent layer retires with #919; there is no
+                // track by decision: the loop runtime is the only built-in
+                // loop (each predecessor retired, #670 / #919); there is no
                 // runtime switch and no fallback.
                 let mut request = window::assemble_tool_turn(
                     question,
@@ -4489,11 +4488,12 @@ mod tests {
     // and clashes on CREATE, wedging every later turn (ADR-0022 never-reused).
     // Under the agent contract (ADR-0077) the derive failure routes back to the
     // model as a tool error; this scripted model never self-corrects (the
-    // single call clamps, re-issued every round-trip). Under the yoagent loop
-    // (ADR-0107 Decision 4) the non-converging trajectory is stopped by loop
-    // detection -- steer at 3 identical calls, abort on the repeat after the
-    // nudge -- long before the 24-step cap, failing honestly with the loop's
-    // own reason; EVERY failed attempt must still roll back result_1.
+    // single call clamps, re-issued every round-trip). The loop runtime's
+    // loop detection (ADR-0107 Decision 4, inherited by ADR-0116) stops the
+    // non-converging trajectory -- steer at 3 identical calls, abort on the
+    // repeat after the nudge -- long before the 24-step cap, failing
+    // honestly with the loop's own reason; EVERY failed attempt must still
+    // roll back result_1.
     #[test]
     fn ask_drops_the_result_table_when_shape_derivation_fails() {
         let provider =
@@ -4607,7 +4607,7 @@ mod tests {
     /// never touches the engine. Under the loop runtime (ADR-0116) the
     /// tool table rig was given does not carry the external server's entry
     /// (the inputs are empty here), so the model's call lands as the
-    /// unknown-tool terminal (Decision 5's honest transient -- the yoagent
+    /// unknown-tool terminal (Decision 5's honest transient -- the retired
     /// seam used to route it to the gateway's unknown-server error result
     /// and let the model answer on top; the terminal form is the calibrated
     /// replacement) -- and the engine stays at zero instances either way,

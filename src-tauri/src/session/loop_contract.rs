@@ -1,11 +1,11 @@
 //! The round-execution contract vocabulary (ADR-0081 / ADR-0103 / ADR-0107).
 //!
 //! [`LoopOutcome`] and its trace shapes are the shared contract every turn
-//! runtime produces -- the yoagent loop, the integration layer's dispatch
-//! server, the ACP engine, and the claude / codex stream adapters all emit
-//! this vocabulary, and the wiring seam (`Session::ask_with_phase`) consumes
-//! exactly one shape regardless of runtime (the five-producer contract,
-//! ADR-0107's replaceability review). The module is deliberately dependency-
+//! runtime produces -- the loop runtime and its dispatch server, the ACP
+//! engine, and the claude / codex stream adapters all emit this vocabulary,
+//! and the wiring seam (`Session::ask_with_phase`) consumes exactly one
+//! shape regardless of runtime (the producer contract, ADR-0107's
+//! replaceability review inherited by ADR-0116). The module is deliberately dependency-
 //! light: pure data shapes, their persisted / display projections, and the
 //! shared trace-container operations -- the execution machinery lives in
 //! [`crate::session::turn_dispatch`].
@@ -366,7 +366,7 @@ impl LoopRound {
 }
 
 /// Append one completed call's entry to the open round. Shared by the
-/// runtimes' outcome assembly (the yoagent fold): the runtime opens a round
+/// runtimes' outcome assembly (the loop runtime fold): the runtime opens a round
 /// before dispatching its batch, so the last round is the current one; the
 /// fallback folds a call that arrives with no open round (structurally
 /// unreachable -- every dispatch site runs after the round push) into a

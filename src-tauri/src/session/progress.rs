@@ -280,11 +280,10 @@ mod tests {
     /// | `trip_silence_is_measured_from_the_last_re_arm` (here) | CAP*3/4 pre-touch segment | 250 ms | 1.33x (flip margin: the CAP/4 premature-trip window; the gap asserted at 3x its floor) |
     /// | `freeze_survives_a_segment_far_past_the_cap` (here) | 3x CAP frozen | CAP | 3x |
     /// | `slow_drip_survives_past_the_cap` (claude_stream_json) | 100 ms frame drip | 400 ms | 4x |
-    /// | `generation_silence_fires_no_progress` (yoagent) | 400 ms stream delay | 100 ms | 4x |
-    /// | `approval_pending_survives_past_the_cap` (yoagent) | 300 ms responder park | 100 ms | 3x |
     ///
     /// Kill-side pins (a stuck fixture's unbounded silence against its cap)
-    /// are duration-side by construction and not cadence-sensitive.
+    /// are duration-side by construction and not cadence-sensitive; the
+    /// loop runtime's `no_progress_silence_lands_no_progress` is one.
     const CAP: Duration = Duration::from_millis(250);
 
     fn armed(timeout: Duration) -> (Arc<CancelToken>, Arc<ProgressClock>, TurnGeneration) {

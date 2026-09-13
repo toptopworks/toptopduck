@@ -238,7 +238,7 @@ pub enum ProviderError {
 /// active access profile's wire coordinates plus the keychain key, read
 /// FRESH each turn so a profile switch lands the next turn. All app-owned
 /// types on purpose -- the upstream provider construction these feed is
-/// sealed inside `session::yoagent`, so no upstream type crosses this
+/// sealed inside `session::loop_runtime`, so no upstream type crosses this
 /// boundary (the #669 encapsulation AC). `None` (the trait default) marks a
 /// provider with no live profile behind it (the scripted test fake,
 /// [`UnwiredProvider`]); the wiring seam bridges those onto the loop as-is
@@ -272,7 +272,7 @@ impl std::fmt::Debug for TurnModelFacts {
 /// execute or its terminal text answer, alongside any reasoning blocks the
 /// runtime emitted (issue #614 -- empty for every thinking-disabled turn).
 /// Concrete implementations: the scripted test fake
-/// (fake::FakeProvider, bridged onto the yoagent loop) and the default
+/// (fake::FakeProvider, bridged onto the loop runtime) and the default
 /// [`UnwiredProvider`]; [`LiveProvider`] carries live construction facts
 /// instead and never answers a round-trip itself. Send so the session can
 /// hold it behind an Arc<Mutex> and run turns on a blocking thread.
@@ -327,7 +327,7 @@ impl Provider for UnwiredProvider {}
 /// switch / protocol edit lands the next turn (the protocol-switch-takes-
 /// effect-next-turn AC). The adapter dispatch this type used to perform
 /// retired with the self-written adapters (ADR-0107 Decision 1); the facts
-/// feed the upstream provider construction sealed inside `session::yoagent`.
+/// feed the upstream provider construction sealed inside `session::loop_runtime`.
 ///
 /// Generic over `C` so production wires [`crate::LiveProviderConfig`] (reads
 /// app-config + keychain fresh each turn) while tests inject

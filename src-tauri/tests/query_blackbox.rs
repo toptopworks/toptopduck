@@ -962,12 +962,12 @@ fn step_cap_exhaustion_lands_a_failed_turn() {
     // (keeps exploring) is aborted by the step cap (default 24) as a Failed
     // turn carrying an honest non-convergence detail. The no-progress watchdog
     // (Cancelled) shares the cancel path; its deterministic coverage lives at
-    // the yoagent offline seam (the 120s default is not tunable through the
-    // Session facade).
+    // the loop runtime's offline seam (the 120s default is not tunable
+    // through the Session facade).
     //
-    // Under the yoagent loop (ADR-0107, issue #669) the trajectory must
+    // The trajectory must
     // VARY its call to reach the cap: identical repeated calls are stopped
-    // earlier by upstream loop detection (steer at 3, abort on the repeat
+    // earlier by loop detection (steer at 3, abort on the repeat
     // after the nudge -- that path has its own pins). A draw-time-unique SQL
     // keeps every call distinct, so nothing but the cap ends the run.
     let trajectory: Vec<Result<ToolTurnReply, ProviderError>> = (0..24)
@@ -1779,7 +1779,7 @@ fn a_real_long_duckdb_query_is_interruptible_via_cancel() {
 // the event SEQUENCE the UI renders the live trace from.
 
 /// A `'static` phase collector (issue #669): the phase callback crosses
-/// into the yoagent loop's driver thread, so the collector rides an
+/// into the loop runtime's driver thread, so the collector rides an
 /// `Arc<Mutex>` -- one construction covers the capture + drain pattern
 /// every phase-asserting test repeats.
 fn phase_collector() -> (
@@ -1894,7 +1894,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
     let approval = ApprovalState::new();
     let sink = NullSink;
     // 'static capture (issue #669): the phase callback crosses into the
-    // yoagent loop's driver thread, so the collector rides an Arc<Mutex>.
+    // loop runtime's driver thread, so the collector rides an Arc<Mutex>.
     let addressed: Arc<Mutex<Vec<TurnProgress>>> = Arc::new(Mutex::new(Vec::new()));
     let capture = Arc::clone(&addressed);
     let outcome = session.ask_with_phase(

@@ -1,14 +1,15 @@
 //! The loop-runtime integration layer (ADR-0116, issue #917): the in-process
-//! agent-loop runtime built on rig (rig-core + rig-agent), the replacement
-//! for the yoagent layer the 0.18 wire defects (batched `tool_result`
-//! splitting, thinking-loss 400s) made unservable. Borrow the kernel, not
+//! agent-loop runtime built on rig (rig-core + rig-agent). It replaced a
+//! linked-in loop crate whose 0.18 wire defects (batched `tool_result`
+//! splitting, thinking-loss 400s) made it unservable; ADR-0116 records the
+//! full decision. Borrow the kernel, not
 //! the framework: rig's completion / streaming / tool surfaces drive; rig's
 //! hooks carry exactly one (the cancel watcher), memory is absent
 //! (`without_memory` semantics -- the app owns the window), `ToolContext`
 //! stays blank, and model selection is the single model this runtime was
 //! built with.
 //!
-//! Threading mirrors the yoagent layer exactly: the session's dispatch
+//! Threading: the session's dispatch
 //! collaborators (`TurnDeps`, materializer, `McpAggregator`) are not `Sync`
 //! and never leave the caller's thread, so `run` serves dispatch requests
 //! on the caller's thread (through the shared `dispatch_gated_call` core)
@@ -23,8 +24,7 @@
 //! Wired since the swap slice (issue #918): `turn_loop_for` (in `live`)
 //! is the wiring seam's single entry -- live facts construct the real
 //! upstream model with the app-injected no-redirect client; facts-less
-//! providers bridge onto the completion face. The yoagent layer it
-//! replaces stays in place only until its retirement slice (#919).
+//! providers bridge onto the completion face.
 
 mod adapter;
 mod cancel;
@@ -67,8 +67,8 @@ use model::INVALID_CONFIG_PREFIX;
 
 pub(crate) use live::turn_loop_for;
 
-/// The per-turn loop runner -- the rig-backed twin of the yoagent layer's
-/// `YoagentLoop`. Built per turn (cheap): the erased model handle and the
+/// The per-turn loop runner (rig-backed).
+/// Built per turn (cheap): the erased model handle and the
 /// two execution-level caps.
 pub(crate) struct LoopRuntime {
     model: ModelHandle,
@@ -122,7 +122,7 @@ impl LoopRuntime {
     /// on this thread while the driver thread runs the loop, then fold the
     /// event stream into the round-grouped trace and derive the termination
     /// -- the single-in-flight + watchdog + panic-guard contract
-    /// (ADR-0021/0081, issue #321), the same shape the yoagent layer runs.
+    /// (ADR-0021/0081, issue #321).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run(
         &self,
@@ -314,8 +314,7 @@ impl LoopRuntime {
                     Err(DispatchAbort::Gate) => DispatchOutcome::GateCancelled,
                     Err(DispatchAbort::Panic(termination)) => DispatchOutcome::Aborted(termination),
                     Ok((result, entry, promotion)) => {
-                        // Record-before-send (#921, the yoagent layer's
-                        // record-before-return invariant): the executed
+                        // Record-before-send (#921): the executed
                         // call's trace entry and promotion land on the
                         // shared state HERE, on the executing thread, before
                         // the reply crosses -- strictly ahead of any
@@ -406,9 +405,9 @@ impl LoopRuntime {
 }
 
 /// The identical-arguments loop detector (issue #918, the #920-review-I4
-/// disposition): the yoagent layer's steer-then-abort ported at the
-/// dispatch seam. rig offers neither loop detection nor a mid-run
-/// message-injection surface for the yoagent nudge phrasing, so the steer
+/// disposition): steer-then-abort ported to the dispatch seam. rig offers
+/// neither loop detection nor a mid-run message-injection surface for a
+/// steer nudge, so the steer
 /// rides the ADR-0028 error channel instead -- the call is genuinely
 /// refused, its refusal text feeds back for self-correction -- and the
 /// repeat after that nudge latches an honest abort the cancel watcher
@@ -417,13 +416,12 @@ impl LoopRuntime {
 /// plain fields, no locking.
 ///
 /// Counting is per (tool name, argument signature), accumulated over the
-/// whole turn rather than reset by interleaving: the yoagent tracker was
-/// a single last-signature streak -- any different call reset it (its own
-/// limits doc calls the word "consecutive" load-bearing), so a mixed
-/// batch re-issuing [A, B] every round evaded detection though it was
-/// just as stuck (found by the merged-batch wire pin running to the step
-/// cap) -- so here a sibling call with different arguments must not erase
-/// another signature's history.
+/// whole turn rather than reset by interleaving: a single last-signature
+/// streak (any different call resets the count) lets a mixed batch
+/// re-issuing [A, B] every round evade detection though it is just as
+/// stuck (found by the merged-batch wire pin running to the step cap) --
+/// so a sibling call with different arguments must not erase another
+/// signature's history.
 #[derive(Default)]
 struct LoopDetector {
     /// Per (tool name, argument signature): arrivals this turn.
@@ -433,8 +431,7 @@ struct LoopDetector {
     steered: std::collections::HashSet<(String, String)>,
 }
 
-/// Refuse first at this many arrivals of one exact call (the yoagent
-/// layer's threshold, inherited).
+/// Refuse first at this many arrivals of one exact call.
 const IDENTICAL_STEER_AT: u32 = 3;
 
 impl LoopDetector {
@@ -581,8 +578,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         // ADR-0103 (#918): the posture's thought level rides the request
         // in the protocol's wire shape (anthropic budget / openai effort)
         // or, on the bridged face, an app-private key the completion-model
-        // bridge reads back -- the same stamp every built-in round-trip
-        // carried under the yoagent seam.
+        // bridge reads back.
         .merge_additional_params(live::thought_level_params(
             protocol,
             request.thought_level.as_deref(),
@@ -623,8 +619,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
     DriveOutcome { fold, exit }
 }
 
-/// Assemble the final [`LoopOutcome`] -- the layer's mirror of the yoagent
-/// loop's `finish` fn: drain the completed queue a cancellation may have
+/// Assemble the final [`LoopOutcome`]: drain the completed queue a cancellation may have
 /// left behind (the executed-but-unconsumed calls, #921), drop rounds
 /// nothing landed on, carry promotions in dispatch order, and report no
 /// discovered runtime (the built-in protocol surface has no handshake
@@ -735,7 +730,7 @@ fn termination_for_completion(err: &rig_core::completion::CompletionError) -> Te
     // detail as the whole payload -- surfaced verbatim, not re-prefixed by
     // the variant's Display ("ProviderError: ..."), so a bridged
     // `Unavailable("connection reset")` still lands as exactly that string
-    // (the #669 verbatim classification contract the yoagent seam held).
+    // (the #669 verbatim classification contract).
     if let rig_core::completion::CompletionError::ProviderError(detail) = err {
         return Termination::Transient(detail.clone());
     }
