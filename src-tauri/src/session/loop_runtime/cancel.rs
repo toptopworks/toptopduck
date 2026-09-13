@@ -140,7 +140,6 @@ impl AgentHook for CancelWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::progress::ProgressClock;
     use std::time::Duration;
 
     /// The stop-reason fork (ADR-0116 Decision 3, ADR-0115): a requested

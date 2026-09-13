@@ -7,7 +7,7 @@
 //!
 //! The callback always resolves `Ok`: a tool-level failure (including the
 //! gateway's error results) feeds back to the model as an error-text result
-//! it can self-correct from (ADR-0028), so the upstream fail-fast error
+//! it can self-correct from (ADR-0077), so the upstream fail-fast error
 //! channel is structurally unreachable. Cancel / abort states latch in the
 //! shared turn state, where the cancel-watcher hook stops the run at its
 //! next checkpoint (the rig loop has no external cancellation token to
@@ -20,9 +20,10 @@
 //! never crosses this boundary -- rig assembles that itself from the call
 //! it issued; the app's trace entries pair with the event stream by
 //! completion order (single-concurrency execution makes dispatch order ==
-//! call order == result-forwarding order, the sequential-strategy
-//! guarantee ADR-0107 pinned for the yoagent layer and Decision 4 keeps
-//! here with `tool_concurrency = 1`).
+//! call order == result-forwarding order -- the ordering guarantee
+//! ADR-0116 Decision 4 pins here with `tool_concurrency = 1`; the yoagent
+//! layer got the same ordering from its own sequential execution
+//! strategy).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -188,7 +189,7 @@ pub(crate) fn gateway_dynamic_tool(
                         }
                         // Always Ok, error results included: the content
                         // string IS the error text the model self-corrects
-                        // from (ADR-0028); rig's fail-fast channel stays
+                        // from (ADR-0077); rig's fail-fast channel stays
                         // unreachable by construction.
                         Ok(rig_agent::tool::ToolOutput::text(result.content))
                     }

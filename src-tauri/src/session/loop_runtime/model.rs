@@ -69,9 +69,21 @@ impl ProviderCompletionModel {
     ) -> Result<CompletionResponse, CompletionError> {
         let app_request = to_app_request(&request);
         let inner = Arc::clone(&self.inner);
-        let outcome = tokio::task::spawn_blocking(move || inner.generate_tool_turn(&app_request))
-            .await
-            .expect("provider bridge task cannot panic: the provider surface returns Result");
+        let outcome =
+            match tokio::task::spawn_blocking(move || inner.generate_tool_turn(&app_request)).await
+            {
+                Ok(outcome) => outcome,
+                // A panicking provider implementation surfaces as an honest
+                // completion error, never a thread-unwinding panic: the
+                // driver's fold keeps every round it already landed (the
+                // yoagent layer's rounds-stay-alive posture) and the run
+                // ends in a Transient carrying the panic message.
+                Err(join_err) => {
+                    return Err(CompletionError::ProviderError(format!(
+                        "provider task panicked: {join_err}"
+                    )))
+                }
+            };
         match outcome {
             Ok(reply) => Ok(from_app_outcome(reply)),
             Err(err) => Err(to_completion_error(err)),
@@ -200,7 +212,8 @@ fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
 /// per-message shapes (one `User` per text, one `ToolResult` per result
 /// block) -- the inverse of the batch merge [`to_rig_history`] performs, so
 /// the app provider sees the same conversation the yoagent bridge fed it.
-fn to_app_messages(history: &[Message]) -> Vec<ToolTurnMessage> {
+/// `pub(super)` for the module suite's direct conversion pins.
+pub(super) fn to_app_messages(history: &[Message]) -> Vec<ToolTurnMessage> {
     let mut converted = Vec::with_capacity(history.len());
     for message in history {
         match message {
@@ -341,8 +354,12 @@ pub(crate) fn to_rig_history(messages: &[ToolTurnMessage]) -> Vec<Message> {
                 // flag is dropped on the way in.
                 pending_results.push(rig_core::message::UserContent::ToolResult(
                     rig_core::message::ToolResult {
-                        call: rig_core::message::ToolCallId::new(tool_use_id.clone())
-                            .expect("the app vocabulary never carries an empty tool id"),
+                        // Mint-tolerant adoption, matching the assistant
+                        // branch's `ToolCall::from_wire` stance one match
+                        // arm over: a degenerate empty id on the wire
+                        // degrades to a minted handle rather than a panic
+                        // that unwinds the driver and costs the whole turn.
+                        call: rig_core::message::ToolCallId::new_or_mint(tool_use_id.clone()),
                         provider: rig_core::message::ProviderCallId::new(tool_use_id.clone()),
                         name: String::new(),
                         content: vec![rig_core::message::ToolResultContent::text(content.clone())],

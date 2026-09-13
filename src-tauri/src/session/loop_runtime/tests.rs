@@ -3,9 +3,12 @@
 //! `MockCompletionModel` (stream-event scripts) or the app-provider bridge
 //! (a blocking scripted provider) -- no network, no key, no `Session`.
 //! Scripted trajectory + the real materializer + an in-memory DuckDB
-//! engine, asserting the SAME `LoopOutcome` shapes the yoagent layer's
-//! suites pin, so the two runtimes stay behaviorally interchangeable for
-//! the #918 swap.
+//! engine, asserting the `LoopOutcome` shapes these suites pin -- the
+//! termination vocabulary, round grouping, and dispatch contract the #918
+//! swap is measured against. The yoagent layer's loop-detection
+//! steer-and-abort has no counterpart in this module; its disposition
+//! (port or calibrated drop) is #918's to decide, so interchangeability is
+//! claimed for the pinned surfaces, not as a blanket equivalence.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -331,11 +334,56 @@ fn multi_step_success_groups_rounds_and_promotes() {
     assert_eq!(round1.calls[0].name, "explore");
     assert!(round1.calls[0].success, "explore succeeds");
     let round2 = &outcome.trace[1];
+    assert_eq!(
+        round2.thinking.as_ref().expect("round 2 thinking").text,
+        "now materialize",
+        "a no-prose turn's thinking rides its batch round, never dropped"
+    );
+    assert_eq!(
+        round2.text.as_deref(),
+        None,
+        "round 2 streamed no prose; round 1's must not leak into it"
+    );
     assert_eq!(round2.calls[0].name, "materialize");
     // result_1 occupied, so the promotion is result_2 -- the materializer's
     // monotonic naming, unchanged through the adapter.
     assert_eq!(outcome.promotions.len(), 1);
     assert_eq!(outcome.promotions[0].dataset.reference_name, "result_2");
+
+    // The phase rail stays per-turn: one RoundText (round 1's prose only,
+    // never re-emitted for the prose-less round 2), one ThinkingCompleted
+    // per thinking-bearing turn with that turn's thinking alone (never a
+    // cross-turn concatenation), and a Thinking marker for every turn
+    // opened -- three turns, the terminal one included.
+    let phases = h.phases.lock().unwrap();
+    let round_texts: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::RoundText { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(round_texts, vec!["Looking at the data."]);
+    let think_done: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ThinkingCompleted { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        think_done,
+        vec!["count the rows first", "now materialize"],
+        "each turn's thinking completes alone, at its own close"
+    );
+    let attempts: Vec<u32> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::Thinking { attempt } => Some(*attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attempts, vec![1, 2, 3], "every turn opens, prose or not");
 }
 
 /// The batched-`tool_result` wire contract (ADR-0116's diagnostic-probe
@@ -558,4 +606,124 @@ fn unknown_tool_call_lands_honest_transient() {
         }
         other => panic!("expected Transient, got {other:?}"),
     }
+}
+
+/// The layer's own history conversion -- the ADR-0116 diagnostic-probe
+/// contract at its source. The runtime suites' harness requests start
+/// fresh conversations, so rig-assembled histories never exercise this
+/// conversion; this pin drives it directly. Consecutive tool results from
+/// one assistant batch merge into ONE rig user message, never split across
+/// user turns -- the wire shape whose yoagent-layer absence was the
+/// >=2-tool-calls 400 fault (a split here is exactly that fault's return).
+#[test]
+fn to_rig_history_merges_batch_results_into_one_user_message() {
+    use crate::provider::tool_calling::ThinkingBlock;
+    use crate::session::loop_runtime::model::to_rig_history;
+    let messages = vec![
+        ToolTurnMessage::user("first question"),
+        ToolTurnMessage::Assistant {
+            text: None,
+            tool_calls: vec![
+                crate::provider::tool_calling::ToolUse {
+                    id: "tu_1".into(),
+                    name: "explore".into(),
+                    input: json!({"sql": "SELECT 1 AS a"}),
+                },
+                crate::provider::tool_calling::ToolUse {
+                    id: "tu_2".into(),
+                    name: "explore".into(),
+                    input: json!({"sql": "SELECT 2 AS b"}),
+                },
+            ],
+            thinking: vec![ThinkingBlock::Thinking {
+                thinking: "plan".into(),
+                signature: "sig".into(),
+            }],
+        },
+        ToolTurnMessage::ToolResult {
+            tool_use_id: "tu_1".into(),
+            content: "one".into(),
+            is_error: false,
+        },
+        ToolTurnMessage::ToolResult {
+            tool_use_id: "tu_2".into(),
+            content: "two".into(),
+            is_error: false,
+        },
+        ToolTurnMessage::user("next question"),
+    ];
+    let history = to_rig_history(&messages);
+    // [User, Assistant(thinking + 2 calls), User(merged results), User]:
+    // the two results ride exactly one user message between the batch and
+    // the next question.
+    let user_messages: Vec<&Vec<UserContent>> = history
+        .iter()
+        .filter_map(|m| match m {
+            Message::User { content } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_messages.len(),
+        3,
+        "three user turns: question, merged results, next question"
+    );
+    let result_blocks = user_messages[1]
+        .iter()
+        .filter(|b| matches!(b, UserContent::ToolResult(_)))
+        .count();
+    assert_eq!(
+        result_blocks, 2,
+        "both batch results ride ONE user message, never split"
+    );
+}
+
+/// The bridge's reverse conversion, which the harness never drives past a
+/// turn-one fault: a rig assistant turn carrying thinking blocks converts
+/// back onto the app vocabulary with the blocks intact, signatures
+/// round-tripping through the empty-string-to-absent boundary.
+#[test]
+fn to_app_messages_round_trips_thinking_blocks() {
+    use crate::provider::tool_calling::ThinkingBlock;
+    use crate::session::loop_runtime::model::to_app_messages;
+    use rig_core::message::{AssistantContent, Reasoning, ReasoningContent};
+    let history = vec![Message::Assistant {
+        id: None,
+        content: vec![
+            AssistantContent::Reasoning(Reasoning::new_with_signature(
+                "signed",
+                Some("sig".to_string()),
+            )),
+            AssistantContent::Reasoning(Reasoning::new_with_signature("unsigned", None)),
+            AssistantContent::Reasoning(Reasoning {
+                id: None,
+                content: vec![ReasoningContent::Redacted {
+                    data: "opaque".into(),
+                }],
+            }),
+            AssistantContent::text("prose"),
+        ],
+    }];
+    let converted = to_app_messages(&history);
+    let ToolTurnMessage::Assistant { text, thinking, .. } = &converted[0] else {
+        panic!("the assistant turn converts to the app assistant shape");
+    };
+    assert_eq!(text.as_deref(), Some("prose"));
+    assert_eq!(
+        thinking,
+        &vec![
+            ThinkingBlock::Thinking {
+                thinking: "signed".into(),
+                signature: "sig".into(),
+            },
+            ThinkingBlock::Thinking {
+                thinking: "unsigned".into(),
+                signature: String::new(),
+            },
+            ThinkingBlock::Redacted {
+                data: "opaque".into(),
+            },
+        ],
+        "absent signatures land as empty strings, redacted blocks stay redacted"
+    );
 }

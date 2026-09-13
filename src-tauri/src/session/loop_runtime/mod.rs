@@ -140,7 +140,7 @@ impl LoopRuntime {
         let drive_done = Arc::new(AtomicBool::new(false));
 
         std::thread::scope(|scope| {
-            // Cancel watcher thread (ADR-0107 Decision 4's poll bridge, the
+            // Cancel watcher thread (ADR-0116 Decision 3's poll bridge, the
             // rig shape): the app token is poll-based, so a scoped thread
             // watches it at 25ms -- the order of the UI's cancel round-trip;
             // dispatch-side cancellation is immediate regardless (the gate
@@ -191,8 +191,7 @@ impl LoopRuntime {
                     {
                         Ok(rt) => rt,
                         Err(e) => {
-                            let mut fold = EventFold::new();
-                            fold.final_output = None;
+                            let fold = EventFold::new();
                             *state.aborted.lock().expect("aborted lock poisoned") = Some(
                                 Termination::Transient(format!("loop runtime build failed: {e}")),
                             );
@@ -380,12 +379,28 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
     } = inputs;
     // The whole windowed conversation rides the request (the app assembled
     // it; the loop runtime re-feeds it verbatim) split at rig's boundary:
-    // the LAST message is the prompt, everything before it the history.
-    let history =
-        model::to_rig_history(&request.messages[..request.messages.len().saturating_sub(1)]);
-    let prompt = model::to_rig_history(&request.messages[request.messages.len() - 1..])
-        .pop()
-        .expect("the prompt split always yields exactly one message");
+    // the LAST message is the prompt, everything before it the history. An
+    // empty request is a contract violation by the caller -- surfaced as an
+    // honest transient rather than a slice-underflow panic misattributed to
+    // the runtime.
+    let (prompt, history) = match request.messages.split_last() {
+        Some((last, rest)) => {
+            let prompt = model::to_rig_history(std::slice::from_ref(last))
+                .pop()
+                .expect("a single message always converts to exactly one");
+            (prompt, model::to_rig_history(rest))
+        }
+        None => {
+            return DriveOutcome {
+                fold: EventFold::new(),
+                exit: DriveExit::Error(StreamingError::Completion(
+                    rig_core::completion::CompletionError::ProviderError(
+                        "empty turn request: no prompt message".to_string(),
+                    ),
+                )),
+            };
+        }
+    };
     let tools = request
         .tools
         .iter()
@@ -485,12 +500,22 @@ fn termination_for_prompt(
             // by the cancel suites; the landing derives from the same clock
             // the hook read (its latch is the single source of truth for
             // the cancelled-vs-no-progress fork), so any of this module's
-            // reason words maps through the one landing rule.
+            // reason words maps through the one landing rule. A reason word
+            // outside the vocabulary (a future hook of ours) is rejected
+            // honestly in release builds too -- it can never silently
+            // degrade into a cancel landing.
             debug_assert!(
                 reason == cancel::CANCEL_REASON_USER || reason == cancel::CANCEL_REASON_NO_PROGRESS,
                 "unexpected stop reason `{reason}`: no hook outside the cancel watcher stops the run"
             );
-            ProgressClock::cancel_landing(clock)
+            match reason.as_str() {
+                cancel::CANCEL_REASON_USER | cancel::CANCEL_REASON_NO_PROGRESS => {
+                    ProgressClock::cancel_landing(clock)
+                }
+                other => Termination::Transient(format!(
+                    "unexpected stop reason `{other}`: no hook outside the cancel watcher stops the run"
+                )),
+            }
         }
         PromptError::CompletionError(err) => termination_for_completion(err),
         PromptError::UnknownToolCall { tool_name, .. } => {
@@ -511,8 +536,9 @@ fn termination_for_prompt(
 /// vocabulary: HTTP 401/403 is the not-wired class (ADR-0044 permanent --
 /// the bridge encodes `NotWired` as an honest 401); the bridge's
 /// invalid-config encoding (400 + prefix) strips back to its payload; and
-/// everything else -- after upstream retries exhausted -- is an honest
-/// transient.
+/// everything else is an honest transient -- generation-side retry is not
+/// delegated (ADR-0116 Decision 5 retired the upstream-retry posture; no
+/// retry stage exists on any path this slice can execute).
 fn termination_for_completion(err: &rig_core::completion::CompletionError) -> Termination {
     if let Some(status) = err.provider_response_status() {
         if status == http::StatusCode::UNAUTHORIZED || status == http::StatusCode::FORBIDDEN {
