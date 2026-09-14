@@ -15,11 +15,12 @@
 //! ever moves).
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::app_config::AppConfig;
 
 use super::frontmatter;
+use super::model::AgentWarning;
 
 /// One shipped builtin definition. Monolingual English in v1 (the
 /// description + preamble are MODEL-facing assets the built-in runtime
@@ -152,7 +153,7 @@ pub(crate) fn reconcile(root: &Path, materialized: &mut BTreeSet<String>) -> boo
     }
     let mut dirty = false;
     for def in BUILTIN_AGENT_DEFINITIONS {
-        let path = root.join(format!("{}.md", def.name));
+        let path = def_path(root, def);
         if !path.exists() {
             match super::registry::write_agent_file(&path, &def.render()) {
                 Ok(()) => {
@@ -178,25 +179,36 @@ pub(crate) fn reconcile(root: &Path, materialized: &mut BTreeSet<String>) -> boo
         if materialized.contains(def.name) {
             continue; // Recorded identity stands (an edit is preserved).
         }
-        // No record: shipped content adopts (the self-heal), anything else
-        // is the user's file owning the name (defer).
-        let adopted = fs_read_best_effort(&path).is_some_and(|current| current == def.render());
-        if adopted {
-            materialized.insert(def.name.to_string());
-            dirty = true;
-            log::info!(
-                target: "agents",
-                "builtin agent definition `{}` adopted a shipped-render file with no \
-                 record (self-heal after an interrupted persist)",
-                def.name
-            );
-        } else {
-            log::warn!(
-                target: "agents",
-                "builtin agent definition `{}` deferred: a user file owns the name; it \
-                 materializes once the user renames or removes it",
-                def.name
-            );
+        // No record: shipped content adopts (the self-heal); anything else
+        // is the defer posture, with the warn naming the real cause (a user
+        // file, or an unreadable one; issue #937 posture D).
+        match classify_name_owner(&path, &def.render()) {
+            NameOwner::Shipped => {
+                materialized.insert(def.name.to_string());
+                dirty = true;
+                log::info!(
+                    target: "agents",
+                    "builtin agent definition `{}` adopted a shipped-render file with no \
+                     record (self-heal after an interrupted persist)",
+                    def.name
+                );
+            }
+            NameOwner::User => {
+                log::warn!(
+                    target: "agents",
+                    "builtin agent definition `{}` deferred: a user file owns the name; it \
+                     materializes once the user renames or removes it",
+                    def.name
+                );
+            }
+            NameOwner::Unreadable => {
+                log::warn!(
+                    target: "agents",
+                    "builtin agent definition `{}` deferred: the name-owning file could \
+                     not be read; the next startup retries the posture",
+                    def.name
+                );
+            }
         }
     }
     // Mark cleanup: a record whose name left the shipped set is stale. No
@@ -207,19 +219,89 @@ pub(crate) fn reconcile(root: &Path, materialized: &mut BTreeSet<String>) -> boo
     dirty || materialized.len() != before
 }
 
-/// Read a file to a string, mapping any failure to None (the reconcile
-/// adoption check degrades to "not ours" on a read fault).
-fn fs_read_best_effort(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .map_err(|e| {
+/// The no-record existing-file classification, shared by the reconcile
+/// defer arm and the read-side audit so the two cannot drift: shipped
+/// content adopts, any other readable content is the user's, and a read
+/// fault is neither -- attributing it to "a user file owns the name" is the
+/// false attribution this slice fixes (issue #937 posture D).
+enum NameOwner {
+    Shipped,
+    User,
+    Unreadable,
+}
+
+fn classify_name_owner(path: &Path, expected: &str) -> NameOwner {
+    match std::fs::read_to_string(path) {
+        Ok(current) if current == expected => NameOwner::Shipped,
+        Ok(_) => NameOwner::User,
+        Err(e) => {
             log::warn!(
                 target: "agents",
                 "builtin agent definition read failed for `{}`: {e}",
                 path.display()
             );
-            e
-        })
-        .ok()
+            NameOwner::Unreadable
+        }
+    }
+}
+
+/// The read-side degradation audit (issue #937 posture C): classify every
+/// shipped definition the mark does not cover, so the deferred, the
+/// read-fault, and the failed-materialization postures stop being
+/// log-only. Read-only -- no
+/// writes, no state; the pane renders each warning as a row next to the
+/// list.
+pub(crate) fn audit_builtin_postures(root: &Path, mark: &BuiltinAgentMark) -> Vec<AgentWarning> {
+    let mut warnings = Vec::new();
+    for def in BUILTIN_AGENT_DEFINITIONS {
+        if mark.contains(def.name) {
+            continue; // The recorded identity stands.
+        }
+        let path = def_path(root, def);
+        // `Path::exists` folds every metadata fault into "absent", which
+        // would misfile an unreadable name-owner (ACL / lock) as a
+        // not-materialized row: split NotFound (genuinely absent -- the
+        // failed write) from other faults (unreadable), the
+        // `is_loadable_file` discipline (issue #937 posture D).
+        match std::fs::metadata(&path) {
+            Ok(_) => match classify_name_owner(&path, &def.render()) {
+                // The interrupted-persist window: the next startup adopts --
+                // not a degradation.
+                NameOwner::Shipped => {}
+                NameOwner::User => warnings.push(AgentWarning::Deferred {
+                    name: def.name.to_string(),
+                }),
+                NameOwner::Unreadable => warnings.push(AgentWarning::ReadFault {
+                    name: def.name.to_string(),
+                }),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // The startup write failed (or the root itself would not
+                // mint); without this row an empty pane reads as "never
+                // created".
+                warnings.push(AgentWarning::NotMaterialized {
+                    name: def.name.to_string(),
+                });
+            }
+            Err(e) => {
+                log::warn!(
+                    target: "agents",
+                    "builtin agent definition metadata read failed for `{}`: {e}",
+                    path.display()
+                );
+                warnings.push(AgentWarning::ReadFault {
+                    name: def.name.to_string(),
+                });
+            }
+        }
+    }
+    warnings
+}
+
+/// The on-disk path of one shipped definition (the `{name}.md` file-name
+/// convention in one place -- reconcile and the audit stay in lockstep).
+fn def_path(root: &Path, def: &BuiltinAgentDefinition) -> PathBuf {
+    root.join(format!("{}.md", def.name))
 }
 
 #[cfg(test)]
@@ -348,5 +430,98 @@ mod tests {
         let mut mark = BTreeSet::from(["ghost".to_string()]);
         assert!(reconcile(tmp.path(), &mut mark));
         assert!(!mark.contains("ghost"));
+    }
+
+    #[test]
+    fn reconcile_defers_an_unreadable_name_file_without_adopting() {
+        // A directory squatting on the name faults the read on both platforms
+        // (IsADirectory / AccessDenied): the content is unknown, so adopting
+        // is off the table -- and the defer arm must attribute the read fault,
+        // not "a user file owns the name" (issue #937 posture D).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("general-purpose.md")).unwrap();
+        let mut mark = BTreeSet::new();
+        assert!(!reconcile(tmp.path(), &mut mark));
+        assert!(!mark.contains("general-purpose"));
+    }
+
+    // --- audit (issue #937 posture C) ----------------------------------------
+
+    #[test]
+    fn audit_is_silent_when_the_mark_covers_the_shipped_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut names = BTreeSet::new();
+        reconcile(tmp.path(), &mut names);
+        let mark = BuiltinAgentMark::of(&["general-purpose"]);
+        assert!(audit_builtin_postures(tmp.path(), &mark).is_empty());
+    }
+
+    #[test]
+    fn audit_reports_a_deferred_builtin_behind_a_user_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("general-purpose.md"),
+            "---\nname: general-purpose\ndescription: Mine.\n---\nMy own preamble.\n",
+        )
+        .unwrap();
+        let warnings = audit_builtin_postures(tmp.path(), &BuiltinAgentMark::default());
+        assert_eq!(
+            warnings,
+            vec![AgentWarning::Deferred {
+                name: "general-purpose".into()
+            }]
+        );
+        // The full lifecycle (AC 1): once the user's file is gone, the next
+        // startup materializes and the audit goes quiet.
+        std::fs::remove_file(tmp.path().join("general-purpose.md")).unwrap();
+        let mut names = BTreeSet::new();
+        reconcile(tmp.path(), &mut names);
+        // The materializes half asserted on its own: the write arm minted
+        // the file, so the record below is earned, not hand-built.
+        assert!(names.contains("general-purpose"));
+        let mark = BuiltinAgentMark::of(&["general-purpose"]);
+        assert!(audit_builtin_postures(tmp.path(), &mark).is_empty());
+    }
+
+    #[test]
+    fn audit_reports_a_materialization_failure_with_no_file() {
+        // The startup's write failed (disk full / permissions): the mark
+        // stayed empty and no file exists -- without the audit the pane reads
+        // the empty list as "never created a registry" (issue #937 posture C).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let warnings = audit_builtin_postures(tmp.path(), &BuiltinAgentMark::default());
+        assert_eq!(
+            warnings,
+            vec![AgentWarning::NotMaterialized {
+                name: "general-purpose".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn audit_reports_a_read_fault_for_an_unreadable_name_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("general-purpose.md")).unwrap();
+        let warnings = audit_builtin_postures(tmp.path(), &BuiltinAgentMark::default());
+        assert_eq!(
+            warnings,
+            vec![AgentWarning::ReadFault {
+                name: "general-purpose".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn audit_stays_silent_for_a_pending_self_heal() {
+        // A shipped-render file with no record is the interrupted-persist
+        // window; the next startup adopts it -- not a degradation.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("general-purpose.md"),
+            find_definition("general-purpose").unwrap().render(),
+        )
+        .unwrap();
+        assert!(audit_builtin_postures(tmp.path(), &BuiltinAgentMark::default()).is_empty());
     }
 }

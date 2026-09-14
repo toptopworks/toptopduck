@@ -56,12 +56,22 @@ export interface SkippedAgent {
   reason: string;
 }
 
+// One read-side degradation of the builtin set (issue #937): a shipped
+// definition that is NOT in its expected posture. Internally tagged on
+// `state` (the BuiltinScanEntry wire shape); the catalog owns each row's
+// wording.
+export type AgentWarning =
+  | { state: "deferred"; name: string }
+  | { state: "read_fault"; name: string }
+  | { state: "not_materialized"; name: string };
+
 // The list_agents return: the spec-valid definitions + the skipped files +
-// a root-level error when the registry root itself could not be read.
-// Mirrors the Rust AgentListing.
+// the builtin-degradation warnings + a root-level error when the registry
+// root itself could not be read. Mirrors the Rust AgentListing.
 export interface AgentListing {
   agents: AgentEntry[];
   ignored: SkippedAgent[];
+  warnings: AgentWarning[];
   root_error: string | null;
 }
 

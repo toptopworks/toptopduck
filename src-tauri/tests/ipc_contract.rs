@@ -2012,7 +2012,8 @@ fn agent_entry_serializes_with_snake_case_source() {
 #[test]
 fn agent_listing_wraps_agents_and_ignored() {
     // AgentListing (the list_agents return, issue #932): the flat
-    // { agents, ignored, root_error } object -- the SkillListing contract.
+    // { agents, ignored, warnings, root_error } object -- the SkillListing
+    // contract plus the degradation lane (issue #937).
     use toptopduck_lib::agents::{AgentError, AgentListing, SkippedAgent};
     assert_wire(
         &AgentListing {
@@ -2024,8 +2025,34 @@ fn agent_listing_wraps_agents_and_ignored() {
                 )
                 .to_string(),
             }],
+            warnings: Vec::new(),
             root_error: None,
         },
-        r#"{"agents":[],"ignored":[{"file":"mismatch.md","reason":"invalid agent definition: frontmatter name `other` does not match its file stem `mismatch`"}],"root_error":null}"#,
+        r#"{"agents":[],"ignored":[{"file":"mismatch.md","reason":"invalid agent definition: frontmatter name `other` does not match its file stem `mismatch`"}],"warnings":[],"root_error":null}"#,
+    );
+}
+
+#[test]
+fn agent_warning_serializes_state_tagged() {
+    // AgentWarning (issue #937): internally tagged on `state`, the
+    // BuiltinScanEntry shape -- the frontend narrows on the variant.
+    use toptopduck_lib::agents::AgentWarning;
+    assert_wire(
+        &AgentWarning::NotMaterialized {
+            name: "general-purpose".into(),
+        },
+        r#"{"state":"not_materialized","name":"general-purpose"}"#,
+    );
+    assert_wire(
+        &AgentWarning::ReadFault {
+            name: "general-purpose".into(),
+        },
+        r#"{"state":"read_fault","name":"general-purpose"}"#,
+    );
+    assert_wire(
+        &AgentWarning::Deferred {
+            name: "general-purpose".into(),
+        },
+        r#"{"state":"deferred","name":"general-purpose"}"#,
     );
 }
