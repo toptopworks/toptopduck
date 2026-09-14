@@ -53,8 +53,11 @@ pub fn list_agents(
                                     "error reading entry metadata for `{}`: {e}",
                                     path.display()
                                 );
+                                let file = file_name_of(&path).unwrap_or_else(|| {
+                                    format!("<unnamed-entry-{}>", ignored.len())
+                                });
                                 ignored.push(SkippedAgent {
-                                    file: file_name_of(&path).unwrap_or_default(),
+                                    file,
                                     reason: format!("read entry metadata failed: {e}"),
                                 });
                                 continue;
@@ -651,6 +654,10 @@ mod tests {
         let mark = BuiltinAgentMark::of(&["general-purpose"]);
         let listing = list_agents(tmp.path(), &mark, &Default::default(), &Default::default());
         assert_eq!(listing.agents[0].source, AgentSource::Builtin);
+        // A mark-covered but drifted definition is an edited materialized
+        // builtin (the blessed flow), not a degradation: the audit's mark
+        // gate keeps it out of the warning lane.
+        assert!(listing.warnings.is_empty());
         // The same file without the record reads as the user's own.
         let unmarked = list_agents(
             tmp.path(),

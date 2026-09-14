@@ -118,6 +118,7 @@ describe("AgentsSection (issue #932)", () => {
 
   it("renders each builtin degradation warning with its posture wording (issue #937)", async () => {
     await renderListed([makeEntry()], {
+      root_error: "read root failed",
       warnings: [
         { state: "deferred", name: "general-purpose" },
         { state: "read_fault", name: "reviewer" },
@@ -132,15 +133,17 @@ describe("AgentsSection (issue #932)", () => {
       ),
     ).toBeVisible();
     expect(
-      screen.getByText(
-        "The file holding the built-in agent reviewer could not be read (permissions or a lock).",
-      ),
+      screen.getByText("The file holding the built-in agent reviewer could not be read."),
     ).toBeVisible();
     expect(
       screen.getByText(
-        "The built-in agent writer failed to materialize (disk or permissions); the " +
-        "next app start retries.",
+        "The built-in agent writer has not materialized yet; the next app start retries.",
       ),
+    ).toBeVisible();
+    // The root scan error and the degradation rows coexist: the audit runs
+    // even under a root fault, and each lane states its own surface.
+    expect(
+      screen.getByText("Couldn't load your agents: read root failed"),
     ).toBeVisible();
   });
 

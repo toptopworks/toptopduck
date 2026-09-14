@@ -246,8 +246,9 @@ fn classify_name_owner(path: &Path, expected: &str) -> NameOwner {
 }
 
 /// The read-side degradation audit (issue #937 posture C): classify every
-/// shipped definition the mark does not cover, so the deferred and the
-/// failed-materialization postures stop being log-only. Read-only -- no
+/// shipped definition the mark does not cover, so the deferred, the
+/// read-fault, and the failed-materialization postures stop being
+/// log-only. Read-only -- no
 /// writes, no state; the pane renders each warning as a row next to the
 /// list.
 pub(crate) fn audit_builtin_postures(root: &Path, mark: &BuiltinAgentMark) -> Vec<AgentWarning> {
@@ -475,6 +476,9 @@ mod tests {
         std::fs::remove_file(tmp.path().join("general-purpose.md")).unwrap();
         let mut names = BTreeSet::new();
         reconcile(tmp.path(), &mut names);
+        // The materializes half asserted on its own: the write arm minted
+        // the file, so the record below is earned, not hand-built.
+        assert!(names.contains("general-purpose"));
         let mark = BuiltinAgentMark::of(&["general-purpose"]);
         assert!(audit_builtin_postures(tmp.path(), &mark).is_empty());
     }

@@ -338,29 +338,45 @@ export function AgentsSection({
             {warnings.map((warning) => {
               // The catalog owns each posture's wording (issue #937): the
               // row must name the real cause, never a false attribution.
-              const message =
-                warning.state === "deferred" ? (
-                  <FormattedMessage
-                    id="settings.agents.warningDeferred"
-                    defaultMessage="A built-in agent is waiting for the name {name}: it materializes once the file is renamed or removed and the app restarts."
-                    values={{ name: warning.name }}
-                  />
-                ) : warning.state === "read_fault" ? (
-                  <FormattedMessage
-                    id="settings.agents.warningReadFault"
-                    defaultMessage="The file holding the built-in agent {name} could not be read (permissions or a lock)."
-                    values={{ name: warning.name }}
-                  />
-                ) : (
-                  <FormattedMessage
-                    id="settings.agents.warningNotMaterialized"
-                    defaultMessage="The built-in agent {name} failed to materialize (disk or permissions); the next app start retries."
-                    values={{ name: warning.name }}
-                  />
-                );
-              return (
-                <li key={`${warning.state}-${warning.name}`}>{message}</li>
-              );
+              // The never guard makes a future backend variant fail at
+              // compile time, not render as the wrong posture's cause
+              // (the LocalCliTab probe switch pattern).
+              switch (warning.state) {
+                case "deferred":
+                  return (
+                    <li key={`${warning.state}-${warning.name}`}>
+                      <FormattedMessage
+                        id="settings.agents.warningDeferred"
+                        defaultMessage="A built-in agent is waiting for the name {name}: it materializes once the file is renamed or removed and the app restarts."
+                        values={{ name: warning.name }}
+                      />
+                    </li>
+                  );
+                case "read_fault":
+                  return (
+                    <li key={`${warning.state}-${warning.name}`}>
+                      <FormattedMessage
+                        id="settings.agents.warningReadFault"
+                        defaultMessage="The file holding the built-in agent {name} could not be read."
+                        values={{ name: warning.name }}
+                      />
+                    </li>
+                  );
+                case "not_materialized":
+                  return (
+                    <li key={`${warning.state}-${warning.name}`}>
+                      <FormattedMessage
+                        id="settings.agents.warningNotMaterialized"
+                        defaultMessage="The built-in agent {name} has not materialized yet; the next app start retries."
+                        values={{ name: warning.name }}
+                      />
+                    </li>
+                  );
+                default: {
+                  const _exhaustive: never = warning;
+                  throw new Error(`Unknown builtin warning state: ${String(_exhaustive)}`);
+                }
+              }
             })}
           </ul>
         </div>
