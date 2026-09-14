@@ -97,3 +97,11 @@ export const skillKeys = {
   sources: (customPaths: readonly string[]) =>
     ["skills", "sources", customPaths] as const,
 } as const;
+
+/** Session-AGNOSTIC agent-definitions registry (issue #932, ADR-0117) -- the
+ *  settings AgentsSection list read + the create / update / delete /
+ *  enablement invalidation target. Same posture as skillKeys: process-global,
+ *  not under the session prefix. */
+export const agentKeys = {
+  all: () => ["agents"] as const,
+} as const;

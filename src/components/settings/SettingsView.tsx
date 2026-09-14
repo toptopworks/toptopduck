@@ -9,6 +9,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Bot,
 } from "lucide-react";
 
 import { getAppConfig } from "../../api";
@@ -36,6 +37,7 @@ import { type ProfilesControls } from "./ProfilesSection";
 import { PrivacySection } from "./PrivacySection";
 import { RuntimeSection } from "./RuntimeSection";
 import { SkillsSection } from "./SkillsSection";
+import { AgentsSection } from "./AgentsSection";
 import {
   SETTINGS_SECTIONS,
   type IpcBusyReporter,
@@ -78,6 +80,8 @@ function SectionIcon({ section }: { section: SettingsSection }) {
       return <SlidersHorizontal className="size-4 shrink-0" aria-hidden />;
     case "skills":
       return <Puzzle className="size-4 shrink-0" aria-hidden />;
+    case "agents":
+      return <Bot className="size-4 shrink-0" aria-hidden />;
     case "runtime":
       return <Brain className="size-4 shrink-0" aria-hidden />;
     case "database-engine":
@@ -104,6 +108,8 @@ function SectionLabel({ section }: { section: SettingsSection }) {
       return <FormattedMessage id="settings.nav.general" defaultMessage="General" />;
     case "skills":
       return <FormattedMessage id="settings.nav.skills" defaultMessage="Skills" />;
+    case "agents":
+      return <FormattedMessage id="settings.nav.agents" defaultMessage="Subagents" />;
     case "runtime":
       return <FormattedMessage id="settings.nav.runtime" defaultMessage="Runtime" />;
     case "database-engine":
@@ -171,6 +177,8 @@ function SectionContent({
           onAppConfigSync={onCliToolsChanged}
         />
       );
+    case "agents":
+      return <AgentsSection onAppConfigSync={onCliToolsChanged} />;
     case "runtime":
       return (
         <RuntimeSection

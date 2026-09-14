@@ -453,6 +453,77 @@ impl LiveProviderConfig {
             .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))
     }
 
+    /// The builtin agent-definitions startup window (issue #932, ADR-0117
+    /// Decision 3): materialize / adopt / clean the shipped set against the
+    /// registry under the write lock, persisting only when the mark moved.
+    /// Failures are the caller's to log-and-degrade (the next startup
+    /// retries).
+    pub fn materialize_builtin_agents(
+        &self,
+        agents_root: &std::path::Path,
+    ) -> Result<(), app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write()?;
+        if crate::agents::builtin::reconcile(agents_root, &mut cfg.materialized_builtin_agents) {
+            self.store_inner(cfg)?;
+        }
+        Ok(())
+    }
+
+    /// Set one agent definition's machine-level enablement (issue #932,
+    /// ADR-0117 Decision 2): the app-config name set is the single axis --
+    /// enabled = listed into the built-in runtime's every-turn tool face
+    /// (#933), disabled = hidden. Read-modify-write under the same write
+    /// lock as every registry write. Returns the updated FULL config (the
+    /// ADR-0109 Decision 9 frontend-sync contract).
+    pub fn set_agent_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write()?;
+        let trimmed = name.trim().to_string();
+        if enabled {
+            if trimmed.is_empty() {
+                return Err(app_config::WriteError::Validation(
+                    "an agent-definition name must not be blank".into(),
+                ));
+            }
+            cfg.enabled_agents.insert(trimmed);
+        } else {
+            cfg.enabled_agents.remove(&trimmed);
+        }
+        self.store_inner(cfg)
+    }
+
+    /// Carry one agent definition's enablement across a rename (issue #932):
+    /// an enabled definition that renames keeps its enabled state (the entry
+    /// moves `from` -> `to` in the name set); a disabled rename is a no-op --
+    /// no stale `from` entry is created. Read-modify-write under the same
+    /// write lock as every registry write.
+    pub fn rename_agent_enabled(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write()?;
+        if cfg.enabled_agents.remove(from) {
+            cfg.enabled_agents.insert(to.to_string());
+        }
+        self.store_inner(cfg)
+    }
+
     /// Read-only snapshot of the configured CLI registry: every entry,
     /// enabled or not (the settings list renders the disabled rows too).
     pub fn cli_tools(&self) -> Vec<CliToolConfig> {
@@ -2055,6 +2126,50 @@ mod tests {
             .expect("set_default_runtime built-in");
         assert_eq!(reset.default_runtime, DefaultRuntime::BuiltIn);
         assert_eq!(live.load().default_runtime, DefaultRuntime::BuiltIn);
+    }
+
+    // --- agent enablement (issue #932, ADR-0117) -----------------------------
+
+    #[test]
+    fn set_agent_enabled_round_trips_and_keeps_siblings() {
+        // The write lands on the name set; a sibling entry and an unrelated
+        // pref (default_runtime) survive the read-modify-write, and a fresh
+        // load reads the set back off disk (the persisted-set round trip).
+        let (_dir, live) = live();
+        live.set_agent_enabled("data-cleaner", true)
+            .expect("seed data-cleaner");
+        let stored = live
+            .set_agent_enabled("sql-explorer", true)
+            .expect("set sql-explorer");
+        assert!(stored.enabled_agents.contains("data-cleaner"));
+        assert!(stored.enabled_agents.contains("sql-explorer"));
+        // Disabling one entry leaves the sibling alone.
+        let stored = live
+            .set_agent_enabled("data-cleaner", false)
+            .expect("disable data-cleaner");
+        assert!(!stored.enabled_agents.contains("data-cleaner"));
+        assert!(stored.enabled_agents.contains("sql-explorer"));
+        assert_eq!(
+            live.load().enabled_agents,
+            ["sql-explorer".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn rename_agent_enabled_carries_the_entry_and_creates_no_stale_one() {
+        let (_dir, live) = live();
+        live.set_agent_enabled("old-name", true).expect("seed");
+        let stored = live
+            .rename_agent_enabled("old-name", "new-name")
+            .expect("rename");
+        assert!(!stored.enabled_agents.contains("old-name"));
+        assert!(stored.enabled_agents.contains("new-name"));
+        // A disabled rename is a no-op: no stale `from` entry appears.
+        let stored = live
+            .rename_agent_enabled("ghost", "other")
+            .expect("rename a disabled name");
+        assert!(!stored.enabled_agents.contains("other"));
+        assert!(!stored.enabled_agents.contains("ghost"));
     }
 
     // --- last model posture (issue #581, ADR-0100) --------------------------

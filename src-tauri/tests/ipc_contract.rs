@@ -1558,6 +1558,26 @@ fn model_posture_wire_shape() {
     );
 }
 
+/// The two agent-definitions name sets (issue #932) serialize ALWAYS (no
+/// `skip_serializing_if`): the frontend mirror declares both fields required,
+/// and an absent key would read as `undefined` through the hand-mirror. Pin
+/// the empty-set form on defaults (the `last_model_postures` precedent).
+#[test]
+fn app_config_always_serializes_agent_name_sets() {
+    use toptopduck_lib::app_config::AppConfig;
+    let value = serde_json::to_value(AppConfig::defaults()).expect("serialize");
+    assert_eq!(
+        value["enabled_agents"],
+        serde_json::json!([]),
+        "the enabled set key is always present, empty by default"
+    );
+    assert_eq!(
+        value["materialized_builtin_agents"],
+        serde_json::json!([]),
+        "the materialization mark key is always present, empty by default"
+    );
+}
+
 /// `AppConfig.last_model_postures` serializes ALWAYS (no
 /// `skip_serializing_if`): the frontend mirror declares the field required,
 /// and an absent key would read as `undefined` through the hand-mirror. Pin
@@ -1902,5 +1922,110 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
             "in_flight": true,
         }),
         "degraded row drifted from pinned contract"
+    );
+}
+
+#[test]
+fn agent_error_serializes_adjacently_tagged() {
+    // AgentError (agents registry commands, issue #932) crosses IPC as the
+    // reject of create_agent / update_agent / delete_agent /
+    // set_agent_enabled. Every variant carries the English detail or the
+    // offending name under data; the kind set is disjoint from every other
+    // typed error enum so the frontend dispatch stays unambiguous (the
+    // SkillError lane's contract).
+    use toptopduck_lib::agents::AgentError;
+    assert_wire(
+        &AgentError::InvalidName("bad reason".into()),
+        r#"{"kind":"InvalidAgentName","data":"bad reason"}"#,
+    );
+    assert_wire(
+        &AgentError::InvalidAgent("no fence".into()),
+        r#"{"kind":"InvalidAgent","data":"no fence"}"#,
+    );
+    assert_wire(
+        &AgentError::NoSuchAgent("ghost".into()),
+        r#"{"kind":"NoSuchAgent","data":"ghost"}"#,
+    );
+    assert_wire(
+        &AgentError::NameTaken("taken".into()),
+        r#"{"kind":"AgentNameTaken","data":"taken"}"#,
+    );
+    assert_wire(
+        &AgentError::ReservedAgentName("explore".into()),
+        r#"{"kind":"ReservedAgentName","data":"explore"}"#,
+    );
+    assert_wire(
+        &AgentError::BuiltinNameLocked("general-purpose".into()),
+        r#"{"kind":"BuiltinNameLocked","data":"general-purpose"}"#,
+    );
+    assert_wire(
+        &AgentError::BuiltinUndeletable("general-purpose".into()),
+        r#"{"kind":"BuiltinUndeletable","data":"general-purpose"}"#,
+    );
+    assert_wire(
+        &AgentError::ReadOnly("external".into()),
+        r#"{"kind":"AgentReadOnly","data":"external"}"#,
+    );
+    assert_wire(
+        &AgentError::FsFailure("disk full".into()),
+        r#"{"kind":"AgentFsFailure","data":"disk full"}"#,
+    );
+}
+
+#[test]
+fn agent_entry_serializes_with_snake_case_source() {
+    // AgentEntry (list_agents + the mutating commands' return, issue #932):
+    // the source enum crosses as the bare snake_case variant (mirrors
+    // SkillEntry.acquired); every field is present (no skip_serializing_if
+    // convention in this repo -- Option serializes as null).
+    use toptopduck_lib::agents::{AgentEntry, AgentSource};
+    assert_wire(
+        &AgentEntry {
+            name: "data-cleaner".into(),
+            description: "Cleans datasets.".into(),
+            preamble: "You clean data.\n".into(),
+            source: AgentSource::User,
+            enabled: true,
+            link_target: None,
+            skill_refs: vec!["pdf-tools".into()],
+            dangling_skill_refs: Vec::new(),
+            dropped_axes: vec!["tools".into()],
+        },
+        r#"{"name":"data-cleaner","description":"Cleans datasets.","preamble":"You clean data.\n","source":"user","enabled":true,"link_target":null,"skill_refs":["pdf-tools"],"dangling_skill_refs":[],"dropped_axes":["tools"]}"#,
+    );
+    assert_wire(
+        &AgentEntry {
+            name: "external".into(),
+            description: "External.".into(),
+            preamble: "Body.\n".into(),
+            source: AgentSource::Linked,
+            enabled: false,
+            link_target: Some("/src/external.md".into()),
+            skill_refs: Vec::new(),
+            dangling_skill_refs: vec!["ghost".into()],
+            dropped_axes: Vec::new(),
+        },
+        r#"{"name":"external","description":"External.","preamble":"Body.\n","source":"linked","enabled":false,"link_target":"/src/external.md","skill_refs":[],"dangling_skill_refs":["ghost"],"dropped_axes":[]}"#,
+    );
+}
+
+#[test]
+fn agent_listing_wraps_agents_and_ignored() {
+    // AgentListing (the list_agents return, issue #932): the flat
+    // { agents, ignored, root_error } object -- the SkillListing contract.
+    use toptopduck_lib::agents::{AgentError, AgentListing, SkippedAgent};
+    assert_wire(
+        &AgentListing {
+            agents: Vec::new(),
+            ignored: vec![SkippedAgent {
+                file: "mismatch.md".into(),
+                reason: AgentError::InvalidAgent(
+                    "frontmatter name `other` does not match its file stem `mismatch`".into(),
+                )
+                .to_string(),
+            }],
+            root_error: None,
+        },
+        r#"{"agents":[],"ignored":[{"file":"mismatch.md","reason":"invalid agent definition: frontmatter name `other` does not match its file stem `mismatch`"}],"root_error":null}"#,
     );
 }

@@ -7,11 +7,13 @@
 // carries the section id set + order.
 
 /** The settings panes (ADR-0065 + #362 skills + #387 MCP + ADR-0091 rename +
- *  reorder): General / Runtime / Skills / MCP / Database Engine / Privacy. */
+ *  reorder + #932 agents): General / Runtime / Skills / Agents / MCP / CLI
+ *  Tools / Database Engine / Privacy. */
 export type SettingsSection =
   | "general"
   | "runtime"
   | "skills"
+  | "agents"
   | "mcp"
   | "cli-tools"
   | "database-engine"
@@ -26,6 +28,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "general",
   "runtime",
   "skills",
+  "agents",
   "mcp",
   "cli-tools",
   "database-engine",

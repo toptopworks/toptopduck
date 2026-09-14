@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { AgentEntry, AgentListing, AgentUpdate } from "./types/agents";
 import type { AppConfig, DefaultRuntime, ModelPosture } from "./types/app-config";
 import type { BuiltinScanResult, CliToolConfig } from "./types/cli-tool";
 import type {
@@ -678,6 +679,57 @@ export async function updateSkill(name: string, update: SkillUpdate): Promise<Sk
 // a linked skill's LINK is removed without touching the external source.
 export async function deleteSkill(name: string): Promise<void> {
   await invoke<void>("delete_skill", { name });
+}
+
+// --- Agent definitions (issue #932, ADR-0117) --------------------------------
+//
+// Session-AGNOSTIC: the registry is process-global (one root shared by every
+// session), the same posture as the skills registry.
+
+// List every spec-valid agent definition PLUS the files the scan skipped.
+// The listing merges the machine-level enablement set + the builtin
+// materialization mark + the backtick skill-mark partition, so each entry
+// carries its source posture, enabled state, and the two warning surfaces.
+// A never-created registry lists empty. Read-only -- never refuses.
+export async function listAgents(): Promise<AgentListing> {
+  return invoke<AgentListing>("list_agents");
+}
+
+// Mint a new user agent definition: <root>/<name>.md with the given
+// declaration (description + preamble). The name must be kebab-case (<= 64),
+// free, and outside the reserved tool-name set. A fresh mint lands enabled
+// (the explicit create is explicit intent). Returns the entry read back from
+// disk.
+export async function createAgent(
+  name: string,
+  description: string,
+  preamble: string,
+): Promise<AgentEntry> {
+  return invoke<AgentEntry>("create_agent", { name, description, preamble });
+}
+
+// Rewrite one user/builtin definition atomically. `name` addresses the
+// current file; `update.name` is the identity to write -- a different value
+// renames the file. Refuses a linked definition (read-only), a materialized
+// builtin rename, a taken rename target, and a reserved name. Present
+// community `tools` / `model` axes survive the edit verbatim.
+export async function updateAgent(name: string, update: AgentUpdate): Promise<AgentEntry> {
+  return invoke<AgentEntry>("update_agent", { name, update });
+}
+
+// Delete one definition file. A user file is removed; a linked definition's
+// LINK is removed; a materialized builtin is refused. Returns the updated
+// FULL app-config (the ADR-0109 Decision 9 sync contract -- the stale
+// enablement entry drops server-side).
+export async function deleteAgent(name: string): Promise<AppConfig> {
+  return invoke<AppConfig>("delete_agent", { name });
+}
+
+// Set one definition's machine-level enablement (the single axis): enabled =
+// listed into the built-in runtime's every-turn tool face (#933); disabled =
+// hidden. Returns the updated FULL app-config.
+export async function setAgentEnabled(name: string, enabled: boolean): Promise<AppConfig> {
+  return invoke<AppConfig>("set_agent_enabled", { name, enabled });
 }
 
 // --- Skill import (issue #367, ADR-0086) -------------------------------------

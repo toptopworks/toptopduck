@@ -99,6 +99,8 @@ function baseAppConfig(): AppConfig {
     default_runtime: { kind: "built_in" },
     builtin_skill_baselines: {},
     last_model_postures: {},
+    enabled_agents: [],
+    materialized_builtin_agents: [],
   };
 }
 
