@@ -140,8 +140,9 @@ pub fn list_skills(root: &Path, mark: &BuiltinSkillMark) -> SkillListing {
 /// Mint a new `local` skill: `<root>/<name>/SKILL.md` with the given
 /// description + the skeleton body. The registry root is created lazily on
 /// first mint. Refuses a name in the builtin reserved set (issue #677) --
-/// statically, independent of what is materialized. Returns the entry read
-/// back from disk.
+/// statically, independent of what is materialized. Returns the entry for
+/// the written skill (read back, or derived from the written payload on a
+/// transient read-back failure).
 pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillEntry, SkillError> {
     validate_skill_name(name)?;
     if super::builtin::is_reserved_skill_name(name) {
@@ -168,8 +169,21 @@ pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillE
         return Err(e);
     }
     // The reserved-set refusal above keeps a freshly minted name out of the
-    // builtin namespace, so the read-back cannot be a builtin skill.
-    load_skill(&dir, &BuiltinSkillMark::default())
+    // builtin namespace, so the read-back cannot be a builtin skill. A
+    // failed transient read-back derives from the written payload (issue
+    // #936) -- reporting `Err` there would strand the minted directory and
+    // deadlock a retry on NameTaken. A semantic read-back failure
+    // (render/parse drift) stays `Err`, and the mint is removed below so
+    // the retry succeeds anyway.
+    let mark = BuiltinSkillMark::default();
+    let result = read_back_or_derive(load_skill_parts(&dir, &mark), &content, name, &mark);
+    // Same cleanup contract as the write branch above: a failed mint leaves
+    // no directory behind (it would surface as NameTaken on the user's
+    // retry).
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    result
 }
 
 /// RAII guard for an in-flight rename in [`update_skill`]: if still armed on
@@ -274,7 +288,14 @@ pub fn update_skill(
         frontmatter::set_cli_tools(&mut fm, &update.cli_tools);
         let content = frontmatter::render_skill_md(&fm, &update.body)?;
         write_skill_md(&work_dir, &content)?;
-        load_skill(&work_dir, mark)
+        // The write has landed; reconcile a failed read-back against it
+        // (issue #936) instead of reporting an edit failure that is on disk.
+        read_back_or_derive(
+            load_skill_parts(&work_dir, mark),
+            &content,
+            &update.name,
+            mark,
+        )
     })();
     match result {
         Ok(entry) => {
@@ -355,11 +376,26 @@ fn existing_skill_dir(root: &Path, name: &str) -> Result<PathBuf, SkillError> {
     Ok(dir)
 }
 
+/// The IO half of [`load_skill`] (see there for the full contract): raw
+/// SKILL.md bytes + the directory's fs-derived posture.
+type SkillParts = (Vec<u8>, String, Acquired, Option<String>);
+
 /// Load + validate one skill directory into its wire entry. `mark` carries
 /// the materialized-builtin names (the side-table keys) so a materialized
 /// skill's `acquired` reads `Builtin` while a user's pre-existing same-named
 /// skill keeps its own source (issue #677).
 pub(crate) fn load_skill(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillEntry, SkillError> {
+    let (bytes, dir_name, acquired, link_target) = load_skill_parts(dir, mark)?;
+    assemble_skill_parts(&bytes, &dir_name, acquired, link_target)
+}
+
+/// The IO half of [`load_skill`]: read the SKILL.md bytes and derive the
+/// directory's posture. Split out so [`read_back_or_derive`] can tell a
+/// transient read failure apart from a parse/validation failure BY STRUCTURE,
+/// not by matching the error payload (issue #936) -- a read failure maps to
+/// `InvalidSkill` here, and that mapping is the scan surface's documented
+/// contract (`SkippedSkill::reason`), so it stays untouched.
+fn load_skill_parts(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillParts, SkillError> {
     let dir_name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -376,8 +412,46 @@ pub(crate) fn load_skill(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillEnt
     let bytes = fs::read(&md_path).map_err(|e| {
         SkillError::InvalidSkill(format!("cannot read `{}`: {e}", md_path.display()))
     })?;
-    let raw = String::from_utf8_lossy(&bytes);
-    let parsed = frontmatter::parse_skill_md(&raw).map_err(SkillError::InvalidSkill)?;
+    // Derive acquired off the directory's own metadata (never following the
+    // link), and resolve the target for the "open source location" anchor.
+    let is_link = fs::symlink_metadata(dir)
+        .map(|m| is_linked(&m))
+        .unwrap_or(false);
+    let fs_acquired = if is_link {
+        Acquired::Linked
+    } else {
+        Acquired::Local
+    };
+    let acquired = mark.acquired(&dir_name, fs_acquired);
+    let link_target = if is_link { link_target_of(dir) } else { None };
+    Ok((bytes, dir_name, acquired, link_target))
+}
+
+/// The assembly half of [`load_skill`]: raw bytes -> wire entry.
+fn assemble_skill_parts(
+    bytes: &[u8],
+    dir_name: &str,
+    acquired: Acquired,
+    link_target: Option<String>,
+) -> Result<SkillEntry, SkillError> {
+    let raw = String::from_utf8_lossy(bytes);
+    skill_from_str(&raw, dir_name, acquired, link_target, sha256_hex(bytes))
+}
+
+/// Parse + assemble one skill's wire entry from raw text (the loader's
+/// pipeline minus its IO, so a write path can reuse the exact parse +
+/// validate + assemble pass on the payload it just wrote). `content_hash` is
+/// caller-computed -- the loader hashes the exact on-disk bytes; a write path
+/// hashes the payload it wrote (`write_skill_md` writes the string verbatim,
+/// so the two agree).
+fn skill_from_str(
+    raw: &str,
+    dir_name: &str,
+    acquired: Acquired,
+    link_target: Option<String>,
+    content_hash: String,
+) -> Result<SkillEntry, SkillError> {
+    let parsed = frontmatter::parse_skill_md(raw).map_err(SkillError::InvalidSkill)?;
 
     let fm = &parsed.frontmatter;
     let name = frontmatter::get_string(fm, "name").ok_or_else(|| {
@@ -397,19 +471,6 @@ pub(crate) fn load_skill(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillEnt
     validate_description(&description)?;
     validate_body(&parsed.body)?;
 
-    // Derive acquired off the directory's own metadata (never following the
-    // link), and resolve the target for the "open source location" anchor.
-    let is_link = fs::symlink_metadata(dir)
-        .map(|m| is_linked(&m))
-        .unwrap_or(false);
-    let fs_acquired = if is_link {
-        Acquired::Linked
-    } else {
-        Acquired::Local
-    };
-    let acquired = mark.acquired(&dir_name, fs_acquired);
-    let link_target = if is_link { link_target_of(dir) } else { None };
-
     Ok(SkillEntry {
         name,
         description,
@@ -420,8 +481,61 @@ pub(crate) fn load_skill(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillEnt
         cli_tools: frontmatter::cli_tools(fm),
         body: parsed.body,
         link_target,
-        content_hash: sha256_hex(&bytes),
+        content_hash,
     })
+}
+
+/// Reconcile a post-write read-back (issue #936): the atomic write has
+/// already landed, so a read-back failure cannot un-write it. An IO failure
+/// (the IO half failing -- e.g. an antivirus / indexer lock on the fresh
+/// file) degrades to deriving the entry from the written payload with zero
+/// extra IO; reporting `Err` there would claim an edit failed that is on
+/// disk. A parse/validation failure of the freshly written content is
+/// render/parse drift: it stays `Err` and walks the existing rollback -- the
+/// file on disk is genuinely bad, and the next scan's ignored pane surfaces
+/// it.
+fn read_back_or_derive(
+    parts: Result<SkillParts, SkillError>,
+    content: &str,
+    name: &str,
+    mark: &BuiltinSkillMark,
+) -> Result<SkillEntry, SkillError> {
+    match parts {
+        Ok((bytes, dir_name, acquired, link_target)) => {
+            assemble_skill_parts(&bytes, &dir_name, acquired, link_target)
+        }
+        Err(e) => {
+            // A skill the app just wrote is never a link (update and create
+            // refuse the linked posture up front), so the posture derives
+            // from the mark alone.
+            let acquired = mark.acquired(name, Acquired::Local);
+            // Log after the derivation so the line states the outcome; the
+            // underlying error carries the OS detail (the scan warns fold
+            // their error in the same way).
+            match skill_from_str(
+                content,
+                name,
+                acquired,
+                None,
+                sha256_hex(content.as_bytes()),
+            ) {
+                Ok(entry) => {
+                    log::warn!(
+                        target: "skills",
+                        "read-back of skill `{name}` failed ({e}); derived the entry from the written payload"
+                    );
+                    Ok(entry)
+                }
+                Err(err) => {
+                    log::warn!(
+                        target: "skills",
+                        "read-back of skill `{name}` failed ({e}); deriving from the written payload also failed"
+                    );
+                    Err(err)
+                }
+            }
+        }
+    }
 }
 
 /// Resolve a link's target to an absolute path for the frontend's reveal
@@ -858,6 +972,82 @@ mod tests {
         let raw = fs::read_to_string(root.join("new-name").join(SKILL_MD)).unwrap();
         assert!(raw.contains("name: new-name"));
         assert!(raw.contains("Renamed body."));
+    }
+
+    // --- post-write reconciliation (issue #936) ------------------------------
+
+    /// The payload a write path just produced: exactly what write_skill_md
+    /// writes (the temp-file write is verbatim).
+    fn written_skill_payload() -> String {
+        "---\nname: cleaner\ndescription: New.\n---\nNew body.\n".to_string()
+    }
+
+    #[test]
+    fn read_back_or_derive_degrades_a_transient_read_failure() {
+        let entry = read_back_or_derive(
+            Err(SkillError::InvalidSkill(
+                "cannot read `.../cleaner/SKILL.md`: injected read failure".into(),
+            )),
+            &written_skill_payload(),
+            "cleaner",
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(entry.name, "cleaner");
+        assert_eq!(entry.description, "New.");
+        assert_eq!(entry.body, "New body.\n");
+        assert_eq!(entry.acquired, Acquired::Local);
+    }
+
+    #[test]
+    fn read_back_or_derive_degrade_honors_a_builtin_mark_hit() {
+        // A materialized builtin edited under its own name must degrade to
+        // the Builtin acquired posture (issue #677's identity anchoring).
+        let mark = BuiltinSkillMark::of(&["cleaner"]);
+        let entry = read_back_or_derive(
+            Err(SkillError::InvalidSkill("injected read failure".into())),
+            &written_skill_payload(),
+            "cleaner",
+            &mark,
+        )
+        .unwrap();
+        assert_eq!(entry.acquired, Acquired::Builtin);
+    }
+
+    #[test]
+    fn read_back_or_derive_degraded_entry_matches_a_fresh_disk_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("cleaner");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SKILL_MD), written_skill_payload()).unwrap();
+        let degraded = read_back_or_derive(
+            Err(SkillError::InvalidSkill("injected read failure".into())),
+            &written_skill_payload(),
+            "cleaner",
+            &Default::default(),
+        )
+        .unwrap();
+        let loaded = load_skill(&dir, &Default::default()).unwrap();
+        assert_eq!(degraded, loaded);
+    }
+
+    #[test]
+    fn read_back_or_derive_passes_a_semantic_failure_through() {
+        // Parts read fine, but the bytes on disk are not a skill: the
+        // parse failure must surface, not be papered over by the payload.
+        let err = read_back_or_derive(
+            Ok((
+                b"not a skill".to_vec(),
+                "cleaner".to_string(),
+                Acquired::Local,
+                None,
+            )),
+            &written_skill_payload(),
+            "cleaner",
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SkillError::InvalidSkill(_)));
     }
 
     #[test]

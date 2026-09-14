@@ -487,7 +487,8 @@ impl LiveProviderConfig {
     /// precedent). The enablement write degrades with a log: the row renders
     /// with its switch off and the user can flip it. The read-back partitions
     /// the preamble marks against the real registered-skills set. Returns the
-    /// entry read back from disk.
+    /// entry for the written definition (read back, or derived from the
+    /// written payload on a transient read-back failure).
     pub fn create_agent(
         &self,
         agents_root: &Path,
@@ -524,7 +525,9 @@ impl LiveProviderConfig {
     /// (without the carry an enabled definition would silently read disabled
     /// under its new name, and the old entry would linger inert). The carry
     /// degrades with a warn; the returned entry's enablement reflects the
-    /// post-carry set. Returns the entry read back from disk.
+    /// post-carry set. Returns the entry for the written definition (read
+    /// back, or derived from the written payload on a transient read-back
+    /// failure).
     pub fn update_agent(
         &self,
         agents_root: &Path,
