@@ -140,8 +140,9 @@ pub fn list_skills(root: &Path, mark: &BuiltinSkillMark) -> SkillListing {
 /// Mint a new `local` skill: `<root>/<name>/SKILL.md` with the given
 /// description + the skeleton body. The registry root is created lazily on
 /// first mint. Refuses a name in the builtin reserved set (issue #677) --
-/// statically, independent of what is materialized. Returns the entry read
-/// back from disk.
+/// statically, independent of what is materialized. Returns the entry for
+/// the written skill (read back, or derived from the written payload on a
+/// transient read-back failure).
 pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillEntry, SkillError> {
     validate_skill_name(name)?;
     if super::builtin::is_reserved_skill_name(name) {
@@ -169,11 +170,20 @@ pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillE
     }
     // The reserved-set refusal above keeps a freshly minted name out of the
     // builtin namespace, so the read-back cannot be a builtin skill. A
-    // failed read-back derives from the written payload (issue #936) --
-    // reporting `Err` would strand the minted directory and deadlock a
-    // retry on NameTaken.
+    // failed transient read-back derives from the written payload (issue
+    // #936) -- reporting `Err` there would strand the minted directory and
+    // deadlock a retry on NameTaken. A semantic read-back failure
+    // (render/parse drift) stays `Err`, and the mint is removed below so
+    // the retry succeeds anyway.
     let mark = BuiltinSkillMark::default();
-    read_back_or_derive(load_skill_parts(&dir, &mark), &content, name, &mark)
+    let result = read_back_or_derive(load_skill_parts(&dir, &mark), &content, name, &mark);
+    // Same cleanup contract as the write branch above: a failed mint leaves
+    // no directory behind (it would surface as NameTaken on the user's
+    // retry).
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    result
 }
 
 /// RAII guard for an in-flight rename in [`update_skill`]: if still armed on
@@ -476,11 +486,11 @@ fn skill_from_str(
 }
 
 /// Reconcile a post-write read-back (issue #936): the atomic write has
-/// already landed, so a read-back failure cannot un-write it. A transient IO
-/// failure (the IO half failing -- e.g. an antivirus / indexer lock on the
-/// fresh file) degrades to deriving the entry from the written payload with
-/// zero extra IO; reporting `Err` there would claim an edit failed that is
-/// on disk. A parse/validation failure of the freshly written content is
+/// already landed, so a read-back failure cannot un-write it. An IO failure
+/// (the IO half failing -- e.g. an antivirus / indexer lock on the fresh
+/// file) degrades to deriving the entry from the written payload with zero
+/// extra IO; reporting `Err` there would claim an edit failed that is on
+/// disk. A parse/validation failure of the freshly written content is
 /// render/parse drift: it stays `Err` and walks the existing rollback -- the
 /// file on disk is genuinely bad, and the next scan's ignored pane surfaces
 /// it.
@@ -494,22 +504,36 @@ fn read_back_or_derive(
         Ok((bytes, dir_name, acquired, link_target)) => {
             assemble_skill_parts(&bytes, &dir_name, acquired, link_target)
         }
-        Err(_) => {
-            log::warn!(
-                target: "skills",
-                "read-back of skill `{name}` failed; deriving the entry from the written payload"
-            );
+        Err(e) => {
             // A skill the app just wrote is never a link (update and create
             // refuse the linked posture up front), so the posture derives
             // from the mark alone.
             let acquired = mark.acquired(name, Acquired::Local);
-            skill_from_str(
+            // Log after the derivation so the line states the outcome; the
+            // underlying error carries the OS detail (the scan warns fold
+            // their error in the same way).
+            match skill_from_str(
                 content,
                 name,
                 acquired,
                 None,
                 sha256_hex(content.as_bytes()),
-            )
+            ) {
+                Ok(entry) => {
+                    log::warn!(
+                        target: "skills",
+                        "read-back of skill `{name}` failed ({e}); derived the entry from the written payload"
+                    );
+                    Ok(entry)
+                }
+                Err(err) => {
+                    log::warn!(
+                        target: "skills",
+                        "read-back of skill `{name}` failed ({e}); deriving from the written payload also failed"
+                    );
+                    Err(err)
+                }
+            }
         }
     }
 }
@@ -973,6 +997,21 @@ mod tests {
         assert_eq!(entry.description, "New.");
         assert_eq!(entry.body, "New body.\n");
         assert_eq!(entry.acquired, Acquired::Local);
+    }
+
+    #[test]
+    fn read_back_or_derive_degrade_honors_a_builtin_mark_hit() {
+        // A materialized builtin edited under its own name must degrade to
+        // the Builtin acquired posture (issue #677's identity anchoring).
+        let mark = BuiltinSkillMark::of(&["cleaner"]);
+        let entry = read_back_or_derive(
+            Err(SkillError::InvalidSkill("injected read failure".into())),
+            &written_skill_payload(),
+            "cleaner",
+            &mark,
+        )
+        .unwrap();
+        assert_eq!(entry.acquired, Acquired::Builtin);
     }
 
     #[test]

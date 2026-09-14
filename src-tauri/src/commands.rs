@@ -3330,7 +3330,8 @@ pub fn list_skills(
 /// Mint a new `local` skill (issue #362): `<root>/<name>/SKILL.md` with the
 /// given description + the skeleton body. The name must be spec-shaped
 /// (kebab-case, <= 64) and free; the registry root is minted lazily on first
-/// create. Returns the entry read back from disk.
+/// create. Returns the entry for the written skill (read back, or derived
+/// from the written payload on a transient read-back failure).
 #[tauri::command]
 pub fn create_skill(
     root: State<'_, SkillsRoot>,
@@ -3423,7 +3424,9 @@ pub fn create_agent(
 }
 
 /// Rewrite one user/builtin agent definition (issue #932): a rename carries
-/// the enablement entry with it. Returns the entry read back from disk.
+/// the enablement entry with it. Returns the entry for the written
+/// definition (read back, or derived from the written payload on a
+/// transient read-back failure).
 #[tauri::command]
 pub fn update_agent(
     agents_root: State<'_, crate::agents::AgentsRoot>,

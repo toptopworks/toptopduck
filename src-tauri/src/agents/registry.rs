@@ -189,12 +189,12 @@ fn agent_from_str(
 }
 
 /// Reconcile a post-write read-back (issue #936): the atomic write has
-/// already landed, so a read-back failure cannot un-write it. A transient IO
-/// failure (`FsFailure` -- e.g. an antivirus / indexer lock on the fresh
-/// file) degrades to deriving the entry from the written payload with zero
-/// extra IO; reporting `Err` there would claim an edit failed that is on
-/// disk. A semantic failure (parse / validation, i.e. render/parse drift)
-/// stays `Err` and walks the existing rollback: the file on disk is
+/// already landed, so a read-back failure cannot un-write it. An IO failure
+/// of the read (`FsFailure` -- e.g. an antivirus / indexer lock on the
+/// fresh file) degrades to deriving the entry from the written payload with
+/// zero extra IO; reporting `Err` there would claim an edit failed that is
+/// on disk. A semantic failure (parse / validation, i.e. render/parse
+/// drift) stays `Err` and walks the existing rollback: the file on disk is
 /// genuinely bad, and the next scan's ignored pane surfaces it.
 fn read_back_or_derive(
     readback: Result<AgentEntry, AgentError>,
@@ -206,11 +206,7 @@ fn read_back_or_derive(
 ) -> Result<AgentEntry, AgentError> {
     match readback {
         Ok(entry) => Ok(entry),
-        Err(AgentError::FsFailure(_)) => {
-            log::warn!(
-                target: "agents",
-                "read-back of definition `{name}` failed transiently; deriving the entry from the written payload"
-            );
+        Err(AgentError::FsFailure(e)) => {
             // A definition the app just wrote is never a link (update and
             // create refuse the linked posture up front), so the source
             // derives from the mark alone.
@@ -219,7 +215,25 @@ fn read_back_or_derive(
             } else {
                 AgentSource::User
             };
-            agent_from_str(content, name, source, None, enabled, skill_names)
+            // Log after the derivation so the line states the outcome; the
+            // underlying error carries the OS detail (the scan warns fold
+            // their error in the same way).
+            match agent_from_str(content, name, source, None, enabled, skill_names) {
+                Ok(entry) => {
+                    log::warn!(
+                        target: "agents",
+                        "read-back of definition `{name}` failed ({e}); derived the entry from the written payload"
+                    );
+                    Ok(entry)
+                }
+                Err(err) => {
+                    log::warn!(
+                        target: "agents",
+                        "read-back of definition `{name}` failed ({e}); deriving from the written payload also failed"
+                    );
+                    Err(err)
+                }
+            }
         }
         Err(e) => Err(e),
     }
@@ -234,7 +248,8 @@ fn agent_path(root: &Path, name: &str) -> PathBuf {
 /// Mint a new user definition: `<root>/<name>.md` with the given
 /// declaration (description + preamble). The root is minted lazily on first
 /// create. Refuses a reserved name statically (the CLI-registration
-/// precedent). Returns the entry read back from disk.
+/// precedent). Returns the entry for the written definition (read back, or
+/// derived from the written payload on a transient read-back failure).
 pub fn create_agent(
     root: &Path,
     name: &str,
@@ -267,17 +282,26 @@ pub fn create_agent(
     write_agent_file(&path, &content)?;
     // The reserved-set refusal keeps a fresh mint out of the builtin
     // namespace, so the read-back cannot be a builtin definition. A failed
-    // read-back derives from the written payload (issue #936) -- reporting
-    // `Err` would strand the minted file and deadlock a retry on NameTaken.
+    // transient read-back derives from the written payload (issue #936) --
+    // reporting `Err` there would strand the minted file and deadlock a
+    // retry on NameTaken. A semantic read-back failure (render/parse
+    // drift) stays `Err`, and the mint is removed below so the retry
+    // succeeds anyway.
     let mark = BuiltinAgentMark::default();
-    read_back_or_derive(
+    let result = read_back_or_derive(
         load_agent(&path, &mark, enabled, skill_names),
         &content,
         name,
         &mark,
         enabled,
         skill_names,
-    )
+    );
+    // A failed mint has no prior asset to preserve (unlike update's rename
+    // rollback): remove the file so a retry does not hit NameTaken.
+    if result.is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
+    result
 }
 
 /// RAII guard for an in-flight rename (the `RenameGuard` posture of the
@@ -755,7 +779,7 @@ mod tests {
     /// The payload a write path just produced: exactly what write_agent_file
     /// puts on disk (the temp-file write is verbatim).
     fn written_payload() -> String {
-        "---\nname: cleaner\ndescription: New.\n---\nNew body.\n".to_string()
+        "---\nname: cleaner\ndescription: New.\n---\nNew body. Uses `polisher`.\n".to_string()
     }
 
     #[test]
@@ -771,8 +795,28 @@ mod tests {
         .unwrap();
         assert_eq!(entry.name, "cleaner");
         assert_eq!(entry.description, "New.");
-        assert_eq!(entry.preamble, "New body.\n");
+        assert_eq!(entry.preamble, "New body. Uses `polisher`.\n");
         assert_eq!(entry.source, AgentSource::User);
+        // The un-registered mark lands in the dangling lane: the downgrade
+        // arm threads the real skill-names set.
+        assert_eq!(entry.dangling_skill_refs, vec!["polisher".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_degrade_honors_a_builtin_mark_hit() {
+        // A materialized builtin edited under its own name must degrade to
+        // the Builtin source, not the User default (ADR-0117 Decision 2).
+        let mark = BuiltinAgentMark::of(&["cleaner"]);
+        let entry = read_back_or_derive(
+            Err(AgentError::FsFailure("injected read failure".into())),
+            &written_payload(),
+            "cleaner",
+            &mark,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(entry.source, AgentSource::Builtin);
     }
 
     #[test]
@@ -781,22 +825,21 @@ mod tests {
         std::fs::create_dir_all(tmp.path()).unwrap();
         let path = agent_path(tmp.path(), "cleaner");
         std::fs::write(&path, written_payload()).unwrap();
+        // Non-empty sets on both sides: the guard must catch a downgrade
+        // arm that drops the enabled / skill-names threading (an enabled
+        // definition would read disabled; a bound mark would mispartition).
+        let enabled: BTreeSet<String> = ["cleaner".to_string()].into_iter().collect();
+        let skill_names: BTreeSet<String> = ["polisher".to_string()].into_iter().collect();
         let degraded = read_back_or_derive(
             Err(AgentError::FsFailure("injected read failure".into())),
             &written_payload(),
             "cleaner",
             &Default::default(),
-            &Default::default(),
-            &Default::default(),
+            &enabled,
+            &skill_names,
         )
         .unwrap();
-        let loaded = load_agent(
-            &path,
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
-        )
-        .unwrap();
+        let loaded = load_agent(&path, &Default::default(), &enabled, &skill_names).unwrap();
         assert_eq!(degraded, loaded);
     }
 
