@@ -6,6 +6,18 @@
 //! nature of the directory (symlink / junction -> `linked`, real directory ->
 //! `local`). Every function takes the root as a parameter -- pure of Tauri
 //! state, so the whole surface is black-box testable against a tempdir.
+//!
+//! Read-back downgrade wiring: the two write sites (`create_skill` /
+//! `update_skill`) thread `read_back_or_derive` over the fresh load
+//! parts, and that wiring is an ACCEPTED unguarded face (issue #940): the
+//! pure half (the structural judgement both ways, the builtin-mark hit,
+//! the derived-entry equivalence) is pinned by direct tests, but a
+//! call-site revert to the bare pre-#936 `load_skill`, or an
+//! argument-threading slip, is observable only when the real read-back IO
+//! fails -- which never happens in tests. Closing the gap needs a
+//! fault-injection seam at the call sites, which the repo's
+//! no-fabricated-seams precedent counsels against; land one when a second
+//! consumer of the wiring justifies it.
 
 use std::fs;
 use std::path::{Path, PathBuf};

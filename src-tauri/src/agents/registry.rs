@@ -6,6 +6,17 @@
 //! distributable asset, so a future import / plugin / cloud source degenerates
 //! to a filesystem action). All functions take the root as a parameter and
 //! touch no Tauri state, so the whole surface tests against a tempdir.
+//!
+//! Read-back downgrade wiring: the two write sites (`create_agent` /
+//! `update_agent`) thread `read_back_or_derive` over the fresh load, and
+//! that wiring is an ACCEPTED unguarded face (issue #940): the pure half
+//! (both judgement directions, the builtin-mark hit, the derived-entry
+//! equivalence) is pinned by direct tests, but a call-site revert to the
+//! bare pre-#936 `load_agent`, or an argument-threading slip, is
+//! observable only when the real read-back IO fails -- which never
+//! happens in tests. Closing the gap needs a fault-injection seam at the
+//! call sites, which the repo's no-fabricated-seams precedent counsels
+//! against; land one when a second consumer of the wiring justifies it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
