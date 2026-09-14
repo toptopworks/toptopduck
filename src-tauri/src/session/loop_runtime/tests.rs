@@ -29,7 +29,7 @@ use crate::cancel::CancelToken;
 use crate::mcp::aggregator::McpAggregator;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::{
-    ToolTurnMessage, ToolTurnOutcome, ToolTurnReply, ToolTurnRequest,
+    ToolDefinition, ToolTurnMessage, ToolTurnOutcome, ToolTurnReply, ToolTurnRequest,
 };
 use crate::provider::{Provider, ProviderError};
 use crate::session::engine::AdminEngine;
@@ -78,6 +78,31 @@ struct NoopSink;
 
 impl ApprovalSink for NoopSink {
     fn emit_request(&self, _body: &crate::approval::ApprovalRequestBody) {}
+    fn emit_resolved(
+        &self,
+        _body: &crate::approval::ApprovalRequestBody,
+        _response: ApprovalResponse,
+    ) {
+    }
+}
+
+/// A recording sink for the approval pin (issue #928): unlike the no-op
+/// sink above -- its ledger was retired in #922 because nothing ever read
+/// it -- this one has a reader. The responder thread polls the emitted
+/// request ids to time its Deny against the gate's condvar wait. The wire
+/// carries ids as strings; they parse once here so the responder answers
+/// with the typed id (mirrors the gate-test sink in turn_dispatch's
+/// suites).
+#[derive(Default)]
+struct RecordingSink {
+    request_ids: Mutex<Vec<uuid::Uuid>>,
+}
+
+impl ApprovalSink for RecordingSink {
+    fn emit_request(&self, body: &crate::approval::ApprovalRequestBody) {
+        let id = uuid::Uuid::parse_str(&body.request_id).expect("the gate stamps uuid ids");
+        self.request_ids.lock().unwrap().push(id);
+    }
     fn emit_resolved(
         &self,
         _body: &crate::approval::ApprovalRequestBody,
@@ -233,6 +258,22 @@ impl Harness {
         }
     }
 
+    /// A request whose tool table additionally advertises the named tools:
+    /// a scripted external call must be advertised for the loop to
+    /// dispatch it at all (the unknown-tool fallback would otherwise land
+    /// the honest transient).
+    fn request_with_tools(&self, question: &str, extra: &[&str]) -> ToolTurnRequest {
+        let mut request = self.request(question);
+        for name in extra {
+            request.tools.push(ToolDefinition {
+                name: (*name).into(),
+                description: "test-external tool".into(),
+                input_schema: json!({"type": "object"}),
+            });
+        }
+        request
+    }
+
     fn run(
         &mut self,
         request: &ToolTurnRequest,
@@ -242,6 +283,8 @@ impl Harness {
         self.run_with_caps(request, runtime, cancel, 24, None)
     }
 
+    /// The default turn shape: a fresh approval state, the no-op sink, no
+    /// CLI tools -- the suites calling this never exercise approval flows.
     fn run_with_caps(
         &mut self,
         request: &ToolTurnRequest,
@@ -249,6 +292,33 @@ impl Harness {
         cancel: Arc<CancelToken>,
         step_cap: u32,
         no_progress_cap: Option<Duration>,
+    ) -> LoopOutcome {
+        self.run_turn(
+            request,
+            runtime,
+            cancel,
+            step_cap,
+            no_progress_cap,
+            &[],
+            &ApprovalState::new(),
+            &NoopSink,
+        )
+    }
+
+    /// The parameterized turn assembly the default entry points and the
+    /// approval pin share (issue #928): the gate's recording sink and the
+    /// CLI tool table are the approval pin's only extras.
+    #[allow(clippy::too_many_arguments)]
+    fn run_turn(
+        &mut self,
+        request: &ToolTurnRequest,
+        runtime: LoopRuntime,
+        cancel: Arc<CancelToken>,
+        step_cap: u32,
+        no_progress_cap: Option<Duration>,
+        cli: &[crate::cli_tools::config::CliToolConfig],
+        approval: &ApprovalState,
+        sink: &dyn ApprovalSink,
     ) -> LoopOutcome {
         let runtime = runtime.with_caps(step_cap, no_progress_cap);
         let mut deps = inert_deps_with_temp(
@@ -259,8 +329,6 @@ impl Harness {
             &mut self.refs,
         );
         let mut mcp = McpAggregator::empty();
-        let approval = ApprovalState::new();
-        let sink = NoopSink;
         let phases = Arc::clone(&self.phases);
         let phase_hook = self.phase_hook.clone();
         let read = crate::skills::read::SkillReadGate {
@@ -268,17 +336,16 @@ impl Harness {
             activated: &self.read_activated,
             root: &self.read_root,
         };
-        let cli: [crate::cli_tools::config::CliToolConfig; 0] = [];
         runtime.run(
             request,
             &mut deps,
             &mut RealMaterializer,
             &mut mcp,
-            &cli,
+            cli,
             &mut self.skills.ctx(),
             &read,
-            &approval,
-            &sink,
+            approval,
+            sink,
             cancel,
             move |phase| {
                 if let Some(hook) = &phase_hook {
@@ -1241,7 +1308,10 @@ fn driver_panic_after_a_folded_call_lands_transient_cleanly() {
 
 /// The no-progress watchdog's kill (ADR-0115): a generation that goes
 /// silent past the cap lands `NoProgress` with the armed cap -- the
-/// cancelled-vs-timed-out fork of the same cancel landing.
+/// cancelled-vs-timed-out fork of the same cancel landing. The measured
+/// silence must cover the cap (the `NoProgressDetail` contract: "at least
+/// the cap") -- the measurement half this pin shares with its retired
+/// yoagent original (issue #928).
 #[test]
 fn no_progress_silence_lands_no_progress() {
     let mut h = Harness::new();
@@ -1257,9 +1327,97 @@ fn no_progress_silence_lands_no_progress() {
     match &outcome.termination {
         Termination::NoProgress(detail) => {
             assert_eq!(detail.cap, Duration::from_millis(150));
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
         }
         other => panic!("expected NoProgress, got {other:?}"),
     }
+}
+
+/// The freeze (ADR-0115): an approval pending past the cap does NOT kill
+/// the turn -- the loop freezes the progress clock across the dispatch
+/// (an approval pending on the condvar is a wait on an external
+/// principal), and the turn resumes when the responder answers: the Deny
+/// feeds back as a tool-level error, the loop self-corrects, the terminal
+/// text lands. Ported from the retired yoagent suites (issue #928): the
+/// behavior lives in the shared dispatch core, the pin lives here.
+#[test]
+fn approval_pending_survives_past_the_cap() {
+    use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+    let mut h = Harness::new();
+    let cli_tool = CliToolConfig {
+        name: "pandoc".into(),
+        description: "convert".into(),
+        executable: "/bin/pandoc".into(),
+        argv_template: vec!["-o".into(), "{output}".into()],
+        params: vec![CliToolParam {
+            name: "output".into(),
+            description: "target".into(),
+            delivery: CliParamDelivery::Argv,
+            varargs: false,
+        }],
+        env: Default::default(),
+        enabled: true,
+        source: Default::default(),
+        baseline: None,
+    };
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[("tu_1", "pandoc", json!({"output": "out.pdf"}))],
+        ),
+        text_turn("denied, moving on."),
+    ]);
+    // The gate waits on the shared approval state while the responder
+    // parks PAST the cap, then drives the Deny -- if the freeze were
+    // missing, the no-progress clock would kill the turn mid-pending.
+    let approval = Arc::new(ApprovalState::new());
+    let sink = Arc::new(RecordingSink::default());
+    let responder = {
+        let approval = Arc::clone(&approval);
+        let sink = Arc::clone(&sink);
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(id) = sink.request_ids.lock().unwrap().first().copied() {
+                    // Park past the 100 ms cap before answering.
+                    std::thread::sleep(Duration::from_millis(300));
+                    approval
+                        .respond(id, ApprovalResponse::Deny)
+                        .expect("respond ok");
+                    return;
+                }
+                if start.elapsed() > Duration::from_secs(5) {
+                    panic!("no approval request arrived");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let outcome = h.run_turn(
+        &h.request_with_tools("call pandoc", &["pandoc"]),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        24,
+        Some(Duration::from_millis(100)),
+        std::slice::from_ref(&cli_tool),
+        approval.as_ref(),
+        sink.as_ref(),
+    );
+    responder.join().unwrap();
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("denied, moving on.".into()),
+        "the turn must survive a pending approval past the cap"
+    );
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "the denied call leaves exactly its resolved-deny row"
+    );
 }
 
 /// The unknown-tool-call fallback (ADR-0116 Decision 5): the model reaching
