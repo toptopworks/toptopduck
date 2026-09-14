@@ -151,4 +151,17 @@ export interface AppConfig {
   // catalog) are kept -- they re-enable automatically on re-detection
   // (ADR-0100 Decision 4).
   last_model_postures: Record<string, ModelPosture>;
+  // The enabled agent-definitions name set (issue #932, ADR-0117 Decision 2):
+  // the machine-level single axis of the agent-definitions registry. Mirrors
+  // the Rust BTreeSet (crosses IPC as an array); serde(default) fills an
+  // empty set for a pre-#932 file, but serialization ALWAYS carries the
+  // field, so the wire shape is non-optional here too. Dangling entries (a
+  // name whose file is gone) are kept -- the backend reader intersects with
+  // the registry scan, so a stale name is inert.
+  enabled_agents: string[];
+  // The materialized builtin agent-definitions mark (issue #932, ADR-0117
+  // Decision 3): which shipped builtin definitions the startup window wrote
+  // into the registry -- the builtin-identity anchor, not the static shipped
+  // set (which lives in code). Mirrors the Rust BTreeSet.
+  materialized_builtin_agents: string[];
 }

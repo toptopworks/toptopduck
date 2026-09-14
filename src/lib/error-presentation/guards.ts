@@ -17,6 +17,7 @@ import type {
   StoreCommandError,
   RowReadError,
 } from "../../types/session";
+import type { AgentError } from "../../types/agents";
 import type { SkillError, SkillMountError } from "../../types/skills";
 
 // Narrow an unknown IPC reject to a SessionError (issue #119). A session-
@@ -370,6 +371,36 @@ export function isSkillError(e: unknown): e is SkillError {
     case "BuiltinUndeletable":
     case "ReadOnly":
     case "FsFailure":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown IPC reject to an AgentError (issue #932). Rejects from
+// the agent-definitions registry commands (list never refuses; create /
+// update / delete / set_agent_enabled do). Every variant carries a string
+// under data (the English technical detail / the offending name). Same L1
+// defensive shape as the other guards. The kind set is disjoint from
+// SkillError and every other typed error lane -- the six shapes SkillError
+// also uses (invalid name / taken / name-locked / undeletable / read-only /
+// fs) carry an Agent-prefixed wire name (InvalidAgentName / AgentNameTaken /
+// AgentBuiltinNameLocked / AgentBuiltinUndeletable / AgentReadOnly /
+// AgentFsFailure) so fmtError's kind dispatch stays unambiguous even though
+// both lanes share the reject surface shape (ADR-0069 invariant).
+export function isAgentError(e: unknown): e is AgentError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "InvalidAgentName":
+    case "InvalidAgent":
+    case "NoSuchAgent":
+    case "AgentNameTaken":
+    case "ReservedAgentName":
+    case "AgentBuiltinNameLocked":
+    case "AgentBuiltinUndeletable":
+    case "AgentReadOnly":
+    case "AgentFsFailure":
       return typeof (e as { data?: unknown }).data === "string";
     default:
       return false;

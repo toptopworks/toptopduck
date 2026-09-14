@@ -19,8 +19,15 @@ import type {
   StoreCommandError,
   RowReadError,
 } from "../../types/session";
+import type { AgentError } from "../../types/agents";
 import type { SkillError, SkillMountError } from "../../types/skills";
-import { isSaveError, isSessionError, isSkillError, isStoreCommandError } from "./guards";
+import {
+  isAgentError,
+  isSaveError,
+  isSessionError,
+  isSkillError,
+  isStoreCommandError,
+} from "./guards";
 
 // Format a DuckLoadError through the locale catalog (issue #120). The
 // version-mismatch "please upgrade" hint interpolates the found / supported
@@ -197,6 +204,79 @@ function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string 
     default: {
       const unhandled: never = e;
       throw new Error(`unhandled StoreCommandError kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Format an AgentError through the locale catalog (issue #932). NoSuchAgent
+// and AgentNameTaken interpolate the name; the other variants render a
+// generic message and their English data rides the technical-details fold
+// (the formatSkillError contract).
+function formatAgentError(e: AgentError, intl: IntlShape): string {
+  switch (e.kind) {
+    case "InvalidAgentName":
+      return intl.formatMessage({
+        id: "error.agent.invalidName",
+        defaultMessage: "Agent name must be kebab-case (lowercase a-z / 0-9 + hyphens) and at most 64 chars",
+      });
+    case "InvalidAgent":
+      return intl.formatMessage({
+        id: "error.agent.invalidAgent",
+        defaultMessage: "The agent definition is missing required fields or a preamble",
+      });
+    case "NoSuchAgent":
+      return intl.formatMessage(
+        {
+          id: "error.agent.notFound",
+          defaultMessage: "No agent definition named \"{name}\"",
+        },
+        { name: e.data },
+      );
+    case "AgentNameTaken":
+      return intl.formatMessage(
+        {
+          id: "error.agent.nameTaken",
+          defaultMessage: "An agent definition named \"{name}\" already exists",
+        },
+        { name: e.data },
+      );
+    case "ReservedAgentName":
+      return intl.formatMessage(
+        {
+          id: "error.agent.reservedName",
+          defaultMessage: "The name \"{name}\" is reserved for a built-in tool",
+        },
+        { name: e.data },
+      );
+    case "AgentBuiltinNameLocked":
+      return intl.formatMessage(
+        {
+          id: "error.agent.nameLocked",
+          defaultMessage: "Built-in agent \"{name}\" cannot be renamed",
+        },
+        { name: e.data },
+      );
+    case "AgentBuiltinUndeletable":
+      return intl.formatMessage(
+        {
+          id: "error.agent.undeletable",
+          defaultMessage: "Built-in agent \"{name}\" cannot be deleted; disable it instead",
+        },
+        { name: e.data },
+      );
+    case "AgentReadOnly":
+      return intl.formatMessage({
+        id: "error.agent.readOnly",
+        defaultMessage: "Linked agent definitions are read-only; edit the source instead",
+      });
+    case "AgentFsFailure":
+      return intl.formatMessage({
+        id: "error.agent.fsFailure",
+        defaultMessage: "An agent definition file operation failed",
+      });
+    default: {
+      const unhandled: never = e;
+      throw new Error(`unhandled AgentError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
@@ -535,6 +615,9 @@ export function fmtError(e: unknown, intl: IntlShape): string {
   if (isSkillError(e)) {
     return formatSkillError(e, intl);
   }
+  if (isAgentError(e)) {
+    return formatAgentError(e, intl);
+  }
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   // Opaque object: stringify best-effort. A cyclic reject would throw, so fall
@@ -593,6 +676,14 @@ export function errorDetail(e: unknown): string | null {
     // or the offending name) -- all useful in the fold except NoSuchSkill /
     // NameTaken, whose name already rides the message.
     if (e.kind === "NoSuchSkill" || e.kind === "NameTaken") {
+      return null;
+    }
+    return e.data;
+  }
+  if (isAgentError(e)) {
+    // Same contract as the SkillError fold: the two name-riding kinds fold
+    // nothing, everything else carries the English detail.
+    if (e.kind === "NoSuchAgent" || e.kind === "AgentNameTaken") {
       return null;
     }
     return e.data;

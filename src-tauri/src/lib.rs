@@ -14,6 +14,7 @@
 //! through a scripted FakeProvider at the ask -> outcome seam -- offline and
 //! deterministic.
 
+pub mod agents;
 pub mod app_config;
 pub mod approval;
 pub(crate) mod bounded_line;
@@ -278,6 +279,19 @@ pub fn run() {
                 }
             };
 
+            // Agent-definitions registry root (issue #932, ADR-0117): the
+            // same app-data-dir resolution + honest temp-dir fallback as the
+            // skills root; minted lazily on first create.
+            let agents_root = match app.path().app_data_dir() {
+                Ok(dir) => dir.join("agents"),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; agents registry falls back to a temp path: {e}"
+                    );
+                    std::env::temp_dir().join("toptopduck-agents")
+                }
+            };
+
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
             // First-paint boot seed (issue #814, ADR-0113): one direct
@@ -353,9 +367,21 @@ pub fn run() {
                      rescan retries on demand): {detail}"
                 );
             }
+            // The builtin agent-definitions window rides the same startup
+            // slot (issue #932, ADR-0117 Decision 3): `general-purpose`
+            // materializes into the registry before the frontend loads its
+            // first listing. Failures log and degrade (the next startup
+            // retries).
+            if let Err(detail) = live.materialize_builtin_agents(&agents_root) {
+                log::warn!(
+                    "builtin agent-definition materialization failed (the next \
+                     startup retries): {detail}"
+                );
+            }
             app.manage(live);
             app.manage(SessionsRoot::new(sessions_root));
             app.manage(SkillsRoot(skills_root));
+            app.manage(agents::AgentsRoot(agents_root));
             // The adapter catalog cache sidecar (ADR-0096 D5, issue #536):
             // `adapter-catalogs.json` under the OS app-data dir, with the
             // same honest temp-dir fallback. The probe click is the only
@@ -487,6 +513,11 @@ pub fn run() {
             commands::create_skill,
             commands::update_skill,
             commands::delete_skill,
+            commands::list_agents,
+            commands::create_agent,
+            commands::update_agent,
+            commands::delete_agent,
+            commands::set_agent_enabled,
             commands::list_skill_sources,
             commands::import_skills,
             commands::mount_skill,

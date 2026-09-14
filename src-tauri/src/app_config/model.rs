@@ -10,7 +10,7 @@
 //! [`crate::app_config::io`]), so a hand-edited file cannot smuggle a key past
 //! the type system into a plaintext-on-disk state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -375,6 +375,28 @@ pub struct AppConfig {
     /// `McpServerConfig.env` precedent).
     #[serde(default)]
     pub last_model_postures: BTreeMap<String, ModelPosture>,
+    /// The enabled agent-definitions name set (issue #932, ADR-0117 Decision
+    /// 2): the machine-level single axis of the agent-definitions registry.
+    /// The definitions themselves live in the single-file registry under the
+    /// app-data dir (a directory scan, no sidecar table) -- this set holds
+    /// only the ENABLED names: enabled = listed into the built-in runtime's
+    /// every-turn tool face; disabled = hidden. Forward-compat: a pre-#932
+    /// file has no `enabled_agents` key, so serde(default) fills an empty set
+    /// rather than rejecting the whole document. Dangling entries (a name
+    /// whose file is gone) are kept -- the reader intersects with the
+    /// registry scan, so a stale name is inert by construction.
+    #[serde(default)]
+    pub enabled_agents: BTreeSet<String>,
+    /// The materialized builtin agent-definitions mark (issue #932, ADR-0117
+    /// Decision 3): which shipped builtin definitions were written into the
+    /// registry by the startup window. This is the builtin-identity anchor --
+    /// NOT the static shipped set (which lives in code) -- so a user's
+    /// pre-existing same-named file keeps its own source (the
+    /// `builtin_skill_baselines` posture, minus the baseline hash: agent
+    /// definitions carry no version-following in v1). Forward-compat: a
+    /// pre-#932 file has no key, so serde(default) fills an empty set.
+    #[serde(default)]
+    pub materialized_builtin_agents: BTreeSet<String>,
 }
 
 impl AppConfig {
@@ -398,6 +420,8 @@ impl AppConfig {
             sessions_dir: None,
             default_runtime: DefaultRuntime::default(),
             last_model_postures: BTreeMap::new(),
+            enabled_agents: BTreeSet::new(),
+            materialized_builtin_agents: BTreeSet::new(),
         }
     }
 
@@ -505,7 +529,24 @@ impl AppConfig {
                 ))
             })
             .collect();
+        // Shape-repair the two agent-definitions name sets (issue #932):
+        // whitespace trimmed, blank names dropped, dangling entries KEPT (the
+        // reader intersects with the registry scan, so a stale name is inert
+        // -- the `last_model_postures` dangling-kept precedent).
+        retain_name_shape(&mut self.enabled_agents);
+        retain_name_shape(&mut self.materialized_builtin_agents);
     }
+}
+
+/// Trim + drop-blank one agent-definitions name set (the helper behind the
+/// two normalize call sites above).
+fn retain_name_shape(set: &mut BTreeSet<String>) {
+    let names = std::mem::take(set);
+    *set = names
+        .into_iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
 }
 
 impl Default for AppConfig {

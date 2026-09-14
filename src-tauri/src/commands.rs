@@ -3383,6 +3383,84 @@ pub fn restore_builtin_skill(
     live.restore_builtin_skill(&skills_root.0, &name)
 }
 
+// The agent-definitions commands (issue #932, ADR-0117) are thin shells:
+// every composite -- the read-merge, the create-lands-enabled pair, the
+// rename carry, the delete stale-entry drop -- lives on LiveProviderConfig
+// (the restore_builtin_skill / cli_tools precedent: the config layer is the
+// testable seam, and Tauri commands are not).
+
+/// List the agent-definitions registry (issue #932): the scan merged with
+/// the enablement set, the builtin mark, and the skill-mark partition.
+/// Read-only -- cannot refuse.
+#[tauri::command]
+pub fn list_agents(
+    agents_root: State<'_, crate::agents::AgentsRoot>,
+    skills_root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
+) -> crate::agents::AgentListing {
+    live.list_agents(&agents_root.0, &skills_root.0)
+}
+
+/// Mint a new user agent definition (issue #932): a fresh mint lands
+/// ENABLED (the explicit create is explicit intent). Returns the entry read
+/// back from disk.
+#[tauri::command]
+pub fn create_agent(
+    agents_root: State<'_, crate::agents::AgentsRoot>,
+    skills_root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+    description: String,
+    preamble: String,
+) -> Result<crate::agents::AgentEntry, crate::agents::AgentError> {
+    live.create_agent(
+        &agents_root.0,
+        &skills_root.0,
+        &name,
+        &description,
+        &preamble,
+    )
+}
+
+/// Rewrite one user/builtin agent definition (issue #932): a rename carries
+/// the enablement entry with it. Returns the entry read back from disk.
+#[tauri::command]
+pub fn update_agent(
+    agents_root: State<'_, crate::agents::AgentsRoot>,
+    skills_root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+    update: crate::agents::AgentUpdate,
+) -> Result<crate::agents::AgentEntry, crate::agents::AgentError> {
+    live.update_agent(&agents_root.0, &skills_root.0, &name, update)
+}
+
+/// Delete one agent definition file (issue #932): a user file is removed, a
+/// linked definition's LINK is removed, a materialized builtin is refused.
+/// The stale enablement entry drops best-effort. Returns the updated full
+/// app-config (the ADR-0109 Decision 9 sync contract).
+#[tauri::command]
+pub fn delete_agent(
+    agents_root: State<'_, crate::agents::AgentsRoot>,
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+) -> Result<crate::app_config::AppConfig, crate::agents::AgentError> {
+    live.delete_agent(&agents_root.0, &name)
+}
+
+/// Set one agent definition's machine-level enablement (issue #932,
+/// ADR-0117 Decision 2): the app-config name set is the single axis.
+/// Returns the updated FULL app-config (the frontend-sync contract).
+#[tauri::command]
+pub fn set_agent_enabled(
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+    enabled: bool,
+) -> Result<crate::app_config::AppConfig, crate::agents::AgentError> {
+    live.set_agent_enabled(&name, enabled)
+        .map_err(|e| crate::agents::AgentError::FsFailure(e.to_string()))
+}
+
 /// Discover external skill sources for the import dialog (issue #367,
 /// ADR-0086). Resolves the standard agent skill libraries -- Claude Code
 /// (`~/.claude/skills`), Codex CLI (`~/.codex/skills`) -- off the Tauri
