@@ -238,10 +238,18 @@ pub fn validate_preamble(preamble: &str) -> Result<(), AgentError> {
 }
 
 /// Extract the backtick skill-name marks from a preamble (ADR-0117 Decision
-/// 2): every backtick-wrapped word that is SHAPED like a name (kebab-case,
+/// 2): a backtick-wrapped word that is SHAPED like a name (kebab-case,
 /// <= 64 chars) is a candidate mark; anything else inside backticks (paths,
 /// code snippets with spaces or underscores, uppercase words) is ordinary
 /// prose and never warns. Deduplicated, first-occurrence order.
+///
+/// The pairing is sequential, not markdown-aware, and tolerant: a stray
+/// tick re-pairs every later pair, so it can swallow real marks (an
+/// unmatched leftover tick stops the scan), and an odd inline tick run can
+/// lift a code-fence language tag as a mark. Balanced fenced blocks are
+/// safe -- empty pairs and the fence interior fail the name shape. These
+/// postures are test-pinned; a missed mark degrades to a plain mention per
+/// ADR-0117 Decision 2's no-breakage clause.
 pub fn extract_skill_marks(preamble: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut marks = Vec::new();
@@ -339,6 +347,35 @@ mod tests {
         assert_eq!(
             extract_skill_marks("bind `sql` and then `dangling"),
             vec!["sql"]
+        );
+    }
+
+    #[test]
+    fn extract_stray_tick_swallows_a_following_mark() {
+        // Pinned tolerance: the stray tick pairs with the mark's opener, the
+        // mis-paired content fails the name shape, and the mark's closer is
+        // left unmatched -- the scan stops and the mark is never extracted.
+        assert_eq!(
+            extract_skill_marks("Don`t do this. Use `pdf-tools`."),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn extract_odd_tick_run_can_lift_a_fence_shaped_word() {
+        // Pinned as intentional: an odd inline tick run shifts the pairing so
+        // a code-fence language tag can surface as a mark.
+        assert_eq!(extract_skill_marks("a `` b `md` c"), vec!["md".to_string()]);
+    }
+
+    #[test]
+    fn extract_leaves_balanced_fenced_blocks_untouched() {
+        // Balanced fences are safe: the empty pairs and the fence interior
+        // fail the name shape, so neither the language tag nor the body is
+        // extracted; the prose mark after the fence still binds.
+        assert_eq!(
+            extract_skill_marks("```md\nfoo(bar);\n```\n\nthen `sql`."),
+            vec!["sql".to_string()]
         );
     }
 
