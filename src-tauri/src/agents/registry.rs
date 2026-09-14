@@ -125,6 +125,12 @@ fn load_agent(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // The identity rule holds at load time too (the skills loader's
+    // in-scan shape validation): a hand-placed file whose name is not
+    // kebab-case cannot enter the registry -- its row would later deadlock
+    // its own edit (update refuses the written name). The refusal lands in
+    // the listing's ignored pane with the reason.
+    validate_agent_name(&name)?;
     if name != stem {
         return Err(AgentError::InvalidAgent(format!(
             "frontmatter name `{name}` does not match its file stem `{stem}`"
@@ -234,11 +240,13 @@ impl Drop for RenameGuard {
 
 /// Rewrite one user/builtin definition's file (frontmatter + preamble).
 /// `name` addresses the current file; `update.name` is the identity to
-/// write -- a different value renames the file. Refuses a `linked`
-/// definition (read-only), an unknown name, a taken rename target, and a
-/// rename of a builtin definition (the name is the locked identity).
-/// Unknown frontmatter keys -- including a present `tools` / `model` --
-/// survive the edit verbatim (community files stay community-shaped).
+/// write -- a different value renames the file. Refuses a non-kebab
+/// addressed name (the name joins the path directly -- the delete_skill
+/// posture, the name is IPC-provided), a `linked` definition (read-only),
+/// an unknown name, a taken rename target, and a rename of a builtin
+/// definition (the name is the locked identity). Unknown frontmatter keys
+/// -- including a present `tools` / `model` -- survive the edit verbatim
+/// (community files stay community-shaped).
 pub fn update_agent(
     root: &Path,
     mark: &BuiltinAgentMark,
@@ -247,6 +255,7 @@ pub fn update_agent(
     enabled: &BTreeSet<String>,
     skill_names: &BTreeSet<String>,
 ) -> Result<AgentEntry, AgentError> {
+    validate_agent_name(name)?;
     let path = agent_path(root, name);
     if !path.exists() {
         return Err(AgentError::NoSuchAgent(name.to_string()));
@@ -323,11 +332,14 @@ pub fn update_agent(
     }
 }
 
-/// Delete one definition file. A `linked` definition's LINK is removed
-/// without touching the external source. A materialized builtin definition
-/// is refused (it re-materializes on the next startup anyway; disabling is
-/// the single shutdown axis).
+/// Delete one definition file. A non-kebab addressed name is refused first
+/// (the delete_skill posture: the name joins the path directly, and it is
+/// IPC-provided -- validation keeps the join root-bound). A `linked`
+/// definition's LINK is removed without touching the external source. A
+/// materialized builtin definition is refused (it re-materializes on the
+/// next startup anyway; disabling is the single shutdown axis).
 pub fn delete_agent(root: &Path, mark: &BuiltinAgentMark, name: &str) -> Result<(), AgentError> {
+    validate_agent_name(name)?;
     if mark.contains(name) {
         return Err(AgentError::BuiltinUndeletable(name.to_string()));
     }
@@ -472,6 +484,29 @@ mod tests {
         // silently -- they are not definition files at all).
         assert_eq!(listing.ignored.len(), 1);
         assert!(listing.ignored[0].reason.contains("does not match"));
+    }
+
+    #[test]
+    fn list_ignores_a_non_kebab_named_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A community-shaped name (uppercase) matching its stem: the scan
+        // refuses the shape -- loading it would later deadlock its own edit
+        // (update refuses the written name).
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        std::fs::write(
+            tmp.path().join("CodeReviewer.md"),
+            "---\nname: CodeReviewer\ndescription: Reviews.\n---\nYou review.\n",
+        )
+        .unwrap();
+        let listing = list_agents(
+            tmp.path(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(listing.agents.is_empty());
+        assert_eq!(listing.ignored.len(), 1);
+        assert!(listing.ignored[0].reason.contains("invalid agent name"));
     }
 
     #[test]
@@ -711,6 +746,33 @@ mod tests {
                 &Default::default()
             ),
             Err(AgentError::ReservedAgentName(_))
+        ));
+    }
+
+    #[test]
+    fn update_and_delete_refuse_a_non_kebab_addressed_name() {
+        // The addressed name joins the path directly (IPC-provided); the
+        // shape refusal keeps the join root-bound (the delete_skill posture).
+        let tmp = tempfile::tempdir().unwrap();
+        put_agent(tmp.path(), "mine", "d", "p\n", "");
+        assert!(matches!(
+            update_agent(
+                tmp.path(),
+                &Default::default(),
+                "../escape",
+                AgentUpdate {
+                    name: "mine".into(),
+                    description: "d".into(),
+                    preamble: "p\n".into(),
+                },
+                &Default::default(),
+                &Default::default(),
+            ),
+            Err(AgentError::InvalidName(_))
+        ));
+        assert!(matches!(
+            delete_agent(tmp.path(), &Default::default(), "../escape"),
+            Err(AgentError::InvalidName(_))
         ));
     }
 

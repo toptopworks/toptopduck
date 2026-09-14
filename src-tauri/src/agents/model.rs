@@ -138,11 +138,13 @@ pub enum AgentError {
     /// A rename targeted a materialized builtin definition: the name is the
     /// locked identity. Carries the name.
     #[error("built-in agent definition name is locked: {0}")]
+    #[serde(rename = "AgentBuiltinNameLocked")]
     BuiltinNameLocked(String),
     /// A delete targeted a materialized builtin definition: builtin
     /// definitions are undeletable (they re-materialize on the next startup
     /// anyway); disabling is the single shutdown axis. Carries the name.
     #[error("built-in agent definition cannot be deleted: {0}")]
+    #[serde(rename = "AgentBuiltinUndeletable")]
     BuiltinUndeletable(String),
     /// A mutating call targeted a `linked` definition (the app never writes
     /// through an external link). Carries the name.

@@ -3383,70 +3383,47 @@ pub fn restore_builtin_skill(
     live.restore_builtin_skill(&skills_root.0, &name)
 }
 
-/// List the agent-definitions registry (issue #932, ADR-0117): the
-/// directory scan over `<app_data_dir>/agents`, merged with the
-/// machine-level enablement set + the builtin materialization mark + the
-/// skills-registry name set (the backtick-mark partition). Read-only --
-/// cannot refuse.
+// The agent-definitions commands (issue #932, ADR-0117) are thin shells:
+// every composite -- the read-merge, the create-lands-enabled pair, the
+// rename carry, the delete stale-entry drop -- lives on LiveProviderConfig
+// (the restore_builtin_skill / cli_tools precedent: the config layer is the
+// testable seam, and Tauri commands are not).
+
+/// List the agent-definitions registry (issue #932): the scan merged with
+/// the enablement set, the builtin mark, and the skill-mark partition.
+/// Read-only -- cannot refuse.
 #[tauri::command]
 pub fn list_agents(
     agents_root: State<'_, crate::agents::AgentsRoot>,
     skills_root: State<'_, SkillsRoot>,
     live: State<'_, LiveProviderConfig>,
 ) -> crate::agents::AgentListing {
-    let cfg = live.load();
-    let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
-    // The registered-skills name set the preamble marks partition against:
-    // the spec-valid listing off the same scan the Skills pane reads.
-    let skill_mark = crate::skills::BuiltinSkillMark::from_config(&cfg);
-    let skill_names = crate::skills::registry::list_skills(&skills_root.0, &skill_mark)
-        .skills
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
-    crate::agents::registry::list_agents(&agents_root.0, &mark, &cfg.enabled_agents, &skill_names)
+    live.list_agents(&agents_root.0, &skills_root.0)
 }
 
-/// Mint a new user agent definition (issue #932): `<root>/<name>.md` with
-/// the given declaration. The name must be kebab-case, free, and outside
-/// the reserved tool-name set. A fresh mint lands ENABLED (the explicit
-/// create is explicit intent, the blankCliTool precedent); the enablement
-/// write degrades with a log -- the row renders with its switch off and the
-/// user can flip it. Returns the entry read back from disk.
+/// Mint a new user agent definition (issue #932): a fresh mint lands
+/// ENABLED (the explicit create is explicit intent). Returns the entry read
+/// back from disk.
 #[tauri::command]
 pub fn create_agent(
     agents_root: State<'_, crate::agents::AgentsRoot>,
+    skills_root: State<'_, SkillsRoot>,
     live: State<'_, LiveProviderConfig>,
     name: String,
     description: String,
     preamble: String,
 ) -> Result<crate::agents::AgentEntry, crate::agents::AgentError> {
-    let cfg = live.load();
-    let entry = crate::agents::registry::create_agent(
+    live.create_agent(
         &agents_root.0,
+        &skills_root.0,
         &name,
         &description,
         &preamble,
-        &cfg.enabled_agents,
-        &Default::default(),
-    )?;
-    if let Err(e) = live.set_agent_enabled(&name, true) {
-        log::warn!(
-            "created agent definition `{name}` but failed to enable it (flip the \
-             switch in the Agents pane): {e}"
-        );
-        return Ok(entry);
-    }
-    Ok(crate::agents::AgentEntry {
-        enabled: true,
-        ..entry
-    })
+    )
 }
 
-/// Rewrite one user/builtin agent definition (issue #932). `name` addresses
-/// the current file; `update.name` is the identity to write. Refuses a
-/// `linked` definition, a materialized builtin rename, a taken rename
-/// target, and a reserved name.
+/// Rewrite one user/builtin agent definition (issue #932): a rename carries
+/// the enablement entry with it. Returns the entry read back from disk.
 #[tauri::command]
 pub fn update_agent(
     agents_root: State<'_, crate::agents::AgentsRoot>,
@@ -3455,54 +3432,20 @@ pub fn update_agent(
     name: String,
     update: crate::agents::AgentUpdate,
 ) -> Result<crate::agents::AgentEntry, crate::agents::AgentError> {
-    let cfg = live.load();
-    let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
-    let skill_mark = crate::skills::BuiltinSkillMark::from_config(&cfg);
-    let skill_names = crate::skills::registry::list_skills(&skills_root.0, &skill_mark)
-        .skills
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
-    let updated = crate::agents::registry::update_agent(
-        &agents_root.0,
-        &mark,
-        &name,
-        update,
-        &cfg.enabled_agents,
-        &skill_names,
-    )?;
-    // A rename carries the enablement entry with it (issue #932): without
-    // this an enabled definition would silently read disabled under its new
-    // name, and the old entry would linger inert. Best-effort with a warn --
-    // the file rename already landed, and the row's switch shows the truth.
-    if updated.name != name {
-        if let Err(e) = live.rename_agent_enabled(&name, &updated.name) {
-            log::warn!(
-                "renamed agent definition `{name}` -> `{}` but failed to carry its \
-                 enablement entry (flip the switch in the Agents pane): {e}",
-                updated.name
-            );
-        }
-    }
-    Ok(updated)
+    live.update_agent(&agents_root.0, &skills_root.0, &name, update)
 }
 
 /// Delete one agent definition file (issue #932): a user file is removed, a
 /// linked definition's LINK is removed, a materialized builtin is refused.
-/// The stale enablement entry drops best-effort; the returned full
-/// app-config carries the cleanup (the ADR-0109 Decision 9 sync contract).
+/// The stale enablement entry drops best-effort. Returns the updated full
+/// app-config (the ADR-0109 Decision 9 sync contract).
 #[tauri::command]
 pub fn delete_agent(
     agents_root: State<'_, crate::agents::AgentsRoot>,
     live: State<'_, LiveProviderConfig>,
     name: String,
 ) -> Result<crate::app_config::AppConfig, crate::agents::AgentError> {
-    let mark = crate::agents::BuiltinAgentMark::from_config(&live.load());
-    crate::agents::registry::delete_agent(&agents_root.0, &mark, &name)?;
-    // A leftover enabled entry is inert (the reader intersects with the
-    // registry scan), but dropping it here keeps the set honest.
-    live.set_agent_enabled(&name, false)
-        .map_err(|e| crate::agents::AgentError::FsFailure(e.to_string()))
+    live.delete_agent(&agents_root.0, &name)
 }
 
 /// Set one agent definition's machine-level enablement (issue #932,

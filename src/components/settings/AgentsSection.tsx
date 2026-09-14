@@ -532,11 +532,13 @@ function AgentDialog({
   const [description, setDescription] = useState(editing?.description ?? "");
   const [preamble, setPreamble] = useState(editing?.preamble ?? "");
 
-  // Client-side pre-validation (the backend stays the authority): name shape
+  // Client-side pre-validation (the backend stays the authority): name
+  // present in create mode (the SkillsSection empty-name flag), name shape
   // + ceiling, description non-blank + ceiling, preamble non-blank.
   const nameInvalid =
-    name !== (editing?.name ?? "") &&
-    (!AGENT_NAME_PATTERN.test(name) || name.length > AGENT_NAME_MAX);
+    (editing === null && name.trim() === "") ||
+    (name !== (editing?.name ?? "") &&
+      (!AGENT_NAME_PATTERN.test(name) || name.length > AGENT_NAME_MAX));
   const descriptionInvalid =
     description.trim() === "" || description.length > AGENT_DESCRIPTION_MAX;
   const preambleInvalid = preamble.trim() === "";

@@ -165,6 +165,24 @@ describe("AgentsSection (issue #932)", () => {
     ).toBeVisible();
   });
 
+  it("gates Save on an empty name in create mode before any IPC round-trip", async () => {
+    mockedList.mockResolvedValue(makeListing([]));
+    renderSection();
+    await screen.findByText("No agent definitions yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    fireEvent.change(await screen.findByLabelText("Description"), {
+      target: { value: "d" },
+    });
+    fireEvent.change(screen.getByLabelText("Preamble"), {
+      target: { value: "p" },
+    });
+    // The untouched empty name never reaches the backend (the InvalidName
+    // reject used to be the only gate for this shape).
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
   it("edits a definition through the dialog", async () => {
     mockedUpdate.mockResolvedValue(makeEntry());
     await renderListed([makeEntry()]);

@@ -1956,11 +1956,11 @@ fn agent_error_serializes_adjacently_tagged() {
     );
     assert_wire(
         &AgentError::BuiltinNameLocked("general-purpose".into()),
-        r#"{"kind":"BuiltinNameLocked","data":"general-purpose"}"#,
+        r#"{"kind":"AgentBuiltinNameLocked","data":"general-purpose"}"#,
     );
     assert_wire(
         &AgentError::BuiltinUndeletable("general-purpose".into()),
-        r#"{"kind":"BuiltinUndeletable","data":"general-purpose"}"#,
+        r#"{"kind":"AgentBuiltinUndeletable","data":"general-purpose"}"#,
     );
     assert_wire(
         &AgentError::ReadOnly("external".into()),

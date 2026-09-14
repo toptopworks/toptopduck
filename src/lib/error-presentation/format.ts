@@ -248,7 +248,7 @@ function formatAgentError(e: AgentError, intl: IntlShape): string {
         },
         { name: e.data },
       );
-    case "BuiltinNameLocked":
+    case "AgentBuiltinNameLocked":
       return intl.formatMessage(
         {
           id: "error.agent.nameLocked",
@@ -256,7 +256,7 @@ function formatAgentError(e: AgentError, intl: IntlShape): string {
         },
         { name: e.data },
       );
-    case "BuiltinUndeletable":
+    case "AgentBuiltinUndeletable":
       return intl.formatMessage(
         {
           id: "error.agent.undeletable",

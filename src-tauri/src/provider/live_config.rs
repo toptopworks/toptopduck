@@ -17,6 +17,7 @@
 //! baked into [`LiveProviderConfig::load`] (fires only when the app-config file
 //! is absent AND a legacy blob is present, so it is idempotent across launches).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -451,6 +452,139 @@ impl LiveProviderConfig {
         )?;
         self.store_inner(cfg)
             .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))
+    }
+
+    /// The registered-skills name set the agent preamble marks partition
+    /// against (issue #932): the spec-valid listing off the same scan the
+    /// Skills pane reads. One derivation shared by every agents command, so
+    /// the two panes cannot disagree on which skills count as registered.
+    fn registered_skill_names(cfg: &AppConfig, skills_root: &Path) -> BTreeSet<String> {
+        let skill_mark = crate::skills::BuiltinSkillMark::from_config(cfg);
+        crate::skills::registry::list_skills(skills_root, &skill_mark)
+            .skills
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
+    /// List the agent-definitions registry (issue #932): the directory scan
+    /// over the agents root, merged with the machine-level enablement set,
+    /// the builtin materialization mark, and the backtick skill-mark
+    /// partition. Read-only -- cannot refuse.
+    pub fn list_agents(
+        &self,
+        agents_root: &Path,
+        skills_root: &Path,
+    ) -> crate::agents::AgentListing {
+        let cfg = self.load();
+        let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
+        let skill_names = Self::registered_skill_names(&cfg, skills_root);
+        crate::agents::registry::list_agents(agents_root, &mark, &cfg.enabled_agents, &skill_names)
+    }
+
+    /// Mint + enable as one composite (issue #932): the file mint lands
+    /// ENABLED -- the explicit create is explicit intent (the blankCliTool
+    /// precedent). The enablement write degrades with a log: the row renders
+    /// with its switch off and the user can flip it. The read-back partitions
+    /// the preamble marks against the real registered-skills set. Returns the
+    /// entry read back from disk.
+    pub fn create_agent(
+        &self,
+        agents_root: &Path,
+        skills_root: &Path,
+        name: &str,
+        description: &str,
+        preamble: &str,
+    ) -> Result<crate::agents::AgentEntry, crate::agents::AgentError> {
+        let cfg = self.load();
+        let entry = crate::agents::registry::create_agent(
+            agents_root,
+            name,
+            description,
+            preamble,
+            &cfg.enabled_agents,
+            &Self::registered_skill_names(&cfg, skills_root),
+        )?;
+        if let Err(e) = self.set_agent_enabled(name, true) {
+            log::warn!(
+                "created agent definition `{name}` but failed to enable it (flip the \
+                 switch in the Agents pane): {e}"
+            );
+            return Ok(entry);
+        }
+        Ok(crate::agents::AgentEntry {
+            enabled: true,
+            ..entry
+        })
+    }
+
+    /// Rewrite + carry as one composite (issue #932): `name` addresses the
+    /// current file; `update.name` is the identity to write -- a different
+    /// value renames the file and carries the enablement entry with it
+    /// (without the carry an enabled definition would silently read disabled
+    /// under its new name, and the old entry would linger inert). The carry
+    /// degrades with a warn; the returned entry's enablement reflects the
+    /// post-carry set. Returns the entry read back from disk.
+    pub fn update_agent(
+        &self,
+        agents_root: &Path,
+        skills_root: &Path,
+        name: &str,
+        update: crate::agents::AgentUpdate,
+    ) -> Result<crate::agents::AgentEntry, crate::agents::AgentError> {
+        let cfg = self.load();
+        let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
+        let skill_names = Self::registered_skill_names(&cfg, skills_root);
+        let mut updated = crate::agents::registry::update_agent(
+            agents_root,
+            &mark,
+            name,
+            update,
+            &cfg.enabled_agents,
+            &skill_names,
+        )?;
+        if updated.name != name {
+            match self.rename_agent_enabled(name, &updated.name) {
+                Ok(carried) => {
+                    updated.enabled = carried.enabled_agents.contains(&updated.name);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "renamed agent definition `{name}` -> `{}` but failed to carry its \
+                         enablement entry (flip the switch in the Agents pane): {e}",
+                        updated.name
+                    );
+                }
+            }
+        }
+        Ok(updated)
+    }
+
+    /// Delete + stale-entry drop as one composite (issue #932): the file
+    /// removal IS the operation; the enablement drop keeps the set honest,
+    /// but a leftover entry is inert by construction (the reader intersects
+    /// with the registry scan), so a cleanup failure degrades with a warn
+    /// and the returned config reflects whatever the set holds (the create
+    /// posture -- the delete must not report failure for an operation that
+    /// landed). Returns the updated FULL app-config (the ADR-0109 Decision 9
+    /// sync contract).
+    pub fn delete_agent(
+        &self,
+        agents_root: &Path,
+        name: &str,
+    ) -> Result<AppConfig, crate::agents::AgentError> {
+        let mark = crate::agents::BuiltinAgentMark::from_config(&self.load());
+        crate::agents::registry::delete_agent(agents_root, &mark, name)?;
+        match self.set_agent_enabled(name, false) {
+            Ok(cfg) => Ok(cfg),
+            Err(e) => {
+                log::warn!(
+                    "deleted agent definition `{name}` but failed to drop its enablement \
+                     entry (the stale name is inert): {e}"
+                );
+                Ok(self.load())
+            }
+        }
     }
 
     /// The builtin agent-definitions startup window (issue #932, ADR-0117
@@ -2129,6 +2263,76 @@ mod tests {
     }
 
     // --- agent enablement (issue #932, ADR-0117) -----------------------------
+
+    #[test]
+    fn create_agent_lands_enabled_and_partitions_marks_against_real_skills() {
+        // The create composite at its seam: a fresh mint lands ENABLED, and
+        // the read-back partitions the preamble marks against the real
+        // registered-skills set -- a mark naming a registered skill is a
+        // binding hit, not a dangle.
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        let skills = tempfile::tempdir().expect("skills root");
+        let sql_dir = skills.path().join("sql");
+        std::fs::create_dir_all(&sql_dir).expect("skill dir");
+        std::fs::write(
+            sql_dir.join("SKILL.md"),
+            "---\nname: sql\ndescription: Runs SQL.\n---\nYou run SQL.\n",
+        )
+        .expect("SKILL.md");
+
+        let entry = live
+            .create_agent(
+                agents.path(),
+                skills.path(),
+                "data-cleaner",
+                "Cleans datasets.",
+                "Use `sql` and `ghost-skill` when helpful.\n",
+            )
+            .expect("create");
+
+        assert!(entry.enabled, "a fresh mint lands enabled");
+        assert_eq!(entry.skill_refs, vec!["sql".to_string()]);
+        assert_eq!(entry.dangling_skill_refs, vec!["ghost-skill".to_string()]);
+        let cfg = live.load();
+        assert!(cfg.enabled_agents.contains("data-cleaner"));
+        assert!(agents.path().join("data-cleaner.md").exists());
+    }
+
+    #[test]
+    fn update_agent_renames_and_carries_enablement() {
+        // The update composite at its seam: a rename carries the enablement
+        // entry, and the returned entry's enablement reflects the post-carry
+        // set (the pre-rename snapshot does not know the new name).
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        let skills = tempfile::tempdir().expect("skills root");
+        live.create_agent(agents.path(), skills.path(), "old-name", "d", "p\n")
+            .expect("seed");
+
+        let updated = live
+            .update_agent(
+                agents.path(),
+                skills.path(),
+                "old-name",
+                crate::agents::AgentUpdate {
+                    name: "new-name".into(),
+                    description: "d".into(),
+                    preamble: "p\n".into(),
+                },
+            )
+            .expect("rename");
+
+        assert_eq!(updated.name, "new-name");
+        assert!(
+            updated.enabled,
+            "the carried entry shows under the new name"
+        );
+        let cfg = live.load();
+        assert!(!cfg.enabled_agents.contains("old-name"));
+        assert!(cfg.enabled_agents.contains("new-name"));
+        assert!(agents.path().join("new-name.md").exists());
+    }
 
     #[test]
     fn set_agent_enabled_round_trips_and_keeps_siblings() {

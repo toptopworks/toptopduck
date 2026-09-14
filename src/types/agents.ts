@@ -67,14 +67,16 @@ export interface AgentListing {
 
 // AgentError (already adjacently tagged `{kind, data}` on the wire). The
 // `kind` set is disjoint from every other typed error enum so fmtError's
-// dispatch stays unambiguous (the SkillError lane's contract).
+// dispatch stays unambiguous (the SkillError lane's contract): every shape
+// SkillError also uses (invalid name / taken / name-locked / undeletable /
+// read-only / fs) carries an Agent-prefixed wire name.
 export type AgentError =
   | { kind: "InvalidAgentName"; data: string }
   | { kind: "InvalidAgent"; data: string }
   | { kind: "NoSuchAgent"; data: string }
   | { kind: "AgentNameTaken"; data: string }
   | { kind: "ReservedAgentName"; data: string }
-  | { kind: "BuiltinNameLocked"; data: string }
-  | { kind: "BuiltinUndeletable"; data: string }
+  | { kind: "AgentBuiltinNameLocked"; data: string }
+  | { kind: "AgentBuiltinUndeletable"; data: string }
   | { kind: "AgentReadOnly"; data: string }
   | { kind: "AgentFsFailure"; data: string };

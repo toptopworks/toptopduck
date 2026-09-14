@@ -136,6 +136,20 @@ impl BuiltinAgentMark {
 /// the shipped set drop. Filesystem failures degrade per-definition with a
 /// warn; the startup window must not fail the whole read-modify-write.
 pub(crate) fn reconcile(root: &Path, materialized: &mut BTreeSet<String>) -> bool {
+    // Mint the root first (the skills materializer posture): a fresh install
+    // has no agents directory, and the temp-file write below fails NotFound
+    // without it -- the startup retry could never succeed. A mint failure
+    // degrades like every other window fault: warn, nothing recorded, the
+    // next startup retries.
+    if let Err(e) = std::fs::create_dir_all(root) {
+        log::warn!(
+            target: "agents",
+            "failed to create the agents registry root `{}` (the next startup \
+             retries): {e}",
+            root.display()
+        );
+        return false;
+    }
     let mut dirty = false;
     for def in BUILTIN_AGENT_DEFINITIONS {
         let path = root.join(format!("{}.md", def.name));
@@ -254,6 +268,18 @@ mod tests {
             content,
             find_definition("general-purpose").unwrap().render()
         );
+    }
+
+    #[test]
+    fn reconcile_mints_a_missing_registry_root() {
+        // The fresh-install shape: the agents root does not exist yet. Every
+        // existing install upgrades into it too -- this directory is new.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let mut mark = BTreeSet::new();
+        assert!(reconcile(&root, &mut mark));
+        assert!(mark.contains("general-purpose"));
+        assert!(root.join("general-purpose.md").exists());
     }
 
     #[test]
