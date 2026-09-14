@@ -31,17 +31,20 @@ mod cancel;
 mod fold;
 mod live;
 mod model;
+mod subagent;
 
 #[cfg(test)]
 mod tests;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use futures::StreamExt;
-use rig_agent::agent::{AgentBuilder, ModelHandle, StreamingError, StreamingPromptRequest};
+use rig_agent::agent::{
+    AgentBuilder, ModelHandle, MultiTurnStreamItem, StreamingError, StreamingPromptRequest,
+};
 use rig_agent::completion::PromptError;
 use std::future::IntoFuture;
 
@@ -127,7 +130,12 @@ impl LoopRuntime {
     /// on this thread while the driver thread runs the loop, then fold the
     /// event stream into the round-grouped trace and derive the termination
     /// -- the single-in-flight + watchdog + panic-guard contract
-    /// (ADR-0021/0081, issue #321).
+    /// (ADR-0021/0081, issue #321). `delegations` is the turn's enabled
+    /// agent-definition snapshot (issue #933): every spec whose name the
+    /// request's tool table advertises becomes a named delegation tool --
+    /// the sub-agent runs on the driver's runtime while its own dispatches
+    /// keep crossing to THIS thread's server, so approval / audit /
+    /// promotion stay identical by construction.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run(
         &self,
@@ -136,6 +144,7 @@ impl LoopRuntime {
         materializer: &mut dyn Materializer,
         mcp: &mut McpAggregator,
         cli: &[crate::cli_tools::config::CliToolConfig],
+        delegations: &[crate::agents::DelegationSpec],
         skills: &mut SkillActivationCtx<'_>,
         read: &crate::skills::read::SkillReadGate<'_>,
         approval: &crate::approval::ApprovalState,
@@ -189,6 +198,34 @@ impl LoopRuntime {
             let clock = self.no_progress_cap.map(|timeout| {
                 ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout)
             });
+            // The turn's sub-agent context (issue #933, ADR-0117): the
+            // shared execution collaborators wrapped with the subtracted
+            // sub-face, built once for the whole delegation family. The
+            // clock rides it too -- a sub-agent's generation activity is
+            // turn progress, so its inbound events re-arm the same
+            // un-layered watchdog (Decision 5).
+            // Derived ONCE here (review DRY): the same set drives the
+            // context build below and the driver's tool-table split, so
+            // there is exactly one place that knows a delegation name.
+            let delegation_names: std::collections::BTreeSet<String> =
+                delegations.iter().map(|spec| spec.name.clone()).collect();
+            let subagent_ctx = if delegation_names.is_empty() {
+                None
+            } else {
+                Some(subagent::subagent_ctx(
+                    self.model.clone(),
+                    Arc::clone(&state),
+                    req_tx.clone(),
+                    Arc::clone(&phases),
+                    clock.clone(),
+                    Arc::clone(&cancel),
+                    self.protocol,
+                    request.thought_level.clone(),
+                    request.max_tokens as u64,
+                    &request.tools,
+                    &delegation_names,
+                ))
+            };
             // The driver: one scoped thread owning a dedicated single-thread
             // runtime. The dispatch server below outlives it -- its request
             // channel closes when the driver's context (and with it every
@@ -205,6 +242,13 @@ impl LoopRuntime {
                 let protocol = self.protocol;
                 let clock = clock.clone();
                 let token = Arc::clone(&cancel);
+                let delegations = delegations.to_vec();
+                // MOVED, not cloned: the context owns a dispatch-channel
+                // sender, and any copy left on THIS scope's stack would keep
+                // the server loop's `req_rx` open past the drive -- the
+                // server waits for channel close, the scope waits for the
+                // server, a deadlock by construction (#933).
+                let subagent_ctx = subagent_ctx;
                 scope.spawn(move || {
                     let runtime = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -233,6 +277,9 @@ impl LoopRuntime {
                         protocol,
                         clock: clock.clone(),
                         token,
+                        delegations,
+                        delegation_names,
+                        subagent_ctx,
                     }))
                 })
             };
@@ -534,6 +581,15 @@ struct DriveInputs {
     /// inbound stream event -- the generation segment's liveness signal.
     clock: Option<Arc<ProgressClock>>,
     token: Arc<CancelToken>,
+    /// The turn's delegation specs (issue #933): owned copies, matched by
+    /// name against the request's tool table.
+    delegations: Vec<crate::agents::DelegationSpec>,
+    /// The specs' names, derived once in `run` (the single place that
+    /// knows what a delegation name is).
+    delegation_names: std::collections::BTreeSet<String>,
+    /// The shared sub-agent context for the family; `None` when the turn
+    /// carries no delegation tool at all (the zero-cost posture).
+    subagent_ctx: Option<Arc<subagent::SubagentCtx>>,
 }
 
 /// How the driver's consumption loop ended.
@@ -570,6 +626,9 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         protocol,
         clock,
         token,
+        delegations,
+        delegation_names,
+        subagent_ctx,
     } = inputs;
     // The whole windowed conversation rides the request (the app assembled
     // it; the loop runtime re-feeds it verbatim) split at rig's boundary:
@@ -595,12 +654,37 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
             };
         }
     };
-    let tools = request
-        .tools
-        .iter()
-        .cloned()
-        .map(|def| adapter::gateway_dynamic_tool(def, Arc::clone(&state), req_tx.clone()))
-        .collect::<Vec<_>>();
+    // The face split (issue #933, ADR-0117 Decision 1): every advertised
+    // definition whose name a delegation spec owns becomes a named
+    // delegation tool; everything else stays a gateway adapter. The
+    // delegation counter is per model-turn -- reset at each turn's usage
+    // record below (the boundary that precedes the batch's committed
+    // calls), so the batch width cap counts exactly one model-turn's
+    // delegations under the pinned sequential execution.
+    let delegation_batch = Arc::new(AtomicUsize::new(0));
+    let tools =
+        request
+            .tools
+            .iter()
+            .cloned()
+            .map(|def| {
+                if delegation_names.contains(&def.name) {
+                    let spec = delegations
+                        .iter()
+                        .find(|spec| spec.name == def.name)
+                        .expect("the name set is built from the specs themselves");
+                    subagent::delegation_dynamic_tool(
+                        spec.clone(),
+                        Arc::clone(&delegation_batch),
+                        Arc::clone(subagent_ctx.as_ref().expect(
+                            "a delegation tool implies the turn built the sub-agent context",
+                        )),
+                    )
+                } else {
+                    adapter::gateway_dynamic_tool(def, Arc::clone(&state), req_tx.clone())
+                }
+            })
+            .collect::<Vec<_>>();
     let agent = AgentBuilder::new(model)
         .preamble(request.system.as_str())
         .max_tokens(request.max_tokens as u64)
@@ -636,6 +720,14 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
                     None => break DriveExit::Done,
                     Some(Err(err)) => break DriveExit::Error(err),
                     Some(Ok(item)) => {
+                        // The delegation batch boundary (issue #933): each
+                        // turn's usage record arrives exactly once per
+                        // model turn and BEFORE the turn's committed calls,
+                        // so resetting the counter here scopes it to one
+                        // model-turn's batch.
+                        if matches!(item, MultiTurnStreamItem::CompletionCall(_)) {
+                            delegation_batch.store(0, Ordering::SeqCst);
+                        }
                         fold.event(&item, &state, &phases);
                         // Inbound stream activity (ADR-0115): re-arm the
                         // no-progress clock.
@@ -666,13 +758,18 @@ fn finish(
 ) -> LoopOutcome {
     let drained = fold.drain_residual(state);
     let recorded_calls = state.recorded_calls.load(Ordering::SeqCst);
+    // Sub-agent folds consume their own calls' entries off the shared
+    // queue (issue #933): their landed count joins the pairing here, and
+    // entries a cancelled sub-agent left queued land through the drain
+    // above, so every recorded entry still accounts exactly once.
+    let landed_by_subagents = state.landed_by_subagents.load(Ordering::SeqCst);
     // A driver panic swaps in a fresh fold: the entries the dead fold had
     // already landed go with it (#321's honest Transient landing), so the
     // exactly-once pairing has no baseline to check against -- the drain
     // above still salvages the residual queue onto the fresh fold.
     debug_assert!(
-        fold_replaced || fold.landed_calls == recorded_calls,
-        "every executed call's trace entry must land exactly once: {recorded_calls} recorded, {} landed by result event, {drained} drained at finish",
+        fold_replaced || fold.landed_calls + landed_by_subagents == recorded_calls,
+        "every executed call's trace entry must land exactly once: {recorded_calls} recorded, {} landed by result event, {drained} drained at finish, {landed_by_subagents} landed inside sub-agents",
         fold.landed_calls - drained,
     );
     retain_landed_rounds(&mut fold.rounds);

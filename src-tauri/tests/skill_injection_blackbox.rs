@@ -123,6 +123,7 @@ fn activated_skill_body_in_prompt_and_provenance() {
             skills_root: &skills_root,
             activated: &activated,
             cli_tools: &[],
+            delegations: &[],
         },
     );
     // The scripted text reply lands as a textual outcome.
@@ -219,6 +220,7 @@ fn mounted_not_activated_lands_index_entry_not_body() {
             skills_root: &skills_root,
             activated: &activated,
             cli_tools: &[],
+            delegations: &[],
         },
     );
     assert!(
@@ -299,6 +301,7 @@ fn disclosure_orders_index_before_bodies_and_unmount_cascades() {
                 skills_root,
                 activated: &activated,
                 cli_tools: &[],
+                delegations: &[],
             },
         )
     };
@@ -634,6 +637,7 @@ fn agent_activation_persists_midturn_and_survives_turn_failure() {
             skills_root: &skills_root,
             activated: &[],
             cli_tools: &[],
+            delegations: &[],
         },
     );
     // The turn itself failed (the probe's round 2 is a permanent fault)...
@@ -850,6 +854,7 @@ fn read_surface_mounts_next_turn_and_serves_after_midturn_activation() {
             activated: &[],
             skills_root: &skills_root,
             cli_tools: &[],
+            delegations: &[],
         },
     );
     assert!(
@@ -880,6 +885,7 @@ fn read_surface_mounts_next_turn_and_serves_after_midturn_activation() {
             activated: &activated,
             skills_root: &skills_root,
             cli_tools: &[],
+            delegations: &[],
         },
     );
     assert!(

@@ -85,6 +85,14 @@ pub(crate) struct SharedTurnState {
     /// its result event, or drained at finish when a cancellation left the
     /// event stream abandoned (#921).
     pub(crate) recorded_calls: AtomicUsize,
+    /// Entries landed by SUB-AGENT folds (#933): a sub-agent's event stream
+    /// carries its own result events, so its fold pops the shared
+    /// completion queue itself -- the count it consumed is reported here
+    /// when the sub-agent ends, keeping the exactly-once pairing total
+    /// across the main fold and every sub-agent fold of the turn. Entries
+    /// a cancelled sub-agent leaves queued stay in the completion queue and
+    /// land through the main finish's residual drain.
+    pub(crate) landed_by_subagents: AtomicUsize,
 }
 
 impl SharedTurnState {
@@ -108,6 +116,7 @@ impl SharedTurnState {
             gate_cancelled: AtomicBool::new(false),
             aborted: Mutex::new(None),
             recorded_calls: AtomicUsize::new(0),
+            landed_by_subagents: AtomicUsize::new(0),
         }
     }
 }

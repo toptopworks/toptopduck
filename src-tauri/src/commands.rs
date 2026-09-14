@@ -753,6 +753,7 @@ pub async fn ask(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     skills_root: State<'_, SkillsRoot>,
+    agents_root: State<'_, crate::agents::AgentsRoot>,
     session_id: String,
     question: String,
 ) -> Result<TurnOutcome, SessionError> {
@@ -798,6 +799,10 @@ pub async fn ask(
     // registry root is read below to resolve each mounted skill's SKILL.md body
     // + whole-file SHA-256 for prompt injection + provenance (issue #364).
     let skills_root = skills_root.0.clone();
+    // Clone the agents-root path the same way (issue #933): the turn's
+    // delegation assembly scans the agent-definitions registry under the
+    // held session lock below, next to the skills + CLI reads.
+    let agents_root = agents_root.0.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut s = handle.session_lock()?;
         // Issue #353 + ADR-0095: feed the session's runtime choice and the
@@ -815,7 +820,7 @@ pub async fn ask(
         // session sets under this held lock (neither can change between the
         // read and the turn) and wires `TurnInputs` in one seam -- see
         // [`assemble_turn_inputs`].
-        let assembled = assemble_turn_inputs(&s, &skills_root, &live);
+        let assembled = assemble_turn_inputs(&s, &skills_root, &agents_root, &live);
         let inputs = assembled.turn_inputs(&mcp_servers);
         let outcome = s.ask_with_phase(
             &question,
@@ -876,6 +881,11 @@ struct AssembledTurnInputs<'a> {
     /// surface resolves skill names against it live, mid-turn.
     skills_root: &'a Path,
     cli_tools: Vec<crate::cli_tools::config::CliToolConfig>,
+    /// The turn's delegation snapshot (issue #933, ADR-0117): the enabled
+    /// agent definitions with their bound skill bodies resolved. One scan
+    /// under the same held lock as the skills + CLI reads, so the family
+    /// cannot change between the assembly and the turn.
+    delegations: Vec<crate::agents::DelegationSpec>,
     keychain: &'a crate::provider::keychain::KeychainStore,
 }
 
@@ -895,17 +905,20 @@ struct AssembledTurnInputs<'a> {
 fn assemble_turn_inputs<'a>(
     session: &Session,
     skills_root: &'a Path,
+    agents_root: &'a Path,
     live: &'a LiveProviderConfig,
 ) -> AssembledTurnInputs<'a> {
     let mounted = session.mounted_skills();
     let activated = session.activated_skills();
     let skills = resolve_prompt_fragments(skills_root, &mounted);
     let cli_tools = live.enabled_cli_tools();
+    let delegations = live.delegation_specs(agents_root, skills_root);
     AssembledTurnInputs {
         skills,
         activated,
         skills_root,
         cli_tools,
+        delegations,
         keychain: live.keychain(),
     }
 }
@@ -921,6 +934,7 @@ impl AssembledTurnInputs<'_> {
             activated: &self.activated,
             skills_root: self.skills_root,
             cli_tools: &self.cli_tools,
+            delegations: &self.delegations,
         }
     }
 }
@@ -5558,7 +5572,11 @@ mod tests {
         // legacy blob (review C).
         live.upsert_cli_tool(cli_tool("pandoc-guide", true))
             .expect("upsert one enabled CLI tool");
-        let assembled = assemble_turn_inputs(&session, &root, &live);
+        // An empty agents root (issue #933): the delegation scan reads an
+        // absent registry as the legitimate never-created state and lists
+        // nothing, pinning the empty-family projection here too.
+        let agents_tmp = tempfile::tempdir().unwrap();
+        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live);
         let inputs = assembled.turn_inputs(&[]);
 
         // The sort key is the activated subset, NOT the mounted set -- the
@@ -5567,6 +5585,39 @@ mod tests {
             inputs.activated,
             &["alpha".to_string()],
             "activated carries the activated subset, not the mounted set"
+        );
+        // The empty agents registry projects the empty delegation family
+        // (issue #933): a never-created registry is the legitimate state.
+        assert_eq!(
+            inputs.delegations,
+            &[],
+            "an empty agents root lists no delegation specs"
+        );
+
+        // The non-empty direction: one spec-valid definition on disk plus
+        // its enablement set entry project exactly one spec (the enabled
+        // filter and the file scan both have to pass), so an empty-only
+        // assert cannot be vacuously satisfied by a broken scan.
+        std::fs::write(
+            agents_tmp.path().join("analyst.md"),
+            "---
+name: analyst
+description: Open-ended analysis.
+---
+You are a focused analyst.
+",
+        )
+        .expect("write agent definition");
+        live.set_agent_enabled("analyst", true)
+            .expect("enable analyst");
+        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live);
+        let inputs = assembled.turn_inputs(&[]);
+        assert_eq!(inputs.delegations.len(), 1, "the enabled entry projects");
+        assert_eq!(inputs.delegations[0].name, "analyst");
+        assert_eq!(
+            inputs.delegations[0].preamble,
+            "You are a focused analyst.
+"
         );
         // Every mounted skill resolves with its description + body verbatim.
         assert_eq!(inputs.skills.len(), 2, "every mounted skill resolves");

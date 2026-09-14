@@ -202,6 +202,10 @@ struct Harness {
     read_activated: Vec<String>,
     read_root: std::path::PathBuf,
     phase_hook: Option<PhaseHook>,
+    /// The turn's delegation specs (issue #933): defaults empty; the
+    /// delegation suites seed specs and advertise the matching tool names
+    /// on the request.
+    delegations: Vec<crate::agents::DelegationSpec>,
 }
 
 impl Harness {
@@ -218,6 +222,7 @@ impl Harness {
             read_activated: Vec::new(),
             read_root: std::path::PathBuf::new(),
             phase_hook: None,
+            delegations: Vec::new(),
         }
     }
 
@@ -342,6 +347,7 @@ impl Harness {
             &mut RealMaterializer,
             &mut mcp,
             cli,
+            &self.delegations,
             &mut self.skills.ctx(),
             &read,
             approval,
@@ -1634,5 +1640,320 @@ fn to_app_messages_round_trips_thinking_blocks() {
             },
         ],
         "absent signatures land as empty strings, redacted blocks stay redacted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Named delegation (issue #933, ADR-0117): the mock model's script queue is
+// SHARED between the main loop and every sub-agent (one ModelHandle, one
+// Arc'd state), so the scripts below read in global consumption order --
+// the main turn's calls, then each delegated sub-agent's turns as the
+// sequential executor reaches them, then the main loop's continuation.
+// ---------------------------------------------------------------------------
+
+/// The fixture spec: one enabled definition named `analyst`, unbound.
+fn analyst_spec() -> crate::agents::DelegationSpec {
+    crate::agents::DelegationSpec {
+        name: "analyst".to_string(),
+        description: "Open-ended analysis delegate.".to_string(),
+        preamble: "You are a focused analyst.".to_string(),
+        skill_bodies: Vec::new(),
+    }
+}
+
+/// A main-loop turn whose tool table also advertises the harness's seeded
+/// delegation specs (the direct-list the session assembly performs).
+fn delegation_request(h: &Harness, question: &str) -> ToolTurnRequest {
+    let mut request = h.request(question);
+    for spec in &h.delegations {
+        request.tools.push(spec.tool_definition());
+    }
+    request
+}
+
+/// The happy delegation path plus the AC #5 numbering pin: the main model
+/// delegates, the sub-agent runs over the SHARED face (its materialize
+/// dispatches through the same server), reports back, and the main loop's
+/// own later materialize continues the SAME monotonic `result_N` sequence
+/// -- result_2 inside the sub-agent, result_3 after it, one numberer, one
+/// promotion list, in dispatch order.
+#[test]
+fn delegation_runs_a_subagent_over_the_shared_face_with_one_numberer() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate the count",
+            None,
+            &[(
+                "tu_d1",
+                "analyst",
+                json!({"prompt": "count the rows and materialize the count"}),
+            )],
+        ),
+        // The sub-agent turns, consumed while the delegation callback runs.
+        batch_turn(
+            "sub: materialize",
+            None,
+            &[(
+                "tu_s1",
+                "materialize",
+                json!({"sql": "SELECT count(*) AS n FROM result_1"}),
+            )],
+        ),
+        text_turn("sub promoted result_2"),
+        // The main loop resumes after the delegation returned.
+        batch_turn(
+            "main: materialize too",
+            None,
+            &[(
+                "tu_m1",
+                "materialize",
+                json!({"sql": "SELECT count(*) AS n FROM result_1"}),
+            )],
+        ),
+        text_turn("done with result_3"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "count and materialize"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("done with result_3".into())
+    );
+    // One numberer: the sub-agent promotion landed first (result_2), the
+    // main loop continues after it (result_3) -- monotonic across the
+    // delegation boundary, in dispatch order.
+    let promoted: Vec<&str> = outcome
+        .promotions
+        .iter()
+        .map(|p| p.dataset.reference_name.as_str())
+        .collect();
+    assert_eq!(promoted, vec!["result_2", "result_3"]);
+    // The main trace carries the delegation as ONE call row on its round;
+    // the sub-agent internal rounds do not project onto it here (#934
+    // owns the nested sub-trace).
+    assert_eq!(outcome.trace.len(), 2, "main rounds only");
+    let round1 = &outcome.trace[0];
+    assert_eq!(round1.calls.len(), 1);
+    assert_eq!(round1.calls[0].name, "analyst");
+    assert!(round1.calls[0].success, "the delegation reported back");
+    assert!(
+        round1.calls[0]
+            .result_excerpt
+            .contains("sub promoted result_2"),
+        "the report rides the excerpt: {}",
+        round1.calls[0].result_excerpt
+    );
+    assert_eq!(outcome.trace[1].calls[0].name, "materialize");
+}
+
+/// AC #3: the same-batch width cap. One model turn carries nine delegation
+/// calls; under the pinned sequential execution the first eight run (each
+/// consuming its sub-agent script) and the ninth is REFUSED with an
+/// explicit text naming the cap -- the row lands failed, the turn itself
+/// stays healthy, and the main model reads the refusal and continues.
+#[test]
+fn the_ninth_delegation_of_one_batch_is_refused_with_an_explicit_text() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let mut calls = Vec::new();
+    for n in 1..=9usize {
+        calls.push((
+            format!("tu_d_{n}"),
+            "analyst",
+            json!({ "prompt": format!("task number {n}") }),
+        ));
+    }
+    let borrowable: Vec<(&str, &str, JsonValue)> = calls
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), *name, args.clone()))
+        .collect();
+    let mut script = vec![batch_turn("delegate nine", None, &borrowable)];
+    for n in 1..=8 {
+        script.push(text_turn(&format!("sub report {n}")));
+    }
+    script.push(text_turn("carried on after the refusals"));
+    let model = MockCompletionModel::from_stream_turns(script);
+    let outcome = h.run(
+        &delegation_request(&h, "nine delegations"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("carried on after the refusals".into()),
+        "the refusal is a tool result, never a turn failure"
+    );
+    let round1 = &outcome.trace[0];
+    assert_eq!(round1.calls.len(), 9, "every call keeps its honest row");
+    let succeeded = round1.calls.iter().filter(|c| c.success).count();
+    assert_eq!(succeeded, 8, "the first eight delegations ran");
+    let ninth = &round1.calls[8];
+    assert!(!ninth.success, "the ninth is refused");
+    assert!(
+        ninth.result_excerpt.contains("delegation refused"),
+        "the refusal names itself: {}",
+        ninth.result_excerpt
+    );
+    assert!(
+        ninth.result_excerpt.contains("8"),
+        "the refusal names the cap: {}",
+        ninth.result_excerpt
+    );
+}
+
+/// AC #4: a sub-agent that burns its whole step budget feeds an honest
+/// failure TEXT back through the tool result -- the main turn keeps
+/// running and converges afterwards; the failed delegation row carries
+/// the budget wording. (The sub-agent repeated calls use DISTINCT
+/// arguments so the dispatch seam identical-arguments screen stays out of
+/// the picture -- this pin owns the step-cap path.)
+#[test]
+fn a_subagent_step_cap_failure_feeds_back_without_escalating_the_turn() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let mut script = vec![batch_turn(
+        "delegate",
+        None,
+        &[("tu_d1", "analyst", json!({"prompt": "explore forever"}))],
+    )];
+    for n in 1..=10usize {
+        script.push(batch_turn(
+            &format!("sub round {n}"),
+            None,
+            &[("tu_s", "explore", json!({ "sql": format!("SELECT {n}") }))],
+        ));
+    }
+    script.push(text_turn("recovered after the sub-agent failed"));
+    let model = MockCompletionModel::from_stream_turns(script);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate then recover"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("recovered after the sub-agent failed".into()),
+        "the sub-agent cap is a tool-level failure, never the turn own"
+    );
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "the delegation round alone: the terminal text turn opens no round"
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert_eq!(row.name, "analyst");
+    assert!(!row.success, "the budget exhaustion is a failed row");
+    assert!(
+        row.result_excerpt.contains("did not converge"),
+        "the failure words the budget: {}",
+        row.result_excerpt
+    );
+}
+
+/// AC #6: cancellation forwarded into a running sub-agent lands the WHOLE
+/// turn Cancelled. The token fires during the sub-agent first generation
+/// (the bridged provider second call overall); the sub-agent next dispatch
+/// is gate-cancelled, its watcher hook stops it at the following
+/// model-call checkpoint, and the main loop own checkpoint lands the
+/// ADR-0021 cancel -- the delegation machinery adds no second cancel
+/// vocabulary.
+#[test]
+fn a_cancel_during_the_subagent_lands_the_whole_turn_cancelled() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let token = Arc::new(CancelToken::new());
+    let provider = BlockingProvider::new(vec![
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::ToolCalls {
+                text: None,
+                calls: vec![crate::provider::tool_calling::ToolUse {
+                    id: "tu_d1".into(),
+                    name: "analyst".into(),
+                    input: json!({"prompt": "explore the data"}),
+                }],
+            },
+        }),
+        // The sub-agent first turn asks for a real dispatch; the token
+        // fires while this generation is in flight.
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::ToolCalls {
+                text: None,
+                calls: vec![crate::provider::tool_calling::ToolUse {
+                    id: "tu_s1".into(),
+                    name: "explore".into(),
+                    input: json!({"sql": "SELECT count(*) FROM result_1"}),
+                }],
+            },
+        }),
+    ])
+    .with_fire_cancel_on(2, Arc::clone(&token));
+    let outcome = h.run(
+        &delegation_request(&h, "delegate then cancel"),
+        bridged_runtime(Arc::new(provider) as Arc<dyn Provider>),
+        token,
+    );
+    assert_eq!(outcome.termination, Termination::Cancelled);
+}
+
+/// AC #4 (the provider-fault arm): a sub-agent whose model call faults
+/// feeds the honest failure text back through the tool result -- the main
+/// turn stays healthy and converges on its own next reply. The bridged
+/// provider scripts the sub-agent first generation to fail outright.
+#[test]
+fn a_subagent_provider_fault_feeds_back_without_escalating_the_turn() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let provider = BlockingProvider::new(vec![
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::ToolCalls {
+                text: None,
+                calls: vec![crate::provider::tool_calling::ToolUse {
+                    id: "tu_d1".into(),
+                    name: "analyst".into(),
+                    input: json!({"prompt": "try to explore"}),
+                }],
+            },
+        }),
+        // The sub-agent first generation faults (the provider-error arm of
+        // the failure vocabulary).
+        Err(ProviderError::Unavailable("provider exploded".into())),
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::Text("recovered after the provider fault".into()),
+        }),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate then survive"),
+        bridged_runtime(Arc::new(provider) as Arc<dyn Provider>),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("recovered after the provider fault".into()),
+        "the provider fault inside the sub-agent is a tool-level failure"
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert_eq!(row.name, "analyst");
+    assert!(!row.success);
+    assert!(
+        row.result_excerpt.contains("sub-agent failed"),
+        "the failure words itself: {}",
+        row.result_excerpt
     );
 }

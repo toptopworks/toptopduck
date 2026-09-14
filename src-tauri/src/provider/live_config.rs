@@ -74,6 +74,26 @@ pub enum CliToolWriteError {
     Write(#[from] app_config::WriteError),
 }
 
+/// One skills-registry scan, two projections (issue #933 review DRY): the
+/// registered-name set every agents command partitions marks against, and
+/// the name-to-body map the delegation assembly injects from. Both
+/// consumers ride the same listing, so they cannot disagree on which
+/// skills count as registered.
+fn scan_registered_skills(
+    cfg: &AppConfig,
+    skills_root: &Path,
+) -> (BTreeSet<String>, std::collections::BTreeMap<String, String>) {
+    let skill_mark = crate::skills::BuiltinSkillMark::from_config(cfg);
+    let skills = crate::skills::registry::list_skills(skills_root, &skill_mark).skills;
+    let mut names = BTreeSet::new();
+    let mut bodies = std::collections::BTreeMap::new();
+    for skill in skills {
+        names.insert(skill.name.clone());
+        bodies.insert(skill.name, skill.body);
+    }
+    (names, bodies)
+}
+
 impl LiveProviderConfig {
     /// Bind a new live source to an app-config `path` (resolved by the caller via
     /// the Tauri `app_data_dir`). The path's parent directory must exist; the
@@ -459,12 +479,7 @@ impl LiveProviderConfig {
     /// Skills pane reads. One derivation shared by every agents command, so
     /// the two panes cannot disagree on which skills count as registered.
     fn registered_skill_names(cfg: &AppConfig, skills_root: &Path) -> BTreeSet<String> {
-        let skill_mark = crate::skills::BuiltinSkillMark::from_config(cfg);
-        crate::skills::registry::list_skills(skills_root, &skill_mark)
-            .skills
-            .into_iter()
-            .map(|s| s.name)
-            .collect()
+        scan_registered_skills(cfg, skills_root).0
     }
 
     /// List the agent-definitions registry (issue #932): the directory scan
@@ -480,6 +495,52 @@ impl LiveProviderConfig {
         let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
         let skill_names = Self::registered_skill_names(&cfg, skills_root);
         crate::agents::registry::list_agents(agents_root, &mark, &cfg.enabled_agents, &skill_names)
+    }
+
+    /// The turn's delegation snapshot (issue #933, ADR-0117): the enabled
+    /// agent definitions assembled into [`DelegationSpec`]s with their
+    /// bound skill bodies resolved against the skills registry. Read-side
+    /// degradation is honest and non-blocking: a registry that cannot be
+    /// read yields an empty family (the turn simply carries no delegation
+    /// tool), with every degraded row logged -- the settings pane surfaces
+    /// the same faults, the turn path never surfaces them anywhere else.
+    pub fn delegation_specs(
+        &self,
+        agents_root: &Path,
+        skills_root: &Path,
+    ) -> Vec<crate::agents::DelegationSpec> {
+        let cfg = self.load();
+        let (skill_names, bodies) = scan_registered_skills(&cfg, skills_root);
+        let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
+        let listing = crate::agents::registry::list_agents(
+            agents_root,
+            &mark,
+            &cfg.enabled_agents,
+            &skill_names,
+        );
+        if let Some(root_error) = &listing.root_error {
+            log::warn!(
+                target: "agents",
+                "delegation assembly: agents registry read fault: {root_error}"
+            );
+        }
+        for skipped in &listing.ignored {
+            log::warn!(
+                target: "agents",
+                "delegation assembly: skipped definition `{}`: {}",
+                skipped.file,
+                skipped.reason
+            );
+        }
+        for warning in &listing.warnings {
+            log::warn!(target: "agents", "delegation assembly: {warning:?}");
+        }
+        listing
+            .agents
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| crate::agents::DelegationSpec::from_entry(entry, &bodies))
+            .collect()
     }
 
     /// Mint + enable as one composite (issue #932): the file mint lands
@@ -2856,5 +2917,81 @@ mod tests {
                 "concurrent upsert lost server {id}"
             );
         }
+    }
+
+    /// The turn's delegation assembly (issue #933): enabled entries project
+    /// to specs with their bound skill bodies resolved off the skills
+    /// registry; a disabled entry never lists; an entry whose bound skill
+    /// vanished degrades to unbound (the no-breakage clause). Pin against
+    /// the real config path (create-lands-enabled + the enablement toggle),
+    /// mirroring the wiring pin's non-empty direction posture.
+    #[test]
+    fn delegation_specs_list_enabled_entries_with_resolved_skill_bodies() {
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        let skills = tempfile::tempdir().expect("skills root");
+
+        // One registered skill the definition binds.
+        let skill_dir = skills.path().join("sql");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: sql\ndescription: SQL coach.\n---\nPrefer CTEs.\n",
+        )
+        .expect("skill file");
+
+        // An enabled entry (create lands enabled) binding the skill by a
+        // backtick mark, plus a dangling mark naming no registered skill.
+        live.create_agent(
+            agents.path(),
+            skills.path(),
+            "analyst",
+            "Open-ended analysis.",
+            "You analyze. Use `sql` and `ghost-skill` when helpful.\n",
+        )
+        .expect("create analyst");
+        // A second entry, disabled via the single machine-level axis.
+        live.create_agent(
+            agents.path(),
+            skills.path(),
+            "idle-helper",
+            "Never enabled.",
+            "You wait.\n",
+        )
+        .expect("create idle-helper");
+        live.set_agent_enabled("idle-helper", false)
+            .expect("disable idle-helper");
+
+        let specs = live.delegation_specs(agents.path(), skills.path());
+        assert_eq!(specs.len(), 1, "only the enabled entry lists");
+        assert_eq!(specs[0].name, "analyst");
+        assert_eq!(specs[0].description, "Open-ended analysis.");
+        assert_eq!(
+            specs[0].preamble,
+            "You analyze. Use `sql` and `ghost-skill` when helpful.\n"
+        );
+        // The binding resolved to the registered skill's body alone -- the
+        // dangling mark contributes nothing and refuses nothing.
+        assert_eq!(
+            specs[0].skill_bodies,
+            vec![(
+                "sql".to_string(),
+                "Prefer CTEs.
+"
+                .to_string()
+            )]
+        );
+    }
+
+    /// A never-created agents registry is the legitimate empty state: the
+    /// assembly lists nothing and never refuses the turn.
+    #[test]
+    fn delegation_specs_over_an_absent_registry_lists_empty() {
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        let skills = tempfile::tempdir().expect("skills root");
+        assert!(live
+            .delegation_specs(agents.path(), skills.path())
+            .is_empty());
     }
 }

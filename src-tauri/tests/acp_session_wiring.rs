@@ -198,6 +198,7 @@ fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
             skills_root: std::path::Path::new(""),
             activated: &[],
             cli_tools: &[],
+            delegations: &[],
         },
     );
     std::env::set_var("PATH", old_path);
@@ -272,6 +273,7 @@ fn external_cli_tool_call_routes_through_the_gateway() {
         skills_root: std::path::Path::new(""),
         activated: &[],
         cli_tools: std::slice::from_ref(&tool),
+        delegations: &[],
     };
     // An approval sink that answers allow-once from inside emit_request: the
     // gate installs the pending slot before calling the sink and holds no
@@ -496,6 +498,7 @@ fn external_turn_records_activated_subset_provenance() {
             skills_root: &skills_root,
             activated: &activated,
             cli_tools: &[],
+            delegations: &[],
         },
     );
     std::env::set_var("PATH", old_path);
@@ -611,6 +614,7 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
             skills_root: &skills_root,
             activated: &activated,
             cli_tools: &[],
+            delegations: &[],
         },
     );
     // Restore PATH while still holding the env lock (the `_guard` binding
@@ -686,6 +690,7 @@ fn external_turn_prompt_carries_disclosure_not_full_text() {
             skills_root: &skills_root,
             activated: &activated,
             cli_tools: &[],
+            delegations: &[],
         },
     );
     std::env::set_var("PATH", old_path);
@@ -825,6 +830,7 @@ fn external_cancel_unblocks_a_turn_parked_on_a_hung_mcp_call() {
         skills_root: Path::new(""),
         activated: &[],
         cli_tools: &[],
+        delegations: &[],
     };
     // An external MCP call gates (ADR-0108 classify) -- answer the card so
     // the turn reaches the MCP park instead of resting on the approval.
