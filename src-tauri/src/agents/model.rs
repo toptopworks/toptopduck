@@ -95,12 +95,32 @@ pub struct SkippedAgent {
     pub reason: String,
 }
 
+/// One read-side degradation of the builtin set the scan surfaced (issue
+/// #937): a shipped definition that is NOT in its expected posture. Rendered
+/// by the settings page as a warning row (the ignored-fold sibling) so the
+/// degraded states stop being log-only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AgentWarning {
+    /// A user file owns the shipped name: the builtin defers (the file reads
+    /// as an ordinary editable row) until the user renames or removes it.
+    Deferred { name: String },
+    /// The name-owning file could not be read (ACL / lock), so neither adopt
+    /// nor defer can be decided; the next startup retries.
+    ReadFault { name: String },
+    /// The startup materialization failed for this definition (disk full /
+    /// permissions); the next startup retries.
+    NotMaterialized { name: String },
+}
+
 /// The `list_agents` return: the spec-valid definitions + the skipped files +
-/// a root-level read error when the registry root itself could not be read.
+/// the builtin-set degradation warnings + a root-level read error when the
+/// registry root itself could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentListing {
     pub agents: Vec<AgentEntry>,
     pub ignored: Vec<SkippedAgent>,
+    pub warnings: Vec<AgentWarning>,
     pub root_error: Option<String>,
 }
 

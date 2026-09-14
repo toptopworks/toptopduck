@@ -46,7 +46,7 @@ function makeEntry(overrides: Partial<AgentEntry> = {}): AgentEntry {
 }
 
 function makeListing(agents: AgentEntry[], overrides: Partial<AgentListing> = {}): AgentListing {
-  return { agents, ignored: [], root_error: null, ...overrides };
+  return { agents, ignored: [], warnings: [], root_error: null, ...overrides };
 }
 
 // Empty-catalog English IntlProvider + QueryClient (retry: false) -- the
@@ -114,6 +114,39 @@ describe("AgentsSection (issue #932)", () => {
       screen.getByText("Some files in the agents registry could not be loaded:"),
     ).toBeVisible();
     expect(screen.getByText("broken.md")).toBeVisible();
+  });
+
+  it("renders each builtin degradation warning with its posture wording (issue #937)", async () => {
+    await renderListed([makeEntry()], {
+      warnings: [
+        { state: "deferred", name: "general-purpose" },
+        { state: "read_fault", name: "reviewer" },
+        { state: "not_materialized", name: "writer" },
+      ],
+    });
+    expect(screen.getByText("Built-in agents are in a degraded state:")).toBeVisible();
+    expect(
+      screen.getByText(
+        "A built-in agent is waiting for the name general-purpose: it materializes " +
+        "once the file is renamed or removed and the app restarts.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "The file holding the built-in agent reviewer could not be read (permissions or a lock).",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "The built-in agent writer failed to materialize (disk or permissions); the " +
+        "next app start retries.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("renders no degraded-builtin lane when the registry is healthy", async () => {
+    await renderListed([makeEntry()]);
+    expect(screen.queryByText("Built-in agents are in a degraded state:")).toBeNull();
   });
 
   it("creates a definition through the dialog", async () => {

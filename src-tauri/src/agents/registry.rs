@@ -15,12 +15,12 @@ use super::frontmatter;
 use super::model::{
     extract_skill_marks, partition_skill_marks, validate_agent_name, validate_description,
     validate_preamble, AgentEntry, AgentError, AgentListing, AgentSource, AgentUpdate,
-    SkippedAgent,
+    AgentWarning, SkippedAgent,
 };
 
-/// List the registry: the spec-valid definitions + the skipped files + a
-/// root-level error when the root itself could not be read (the
-/// `SkillListing` contract).
+/// List the registry: the spec-valid definitions + the skipped files + the
+/// builtin-set degradation warnings + a root-level error when the root itself
+/// could not be read (the `SkillListing` contract).
 pub fn list_agents(
     root: &Path,
     mark: &BuiltinAgentMark,
@@ -40,12 +40,25 @@ pub fn list_agents(
                         // Follow the link for the file check: a symlink onto
                         // a definition file IS a definition (the linked
                         // posture); a dangling link or a link to a directory
-                        // is not. Directories never load.
-                        let is_file = std::fs::metadata(&path)
-                            .map(|m| m.is_file())
-                            .unwrap_or(false);
-                        if !is_file {
-                            continue;
+                        // is not. Directories never load. A metadata fault
+                        // other than NotFound (ACL / lock) is an entry the
+                        // OS could not inspect -- it lands in ignored
+                        // instead of vanishing (issue #937 posture D).
+                        match is_loadable_file(std::fs::metadata(&path)) {
+                            Ok(true) => {}
+                            Ok(false) => continue,
+                            Err(e) => {
+                                log::warn!(
+                                    target: "agents",
+                                    "error reading entry metadata for `{}`: {e}",
+                                    path.display()
+                                );
+                                ignored.push(SkippedAgent {
+                                    file: file_name_of(&path).unwrap_or_default(),
+                                    reason: format!("read entry metadata failed: {e}"),
+                                });
+                                continue;
+                            }
                         }
                         if path.extension().and_then(|e| e.to_str()) != Some("md") {
                             continue;
@@ -58,12 +71,9 @@ pub fn list_agents(
                                     "skipping non-spec definition file `{}`: {e}",
                                     path.display()
                                 );
-                                let file = path
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| {
-                                        format!("<unnamed-entry-{}>", ignored.len())
-                                    });
+                                let file = file_name_of(&path).unwrap_or_else(|| {
+                                    format!("<unnamed-entry-{}>", ignored.len())
+                                });
                                 ignored.push(SkippedAgent {
                                     file,
                                     reason: e.to_string(),
@@ -101,11 +111,32 @@ pub fn list_agents(
 
     agents.sort_by(|a, b| a.name.cmp(&b.name));
     ignored.sort_by(|a, b| a.file.cmp(&b.file));
+    let warnings: Vec<AgentWarning> = super::builtin::audit_builtin_postures(root, mark);
     AgentListing {
         agents,
         ignored,
+        warnings,
         root_error,
     }
+}
+
+/// Classify a scanned entry's follow-the-link metadata result (issue #937
+/// posture D): `Ok(is_file)` decides load vs skip, with `NotFound` as the
+/// legitimate dangling-link shape (a non-file, skipped silently) -- any other
+/// fault (ACL / lock) must surface as an ignored row so the entry does not
+/// vanish from the pane.
+fn is_loadable_file(metadata: std::io::Result<std::fs::Metadata>) -> std::io::Result<bool> {
+    match metadata {
+        Ok(m) => Ok(m.is_file()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// The display file name of a scanned path (its file_name, not the full
+/// path -- the `SkillListing` ignored-fold convention).
+fn file_name_of(path: &Path) -> Option<String> {
+    path.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
 /// Load one definition file into its wire entry. `stem` is the file name
@@ -487,7 +518,7 @@ mod tests {
     // --- scan ----------------------------------------------------------------
 
     #[test]
-    fn list_on_a_missing_root_lists_empty() {
+    fn list_on_a_missing_root_lists_empty_but_warns_materialization() {
         let listing = list_agents(
             Path::new("Z:/no-such-root"),
             &Default::default(),
@@ -497,6 +528,14 @@ mod tests {
         assert!(listing.agents.is_empty());
         assert!(listing.ignored.is_empty());
         assert!(listing.root_error.is_none());
+        // The shipped set cannot have materialized against a missing root:
+        // the pane must not read the empty list as "never created" (issue #937).
+        assert_eq!(
+            listing.warnings,
+            vec![AgentWarning::NotMaterialized {
+                name: "general-purpose".into()
+            }]
+        );
     }
 
     #[test]
@@ -1036,5 +1075,115 @@ mod tests {
         assert!(!root.join("external.md").exists());
         // The external source file stands (the sentinel).
         assert!(outside.join("external.md").exists());
+    }
+
+    // --- scan degradation (issue #937) ---------------------------------------
+
+    #[test]
+    fn a_metadata_not_found_reads_as_a_non_file() {
+        // A dangling link's follow-the-link metadata faults NotFound -- that
+        // is the legitimate "not a file" shape, not an entry vanishing.
+        let is_file =
+            is_loadable_file(Err(std::io::Error::from(std::io::ErrorKind::NotFound))).unwrap();
+        assert!(!is_file);
+    }
+
+    #[test]
+    fn a_metadata_fault_is_not_a_non_file() {
+        // ACL / lock faults must reach the caller as Err so the entry lands
+        // in ignored instead of vanishing (issue #937 posture D).
+        let err = is_loadable_file(Err(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )))
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn list_skips_a_dangling_link_without_ignoring_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        std::fs::create_dir_all(&root).unwrap();
+        if !try_file_link(&root.join("no-such-target.md"), &root.join("dangling.md")) {
+            eprintln!("skipping: platform refused symlink creation");
+            return;
+        }
+        let listing = list_agents(
+            &root,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        // A dangling link is not a definition file: skipped, and NotFound is
+        // not a fault -- no ignored row.
+        assert!(listing.agents.is_empty());
+        assert!(listing.ignored.is_empty());
+    }
+
+    #[test]
+    fn list_ignores_a_symlink_loop_and_reports_the_builtin_read_fault() {
+        // A symlink loop faults the follow-the-link metadata with a
+        // non-NotFound error on both platforms (ELOOP /
+        // CANT_RESOLVE_SYMLINK): the entries must land in ignored instead of
+        // vanishing (posture D), and the builtin whose name the loop squats
+        // on reads as a read fault -- not a materialization failure (the
+        // exists()-collapse fix).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        std::fs::create_dir_all(&root).unwrap();
+        if !try_file_link(&root.join("twin.md"), &root.join("general-purpose.md"))
+            || !try_file_link(&root.join("general-purpose.md"), &root.join("twin.md"))
+        {
+            eprintln!("skipping: platform refused symlink creation");
+            return;
+        }
+        let listing = list_agents(
+            &root,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(listing.agents.is_empty());
+        assert_eq!(listing.ignored.len(), 2);
+        assert!(listing
+            .ignored
+            .iter()
+            .all(|s| s.reason.contains("metadata")));
+        let files: Vec<&str> = listing.ignored.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(files, vec!["general-purpose.md", "twin.md"]);
+        assert_eq!(
+            listing.warnings,
+            vec![AgentWarning::ReadFault {
+                name: "general-purpose".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn list_carries_the_builtin_degradation_warnings() {
+        // The read-side audit rides the listing (issue #937 posture C): a
+        // user file squatting on a shipped name surfaces as a deferred
+        // warning next to the ordinary row.
+        let tmp = tempfile::tempdir().unwrap();
+        put_agent(
+            tmp.path(),
+            "general-purpose",
+            "Mine.",
+            "My own preamble.\n",
+            "",
+        );
+        let listing = list_agents(
+            tmp.path(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert_eq!(listing.agents.len(), 1); // the user's row stands
+        assert_eq!(
+            listing.warnings,
+            vec![AgentWarning::Deferred {
+                name: "general-purpose".into()
+            }]
+        );
     }
 }

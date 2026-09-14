@@ -42,5 +42,6 @@ pub mod registry;
 
 pub use builtin::BuiltinAgentMark;
 pub use model::{
-    AgentEntry, AgentError, AgentListing, AgentSource, AgentUpdate, AgentsRoot, SkippedAgent,
+    AgentEntry, AgentError, AgentListing, AgentSource, AgentUpdate, AgentWarning, AgentsRoot,
+    SkippedAgent,
 };
