@@ -118,25 +118,9 @@ fn load_agent(
     skill_names: &BTreeSet<String>,
 ) -> Result<AgentEntry, AgentError> {
     let raw = std::fs::read_to_string(path).map_err(|e| fs_err("read definition file", path, e))?;
-    let parsed = frontmatter::parse_agent_md(&raw).map_err(AgentError::InvalidAgent)?;
-    let name =
-        crate::skills::frontmatter::get_string(&parsed.frontmatter, "name").unwrap_or_default();
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    // The identity rule holds at load time too (the skills loader's
-    // in-scan shape validation): a hand-placed file whose name is not
-    // kebab-case cannot enter the registry -- its row would later deadlock
-    // its own edit (update refuses the written name). The refusal lands in
-    // the listing's ignored pane with the reason.
-    validate_agent_name(&name)?;
-    if name != stem {
-        return Err(AgentError::InvalidAgent(format!(
-            "frontmatter name `{name}` does not match its file stem `{stem}`"
-        )));
-    }
-    let description = crate::skills::frontmatter::get_string(&parsed.frontmatter, "description")
         .unwrap_or_default();
     // Source derivation (ADR-0117 Decision 2): a file-level symlink is the
     // linked posture; a mark hit outranks the real-file default otherwise.
@@ -150,11 +134,44 @@ fn load_agent(
                 .map(|p| p.to_string_lossy().into_owned())
                 .ok(),
         )
-    } else if mark.contains(&name) {
+    } else if mark.contains(&stem) {
         (AgentSource::Builtin, None)
     } else {
         (AgentSource::User, None)
     };
+    agent_from_str(&raw, &stem, source, link_target, enabled, skill_names)
+}
+
+/// Parse + assemble one definition's wire entry from raw text (the loader's
+/// pipeline minus its IO, so a write path can reuse the exact parse +
+/// validate + assemble pass on the payload it just wrote). `stem` is the
+/// identity the frontmatter `name` must equal; `source` / `link_target` are
+/// caller-derived (the loader consults the file's metadata; a write path
+/// knows a freshly written definition is never a link).
+fn agent_from_str(
+    raw: &str,
+    stem: &str,
+    source: AgentSource,
+    link_target: Option<String>,
+    enabled: &BTreeSet<String>,
+    skill_names: &BTreeSet<String>,
+) -> Result<AgentEntry, AgentError> {
+    let parsed = frontmatter::parse_agent_md(raw).map_err(AgentError::InvalidAgent)?;
+    let name =
+        crate::skills::frontmatter::get_string(&parsed.frontmatter, "name").unwrap_or_default();
+    // The identity rule holds at load time too (the skills loader's
+    // in-scan shape validation): a hand-placed file whose name is not
+    // kebab-case cannot enter the registry -- its row would later deadlock
+    // its own edit (update refuses the written name). The refusal lands in
+    // the listing's ignored pane with the reason.
+    validate_agent_name(&name)?;
+    if name != stem {
+        return Err(AgentError::InvalidAgent(format!(
+            "frontmatter name `{name}` does not match its file stem `{stem}`"
+        )));
+    }
+    let description = crate::skills::frontmatter::get_string(&parsed.frontmatter, "description")
+        .unwrap_or_default();
     let (skill_refs, dangling_skill_refs) =
         partition_skill_marks(extract_skill_marks(&parsed.preamble), skill_names);
     let is_enabled = enabled.contains(&name);
@@ -169,6 +186,43 @@ fn load_agent(
         dangling_skill_refs,
         dropped_axes: parsed.dropped_axes,
     })
+}
+
+/// Reconcile a post-write read-back (issue #936): the atomic write has
+/// already landed, so a read-back failure cannot un-write it. A transient IO
+/// failure (`FsFailure` -- e.g. an antivirus / indexer lock on the fresh
+/// file) degrades to deriving the entry from the written payload with zero
+/// extra IO; reporting `Err` there would claim an edit failed that is on
+/// disk. A semantic failure (parse / validation, i.e. render/parse drift)
+/// stays `Err` and walks the existing rollback: the file on disk is
+/// genuinely bad, and the next scan's ignored pane surfaces it.
+fn read_back_or_derive(
+    readback: Result<AgentEntry, AgentError>,
+    content: &str,
+    name: &str,
+    mark: &BuiltinAgentMark,
+    enabled: &BTreeSet<String>,
+    skill_names: &BTreeSet<String>,
+) -> Result<AgentEntry, AgentError> {
+    match readback {
+        Ok(entry) => Ok(entry),
+        Err(AgentError::FsFailure(_)) => {
+            log::warn!(
+                target: "agents",
+                "read-back of definition `{name}` failed transiently; deriving the entry from the written payload"
+            );
+            // A definition the app just wrote is never a link (update and
+            // create refuse the linked posture up front), so the source
+            // derives from the mark alone.
+            let source = if mark.contains(name) {
+                AgentSource::Builtin
+            } else {
+                AgentSource::User
+            };
+            agent_from_str(content, name, source, None, enabled, skill_names)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// The resolved definition-file path for a name (the name is validated
@@ -212,9 +266,18 @@ pub fn create_agent(
     let content = frontmatter::render_agent_md(&fm, preamble)?;
     write_agent_file(&path, &content)?;
     // The reserved-set refusal keeps a fresh mint out of the builtin
-    // namespace, so the read-back cannot be a builtin definition.
+    // namespace, so the read-back cannot be a builtin definition. A failed
+    // read-back derives from the written payload (issue #936) -- reporting
+    // `Err` would strand the minted file and deadlock a retry on NameTaken.
     let mark = BuiltinAgentMark::default();
-    load_agent(&path, &mark, enabled, skill_names)
+    read_back_or_derive(
+        load_agent(&path, &mark, enabled, skill_names),
+        &content,
+        name,
+        &mark,
+        enabled,
+        skill_names,
+    )
 }
 
 /// RAII guard for an in-flight rename (the `RenameGuard` posture of the
@@ -307,7 +370,16 @@ pub fn update_agent(
         frontmatter::set_string(&mut fm, "description", &update.description);
         let content = frontmatter::render_agent_md(&fm, &update.preamble)?;
         write_agent_file(&work_path, &content)?;
-        load_agent(&work_path, mark, enabled, skill_names)
+        // The write has landed; reconcile a failed read-back against it
+        // (issue #936) instead of reporting an edit failure that is on disk.
+        read_back_or_derive(
+            load_agent(&work_path, mark, enabled, skill_names),
+            &content,
+            &update.name,
+            mark,
+            enabled,
+            skill_names,
+        )
     })();
     match result {
         Ok(entry) => {
@@ -676,6 +748,70 @@ mod tests {
         .unwrap();
         assert!(!tmp.path().join("old-name.md").exists());
         assert!(tmp.path().join("new-name.md").exists());
+    }
+
+    // --- post-write reconciliation (issue #936) ------------------------------
+
+    /// The payload a write path just produced: exactly what write_agent_file
+    /// puts on disk (the temp-file write is verbatim).
+    fn written_payload() -> String {
+        "---\nname: cleaner\ndescription: New.\n---\nNew body.\n".to_string()
+    }
+
+    #[test]
+    fn reconcile_degrades_a_transient_readback_failure_to_the_written_payload() {
+        let entry = read_back_or_derive(
+            Err(AgentError::FsFailure("injected read failure".into())),
+            &written_payload(),
+            "cleaner",
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(entry.name, "cleaner");
+        assert_eq!(entry.description, "New.");
+        assert_eq!(entry.preamble, "New body.\n");
+        assert_eq!(entry.source, AgentSource::User);
+    }
+
+    #[test]
+    fn reconcile_degraded_entry_matches_a_fresh_disk_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let path = agent_path(tmp.path(), "cleaner");
+        std::fs::write(&path, written_payload()).unwrap();
+        let degraded = read_back_or_derive(
+            Err(AgentError::FsFailure("injected read failure".into())),
+            &written_payload(),
+            "cleaner",
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let loaded = load_agent(
+            &path,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(degraded, loaded);
+    }
+
+    #[test]
+    fn reconcile_passes_a_semantic_readback_failure_through() {
+        let err = read_back_or_derive(
+            Err(AgentError::InvalidAgent("render/parse drift".into())),
+            &written_payload(),
+            "cleaner",
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AgentError::InvalidAgent(_)));
     }
 
     #[test]
