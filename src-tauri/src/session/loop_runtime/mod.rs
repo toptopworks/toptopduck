@@ -666,8 +666,8 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
             .map(&gateway)
             .collect::<Vec<_>>()
     } else {
-        let delegation_names: std::collections::BTreeSet<String> =
-            delegations.keys().cloned().collect();
+        let delegation_names: std::collections::BTreeSet<&str> =
+            delegations.keys().map(String::as_str).collect();
         let subagent_ctx = subagent::subagent_ctx(
             model.clone(),
             Arc::clone(&state),

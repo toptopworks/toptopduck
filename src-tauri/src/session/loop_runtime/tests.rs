@@ -1677,6 +1677,76 @@ fn delegation_request(h: &Harness, question: &str) -> ToolTurnRequest {
     request
 }
 
+/// The fixture spec's bound variant (PR #947 review Important 1): two
+/// injections in mark order, for pinning the render at the wiring site.
+fn bound_analyst_spec() -> crate::agents::DelegationSpec {
+    crate::agents::DelegationSpec {
+        skill_injections: vec![
+            crate::agents::SkillInjection {
+                name: "sql".to_string(),
+                body: "Prefer CTEs.".to_string(),
+            },
+            crate::agents::SkillInjection {
+                name: "pdf-tools".to_string(),
+                body: "Extract tables first.".to_string(),
+            },
+        ],
+        ..analyst_spec()
+    }
+}
+
+/// The bound injections reach the sub-agent's system prompt in mark order
+/// (PR #947 review Important 1): the wiring site renders
+/// `subagent_preamble` into the agent construction, so the delegated
+/// turn's request carries both skill sections, in the order the spec
+/// lists them -- dropping the render (or reversing it) fails here.
+#[test]
+fn delegation_renders_the_bound_injections_into_the_subagent_prompt() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![bound_analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "count the rows"}))],
+        ),
+        text_turn("sub done"),
+        text_turn("main done"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "count"),
+        mock_runtime(model.clone()),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(outcome.termination, Termination::Text("main done".into()));
+    // The sub-agent's turn is the second request through the shared mock
+    // (the main delegate turn went first); its system prompt is the
+    // rendered injection set -- both sections, in mark order, bodies
+    // included.
+    let sub_request = &model.requests()[1];
+    let rendered = sub_request
+        .chat_history
+        .iter()
+        .find_map(|m| match m {
+            Message::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("the sub-agent turn carries its rendered system prompt");
+    let sql = rendered
+        .find("# Skill: sql")
+        .expect("the sql section renders");
+    let pdf = rendered
+        .find("# Skill: pdf-tools")
+        .expect("the pdf-tools section renders");
+    assert!(
+        sql < pdf,
+        "mark order is the render order (sql first, pdf-tools second)"
+    );
+    assert!(rendered.contains("Prefer CTEs."));
+    assert!(rendered.contains("Extract tables first."));
+}
+
 /// The happy delegation path plus the AC #5 numbering pin: the main model
 /// delegates, the sub-agent runs over the SHARED face (its materialize
 /// dispatches through the same server), reports back, and the main loop's

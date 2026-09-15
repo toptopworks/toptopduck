@@ -43,9 +43,10 @@ pub const DELEGATION_BATCH_CAP: usize = 8;
 
 /// One resolved skill binding (ADR-0117 Decision 2): the skill's registry
 /// name and its verbatim body, assembled once and carried in `skill_refs`
-/// mark order -- the order IS the injection order (the sub-agent's
-/// preamble renders each body once, in this order), a contract the retired
-/// positional tuple could only state in prose.
+/// mark order -- the order IS the injection order, pinned by test (the
+/// sub-agent's preamble renders each body once, in this order); the named
+/// fields keep the construction, render, and assertion sites
+/// self-describing where the positional tuple forced `.0`/`.1`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInjection {
     pub name: String,
@@ -82,6 +83,7 @@ impl DelegationSpec {
     /// defensive clause for future callers. A dangling name degrades to an
     /// unbound sub-agent, never a refusal -- the ADR-0117 Decision 2
     /// no-breakage clause.
+    #[must_use = "the second element carries the skipped bindings for the caller to record at its degradation point"]
     pub fn from_entry(
         entry: &AgentEntry,
         bodies: &BTreeMap<String, String>,
