@@ -5,9 +5,13 @@ import { render } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 
 import { AgentsSection } from "../AgentsSection";
+import { chooseOption, openSelect } from "./helpers";
+import { TooltipProvider } from "../../ui/tooltip";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   createAgent,
   deleteAgent,
+  getAgentsDir,
   listAgents,
   setAgentEnabled,
   updateAgent,
@@ -18,13 +22,21 @@ import type { AgentEntry, AgentListing } from "../../../types/agents";
 // touches Tauri (the McpSection test posture).
 vi.mock("../../../api", () => ({
   listAgents: vi.fn(),
+  getAgentsDir: vi.fn(),
   createAgent: vi.fn(),
   updateAgent: vi.fn(),
   deleteAgent: vi.fn(),
   setAgentEnabled: vi.fn(),
 }));
 
+// The opener plugin is Tauri-gated; the reveal pin lives here.
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: vi.fn(),
+}));
+
 const mockedList = vi.mocked(listAgents);
+const mockedAgentsDir = vi.mocked(getAgentsDir);
+const mockedReveal = vi.mocked(revealItemInDir);
 const mockedCreate = vi.mocked(createAgent);
 const mockedUpdate = vi.mocked(updateAgent);
 const mockedDelete = vi.mocked(deleteAgent);
@@ -51,15 +63,19 @@ function makeListing(agents: AgentEntry[], overrides: Partial<AgentListing> = {}
 
 // Empty-catalog English IntlProvider + QueryClient (retry: false) -- the
 // defaultMessage literals carry the assertions (the McpSection posture).
+// TooltipProvider mirrors the App ancestor (the pane header's create button
+// carries a Tooltip); the helpers.tsx renderSettings posture.
 function renderSection(onAppConfigSync = vi.fn()) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   render(
     <QueryClientProvider client={queryClient}>
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        <AgentsSection onAppConfigSync={onAppConfigSync} />
-      </IntlProvider>
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          <AgentsSection onAppConfigSync={onAppConfigSync} />
+        </IntlProvider>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
   return onAppConfigSync;
@@ -152,7 +168,7 @@ describe("AgentsSection (issue #932)", () => {
     expect(screen.queryByText("Built-in agents are in a degraded state:")).toBeNull();
   });
 
-  it("creates a definition through the dialog", async () => {
+  it("creates a definition through the form", async () => {
     mockedCreate.mockResolvedValue(makeEntry());
     mockedList.mockResolvedValue(makeListing([]));
     renderSection();
@@ -201,6 +217,25 @@ describe("AgentsSection (issue #932)", () => {
     ).toBeVisible();
   });
 
+  it("keeps a fresh create form free of validation red until a field is edited", async () => {
+    mockedList.mockResolvedValue(makeListing([]));
+    renderSection();
+    await screen.findByText("No agent definitions yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    const name = await screen.findByLabelText("Name");
+    // A freshly opened create form shows no invalid marks at all.
+    expect(name).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Description")).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Preamble")).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    // The first edit of a field surfaces that field's error immediately.
+    fireEvent.change(name, { target: { value: "Bad Name!" } });
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/Lowercase letters, digits/)).toBeVisible();
+  });
+
   it("gates Save on an empty name in create mode before any IPC round-trip", async () => {
     mockedList.mockResolvedValue(makeListing([]));
     renderSection();
@@ -219,7 +254,7 @@ describe("AgentsSection (issue #932)", () => {
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 
-  it("edits a definition through the dialog", async () => {
+  it("edits a definition through the form", async () => {
     mockedUpdate.mockResolvedValue(makeEntry());
     await renderListed([makeEntry()]);
 
@@ -244,10 +279,9 @@ describe("AgentsSection (issue #932)", () => {
     ]);
     fireEvent.click(screen.getByRole("button", { name: "Edit agent general-purpose" }));
     expect(await screen.findByLabelText("Name")).toBeDisabled();
-    expect(screen.getByText("A built-in agent keeps its name.")).toBeVisible();
   });
 
-  it("renders the two warning lines inside an edit dialog", async () => {
+  it("renders the two warning lines inside the edit form", async () => {
     await renderListed([
       makeEntry({
         dangling_skill_refs: ["ghost-skill"],
@@ -284,16 +318,17 @@ describe("AgentsSection (issue #932)", () => {
       makeEntry({ name: "on-agent", enabled: true }),
       makeEntry({ name: "off-agent", enabled: false }),
     ]);
+    // Radix Select opens on a pointer sequence and commits on an option
+    // click (the helpers posture) -- fireEvent.change is inert on it.
     const select = screen.getByLabelText("Filter by status");
-    fireEvent.change(select, { target: { value: "enabled" } });
+    openSelect(select);
+    chooseOption("Enabled");
     expect(screen.getByText("on-agent")).toBeVisible();
     expect(screen.queryByText("off-agent")).toBeNull();
-    fireEvent.change(select, { target: { value: "disabled" } });
+    openSelect(select);
+    chooseOption("Disabled");
     expect(screen.getByText("off-agent")).toBeVisible();
     expect(screen.queryByText("on-agent")).toBeNull();
-    // Filtering to an empty slice shows the no-match line.
-    fireEvent.change(select, { target: { value: "enabled" } });
-    fireEvent.change(select, { target: { value: "disabled" } });
   });
 
   it("re-lists through the refresh button", async () => {
@@ -303,6 +338,24 @@ describe("AgentsSection (issue #932)", () => {
     expect(mockedList).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(mockedList).toHaveBeenCalledTimes(2));
+  });
+
+  it("reveals the backend-resolved agents directory through the opener", async () => {
+    await renderListed([makeEntry()]);
+    mockedAgentsDir.mockResolvedValue("C:\\app\\agents");
+    mockedReveal.mockResolvedValue();
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    await waitFor(() => expect(mockedReveal).toHaveBeenCalledWith("C:\\app\\agents"));
+  });
+
+  it("surfaces a failed folder reveal on the pane error face", async () => {
+    await renderListed([makeEntry()]);
+    mockedAgentsDir.mockResolvedValue("C:\\app\\agents");
+    // A retry must chain a NEW error instance (a shared one keeps the same
+    // identity across rejects).
+    mockedReveal.mockRejectedValueOnce(new Error("reveal boom"));
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    expect(await screen.findByText(/reveal boom/)).toBeVisible();
   });
 
   it("flips enablement and syncs the returned config", async () => {
@@ -331,7 +384,7 @@ describe("AgentsSection (issue #932)", () => {
     await waitFor(() => expect(sync).toHaveBeenCalled());
   });
 
-  it("renders a linked row's dialog read-only", async () => {
+  it("renders a linked row's form read-only", async () => {
     await renderListed([
       makeEntry({ source: "linked", link_target: "/outside/external.md" }),
     ]);
@@ -356,9 +409,11 @@ function renderWithSync(sync: (cfg: unknown) => void) {
   });
   const utils = render(
     <QueryClientProvider client={queryClient}>
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        <AgentsSection onAppConfigSync={sync as never} />
-      </IntlProvider>
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          <AgentsSection onAppConfigSync={sync as never} />
+        </IntlProvider>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
   return utils;

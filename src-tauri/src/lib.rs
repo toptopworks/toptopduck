@@ -514,6 +514,7 @@ pub fn run() {
             commands::update_skill,
             commands::delete_skill,
             commands::list_agents,
+            commands::get_agents_dir,
             commands::create_agent,
             commands::update_agent,
             commands::delete_agent,

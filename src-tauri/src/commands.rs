@@ -3419,6 +3419,18 @@ pub fn list_agents(
     live.list_agents(&agents_root.0, &skills_root.0)
 }
 
+/// The agents-definitions registry root as an absolute path string, for the
+/// settings pane's reveal-in-folder affordance. The backend is the path
+/// authority (the sessions_dir resolve posture) -- the frontend never
+/// re-derives app-data layout. Always non-null -- the root is resolved at
+/// setup, mirroring `get_sessions_dir`.
+#[tauri::command]
+pub fn get_agents_dir(
+    agents_root: State<'_, crate::agents::AgentsRoot>,
+) -> Result<String, String> {
+    Ok(agents_root.0.to_string_lossy().into_owned())
+}
+
 /// Mint a new user agent definition (issue #932): a fresh mint lands
 /// ENABLED (the explicit create is explicit intent). Returns the entry read
 /// back from disk.

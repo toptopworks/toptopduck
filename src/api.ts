@@ -695,6 +695,13 @@ export async function listAgents(): Promise<AgentListing> {
   return invoke<AgentListing>("list_agents");
 }
 
+// The registry root as an absolute path (<app_data_dir>/agents), for the
+// settings pane's reveal-in-folder affordance. Always non-null -- the root
+// is resolved at setup (the sessions_dir posture).
+export async function getAgentsDir(): Promise<string> {
+  return invoke<string>("get_agents_dir");
+}
+
 // Mint a new user agent definition: <root>/<name>.md with the given
 // declaration (description + preamble). The name must be kebab-case (<= 64),
 // free, and outside the reserved tool-name set. A fresh mint lands enabled
