@@ -1031,8 +1031,6 @@ mod tests {
             description: description.into(),
             body: body.into(),
             content_hash: "deadbeef".into(),
-            mcp_servers: Vec::new(),
-            cli_tools: Vec::new(),
         }
     }
 

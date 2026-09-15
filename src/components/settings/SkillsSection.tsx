@@ -45,8 +45,20 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Textarea } from "../ui/textarea";
-import { PaneHeader, SettingsCard } from "./settings-chrome";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import {
+  PaneHeader,
+  SETTINGS_TOOLTIP_CLASS,
+  SettingsCard,
+} from "./settings-chrome";
 
 // Skills settings pane (issue #362, ADR-0086). The registry is a directory
 // scan (no app-config entry), so this pane reads list_skills + drives
@@ -71,10 +83,10 @@ type DrawerDraft = {
   currentName: string;
   name: string;
   description: string;
-  license: string;
-  compatibility: string;
-  mcpServers: string[];
-  cliTools: string[];
+  // No edit surface in the drawer: carried as-is and passed back on save so
+  // an existing frontmatter key survives an unrelated edit (null = absent).
+  license: string | null;
+  compatibility: string | null;
   body: string;
   acquired: SkillAcquired;
   linkTarget: string | null;
@@ -110,17 +122,9 @@ function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
 }
 
 export function SkillsSection({
-  mcpServerLabels,
-  configuredCliIds,
   builtinSkillBaselines,
   onAppConfigSync,
 }: {
-  /** The configured MCP servers as id -> display-name pairs: the drawer's
-   *  reference list shows the renamable display name, NOT the raw id (a
-   *  uuid); a stale reference no longer configured falls back to the bare
-   *  id so it stays visible + removable. */
-  mcpServerLabels: Record<string, string>;
-  configuredCliIds: string[];
   /** The builtin-skill baseline side table (issue #677): the anchor the
    *  Edited derivation on builtin rows compares each skill's
    *  `content_hash` against. */
@@ -280,10 +284,8 @@ export function SkillsSection({
         currentName: "",
         name: "",
         description: "",
-        license: "",
-        compatibility: "",
-        mcpServers: [],
-        cliTools: [],
+        license: null,
+        compatibility: null,
         body: "",
         acquired: "local",
         linkTarget: null,
@@ -303,10 +305,8 @@ export function SkillsSection({
         currentName: skill.name,
         name: skill.name,
         description: skill.description,
-        license: skill.license ?? "",
-        compatibility: skill.compatibility ?? "",
-        mcpServers: skill.mcp_servers,
-        cliTools: skill.cli_tools,
+        license: skill.license,
+        compatibility: skill.compatibility,
         body: skill.body,
         acquired: skill.acquired,
         linkTarget: skill.link_target,
@@ -329,41 +329,78 @@ export function SkillsSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => {
-                setError(null);
-                setDrawer({ mode: "create" });
-              }}
-            >
-              <Plus className="size-4" aria-hidden />
-              <FormattedMessage id="settings.skills.new" defaultMessage="New" />
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setError(null);
-                setImportOpen(true);
-              }}
-            >
-              <Download className="size-4" aria-hidden />
-              <FormattedMessage id="common.import" defaultMessage="Import" />
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void refetch()}
-              aria-label={intl.formatMessage({
-                id: "settings.skills.rescan",
-                defaultMessage: "Rescan",
-              })}
-            >
-              <RefreshCw className={cn("size-4", isFetching && "animate-spin")} aria-hidden />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  aria-label={intl.formatMessage({
+                    id: "settings.skills.new",
+                    defaultMessage: "New",
+                  })}
+                  onClick={() => {
+                    setError(null);
+                    setDrawer({ mode: "create" });
+                  }}
+                >
+                  <Plus className="size-3.5" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage id="settings.skills.new" defaultMessage="New" />
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  aria-label={intl.formatMessage({
+                    id: "common.import",
+                    defaultMessage: "Import",
+                  })}
+                  onClick={() => {
+                    setError(null);
+                    setImportOpen(true);
+                  }}
+                >
+                  <Download className="size-3.5" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage id="common.import" defaultMessage="Import" />
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  onClick={() => void refetch()}
+                  aria-label={intl.formatMessage({
+                    id: "settings.skills.rescan",
+                    defaultMessage: "Rescan",
+                  })}
+                >
+                  <RefreshCw
+                    className={cn("size-3.5", isFetching && "animate-spin")}
+                    aria-hidden
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage
+                  id="settings.skills.rescan"
+                  defaultMessage="Rescan"
+                />
+              </TooltipContent>
+            </Tooltip>
           </div>
         )}
       />
@@ -385,36 +422,44 @@ export function SkillsSection({
             defaultMessage="Filter by skill type"
           />
         </Label>
-        <select
-          id="skills-acquired-filter"
-          className="border-border bg-background text-foreground h-9 rounded-md border px-2 text-sm"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value as AcquiredFilter)}
-        >
-          {FILTER_OPTIONS.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt === "all"
-                ? intl.formatMessage({
-                    id: "settings.skills.filterAll",
-                    defaultMessage: "All",
-                  })
-                : opt === "linked"
-                  ? intl.formatMessage({
-                      id: "settings.skills.filterLinked",
-                      defaultMessage: "Linked",
-                    })
-                  : opt === "builtin"
-                    ? intl.formatMessage({
-                        id: "settings.skills.filterBuiltin",
-                        defaultMessage: "System",
-                      })
-                    : intl.formatMessage({
-                        id: "settings.skills.filterLocal",
-                        defaultMessage: "Local",
-                      })}
-            </option>
-          ))}
-        </select>
+        <Select value={filter} onValueChange={(v) => setFilter(v as AcquiredFilter)}>
+          <SelectTrigger
+            id="skills-acquired-filter"
+            aria-label={intl.formatMessage({
+              id: "settings.skills.filterLabel",
+              defaultMessage: "Filter by skill type",
+            })}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {FILTER_OPTIONS.map((opt) => (
+              <SelectItem key={opt} value={opt}>
+                {opt === "all" ? (
+                  <FormattedMessage
+                    id="settings.skills.filterAll"
+                    defaultMessage="All"
+                  />
+                ) : opt === "linked" ? (
+                  <FormattedMessage
+                    id="settings.skills.filterLinked"
+                    defaultMessage="Linked"
+                  />
+                ) : opt === "local" ? (
+                  <FormattedMessage
+                    id="settings.skills.filterLocal"
+                    defaultMessage="Local"
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.skills.filterBuiltin"
+                    defaultMessage="System"
+                  />
+                )}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <SettingsCard>
@@ -472,8 +517,6 @@ export function SkillsSection({
         <SkillDrawer
           key={drawerDraft.currentName}
           draft={drawerDraft}
-          mcpServerLabels={mcpServerLabels}
-          configuredCliIds={configuredCliIds}
           saving={saving}
           error={error}
           onCancel={() => setDrawer({ mode: "closed" })}
@@ -699,8 +742,6 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
 
 type SkillDrawerProps = {
   draft: DrawerDraft;
-  mcpServerLabels: Record<string, string>;
-  configuredCliIds: string[];
   saving: boolean;
   /** The pane's live error (the create / update reject, or a failed source
    *  reveal). Rendered INSIDE the dialog: the modal covers the section-level
@@ -715,8 +756,6 @@ type SkillDrawerProps = {
 
 function SkillDrawer({
   draft,
-  mcpServerLabels,
-  configuredCliIds,
   saving,
   error,
   onCancel,
@@ -728,18 +767,14 @@ function SkillDrawer({
   const isLinked = draft.acquired === "linked";
   const isBuiltin = draft.acquired === "builtin";
   const readOnly = isLinked;
-  // A builtin skill locks its name (issue #677): the identity the skill's
-  // CLI reference and the auto-include pairing anchor on. Everything else
-  // stays editable.
+  // A builtin skill locks its name (issue #677): the identity the builtin
+  // CLI pairing anchors on (the companion skill and its CLI registration
+  // share the name 1:1). Everything else stays editable.
   const nameLocked = isBuiltin;
   // Local draft state so the user can type before committing. Reset when the
   // draft identity changes (switching skills / opening create).
   const [name, setName] = useState(draft.name);
   const [description, setDescription] = useState(draft.description);
-  const [license, setLicense] = useState(draft.license);
-  const [compatibility, setCompatibility] = useState(draft.compatibility);
-  const [mcpServers, setMcpServers] = useState<string[]>(draft.mcpServers);
-  const [cliTools, setCliTools] = useState<string[]>(draft.cliTools);
   const [body, setBody] = useState(draft.body);
   // Touched flags gate the invalid hints: a freshly opened drawer stays
   // quiet (every field starts "invalid-able"), the hint appears once the
@@ -767,35 +802,6 @@ function SkillDrawer({
   const bodyInvalid = !isCreate && body.trim() === "";
   const formInvalid = nameInvalid || descriptionInvalid || bodyInvalid;
 
-  // The mcp multi-select lists every configured server plus any id the skill
-  // already references that is no longer configured (so a stale reference
-  // stays visible + removable rather than silently dropping).
-  const mcpOptions = useMemo(() => {
-    const merged = new Set<string>(Object.keys(mcpServerLabels));
-    mcpServers.forEach((id) => merged.add(id));
-    return [...merged];
-  }, [mcpServerLabels, mcpServers]);
-
-  // The cli multi-select mirrors the mcp one: every registered tool plus any
-  // stale name the skill still references (issue #674).
-  const cliOptions = useMemo(() => {
-    const merged = new Set<string>(configuredCliIds);
-    cliTools.forEach((name) => merged.add(name));
-    return [...merged];
-  }, [configuredCliIds, cliTools]);
-
-  function toggleMcp(id: string) {
-    setMcpServers((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
-  }
-
-  function toggleCli(name: string) {
-    setCliTools((prev) =>
-      prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name],
-    );
-  }
-
   function handleSave() {
     if (isCreate) {
       onCreate(name.trim(), description.trim());
@@ -804,10 +810,11 @@ function SkillDrawer({
     onSave({
       name: name.trim(),
       description: description.trim(),
-      license: license.trim() === "" ? null : license.trim(),
-      compatibility: compatibility.trim() === "" ? null : compatibility.trim(),
-      mcp_servers: mcpServers,
-      cli_tools: cliTools,
+      // The passthrough pair: no edit surface, so the draft's original values
+      // ride back untouched (an unrelated edit must not drop a frontmatter
+      // license/compatibility key -- null is the wire's "remove" signal).
+      license: draft.license,
+      compatibility: draft.compatibility,
       body,
     });
   }
@@ -933,139 +940,31 @@ function SkillDrawer({
           </div>
 
           {!isCreate && (
-            <>
-              <div className="grid gap-1.5">
-                <Label htmlFor="skill-license">
-                  <FormattedMessage
-                    id="settings.skills.fieldLicense"
-                    defaultMessage="License"
-                  />
-                </Label>
-                <Input
-                  id="skill-license"
-                  value={license}
-                  onChange={(e) => setLicense(e.target.value)}
-                  disabled={readOnly}
-                  placeholder="MIT"
+            <div className="grid gap-1.5">
+              <Label htmlFor="skill-body">
+                <FormattedMessage
+                  id="settings.skills.fieldBody"
+                  defaultMessage="Instructions"
                 />
-              </div>
-
-              <div className="grid gap-1.5">
-                <Label htmlFor="skill-compatibility">
+              </Label>
+              <Textarea
+                id="skill-body"
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                onBlur={() => setBodyTouched(true)}
+                disabled={readOnly}
+                rows={10}
+                className="font-mono text-sm"
+              />
+              {bodyTouched && bodyInvalid && (
+                <p className="text-destructive text-xs">
                   <FormattedMessage
-                    id="settings.skills.fieldCompatibility"
-                    defaultMessage="Compatibility"
+                    id="settings.skills.fieldBodyRequired"
+                    defaultMessage="Instructions can't be empty."
                   />
-                </Label>
-                <Input
-                  id="skill-compatibility"
-                  value={compatibility}
-                  onChange={(e) => setCompatibility(e.target.value)}
-                  disabled={readOnly}
-                />
-              </div>
-
-              <div className="grid gap-1.5">
-                <span className="text-sm font-medium">
-                  <FormattedMessage
-                    id="settings.skills.fieldMcpServers"
-                    defaultMessage="MCP server references"
-                  />
-                </span>
-                {mcpOptions.length === 0 ? (
-                  <p className="text-muted-foreground text-xs">
-                    <FormattedMessage
-                      id="settings.skills.fieldMcpServersEmpty"
-                      defaultMessage="No MCP servers configured."
-                    />
-                  </p>
-                ) : (
-                  <div className="grid gap-1">
-                    {mcpOptions.map((id) => (
-                      <label
-                        key={id}
-                        className="flex items-center gap-1.5 text-sm"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={mcpServers.includes(id)}
-                          disabled={readOnly}
-                          onChange={() => toggleMcp(id)}
-                        />
-                        {/* The renamable display name is the row's face; the
-                            bare id shows for a stale reference no longer
-                            configured, and for a configured server whose
-                            display_name loaded empty (a legal wire value
-                            from a hand-edited config). */}
-                        <span className="truncate">
-                          {mcpServerLabels[id] || id}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="grid gap-1.5">
-                <span className="text-sm font-medium">
-                  <FormattedMessage
-                    id="settings.skills.fieldCliTools"
-                    defaultMessage="CLI tool references"
-                  />
-                </span>
-                {cliOptions.length === 0 ? (
-                  <p className="text-muted-foreground text-xs">
-                    <FormattedMessage
-                      id="settings.skills.fieldCliToolsEmpty"
-                      defaultMessage="No CLI tools registered."
-                    />
-                  </p>
-                ) : (
-                  <div className="grid gap-1">
-                    {cliOptions.map((name) => (
-                      <label
-                        key={name}
-                        className="flex items-center gap-1.5 text-sm"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={cliTools.includes(name)}
-                          disabled={readOnly}
-                          onChange={() => toggleCli(name)}
-                        />
-                        {name}
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="grid gap-1.5">
-                <Label htmlFor="skill-body">
-                  <FormattedMessage
-                    id="settings.skills.fieldBody"
-                    defaultMessage="Instructions"
-                  />
-                </Label>
-                <Textarea
-                  id="skill-body"
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  onBlur={() => setBodyTouched(true)}
-                  disabled={readOnly}
-                  rows={10}
-                  className="font-mono text-sm"
-                />
-                {bodyTouched && bodyInvalid && (
-                  <p className="text-destructive text-xs">
-                    <FormattedMessage
-                      id="settings.skills.fieldBodyRequired"
-                      defaultMessage="Instructions can't be empty."
-                    />
-                  </p>
-                )}
-              </div>
-            </>
+                </p>
+              )}
+            </div>
           )}
         </div>
 

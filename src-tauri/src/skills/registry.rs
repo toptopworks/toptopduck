@@ -244,8 +244,9 @@ pub fn update_skill(
         return Err(SkillError::ReadOnly(name.to_string()));
     }
     // A MATERIALIZED builtin skill keeps its name (issue #677): the name is
-    // the locked identity the skill's CLI reference and the auto-include
-    // pairing anchor on. Every other field is editable.
+    // the locked identity the builtin CLI pairing anchors on (the companion
+    // skill and its CLI registration share the name 1:1). Every other field
+    // is editable.
     if current.acquired == Acquired::Builtin && update.name != name {
         return Err(SkillError::BuiltinNameLocked(name.to_string()));
     }
@@ -296,8 +297,6 @@ pub fn update_skill(
             "compatibility",
             update.compatibility.as_deref(),
         );
-        frontmatter::set_mcp_servers(&mut fm, &update.mcp_servers);
-        frontmatter::set_cli_tools(&mut fm, &update.cli_tools);
         let content = frontmatter::render_skill_md(&fm, &update.body)?;
         write_skill_md(&work_dir, &content)?;
         // The write has landed; reconcile a failed read-back against it
@@ -489,8 +488,6 @@ fn skill_from_str(
         acquired,
         license: frontmatter::get_string(fm, "license"),
         compatibility: frontmatter::get_string(fm, "compatibility"),
-        mcp_servers: frontmatter::mcp_servers(fm),
-        cli_tools: frontmatter::cli_tools(fm),
         body: parsed.body,
         link_target,
         content_hash,
@@ -625,8 +622,6 @@ mod tests {
             description: "Updated description.".into(),
             license: None,
             compatibility: None,
-            mcp_servers: Vec::new(),
-            cli_tools: Vec::new(),
             body: "Updated body.\n".into(),
         }
     }
@@ -875,8 +870,6 @@ mod tests {
         assert!(raw.starts_with("---\nname: pdf-tools\n"));
         let listed = list_skills(&root, &Default::default()).skills;
         assert_eq!(listed.len(), 1);
-        assert!(listed[0].mcp_servers.is_empty());
-        assert!(listed[0].cli_tools.is_empty());
     }
 
     #[test]
@@ -929,28 +922,59 @@ mod tests {
         let mut payload = update_payload("keeper");
         payload.license = Some("Apache-2.0".into());
         payload.compatibility = Some("requires network".into());
-        payload.mcp_servers = vec!["github-mcp".into(), "fs-server".into()];
-        payload.cli_tools = vec!["pandoc".into(), "office-cli".into()];
         let entry = update_skill(root, &Default::default(), "keeper", payload).unwrap();
 
         assert_eq!(entry.description, "Updated description.");
         assert_eq!(entry.license.as_deref(), Some("Apache-2.0"));
         assert_eq!(entry.compatibility.as_deref(), Some("requires network"));
-        assert_eq!(
-            entry.mcp_servers,
-            vec!["github-mcp".to_string(), "fs-server".to_string()]
-        );
-        assert_eq!(
-            entry.cli_tools,
-            vec!["pandoc".to_string(), "office-cli".to_string()],
-            "the CLI extension key must round-trip through an edit (issue #674)"
-        );
         assert_eq!(entry.body, "Updated body.\n");
         // The field this app does not surface survives verbatim.
         let raw = fs::read_to_string(dir.join(SKILL_MD)).unwrap();
         assert!(raw.contains("allowed-tools"), "foreign field lost: {raw}");
         // No temp file lingers behind the atomic write.
         assert!(!dir.join(format!("{SKILL_MD}{TMP_SUFFIX}")).exists());
+    }
+
+    #[test]
+    fn update_preserves_a_legacy_metadata_block_verbatim() {
+        // The retired extension keys (issue #952) ride under `metadata`, a
+        // nesting level the allowed-tools pin above does not cover. The edit
+        // path parse-mutates only the four spec fields and re-renders the
+        // whole mapping, so a legacy block from a pre-retirement file must
+        // survive an unrelated edit untouched -- the retirement's no-rewrite
+        // guarantee (ADR-0086 calibration).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("legacy");
+        fs::create_dir(&dir).unwrap();
+        fs::write(
+            dir.join(SKILL_MD),
+            "---\nname: legacy\ndescription: d\nmetadata:\n  toptopduck_mcp_servers: github-mcp\n  toptopduck_cli_tools: pandoc\n---\nold body\n",
+        )
+        .unwrap();
+
+        let entry = update_skill(
+            root,
+            &Default::default(),
+            "legacy",
+            update_payload("legacy"),
+        )
+        .unwrap();
+        assert_eq!(entry.body, "Updated body.\n");
+
+        let raw = fs::read_to_string(dir.join(SKILL_MD)).unwrap();
+        assert!(
+            raw.contains("metadata:"),
+            "the metadata mapping must survive the edit: {raw}"
+        );
+        assert!(
+            raw.contains("toptopduck_mcp_servers: github-mcp"),
+            "the retired MCP key must survive verbatim: {raw}"
+        );
+        assert!(
+            raw.contains("toptopduck_cli_tools: pandoc"),
+            "the retired CLI key must survive verbatim: {raw}"
+        );
     }
 
     #[test]

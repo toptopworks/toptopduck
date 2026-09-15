@@ -8,11 +8,9 @@
 //! `name` (kebab-case, <= 64 chars, equal to the directory name -- ADR-0086
 //! Decision 2); the loader derives `acquired` from the directory's filesystem
 //! nature (`linked` = symlink / junction onto an external source, `local` =
-//! real directory). v1 declares three things per skill: the prompt fragment
-//! (the SKILL.md body) + optional MCP server references (the frontmatter
-//! extension key `metadata.toptopduck_mcp_servers`) + optional CLI tool
-//! references (the frontmatter extension key `metadata.toptopduck_cli_tools`);
-//! attachment files across the whole tree (no privileged subdirectory) read
+//! real directory). v1 declares one thing per skill: the prompt fragment
+//! (the SKILL.md body); attachment files across the whole tree (no
+//! privileged subdirectory) read
 //! through the `read_skill_file` restricted surface, and script execution
 //! rides registered CLI tools as text relay (ADR-0086 Decision 1, calibrated
 //! by ADR-0111).

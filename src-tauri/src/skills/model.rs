@@ -36,21 +36,19 @@ pub enum Acquired {
     /// (`builtin_skill_baselines`) membership -- NOT on the static name set
     /// -- so a user's pre-existing same-named skill keeps its own source
     /// until materialization actually happens. Undeletable; every field
-    /// except `name` is editable (name is the locked identity the CLI
-    /// reference anchors on).
+    /// except `name` is editable (name is the locked identity the builtin
+    /// CLI pairing anchors on -- the companion skill and its CLI
+    /// registration share the name 1:1).
     Builtin,
 }
 
-/// One registry skill as it crosses IPC (issue #362). The full declaration face
-/// (ADR-0086 Decision 1): the prompt fragment (`body`) + the optional MCP
-/// server references (`mcp_servers`, from the frontmatter extension key
-/// `metadata.toptopduck_mcp_servers`) + the optional CLI tool references
-/// (`cli_tools`, from the frontmatter extension key
-/// `metadata.toptopduck_cli_tools`). `link_target` is the resolved symlink /
-/// junction target for `linked` skills (the "open source location" anchor);
-/// `null` for `local`. Option fields mirror the Rust `Option<String>` + bare
-/// serde convention (None serializes as JSON null, same shape as
-/// `AppConfig.last_dir`), so they are `| null` on the wire, not optional.
+/// One registry skill as it crosses IPC (issue #362). The declaration face
+/// (ADR-0086 Decision 1): the prompt fragment (`body`). `link_target` is the
+/// resolved symlink / junction target for `linked` skills (the "open source
+/// location" anchor); `null` for `local`. Option fields mirror the Rust
+/// `Option<String>` + bare serde convention (None serializes as JSON null,
+/// same shape as `AppConfig.last_dir`), so they are `| null` on the wire,
+/// not optional.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkillEntry {
     /// The spec `name` -- identity, kebab-case, equal to the directory name.
@@ -63,14 +61,6 @@ pub struct SkillEntry {
     pub license: Option<String>,
     /// The spec `compatibility` field, when present.
     pub compatibility: Option<String>,
-    /// The ids under the `metadata.toptopduck_mcp_servers` extension key (comma-
-    /// separated in frontmatter, a list on the wire). Empty when absent.
-    pub mcp_servers: Vec<String>,
-    /// The names under the `metadata.toptopduck_cli_tools` extension key
-    /// (issue #674, ADR-0108 Decision 7; comma-separated in frontmatter, a
-    /// list on the wire). The exact sibling of [`Self::mcp_servers`]: empty
-    /// when absent, declarative only.
-    pub cli_tools: Vec<String>,
     /// The Markdown body after the frontmatter -- the prompt fragment injected
     /// on mount (a later #303 slice; carried here so the settings drawer edits
     /// it verbatim).
@@ -151,14 +141,6 @@ pub struct SkillUpdate {
     pub license: Option<String>,
     /// The spec `compatibility` field; blank / null removes the key.
     pub compatibility: Option<String>,
-    /// The MCP server ids to store under `metadata.toptopduck_mcp_servers`
-    /// (empty removes the extension key).
-    pub mcp_servers: Vec<String>,
-    /// The CLI tool names to store under `metadata.toptopduck_cli_tools`
-    /// (issue #674, ADR-0108 Decision 7; empty removes the extension key --
-    /// the exact `mcp_servers` semantics, so an IPC payload must carry the
-    /// field explicitly).
-    pub cli_tools: Vec<String>,
     /// The Markdown body (required non-blank -- a skill without a prompt
     /// fragment has nothing to inject).
     pub body: String,
@@ -205,8 +187,9 @@ pub enum SkillError {
     #[error("skill name is reserved for a built-in skill: {0}")]
     ReservedSkillName(String),
     /// A rename targeted a MATERIALIZED builtin skill (issue #677): the name
-    /// is the locked identity the skill's CLI reference and the auto-include
-    /// pairing anchor on. Carries the name.
+    /// is the locked identity the builtin CLI pairing anchors on (the
+    /// companion skill and its CLI registration share the name 1:1). Carries
+    /// the name.
     #[error("built-in skill name is locked: {0}")]
     BuiltinNameLocked(String),
     /// A delete targeted a MATERIALIZED builtin skill (issue #677): builtin
@@ -507,8 +490,6 @@ mod tests {
             acquired: Acquired::Linked,
             license: Some("MIT".into()),
             compatibility: None,
-            mcp_servers: vec!["github-mcp".into()],
-            cli_tools: vec!["pandoc".into()],
             body: "Body text.\n".into(),
             link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
@@ -524,16 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn skill_update_rejects_a_payload_omitting_cli_tools() {
-        // `cli_tools` is a bare field on purpose (issue #674): an empty list
-        // is an explicit "remove the extension key", so a stale client that
-        // omits the field must REJECT rather than silently clear the skill's
-        // CLI references mid-edit.
-        let json = r#"{"name":"s","description":"d","license":null,"compatibility":null,"mcp_servers":[],"body":"b"}"#;
-        assert!(serde_json::from_str::<SkillUpdate>(json).is_err());
-    }
-
-    #[test]
     fn import_outcome_round_trips_both_arms() {
         // Imported arm: { kind: "imported", data: <SkillEntry> }.
         let entry = SkillEntry {
@@ -542,8 +513,6 @@ mod tests {
             acquired: Acquired::Linked,
             license: None,
             compatibility: None,
-            mcp_servers: Vec::new(),
-            cli_tools: Vec::new(),
             body: "Body.\n".into(),
             link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
             content_hash: "abc".into(),

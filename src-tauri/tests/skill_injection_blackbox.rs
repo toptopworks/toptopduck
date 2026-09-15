@@ -497,24 +497,13 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
     );
 }
 
-/// #656 AC7 / ADR-0106: a skill's MCP references are declarative metadata.
-/// Fragment resolution never consults MCP enablement, and a
-/// configured-but-DISABLED referenced server contributes nothing to the
-/// effective set (its tools stay out of the catalog; the agent refuses
-/// honestly at the capability boundary). The fragment itself resolves
-/// undegraded -- the body injects and the declaration rides along as data.
+/// #656 / ADR-0106: enablement is the machine-level single axis -- a
+/// configured-but-DISABLED server stays out of the enabled slice entirely
+/// (dormant = no catalog tools; the agent refuses honestly at the capability
+/// boundary).
 #[test]
-fn skill_declaring_disabled_server_mounts_and_stays_declarative() {
-    let skills_root = tempfile::tempdir().unwrap();
-    let skill_dir = skills_root.path().join("duck-writer");
-    fs::create_dir_all(&skill_dir).unwrap();
-    fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: duck-writer\ndescription: Write .duck files.\nmetadata:\n  toptopduck_mcp_servers: off-b\n---\nUse the duck-tools server when it is available.\n",
-    )
-    .unwrap();
-
-    // A live config carrying the declared server, toggled OFF.
+fn disabled_mcp_server_stays_out_of_the_enabled_slice() {
+    // A live config carrying the server, toggled OFF.
     let cfg_dir = tempfile::tempdir().unwrap();
     let live = LiveProviderConfig::new(KeychainStore::new(), cfg_dir.path().join("config.json"));
     live.upsert_mcp_server(McpServerConfig {
@@ -529,24 +518,12 @@ fn skill_declaring_disabled_server_mounts_and_stays_declarative() {
     })
     .expect("upsert off-b");
 
-    // Mount side: the fragment resolves from the registry alone -- the body
-    // is injected verbatim and the declaration is retained as metadata.
-    let fragments = resolve_prompt_fragments(skills_root.path(), &["duck-writer".to_string()]);
-    assert_eq!(fragments.len(), 1);
-    assert_eq!(fragments[0].name, "duck-writer");
-    assert!(
-        fragments[0].body.contains("duck-tools"),
-        "the declared body resolves undegraded"
-    );
-    assert_eq!(fragments[0].mcp_servers, vec!["off-b".to_string()]);
-
-    // Effective-set side: the declaration never re-arms the disabled server
-    // -- the slice `ask` feeds the aggregator stays without it.
+    // The slice `ask` feeds the aggregator stays without it.
     assert!(
         live.enabled_mcp_servers()
             .iter()
             .all(|s| s.id.as_str() != "off-b"),
-        "a skill declaration never re-arms a disabled server"
+        "a disabled server never reaches the enabled slice"
     );
 }
 

@@ -55,12 +55,12 @@ interface ThreadProps {
    * do not exercise the chip; defaults to empty (no chips rendered). */
   datasetLabels?: ReadonlyArray<DatasetLabel>;
   /** The process-global skill registry keyed by spec name (ADR-0086, issue
-   *  #366): a Skill lifecycle marker looks up its name here to surface the
-   *  declared MCP server ids in its tooltip AND to detect a name the registry
-   *  no longer carries (resume honest-degrade -- a skill deleted / renamed /
-   *  uninstalled external library since the event was recorded). undefined
-   *  when the caller does not wire the registry: the marker then renders the
-   *  verb + name from the event alone (no MCP tooltip, no missing-skill
+   *  #366): a Skill lifecycle marker looks up its name here to detect a name
+   *  the registry no longer carries (resume honest-degrade -- a skill
+   *  deleted / renamed / uninstalled external library since the event was
+   *  recorded). undefined when the caller does not wire the registry: the
+   *  marker then renders the
+   *  verb + name from the event alone (no missing-skill
    *  warning). The timeline stays readable; the registry only enriches it. */
   skillIndex?: ReadonlyMap<string, SkillEntry>;
   /** The in-flight turn's live trace (ADR-0078/0103, issues #297/#610): when

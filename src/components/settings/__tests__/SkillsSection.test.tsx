@@ -6,6 +6,7 @@ import type { ReactElement } from "react";
 
 import { SkillsSection } from "../SkillsSection";
 import { TooltipProvider } from "../../ui/tooltip";
+import { chooseOption, openSelect } from "./helpers";
 import {
   createSkill,
   deleteSkill,
@@ -36,9 +37,7 @@ const localSkill: SkillEntry = {
   description: "Work with PDF files.",
   acquired: "local",
   license: "MIT",
-  compatibility: null,
-  mcp_servers: [],
-  cli_tools: [],
+  compatibility: "requires network",
   body: "Use this skill when working with PDFs.\n",
   link_target: null,
   content_hash: "deadbeef",
@@ -50,8 +49,6 @@ const linkedSkill: SkillEntry = {
   acquired: "linked",
   license: null,
   compatibility: null,
-  mcp_servers: [],
-  cli_tools: [],
   body: "External body.\n",
   link_target: "/home/u/.claude/skills/external-skill",
   content_hash: "deadbeef",
@@ -89,8 +86,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -111,8 +106,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -132,8 +125,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -161,8 +152,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -191,8 +180,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -231,8 +218,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -259,8 +244,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -280,6 +263,10 @@ describe("SkillsSection (issue #362)", () => {
         expect.objectContaining({
           name: "pdf-tools",
           body: "Updated body.\n",
+          // No edit surface for these: the original values must ride back
+          // untouched (null is the wire's frontmatter-key removal signal).
+          license: "MIT",
+          compatibility: "requires network",
         }),
       );
     });
@@ -295,8 +282,6 @@ describe("SkillsSection (issue #362)", () => {
     );
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -319,110 +304,49 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
-  it("shows MCP server display names in the drawer's reference list and saves ids", async () => {
-    // The reference list renders the renamable display name, not the raw
-    // uuid id; a stale reference no longer configured falls back to the
-    // bare id and stays visible + removable. The stored value is always
-    // the id, regardless of the display face.
-    vi.mocked(listSkills).mockResolvedValue({
-      skills: [{ ...localSkill, mcp_servers: ["a3f2-stale-id"] }],
-      ignored: [],
-      root_error: null,
-    });
-    vi.mocked(updateSkill).mockResolvedValue(localSkill);
+  it("filters local and linked rows through the acquired filter", async () => {
+    // The Radix Select's local/linked arms (the AgentsSection filter
+    // posture, driven through the shared pointer helpers): each arm hides
+    // the other source's rows while the row under test stays visible. The
+    // builtin arm is pinned separately in skills-builtin.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill, linkedSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{ "9b41-uuid-id": "GitHub MCP" }}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
-    await screen.findByText("pdf-tools");
-    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
+    expect(screen.getByText("external-skill")).toBeInTheDocument();
 
-    expect(await screen.findByLabelText("GitHub MCP")).toBeInTheDocument();
-    // The stale reference carries no display name -- the id is its face, and
-    // it starts checked (the skill references it).
-    const stale = screen.getByLabelText("a3f2-stale-id") as HTMLInputElement;
-    expect(stale.checked).toBe(true);
+    const filter = screen.getByLabelText("Filter by skill type");
+    openSelect(filter);
+    chooseOption("Local");
+    expect(screen.getByText("pdf-tools")).toBeInTheDocument();
+    expect(screen.queryByText("external-skill")).toBeNull();
 
-    // Swap the stale reference for the configured one and save.
-    fireEvent.click(stale);
-    fireEvent.click(screen.getByLabelText("GitHub MCP"));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(updateSkill).toHaveBeenCalledWith(
-        "pdf-tools",
-        expect.objectContaining({
-          mcp_servers: ["9b41-uuid-id"],
-        }),
-      );
-    });
+    openSelect(filter);
+    chooseOption("Linked");
+    expect(screen.queryByText("pdf-tools")).toBeNull();
+    expect(screen.getByText("external-skill")).toBeInTheDocument();
   });
 
-  it("falls back to the id when a configured server's display name is empty", async () => {
-    // A hand-edited config can load a server with an empty display_name
-    // (a legal wire value under the Rust serde default) -- the row must
-    // stay labeled with the id, not render blank.
-    vi.mocked(listSkills).mockResolvedValue({
-      skills: [{ ...localSkill, mcp_servers: ["9b41-uuid-id"] }],
-      ignored: [],
-      root_error: null,
-    });
+  it("rescans the listing from the header refresh button", async () => {
+    // The icon-only header action's one seam: a click re-invokes the list
+    // query. The aria-label carries the accessible name; the spin glyph is
+    // presentational.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{ "9b41-uuid-id": "" }}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
     await screen.findByText("pdf-tools");
-    fireEvent.click(screen.getByText("pdf-tools"));
-
-    expect(await screen.findByLabelText("9b41-uuid-id")).toBeInTheDocument();
-  });
-
-  it("edits a skill's CLI tool references through the multi-select", async () => {
-    // Issue #674: the drawer's CLI multi-select mirrors the MCP one. The
-    // option list merges the registered names with the skill's existing
-    // references, so a stale (unregistered) name stays visible + removable.
-    vi.mocked(listSkills).mockResolvedValue({
-      skills: [{ ...localSkill, cli_tools: ["stale-tool"] }],
-      ignored: [],
-      root_error: null,
-    });
-    vi.mocked(updateSkill).mockResolvedValue(localSkill);
-    renderWithProviders(
-      <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={["pandoc", "office-cli"]}
-        builtinSkillBaselines={{}}
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("pdf-tools");
-    fireEvent.click(screen.getByText("pdf-tools"));
-
-    // The merged option list: both registered tools + the stale reference.
-    expect(await screen.findByLabelText("pandoc")).toBeInTheDocument();
-    expect(screen.getByLabelText("office-cli")).toBeInTheDocument();
-    expect(screen.getByLabelText("stale-tool")).toBeInTheDocument();
-
-    // Toggle one registered tool on, drop the stale reference, save.
-    fireEvent.click(screen.getByLabelText("pandoc"));
-    fireEvent.click(screen.getByLabelText("stale-tool"));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
+    const callsBefore = vi.mocked(listSkills).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
     await waitFor(() => {
-      expect(updateSkill).toHaveBeenCalledWith(
-        "pdf-tools",
-        expect.objectContaining({
-          cli_tools: ["pandoc"],
-        }),
-      );
+      expect(vi.mocked(listSkills).mock.calls.length).toBeGreaterThan(callsBefore);
     });
   });
 
@@ -431,8 +355,6 @@ describe("SkillsSection (issue #362)", () => {
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -458,8 +380,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -486,8 +406,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -526,8 +444,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([]);
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -547,8 +463,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -576,8 +490,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -606,8 +518,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockRejectedValue("IPC transport error");
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
@@ -628,8 +538,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        mcpServerLabels={{}}
-        configuredCliIds={[]}
         builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,

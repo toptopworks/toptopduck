@@ -89,18 +89,16 @@ describe("Thread", () => {
   }
 
   // Build a registry SkillEntry with only the fields the skill-marker render
-  // path reads (name + mcp_servers). The other declaration fields are filled
-  // with benign defaults -- the marker never inspects them, and keeping the
-  // helper narrow keeps the tests focused on the marker behavior under test.
-  function skillEntry(name: string, mcpServers: string[] = []): SkillEntry {
+  // path reads (name). The other declaration fields are filled with benign
+  // defaults -- the marker never inspects them, and keeping the helper narrow
+  // keeps the tests focused on the marker behavior under test.
+  function skillEntry(name: string): SkillEntry {
     return {
       name,
       description: `${name} description.`,
       acquired: "local",
       license: null,
       compatibility: null,
-      mcp_servers: mcpServers,
-      cli_tools: [],
       body: "",
       link_target: null,
       content_hash: "deadbeef",
@@ -937,39 +935,6 @@ describe("Thread", () => {
     expect(container.querySelectorAll("ol > .skill-entry")).toHaveLength(0);
   });
 
-  it("discloses a mounted skill's declared MCP servers in the marker tooltip (issue #366)", async () => {
-    // A Mount marker's tooltip carries the skill's declared MCP server ids
-    // (looked up from the registry, never snapshotted into the event) so a
-    // long skill name does not erase which servers the mount activates. The
-    // visible text still shows the verb + name; the MCP detail is hover-only.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
-    ];
-    const skillIndex = new Map([
-      ["pdf-tools", skillEntry("pdf-tools", ["github-mcp", "fs-server"])],
-    ]);
-    const { container } = renderThread(
-      <Thread
-        entries={entries}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        skillIndex={skillIndex}
-      />,
-    );
-    const markerText = container.querySelector(
-      `.skill-entry[data-skill-kind="mount"] .skill-text`,
-    ) as HTMLElement;
-    // Native title is gone (Radix Tooltip carries it, ADR-0050).
-    expect(markerText.getAttribute("title")).toBeNull();
-    fireEvent.pointerMove(markerText);
-    await waitFor(() => {
-      const tip = screen.getByRole("tooltip");
-      expect(tip.textContent).toContain("pdf-tools");
-      expect(tip.textContent).toContain("github-mcp");
-      expect(tip.textContent).toContain("fs-server");
-    });
-  });
-
   it("discloses the agent initiator in the tooltip while the visible copy stays unified (issue #722)", async () => {
     // The placement carries the actor: both actors share the single Activate
     // verb in the visible copy (the agent-specific variant retired), and the
@@ -1013,64 +978,6 @@ describe("Thread", () => {
     // nothing), so the exact text pins the absence.
     await waitFor(() => {
       expect(screen.getByRole("tooltip").textContent).toBe("激活技能「pdf-tools」");
-    });
-  });
-
-  it("omits MCP detail from a Mount tooltip when the skill declares no servers (issue #366)", async () => {
-    // A Mount whose skill is in the registry but declares zero MCP servers
-    // carries no declaration to disclose, so the tooltip mirrors the bare
-    // verb + name -- a regression that drops the length > 0 guard (showing
-    // "Declares MCP:" with an empty list) fails here. The default registry
-    // entry has no servers, so this is the common path.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "plain-skill", actor: null } },
-    ];
-    const skillIndex = new Map([["plain-skill", skillEntry("plain-skill")]]); // empty mcp_servers
-    const { container } = renderThread(
-      <Thread
-        entries={entries}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        skillIndex={skillIndex}
-      />,
-    );
-    const markerText = container.querySelector(
-      `.skill-entry[data-skill-kind="mount"] .skill-text`,
-    ) as HTMLElement;
-    fireEvent.pointerMove(markerText);
-    await waitFor(() => {
-      const tip = screen.getByRole("tooltip");
-      expect(tip.textContent).toContain("plain-skill");
-      expect(tip.textContent).not.toContain("声明 MCP");
-    });
-  });
-
-  it("does not surface MCP detail on an Unmount marker (the declaration is no longer operative)", async () => {
-    // Unmount means the skill left the active set; its MCP declaration no
-    // longer applies, so the tooltip carries the verb + name only -- a
-    // regression that copy-pastes the Mount tooltip branch fails here.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
-    ];
-    const skillIndex = new Map([
-      ["pdf-tools", skillEntry("pdf-tools", ["github-mcp"])],
-    ]);
-    const { container } = renderThread(
-      <Thread
-        entries={entries}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        skillIndex={skillIndex}
-      />,
-    );
-    const markerText = container.querySelector(
-      `.skill-entry[data-skill-kind="unmount"] .skill-text`,
-    ) as HTMLElement;
-    fireEvent.pointerMove(markerText);
-    await waitFor(() => {
-      const tip = screen.getByRole("tooltip");
-      expect(tip.textContent).toContain("pdf-tools");
-      expect(tip.textContent).not.toContain("github-mcp");
     });
   });
 
@@ -2881,8 +2788,6 @@ describe("Thread", () => {
         acquired: "local",
         license: null,
         compatibility: null,
-        mcp_servers: [],
-        cli_tools: [],
         body: "",
         link_target: null,
         content_hash: contentHash,

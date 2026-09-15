@@ -21,7 +21,6 @@
 //! session-agnostic commands (read-only listing / has-key) cannot
 //! fail with a user-facing refusal and keep returning `Result<T, String>`.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -779,8 +778,7 @@ pub async fn ask(
     // crosses IPC back out).
     let live = live.inner().clone();
     // ADR-0106: the effective set is single-axis -- config-level enablement
-    // only (see [`LiveProviderConfig::enabled_mcp_servers`]). Skill MCP
-    // references are declarative metadata and arm nothing (Decision 3). Fresh
+    // only (see [`LiveProviderConfig::enabled_mcp_servers`]). Fresh
     // per-turn snapshot of the app-config file; a config edit between turns
     // is reflected next turn.
     let mcp_servers = live.enabled_mcp_servers();
@@ -3603,18 +3601,10 @@ fn build_skill_source_candidates(
 /// Mount a skill into the session's active set (issue #363, ADR-0086). Appends
 /// a `Mount` event to the timeline + atomically persists the recipe. Refuses a
 /// redundant mount (`AlreadyMounted`) and rejects during resume / an in-flight
-/// turn (the loading gate, AC #5). Issue #369 AC#5: after a successful mount,
-/// the skill's declared MCP server ids are checked against the globally
-/// configured registry -- an id that is not configured is warned + skipped
-/// (it contributes nothing to the effective MCP set; the mount itself
-/// succeeds because the skill's prompt fragment is independent of its MCP
-/// declarations). Issue #674: the declared CLI tool names get the same
-/// post-mount warn, against the EFFECTIVE (enabled) CLI set.
+/// turn (the loading gate, AC #5).
 #[tauri::command]
 pub fn mount_skill(
     store: State<'_, Arc<SessionStore>>,
-    live: State<'_, LiveProviderConfig>,
-    skills_root: State<'_, SkillsRoot>,
     session_id: String,
     name: String,
 ) -> Result<(), SessionError> {
@@ -3624,13 +3614,6 @@ pub fn mount_skill(
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
     s.mount_skill(&name).map_err(SessionError::SkillMount)?;
-    // Issue #369 AC#5: warn for declared MCP server ids not in the global
-    // registry. The mount already succeeded (the skill is live for prompt
-    // injection); the unknown ids are simply skipped in the effective set.
-    // Issue #674: same shape for the declared CLI tool names.
-    drop(s);
-    warn_unknown_mcp_ids(&live, &skills_root.0, &name);
-    warn_unknown_cli_names(&live, &skills_root.0, &name);
     Ok(())
 }
 
@@ -3713,93 +3696,14 @@ pub fn list_activated_skills(
     Ok(s.activated_skills())
 }
 
-/// Warn for MCP server ids declared by a skill that are not in the globally
-/// configured registry (issue #369 AC#5). Called after a successful mount so
-/// the user sees immediate feedback; the mount itself is not affected (the
-/// skill's prompt fragment is independent of its MCP declarations). An
-/// unreadable or missing `SKILL.md` contributes no warning -- the skill still
-/// mounted, and the effective set computation naturally excludes unknown ids.
-fn warn_unknown_mcp_ids(live: &LiveProviderConfig, root: &Path, skill_name: &str) {
-    let fragments = resolve_prompt_fragments(root, &[skill_name.to_string()]);
-    let Some(frag) = fragments.into_iter().next() else {
-        return;
-    };
-    if frag.mcp_servers.is_empty() {
-        return;
-    }
-    let configured: HashSet<String> = live.mcp_servers().into_iter().map(|s| s.id.0).collect();
-    for id in &frag.mcp_servers {
-        if !configured.contains(id) {
-            log::warn!(
-                target: "toptopduck::mcp",
-                "skill `{}` declares MCP server `{}` which is not in the global \
-                 registry -- skipping (configure the server in Settings to enable it)",
-                skill_name,
-                id,
-            );
-        }
-    }
-}
-
-/// The declared CLI tool names that are NOT live in the effective CLI set
-/// (issue #674): a name dangles when it is unregistered OR
-/// registered-but-disabled. Unlike the MCP sibling check (which consults the
-/// full registry, so a disabled server is not flagged), this is checked
-/// against the ENABLED slice on purpose: ADR-0106 disabled = dormant = no
-/// tool-table entry, so a disabled registration is exactly as absent from
-/// the model's tool surface as an unregistered name, and the reference warn
-/// must cover both states (CONTEXT "技能": the referent must be configured
-/// AND enabled to be usable; the reference itself never flips either).
-fn dangling_cli_refs(
-    referenced: &[String],
-    tools: &[crate::cli_tools::config::CliToolConfig],
-) -> Vec<String> {
-    let effective: HashSet<&str> = tools
-        .iter()
-        .filter(|tool| tool.enabled)
-        .map(|tool| tool.name.as_str())
-        .collect();
-    referenced
-        .iter()
-        .filter(|name| !effective.contains(name.as_str()))
-        .cloned()
-        .collect()
-}
-
-/// Warn for CLI tool names declared by a skill that are neither registered
-/// nor enabled (issue #674) -- the `warn_unknown_mcp_ids` sibling. Called
-/// after a successful mount; the mount itself is not affected (declarative
-/// metadata only -- a reference never configures or enables anything). An
-/// unreadable or missing `SKILL.md` contributes no warning.
-fn warn_unknown_cli_names(live: &LiveProviderConfig, root: &Path, skill_name: &str) {
-    let fragments = resolve_prompt_fragments(root, &[skill_name.to_string()]);
-    let Some(frag) = fragments.into_iter().next() else {
-        return;
-    };
-    if frag.cli_tools.is_empty() {
-        return;
-    }
-    let effective = live.enabled_cli_tools();
-    for name in dangling_cli_refs(&frag.cli_tools, &effective) {
-        log::warn!(
-            target: "toptopduck::cli_tools",
-            "skill `{skill_name}` references CLI tool `{name}` which is not \
-             registered or enabled -- the tool stays absent (register/enable \
-             it in Settings to make it available)",
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session_store::UNKNOWN_SESSION;
     use crate::CancelToken;
 
-    // --- skill CLI tool references (issue #674, ADR-0108 Decision 7) -------
-
-    /// A minimal CliToolConfig for the dangling-reference tests: only `name`
-    /// and `enabled` matter to [`dangling_cli_refs`].
+    /// A minimal CliToolConfig for the turn-assembly projection tests: only
+    /// `name` and `enabled` matter to the assembly seam.
     fn cli_tool(name: &str, enabled: bool) -> crate::cli_tools::config::CliToolConfig {
         crate::cli_tools::config::CliToolConfig {
             name: name.to_string(),
@@ -3812,66 +3716,6 @@ mod tests {
             source: Default::default(),
             baseline: None,
         }
-    }
-
-    #[test]
-    fn dangling_cli_refs_flags_missing_and_disabled_but_not_enabled() {
-        let tools = vec![cli_tool("my-pandoc", true), cli_tool("my-office", false)];
-        let referenced = vec![
-            "my-pandoc".to_string(),
-            "my-office".to_string(),
-            "ghost-tool".to_string(),
-        ];
-        let dangling = dangling_cli_refs(&referenced, &tools);
-        // Enabled: live on the tool surface -- not dangling.
-        assert!(!dangling.contains(&"my-pandoc".to_string()));
-        // Registered but disabled: dormant (ADR-0106) -- dangles exactly like
-        // the unregistered name; both states must warn (issue #674 AC).
-        assert!(dangling.contains(&"my-office".to_string()));
-        assert!(dangling.contains(&"ghost-tool".to_string()));
-        assert_eq!(dangling.len(), 2);
-    }
-
-    #[test]
-    fn warn_unknown_cli_names_consults_the_real_enabled_slice() {
-        // Pins the seam `warn_unknown_cli_names` reads: the dangling judgment
-        // must consult the ENABLED slice of a real `LiveProviderConfig`
-        // (`live.enabled_cli_tools()`), not the full registry -- swapping in
-        // `live.cli_tools()` (the MCP sibling's shape) would silently stop
-        // flagging disabled tools while every hand-built-input pin above stays
-        // green.
-        let cfg_dir = tempfile::tempdir().expect("config tempdir");
-        let live = LiveProviderConfig::new(
-            crate::provider::keychain::KeychainStore::new(),
-            cfg_dir.path().join("config.json"),
-        );
-        live.upsert_cli_tool(cli_tool("my-pandoc", true))
-            .expect("upsert 1");
-        live.upsert_cli_tool(cli_tool("my-office", false))
-            .expect("upsert 2");
-
-        let skills = tempfile::tempdir().expect("skills tempdir");
-        let root = skills.path();
-        std::fs::create_dir_all(root.join("doc-writer")).unwrap();
-        std::fs::write(
-            root.join("doc-writer").join("SKILL.md"),
-            "---\nname: doc-writer\ndescription: Test skill.\nmetadata:\n  \
-             toptopduck_cli_tools: my-pandoc, my-office\n---\nBody.\n",
-        )
-        .unwrap();
-
-        // The exact reads `warn_unknown_cli_names` performs after a mount.
-        let frag = resolve_prompt_fragments(root, &["doc-writer".to_string()])
-            .into_iter()
-            .next()
-            .expect("fragment");
-        assert_eq!(frag.cli_tools.len(), 2, "frontmatter parsed both refs");
-        let dangling = dangling_cli_refs(&frag.cli_tools, &live.enabled_cli_tools());
-        assert_eq!(
-            dangling,
-            vec!["my-office".to_string()],
-            "registered-but-disabled dangles through the real enabled slice"
-        );
     }
 
     // --- default runtime startup resolution (issue #569, ADR-0098 D2/D3) ----

@@ -2,7 +2,7 @@
 
 ## Decision
 
-1. **技能 = Agent Skills 规范目录 + 仅提示片段与 MCP 引用，不引新可执行面。** 一技能 = `<root>/<name>/SKILL.md`（YAML frontmatter + Markdown 正文），遵循 [Agent Skills 规范](https://agentskills.io/specification)。声明面仅两件：提示片段（SKILL.md 正文）+ 可选的 MCP server 引用（frontmatter `metadata` 命名空间扩展键 `toptopduck_mcp_servers`，逗号分隔 id）。**v1 不执行技能自带的 `scripts/`**——本地 Markdown 不跨信任边界带可执行代码。ADR-0076 的「技能声明的工具」第三类在 v1 校准为**聚合路径类**（技能 → 挂载 → MCP 启用 → 网关），非可执行面类。
+1. **技能 = Agent Skills 规范目录 + 仅提示片段，不引新可执行面。** 一技能 = `<root>/<name>/SKILL.md`（YAML frontmatter + Markdown 正文），遵循 [Agent Skills 规范](https://agentskills.io/specification)。声明面仅一件：提示片段（SKILL.md 正文）；工具引用以正文点名承载——模型可见正文中点名的工具名，frontmatter 不承载声明性工具引用。**v1 不执行技能自带的 `scripts/`**——本地 Markdown 不跨信任边界带可执行代码。ADR-0076 的「技能声明的工具」第三类校准为**非可执行面类**（技能不携带任何工具供给声明，工具面由会话级注册表装配）。
 
 2. **技能身份 = 规范 `name`**（kebab-case、≤64、等于目录名），不引入 uuid。每轮 `TurnProvenance.skills` 记 `Vec<{name, content_hash}>`，`content_hash` = SHA256(SKILL.md 整文件字节)。resume 诚实降级：name 在注册表缺失 →「已不存在」；hash 与当前不符 →「自该轮后已修改」；hash 空（v3→v4 迁移产物）→ 无基线、不触发。
 
@@ -38,7 +38,7 @@ ADR-0076/0078/0079 留下技能机制未决。技能需同时满足：(1) 适配
 
 - **CONTEXT.md**：「技能」「技能生命周期事件」词条磨锋利——补 Agent Skills 规范、目录即注册表、`name`=身份、Mount/Unmount 仅两态（内容变化由 content_hash 捕获、非事件）。
 - **校准 ADR-0079**：ADR-0017 诚实拒绝是**内置运行时**的默认行为；**外部运行时**默认为工具面边界（CLI persona + 网关工具面），不注入能力边界 prompt。外部运行时是用户主动选择的 power mode，非默认姿态。
-- **延伸 ADR-0076**：「技能声明的工具」第三类在 v1 校准为**聚合路径类**（skill → mount → MCP enablement → gateway），非可执行面类。
+- **延伸 ADR-0076**：「技能声明的工具」第三类校准为**非可执行面类**（技能不携带任何工具供给声明，工具面由会话级注册表装配）。
 - **延伸 ADR-0078**：技能生命周期事件与源事件同构（恒可见、非轮次、进当前状态视图）；轮次记技能出处 + content_hash 供审计。
 - **延续 ADR-0082**：recipe format_version v3→v4 单向迁移。
 - **未决（实施期）**：技能根目录位置、导入对话框两段式钻取、设置页 SkillsSection UX、行内校验/冲突标记、effective 启用集合成、注入点不对称的实现细节。
@@ -46,3 +46,4 @@ ADR-0076/0078/0079 留下技能机制未决。技能需同时满足：(1) 适配
 - **被 ADR-0109 校准**：技能库来源二分——用户（创建 / 导入）与内置（app 自撰、随版发行、配套内置 CLI 注册项）；内置技能于对应项检测到 + 启用时自动进入新会话活跃集——起步初始状态，非 Mount 生命周期事件；本 ADR 的身份、`content_hash`、诚实降级语义不变。
 - **被 ADR-0110 校准**：注入语义——「挂载即全文注入」读作「元数据索引常驻（挂载而未激活集）+ 激活集正文持续注入」；生命周期事件扩为挂载 / 卸载 / 激活三态（激活带发起方），轮次出处记激活集，recipe format_version v5 → v6；本 ADR 的身份、`content_hash`、诚实降级、声明性工具引用与 `scripts/` 禁令不变；本 ADR 及 CONTEXT.md 相应条目中「活跃（技能）集」措辞自此读作「挂载集」。
 - **被 ADR-0111 校准**：`scripts/` 禁令解除——「v1 不执行技能自带的 `scripts/`」读作「附带文件（含 `scripts/`，目录树无特权区）经受限读面统一可读；执行经注册 CLI 信道文本中继——agent 读出脚本文本传入内容型参数，app 无专门执行面」；Why 3 的「激活自带脚本需新 ADR（沙箱 + 审批 + 信任模型）」由 ADR-0111 以借道形态履行（沙箱显式不解决，信任靠 CLI per-call 审批 + 来源二分）；身份、`content_hash`、诚实降级、声明性工具引用不变。
+- **校准：声明性工具引用退役**——`toptopduck_mcp_servers` / `toptopduck_cli_tools` 两扩展键全量退役：提示注入仅渲染正文，键从不参与工具供给或配置决策，声明信息由正文点名承载（模型不可见 frontmatter）。存量文件中的旧键被读取面静默忽略（不迁移、不清除）；内置技能物化不再写入。上方「被 ADR-0108 校准」条目所述扩展随之失效；Why 1 的 `metadata` 扩展半句、Why 2 的 MCP 引用复用理由、Considered 选项一的「走 `metadata` 扩展」出路亦一并失效。
