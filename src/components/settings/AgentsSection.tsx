@@ -2,13 +2,25 @@ import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  ArrowLeft,
+  Bot,
+  FolderOpen,
+  Info,
+  Loader2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 
 import type { AgentEntry, AgentUpdate } from "../../types/agents";
 import type { AppConfig } from "../../types/app-config";
 import {
   createAgent,
   deleteAgent,
+  getAgentsDir,
   listAgents,
   setAgentEnabled,
   updateAgent,
@@ -28,12 +40,24 @@ import {
 } from "../ui/alert-dialog";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
-import { PaneHeader, SettingsCard } from "./settings-chrome";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import {
+  PaneHeader,
+  SETTINGS_TOOLTIP_CLASS,
+  SettingsCard,
+  SettingsRow,
+} from "./settings-chrome";
 
 // Agents settings pane (issue #932, ADR-0117). The registry is a directory
 // scan (no app-config entity -- the definitions are files), so this pane
@@ -46,7 +70,7 @@ import { PaneHeader, SettingsCard } from "./settings-chrome";
 // (disabling is the single shutdown axis); linked rows are read-only.
 
 // The backend name/description rules, mirrored client-side (the
-// SkillsSection posture) so the dialog gates Save BEFORE an IPC round-trip.
+// SkillsSection posture) so the form gates Save BEFORE an IPC round-trip.
 // The backend remains the authority; these only move the feedback earlier.
 const AGENT_NAME_MAX = 64;
 const AGENT_DESCRIPTION_MAX = 1024;
@@ -66,7 +90,7 @@ function matchesSearch(agent: AgentEntry, query: string): boolean {
   return haystack.includes(query.trim().toLowerCase());
 }
 
-type DrawerState =
+type FormState =
   | { mode: "closed" }
   | { mode: "create" }
   | { mode: "edit"; entry: AgentEntry };
@@ -82,9 +106,13 @@ export function AgentsSection({
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<EnabledFilter>("all");
-  const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
+  const [form, setForm] = useState<FormState>({ mode: "closed" });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Reveal failures live apart from `error`: that state is the open form's
+  // error prop, and a late reveal rejection must not render inside a draft
+  // (the GeneralSection dirError posture).
+  const [dirError, setDirError] = useState<string | null>(null);
 
   const { data: listing, error: queryError, refetch, isFetching } = useQuery({
     queryKey: agentKeys.all(),
@@ -101,7 +129,7 @@ export function AgentsSection({
     onSuccess: () => {
       invalidate();
       setError(null);
-      setDrawer({ mode: "closed" });
+      setForm({ mode: "closed" });
     },
     onError: (e) => setError(fmtError(e, intl)),
   });
@@ -112,7 +140,7 @@ export function AgentsSection({
     onSuccess: () => {
       invalidate();
       setError(null);
-      setDrawer({ mode: "closed" });
+      setForm({ mode: "closed" });
     },
     onError: (e) => setError(fmtError(e, intl)),
   });
@@ -157,6 +185,7 @@ export function AgentsSection({
   // error first, then the IPC transport error, then the root scan error.
   const displayError = useMemo(() => {
     if (error) return error;
+    if (dirError) return dirError;
     if (queryError) return fmtError(queryError, intl);
     if (rootError) {
       return intl.formatMessage(
@@ -168,13 +197,41 @@ export function AgentsSection({
       );
     }
     return null;
-  }, [error, queryError, rootError, intl]);
+  }, [error, dirError, queryError, rootError, intl]);
 
   function openEdit(entry: AgentEntry) {
-    // The dialog owns the error face while open (a leftover pane error would
-    // replay inside an unrelated edit dialog).
+    // The form owns the error face while open (a leftover list error would
+    // replay inside an unrelated edit form).
     setError(null);
-    setDrawer({ mode: "edit", entry });
+    setForm({ mode: "edit", entry });
+  }
+
+  // Reveal the registry root in the OS file manager (the GeneralSection
+  // revealSessionsDir posture): a failure lands on the dedicated pane-level
+  // dir error, never the state an open form shares.
+  async function openAgentsDir() {
+    setDirError(null);
+    try {
+      await revealItemInDir(await getAgentsDir());
+    } catch (e) {
+      setDirError(fmtError(e, intl));
+    }
+  }
+
+  // The create/edit form replaces the whole pane (the McpServerForm posture):
+  // a full-page form reads better than a modal over the list it edits.
+  if (form.mode !== "closed") {
+    return (
+      <AgentForm
+        key={form.mode === "edit" ? form.entry.name : "create"}
+        editing={form.mode === "edit" ? form.entry : null}
+        saving={createMutation.isPending || updateMutation.isPending}
+        error={error}
+        onCancel={() => setForm({ mode: "closed" })}
+        onCreate={(update) => createMutation.mutate(update)}
+        onSave={(name, update) => updateMutation.mutate({ name, update })}
+      />
+    );
   }
 
   return (
@@ -195,29 +252,78 @@ export function AgentsSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => {
-                setError(null);
-                setDrawer({ mode: "create" });
-              }}
-            >
-              <Plus className="size-4" aria-hidden />
-              <FormattedMessage id="settings.agents.add" defaultMessage="New agent" />
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void refetch()}
-              aria-label={intl.formatMessage({
-                id: "settings.agents.refreshLabel",
-                defaultMessage: "Refresh",
-              })}
-            >
-              <RefreshCw className={cn("size-4", isFetching && "animate-spin")} aria-hidden />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  aria-label={intl.formatMessage({
+                    id: "settings.agents.add",
+                    defaultMessage: "New agent",
+                  })}
+                  onClick={() => {
+                    setError(null);
+                    setForm({ mode: "create" });
+                  }}
+                >
+                  <Plus className="size-3.5" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage id="settings.agents.add" defaultMessage="New agent" />
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  aria-label={intl.formatMessage({
+                    id: "settings.agents.openDir",
+                    defaultMessage: "Open agents folder",
+                  })}
+                  onClick={() => void openAgentsDir()}
+                >
+                  <FolderOpen className="size-3.5" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage
+                  id="settings.agents.openDir"
+                  defaultMessage="Open agents folder"
+                />
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  onClick={() => void refetch()}
+                  aria-label={intl.formatMessage({
+                    id: "settings.agents.refreshLabel",
+                    defaultMessage: "Refresh",
+                  })}
+                >
+                  <RefreshCw
+                    className={cn("size-3.5", isFetching && "animate-spin")}
+                    aria-hidden
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage
+                  id="settings.agents.refreshLabel"
+                  defaultMessage="Refresh"
+                />
+              </TooltipContent>
+            </Tooltip>
           </div>
         )}
       />
@@ -239,33 +345,30 @@ export function AgentsSection({
             defaultMessage="Filter by status"
           />
         </Label>
-        <select
-          id="agents-enabled-filter"
-          className="border-border bg-background text-foreground h-9 rounded-md border px-2 text-sm"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value as EnabledFilter)}
-        >
-          {FILTER_OPTIONS.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt === "all" ? (
-                intl.formatMessage({
-                  id: "settings.agents.filterAll",
-                  defaultMessage: "All",
-                })
-              ) : opt === "enabled" ? (
-                intl.formatMessage({
-                  id: "settings.agents.filterEnabled",
-                  defaultMessage: "Enabled",
-                })
-              ) : (
-                intl.formatMessage({
-                  id: "settings.agents.filterDisabled",
-                  defaultMessage: "Disabled",
-                })
-              )}
-            </option>
-          ))}
-        </select>
+        <Select value={filter} onValueChange={(v) => setFilter(v as EnabledFilter)}>
+          <SelectTrigger
+            id="agents-enabled-filter"
+            aria-label={intl.formatMessage({
+              id: "settings.agents.filterLabel",
+              defaultMessage: "Filter by status",
+            })}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {FILTER_OPTIONS.map((opt) => (
+              <SelectItem key={opt} value={opt}>
+                {opt === "all" ? (
+                  <FormattedMessage id="settings.agents.filterAll" defaultMessage="All" />
+                ) : opt === "enabled" ? (
+                  <FormattedMessage id="settings.agents.filterEnabled" defaultMessage="Enabled" />
+                ) : (
+                  <FormattedMessage id="settings.agents.filterDisabled" defaultMessage="Disabled" />
+                )}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <SettingsCard>
@@ -304,7 +407,7 @@ export function AgentsSection({
         )}
       </SettingsCard>
 
-      {displayError && drawer.mode === "closed" && (
+      {displayError && (
         <p className="settings-error text-destructive mt-3 text-sm">{displayError}</p>
       )}
 
@@ -382,18 +485,6 @@ export function AgentsSection({
         </div>
       )}
 
-      {drawer.mode !== "closed" && (
-        <AgentDialog
-          key={drawer.mode === "edit" ? drawer.entry.name : "create"}
-          editing={drawer.mode === "edit" ? drawer.entry : null}
-          saving={createMutation.isPending || updateMutation.isPending}
-          error={error}
-          onCancel={() => setDrawer({ mode: "closed" })}
-          onCreate={(update) => createMutation.mutate(update)}
-          onSave={(name, update) => updateMutation.mutate({ name, update })}
-        />
-      )}
-
       {confirmDelete && (
         <AlertDialog
           defaultOpen
@@ -439,6 +530,29 @@ export function AgentsSection({
         </AlertDialog>
       )}
     </div>
+  );
+}
+
+/** One form field's hint, as an info icon + tooltip anchored after the field
+ *  label (the ImportSkillsDialog import-mode posture). `label` is the
+ *  trigger's accessible name; `children` render inside the tooltip. */
+function FieldHint({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" className="text-muted-foreground shrink-0" aria-label={label}>
+          <Info className="size-3.5" aria-hidden />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent
+        side="top"
+        align="start"
+        sideOffset={3}
+        className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+      >
+        {children}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -501,10 +615,9 @@ function AgentRow({
         <p
           className={
             agent.enabled
-              ? "text-muted-foreground truncate text-xs"
-              : "text-muted-foreground/60 truncate text-xs"
+              ? "text-muted-foreground text-xs"
+              : "text-muted-foreground/60 text-xs"
           }
-          title={agent.description}
         >
           {agent.description}
         </p>
@@ -559,12 +672,13 @@ function AgentRow({
   );
 }
 
-/** The create / edit dialog. A linked row renders everything disabled (the
+/** The create / edit form. A full-page replacement for the pane list (the
+ *  McpServerForm posture). A linked row renders everything disabled (the
  *  app never writes through an external link); a builtin row locks only the
  *  name field. The two warning surfaces (dangling backtick skill marks,
  *  dropped community axes) render from the CURRENT entry -- they describe
  *  the on-disk file, not the draft. */
-function AgentDialog({
+function AgentForm({
   editing,
   saving,
   error,
@@ -572,7 +686,7 @@ function AgentDialog({
   onCreate,
   onSave,
 }: {
-  /** The registry entry an edit dialog seeds from; null in create mode. */
+  /** The registry entry an edit form seeds from; null in create mode. */
   editing: AgentEntry | null;
   saving: boolean;
   error: string | null;
@@ -588,6 +702,13 @@ function AgentDialog({
   const [name, setName] = useState(editing?.name ?? "");
   const [description, setDescription] = useState(editing?.description ?? "");
   const [preamble, setPreamble] = useState(editing?.preamble ?? "");
+  // Error surfaces wait for the first edit of each field -- a freshly opened
+  // create form shows no red at all (SkillsSection marks touched on blur;
+  // here onChange, so a field validates as soon as its first keystroke
+  // lands).
+  const [nameTouched, setNameTouched] = useState(false);
+  const [descriptionTouched, setDescriptionTouched] = useState(false);
+  const [preambleTouched, setPreambleTouched] = useState(false);
 
   // Client-side pre-validation (the backend stays the authority): name
   // present in create mode (the SkillsSection empty-name flag), name shape
@@ -604,109 +725,135 @@ function AgentDialog({
   const update: AgentUpdate = { name, description, preamble };
 
   return (
-    <Dialog
-      defaultOpen
-      onOpenChange={(open) => {
-        if (!open) onCancel();
-      }}
-    >
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>
-            {editing ? (
-              <FormattedMessage
-                id="settings.agents.editTitle"
-                defaultMessage="Edit agent {name}"
-                values={{ name: editing.name }}
-              />
-            ) : (
-              <FormattedMessage id="settings.agents.createTitle" defaultMessage="New agent" />
-            )}
-          </DialogTitle>
-        </DialogHeader>
+    <div>
+      <button
+        type="button"
+        className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
+        onClick={onCancel}
+        disabled={saving}
+      >
+        <ArrowLeft className="size-4" aria-hidden />
+        <FormattedMessage
+          id="settings.agents.backToList"
+          defaultMessage="Back to agent list"
+        />
+      </button>
+      <PaneHeader
+        title={editing ? (
+          <FormattedMessage
+            id="settings.agents.editTitle"
+            defaultMessage="Edit agent {name}"
+            values={{ name: editing.name }}
+          />
+        ) : (
+          <FormattedMessage id="settings.agents.createTitle" defaultMessage="New agent" />
+        )}
+      />
 
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="agent-name">
+      <SettingsCard className="divide-y-0">
+        <SettingsRow
+          dense
+          title={(
+            <Label htmlFor="agent-name" className="text-muted-foreground">
               <FormattedMessage id="settings.agents.nameLabel" defaultMessage="Name" />
             </Label>
-            <Input
-              id="agent-name"
-              value={name}
-              disabled={readOnly || nameLocked}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={intl.formatMessage({
-                id: "settings.agents.namePlaceholder",
-                defaultMessage: "data-cleaner",
-              })}
-              aria-invalid={nameInvalid}
-            />
-            {nameInvalid && (
-              <p className="text-destructive text-xs">
-                <FormattedMessage
-                  id="settings.agents.nameInvalid"
-                  defaultMessage="Lowercase letters, digits, and single hyphens (max 64 chars)"
-                />
-              </p>
-            )}
-            {nameLocked && (
-              <p className="text-muted-foreground text-xs">
-                <FormattedMessage
-                  id="settings.agents.nameLockedHint"
-                  defaultMessage="A built-in agent keeps its name."
-                />
-              </p>
-            )}
-          </div>
+          )}
+        >
+          <Input
+            id="agent-name"
+            value={name}
+            disabled={readOnly || nameLocked}
+            onChange={(e) => {
+              setName(e.target.value);
+              setNameTouched(true);
+            }}
+            placeholder={intl.formatMessage({
+              id: "settings.agents.namePlaceholder",
+              defaultMessage: "data-cleaner",
+            })}
+            aria-invalid={nameTouched && nameInvalid}
+          />
+          {nameTouched && nameInvalid && (
+            <p className="text-destructive mt-2 text-xs">
+              <FormattedMessage
+                id="settings.agents.nameInvalid"
+                defaultMessage="Lowercase letters, digits, and single hyphens (max 64 chars)"
+              />
+            </p>
+          )}
+        </SettingsRow>
 
-          <div className="space-y-2">
-            <Label htmlFor="agent-description">
+        <SettingsRow
+          dense
+          title={(
+            <Label htmlFor="agent-description" className="text-muted-foreground">
               <FormattedMessage
                 id="settings.agents.descriptionLabel"
                 defaultMessage="Description"
               />
             </Label>
-            <Input
-              id="agent-description"
-              value={description}
-              disabled={readOnly}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder={intl.formatMessage({
-                id: "settings.agents.descriptionPlaceholder",
-                defaultMessage: "What the main agent should delegate to it",
-              })}
-              aria-invalid={descriptionInvalid}
-            />
-          </div>
+          )}
+        >
+          <Textarea
+            id="agent-description"
+            rows={3}
+            value={description}
+            disabled={readOnly}
+            onChange={(e) => {
+              setDescription(e.target.value);
+              setDescriptionTouched(true);
+            }}
+            placeholder={intl.formatMessage({
+              id: "settings.agents.descriptionPlaceholder",
+              defaultMessage: "What the main agent should delegate to it",
+            })}
+            aria-invalid={descriptionTouched && descriptionInvalid}
+          />
+        </SettingsRow>
 
-          <div className="space-y-2">
-            <Label htmlFor="agent-preamble">
-              <FormattedMessage id="settings.agents.preambleLabel" defaultMessage="Preamble" />
-            </Label>
-            <Textarea
-              id="agent-preamble"
-              rows={8}
-              value={preamble}
-              disabled={readOnly}
-              onChange={(e) => setPreamble(e.target.value)}
-              placeholder={intl.formatMessage({
-                id: "settings.agents.preamblePlaceholder",
-                defaultMessage: "The sub-agent's system prompt...",
-              })}
-              aria-invalid={preambleInvalid}
-            />
-            <p className="text-muted-foreground text-xs">
-              <FormattedMessage
-                id="settings.agents.preambleHint"
-                defaultMessage={
-                  "This becomes the sub-agent's system prompt. Wrap a skill name in " +
-                  "backticks (e.g. `pdf-tools`) to bind it at delegation time."
-                }
-              />
-            </p>
-          </div>
+        <SettingsRow
+          dense
+          title={(
+            <span className="flex items-center gap-1">
+              <Label htmlFor="agent-preamble" className="text-muted-foreground">
+                <FormattedMessage id="settings.agents.preambleLabel" defaultMessage="Preamble" />
+              </Label>
+              <FieldHint
+                label={intl.formatMessage({
+                  id: "settings.agents.preambleHintAria",
+                  defaultMessage: "Preamble explanation",
+                })}
+              >
+                <FormattedMessage
+                  id="settings.agents.preambleHint"
+                  defaultMessage={
+                    "This becomes the sub-agent's system prompt. Wrap a skill name in " +
+                    "backticks (e.g. `pdf-tools`) to bind it at delegation time."
+                  }
+                />
+              </FieldHint>
+            </span>
+          )}
+        >
+          <Textarea
+            id="agent-preamble"
+            rows={8}
+            value={preamble}
+            disabled={readOnly}
+            onChange={(e) => {
+              setPreamble(e.target.value);
+              setPreambleTouched(true);
+            }}
+            placeholder={intl.formatMessage({
+              id: "settings.agents.preamblePlaceholder",
+              defaultMessage: "The sub-agent's system prompt...",
+            })}
+            aria-invalid={preambleTouched && preambleInvalid}
+          />
+        </SettingsRow>
 
-          {editing && editing.dangling_skill_refs.length > 0 && (
+        {editing && editing.dangling_skill_refs.length > 0 && (
+          <div className="px-4 py-2.5">
             <WarningLine>
               <FormattedMessage
                 id="settings.agents.danglingRefs"
@@ -714,8 +861,10 @@ function AgentDialog({
                 values={{ refs: editing.dangling_skill_refs.map((r) => `\`${r}\``).join(", ") }}
               />
             </WarningLine>
-          )}
-          {editing && editing.dropped_axes.length > 0 && (
+          </div>
+        )}
+        {editing && editing.dropped_axes.length > 0 && (
+          <div className="px-4 py-2.5">
             <WarningLine>
               <FormattedMessage
                 id="settings.agents.droppedAxes"
@@ -723,33 +872,39 @@ function AgentDialog({
                 values={{ axes: editing.dropped_axes.join(", ") }}
               />
             </WarningLine>
-          )}
-        </div>
-
+          </div>
+        )}
         {readOnly && (
-          <p className="text-muted-foreground text-sm">
-            <FormattedMessage
-              id="settings.agents.linkedReadOnly"
-              defaultMessage="This definition is linked from outside the app. Edits happen at the source."
-            />
-          </p>
+          <div className="px-4 py-2.5">
+            <p className="text-muted-foreground text-sm">
+              <FormattedMessage
+                id="settings.agents.linkedReadOnly"
+                defaultMessage="This definition is linked from outside the app. Edits happen at the source."
+              />
+            </p>
+          </div>
         )}
 
-        {error && <p className="settings-error text-destructive text-sm">{error}</p>}
+        {error && (
+          <p className="settings-error text-destructive px-4 py-1.5 text-sm">{error}</p>
+        )}
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onCancel} disabled={saving}>
-            <FormattedMessage id="settings.agents.cancel" defaultMessage="Cancel" />
-          </Button>
+        <div className="flex items-center gap-2 px-4 py-3">
           <Button
+            type="button"
             disabled={!canSave || saving}
             onClick={() =>
               editing ? onSave(editing.name, update) : onCreate(update)}
           >
-            <FormattedMessage id="settings.agents.save" defaultMessage="Save" />
+            {saving && <Loader2 className="size-4 animate-spin" aria-hidden />}
+            {saving ? (
+              <FormattedMessage id="common.saving" defaultMessage="Saving…" />
+            ) : (
+              <FormattedMessage id="settings.agents.save" defaultMessage="Save" />
+            )}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      </SettingsCard>
+    </div>
   );
 }

@@ -1,13 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render } from "@testing-library/react";
-import { IntlProvider } from "react-intl";
 
 import { AgentsSection } from "../AgentsSection";
+import { chooseOption, openSelect, renderSettings } from "./helpers";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   createAgent,
   deleteAgent,
+  getAgentsDir,
   listAgents,
   setAgentEnabled,
   updateAgent,
@@ -18,13 +18,21 @@ import type { AgentEntry, AgentListing } from "../../../types/agents";
 // touches Tauri (the McpSection test posture).
 vi.mock("../../../api", () => ({
   listAgents: vi.fn(),
+  getAgentsDir: vi.fn(),
   createAgent: vi.fn(),
   updateAgent: vi.fn(),
   deleteAgent: vi.fn(),
   setAgentEnabled: vi.fn(),
 }));
 
+// The opener plugin is Tauri-gated; the reveal pin lives here.
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: vi.fn(),
+}));
+
 const mockedList = vi.mocked(listAgents);
+const mockedAgentsDir = vi.mocked(getAgentsDir);
+const mockedReveal = vi.mocked(revealItemInDir);
 const mockedCreate = vi.mocked(createAgent);
 const mockedUpdate = vi.mocked(updateAgent);
 const mockedDelete = vi.mocked(deleteAgent);
@@ -49,19 +57,11 @@ function makeListing(agents: AgentEntry[], overrides: Partial<AgentListing> = {}
   return { agents, ignored: [], warnings: [], root_error: null, ...overrides };
 }
 
-// Empty-catalog English IntlProvider + QueryClient (retry: false) -- the
-// defaultMessage literals carry the assertions (the McpSection posture).
+// The shared helpers stack (empty-catalog English + retry:false + the App
+// ancestor's TooltipProvider); the defaultMessage literals carry the
+// assertions (the McpSection posture).
 function renderSection(onAppConfigSync = vi.fn()) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        <AgentsSection onAppConfigSync={onAppConfigSync} />
-      </IntlProvider>
-    </QueryClientProvider>,
-  );
+  renderSettings(<AgentsSection onAppConfigSync={onAppConfigSync} />);
   return onAppConfigSync;
 }
 
@@ -152,7 +152,7 @@ describe("AgentsSection (issue #932)", () => {
     expect(screen.queryByText("Built-in agents are in a degraded state:")).toBeNull();
   });
 
-  it("creates a definition through the dialog", async () => {
+  it("creates a definition through the form", async () => {
     mockedCreate.mockResolvedValue(makeEntry());
     mockedList.mockResolvedValue(makeListing([]));
     renderSection();
@@ -201,6 +201,34 @@ describe("AgentsSection (issue #932)", () => {
     ).toBeVisible();
   });
 
+  it("keeps a fresh create form free of validation red until a field is edited", async () => {
+    mockedList.mockResolvedValue(makeListing([]));
+    renderSection();
+    await screen.findByText("No agent definitions yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    const name = await screen.findByLabelText("Name");
+    // A freshly opened create form shows no invalid marks at all.
+    expect(name).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Description")).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Preamble")).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    // The first edit of a field surfaces that field's error immediately.
+    fireEvent.change(name, { target: { value: "Bad Name!" } });
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/Lowercase letters, digits/)).toBeVisible();
+
+    // The same positive half for the other two fields: a whitespace-only
+    // value is invalid and flags once touched.
+    const description = screen.getByLabelText("Description");
+    fireEvent.change(description, { target: { value: " " } });
+    expect(description).toHaveAttribute("aria-invalid", "true");
+    const preamble = screen.getByLabelText("Preamble");
+    fireEvent.change(preamble, { target: { value: " " } });
+    expect(preamble).toHaveAttribute("aria-invalid", "true");
+  });
+
   it("gates Save on an empty name in create mode before any IPC round-trip", async () => {
     mockedList.mockResolvedValue(makeListing([]));
     renderSection();
@@ -219,7 +247,36 @@ describe("AgentsSection (issue #932)", () => {
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 
-  it("edits a definition through the dialog", async () => {
+  it("returns to the list through the link in the form header", async () => {
+    mockedList.mockResolvedValue(makeListing([]));
+    renderSection();
+    await screen.findByText("No agent definitions yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    expect(await screen.findByLabelText("Name")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Back to agent list" }));
+    expect(await screen.findByText("No agent definitions yet. Click New to create one.")).toBeVisible();
+    expect(screen.queryByLabelText("Name")).toBeNull();
+  });
+
+  it("shows the saving state and locks the back link while a save is pending", async () => {
+    mockedList.mockResolvedValue(makeListing([]));
+    renderSection();
+    await screen.findByText("No agent definitions yet. Click New to create one.");
+
+    // Hold the create IPC pending so the saving state is observable.
+    mockedCreate.mockReturnValue(new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "data-cleaner" } });
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Cleans data" } });
+    fireEvent.change(screen.getByLabelText("Preamble"), { target: { value: "You clean data." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Saving…")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Back to agent list" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  });
+
+  it("edits a definition through the form", async () => {
     mockedUpdate.mockResolvedValue(makeEntry());
     await renderListed([makeEntry()]);
 
@@ -244,10 +301,9 @@ describe("AgentsSection (issue #932)", () => {
     ]);
     fireEvent.click(screen.getByRole("button", { name: "Edit agent general-purpose" }));
     expect(await screen.findByLabelText("Name")).toBeDisabled();
-    expect(screen.getByText("A built-in agent keeps its name.")).toBeVisible();
   });
 
-  it("renders the two warning lines inside an edit dialog", async () => {
+  it("renders the two warning lines inside the edit form", async () => {
     await renderListed([
       makeEntry({
         dangling_skill_refs: ["ghost-skill"],
@@ -284,16 +340,17 @@ describe("AgentsSection (issue #932)", () => {
       makeEntry({ name: "on-agent", enabled: true }),
       makeEntry({ name: "off-agent", enabled: false }),
     ]);
+    // Radix Select opens on a pointer sequence and commits on an option
+    // click (the helpers posture) -- fireEvent.change is inert on it.
     const select = screen.getByLabelText("Filter by status");
-    fireEvent.change(select, { target: { value: "enabled" } });
+    openSelect(select);
+    chooseOption("Enabled");
     expect(screen.getByText("on-agent")).toBeVisible();
     expect(screen.queryByText("off-agent")).toBeNull();
-    fireEvent.change(select, { target: { value: "disabled" } });
+    openSelect(select);
+    chooseOption("Disabled");
     expect(screen.getByText("off-agent")).toBeVisible();
     expect(screen.queryByText("on-agent")).toBeNull();
-    // Filtering to an empty slice shows the no-match line.
-    fireEvent.change(select, { target: { value: "enabled" } });
-    fireEvent.change(select, { target: { value: "disabled" } });
   });
 
   it("re-lists through the refresh button", async () => {
@@ -303,6 +360,42 @@ describe("AgentsSection (issue #932)", () => {
     expect(mockedList).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(mockedList).toHaveBeenCalledTimes(2));
+  });
+
+  it("reveals the backend-resolved agents directory through the opener", async () => {
+    await renderListed([makeEntry()]);
+    mockedAgentsDir.mockResolvedValue("C:\\app\\agents");
+    mockedReveal.mockResolvedValue();
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    await waitFor(() => expect(mockedReveal).toHaveBeenCalledWith("C:\\app\\agents"));
+  });
+
+  it("surfaces a failed folder reveal on the pane error face", async () => {
+    await renderListed([makeEntry()]);
+    mockedAgentsDir.mockResolvedValue("C:\\app\\agents");
+    // One rejection, then the default mock arm resolves -- so the recovery
+    // click below also pins that the pane error face clears.
+    mockedReveal.mockRejectedValueOnce(new Error("reveal boom"));
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    expect(await screen.findByText(/reveal boom/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    await waitFor(() => expect(screen.queryByText(/reveal boom/)).toBeNull());
+  });
+
+  it("keeps a reveal failure out of an open form and back on the pane", async () => {
+    await renderListed([makeEntry()]);
+    mockedAgentsDir.mockResolvedValue("C:\\app\\agents");
+    mockedReveal.mockRejectedValueOnce(new Error("reveal boom"));
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    expect(await screen.findByText(/reveal boom/)).toBeVisible();
+    // The failure stays on the pane's own error face: opening the edit form
+    // must not adopt it as a save error...
+    fireEvent.click(screen.getByRole("button", { name: "Edit agent data-cleaner" }));
+    expect(await screen.findByLabelText("Name")).toBeVisible();
+    expect(screen.queryByText(/reveal boom/)).toBeNull();
+    // ...and it is still waiting when the form closes.
+    fireEvent.click(screen.getByRole("button", { name: "Back to agent list" }));
+    expect(await screen.findByText(/reveal boom/)).toBeVisible();
   });
 
   it("flips enablement and syncs the returned config", async () => {
@@ -331,7 +424,7 @@ describe("AgentsSection (issue #932)", () => {
     await waitFor(() => expect(sync).toHaveBeenCalled());
   });
 
-  it("renders a linked row's dialog read-only", async () => {
+  it("renders a linked row's form read-only", async () => {
     await renderListed([
       makeEntry({ source: "linked", link_target: "/outside/external.md" }),
     ]);
@@ -351,15 +444,5 @@ describe("AgentsSection (issue #932)", () => {
 // A small render variant that captures the sync callback (the describe's
 // enablement/delete cases need to assert on it).
 function renderWithSync(sync: (cfg: unknown) => void) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  const utils = render(
-    <QueryClientProvider client={queryClient}>
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        <AgentsSection onAppConfigSync={sync as never} />
-      </IntlProvider>
-    </QueryClientProvider>,
-  );
-  return utils;
+  renderSettings(<AgentsSection onAppConfigSync={sync as never} />);
 }
