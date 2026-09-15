@@ -37,7 +37,7 @@ use rig_core::streaming::StreamedAssistantContent;
 use crate::model::{ThinkingTrace, TurnPhase};
 use crate::session::loop_contract::{push_call, LoopRound};
 
-use super::adapter::{emit_phase, PhaseSink, SharedTurnState};
+use super::adapter::{emit_phase, CompletionChannel, PhaseSink};
 use std::sync::Arc;
 
 /// What the fold accumulated off the event stream: the round-grouped trace,
@@ -91,12 +91,14 @@ impl EventFold {
         }
     }
 
-    /// Fold one event. `state` supplies the dispatch-recorded trace entries
-    /// (drained in order, one per executed-tool-result event).
+    /// Fold one event. `channel` supplies the dispatch-recorded trace
+    /// entries for THIS fold's consumer family (drained in order, one per
+    /// executed-tool-result event) -- the main fold passes the main
+    /// channel, a sub-agent's fold its private one (#944).
     pub(crate) fn event(
         &mut self,
         item: &MultiTurnStreamItem,
-        state: &Arc<SharedTurnState>,
+        channel: &Arc<CompletionChannel>,
         phases: &PhaseSink,
     ) {
         match item {
@@ -112,7 +114,7 @@ impl EventFold {
                 // order: land its dispatch-recorded entry on the open round.
                 // A result with no queued entry is a framework-side result
                 // (a skipped call -- none of ours) and lands nothing.
-                if let Some(entry) = state
+                if let Some(entry) = channel
                     .completed
                     .lock()
                     .expect("completed lock poisoned")
@@ -160,8 +162,8 @@ impl EventFold {
     /// them -- the record-before-send site already accounted them, so the
     /// runner's finish lands them here instead. Returns how many entries
     /// it landed (the pairing accounting).
-    pub(crate) fn drain_residual(&mut self, state: &Arc<SharedTurnState>) -> usize {
-        let mut queue = state.completed.lock().expect("completed lock poisoned");
+    pub(crate) fn drain_residual(&mut self, channel: &Arc<CompletionChannel>) -> usize {
+        let mut queue = channel.completed.lock().expect("completed lock poisoned");
         let drained = queue.len();
         for entry in queue.drain(..) {
             push_call(&mut self.rounds, entry);
@@ -348,7 +350,7 @@ mod tests {
     /// as it is for any turn that streamed no text).
     #[test]
     fn round_trips_counts_streamed_turns_including_retries() {
-        let state = Arc::new(SharedTurnState::new());
+        let channel = Arc::new(CompletionChannel::new());
         let seen: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
         let sink: PhaseSink = {
             let seen = Arc::clone(&seen);
@@ -365,15 +367,15 @@ mod tests {
                 rig_core::completion::Usage::new(),
             ))
         };
-        fold.event(&text("a"), &state, &sink);
-        fold.event(&close(), &state, &sink);
+        fold.event(&text("a"), &channel, &sink);
+        fold.event(&close(), &channel, &sink);
         fold.event(
             &MultiTurnStreamItem::ModelTurnRetried { turn: 1 },
-            &state,
+            &channel,
             &sink,
         );
-        fold.event(&text("b"), &state, &sink);
-        fold.event(&close(), &state, &sink);
+        fold.event(&text("b"), &channel, &sink);
+        fold.event(&close(), &channel, &sink);
         fold.finish();
         let attempts = seen
             .lock()

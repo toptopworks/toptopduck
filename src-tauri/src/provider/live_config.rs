@@ -509,6 +509,24 @@ impl LiveProviderConfig {
         agents_root: &Path,
         skills_root: &Path,
     ) -> Vec<crate::agents::DelegationSpec> {
+        // #944 review Advisory B: a default install (no definition ever
+        // created) must not pay the skills-registry scan -- a directory
+        // walk plus a full parse per registered skill -- under the held
+        // session lock. A bare read_dir is the whole cost of knowing the
+        // family is empty: no `.md` file in the registry implies no
+        // definition however wide the registry's own admission rule ever
+        // grows (a wider rule can only add files, and this check missing
+        // them degrades to the full scan, never to a wrong family).
+        let has_definitions = std::fs::read_dir(agents_root)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            })
+            .unwrap_or(false);
+        if !has_definitions {
+            return Vec::new();
+        }
         let cfg = self.load();
         let (skill_names, bodies) = scan_registered_skills(&cfg, skills_root);
         let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);

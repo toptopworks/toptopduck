@@ -40,6 +40,13 @@ use crate::session::loop_contract::Termination;
 /// messages move.
 pub(crate) struct DispatchRequest {
     pub(crate) call: ToolUse,
+    /// Where the server records this call's trace entry
+    /// (record-before-send, #921): the dispatching family's completion
+    /// channel -- the main channel for the main loop's tools, a
+    /// sub-agent-private channel for the sub-face's (#944 review Critical
+    /// 1: the record follows the CONSUMER, so a fold can only ever pair
+    /// its own dispatches' entries).
+    pub(crate) channel: Arc<CompletionChannel>,
     pub(crate) resp: mpsc::Sender<DispatchOutcome>,
 }
 
@@ -60,16 +67,49 @@ pub(crate) enum DispatchOutcome {
     Aborted(Termination),
 }
 
+/// One consumer family's completion ledger (#944 review Critical 1): the
+/// recorded-entry queue that family's fold drains one per result event,
+/// plus the recorded count its finish-time pairing asserts against. The
+/// queue is keyed by nothing (rig's callback surface carries no call id,
+/// see the module doc), so pairing is ORDER -- and order is an exact
+/// pairing only while ONE family consumes ONE queue. The main channel
+/// serves the main fold; every sub-agent mints a private channel, because
+/// rig surfaces a batch's tool results only after the whole batch
+/// settles -- over a shared queue, a delegation's earlier siblings'
+/// recorded entries sat at the head when the sub-agent's fold popped, and
+/// the main trace lost a row while another wore its identity.
+pub(crate) struct CompletionChannel {
+    /// Completed calls' trace entries, completion order.
+    pub(crate) completed: Mutex<VecDeque<crate::session::loop_contract::TraceEntry>>,
+    /// Count of trace entries recorded for executed calls (incremented at
+    /// the record-before-send site). The accounting side of the
+    /// exactly-once pairing the family's finish asserts against its
+    /// fold's `landed_calls`: every recorded entry lands once -- by its
+    /// result event, or drained at finish when a cancellation left the
+    /// event stream abandoned (#921).
+    pub(crate) recorded_calls: AtomicUsize,
+}
+
+impl CompletionChannel {
+    pub(crate) fn new() -> Self {
+        Self {
+            completed: Mutex::new(VecDeque::new()),
+            recorded_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
 /// State shared between the tool callbacks (driver side), the caller-side
 /// dispatch server, and the runner's event fold. All fields are
 /// interior-mutability + lock/atomic guarded. Completed entries queue in
 /// completion order; the fold drains one per executed-tool-result event,
 /// which the sequential execution strategy forwards in the same order.
 pub(crate) struct SharedTurnState {
-    /// Completed calls' trace entries, completion order. Keyed by nothing:
-    /// rig's callback surface carries no call id (see the module doc), and
-    /// single-concurrency execution makes order the exact pairing.
-    pub(crate) completed: Mutex<VecDeque<crate::session::loop_contract::TraceEntry>>,
+    /// The MAIN fold's completion channel (#944): gateway dispatches and
+    /// delegation entries record here; the main fold drains here. Every
+    /// sub-agent runs on a private channel minted per run (see
+    /// `run_subagent`) so the order-pairing stays single-consumer.
+    pub(crate) main: Arc<CompletionChannel>,
     /// Promotions in dispatch order (sequential strategy makes dispatch
     /// order == promotion order, ADR-0022 monotonic `result_N`).
     pub(crate) promotions: Mutex<Vec<Promotion>>,
@@ -78,21 +118,6 @@ pub(crate) struct SharedTurnState {
     /// An honest termination overriding the fold's derivation (a dispatch
     /// panic, issue #321).
     pub(crate) aborted: Mutex<Option<Termination>>,
-    /// Count of trace entries recorded for executed calls (incremented at
-    /// the record-before-send site). The accounting side of the
-    /// exactly-once pairing the runner's finish asserts against the fold's
-    /// `landed_calls`: every recorded entry lands on the trace once -- by
-    /// its result event, or drained at finish when a cancellation left the
-    /// event stream abandoned (#921).
-    pub(crate) recorded_calls: AtomicUsize,
-    /// Entries landed by SUB-AGENT folds (#933): a sub-agent's event stream
-    /// carries its own result events, so its fold pops the shared
-    /// completion queue itself -- the count it consumed is reported here
-    /// when the sub-agent ends, keeping the exactly-once pairing total
-    /// across the main fold and every sub-agent fold of the turn. Entries
-    /// a cancelled sub-agent leaves queued stay in the completion queue and
-    /// land through the main finish's residual drain.
-    pub(crate) landed_by_subagents: AtomicUsize,
 }
 
 impl SharedTurnState {
@@ -111,12 +136,10 @@ impl SharedTurnState {
 
     pub(crate) fn new() -> Self {
         Self {
-            completed: Mutex::new(VecDeque::new()),
+            main: Arc::new(CompletionChannel::new()),
             promotions: Mutex::new(Vec::new()),
             gate_cancelled: AtomicBool::new(false),
             aborted: Mutex::new(None),
-            recorded_calls: AtomicUsize::new(0),
-            landed_by_subagents: AtomicUsize::new(0),
         }
     }
 }
@@ -137,6 +160,7 @@ pub(crate) fn next_call_id() -> String {
 pub(crate) fn gateway_dynamic_tool(
     def: ToolDefinition,
     state: Arc<SharedTurnState>,
+    channel: Arc<CompletionChannel>,
     dispatch: mpsc::Sender<DispatchRequest>,
 ) -> rig_agent::tool::DynamicTool {
     let name = def.name.clone();
@@ -151,6 +175,7 @@ pub(crate) fn gateway_dynamic_tool(
                 input: args,
             };
             let state = Arc::clone(&state);
+            let channel = Arc::clone(&channel);
             let dispatch = dispatch.clone();
             Box::pin(async move {
                 // The blocking dispatch round-trip (channel send + the
@@ -161,6 +186,7 @@ pub(crate) fn gateway_dynamic_tool(
                     if dispatch
                         .send(DispatchRequest {
                             call,
+                            channel,
                             resp: resp_tx,
                         })
                         .is_err()

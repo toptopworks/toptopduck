@@ -7,10 +7,13 @@
 //! text result.
 //!
 //! Failure honesty (ADR-0117 Decision 5): a sub-agent that exhausts its
-//! step cap, faults at the provider, or is stopped by loop detection
-//! returns an explicit failure TEXT through the tool result -- the main
-//! turn keeps running, and any `result_N` the sub-agent promoted before
-//! dying stays promoted. The callback always resolves `Ok` (the gateway
+//! step cap or faults at the provider returns an explicit failure TEXT
+//! through the tool result -- the main turn keeps running, and any
+//! `result_N` the sub-agent promoted before dying stays promoted. Loop
+//! detection is the one arm that escalates past this vocabulary: a
+//! nudge-ignoring repeat aborts the MAIN turn as its budget protection
+//! (see the Loop-detection paragraph below), everything else stays
+//! tool-level. The callback always resolves `Ok` (the gateway
 //! adapter's stance): rig's fail-fast error channel stays structurally
 //! unreachable, so a sub-agent failure can never escalate into a turn
 //! termination by accident. Cancellation is forwarded, not mapped -- the
@@ -40,13 +43,15 @@
 //!
 //! Trace + phases: the delegation call lands its own trace entry through
 //! the same record-before-send discipline the dispatch server applies
-//! (entry + `recorded_calls` incremented before the result crosses), so
-//! the main fold's result-event drain pairs it exactly like a gateway
-//! dispatch, and the live rail sees the same `ToolCallStarted` /
-//! `ToolCallCompleted` pair every dispatched call fires. The sub-agent's
-//! own rounds are NOT projected onto the main trace here -- the nested
-//! sub-trace projection is the chain's next ticket (#934); its executed
-//! calls still account through the shared completion queue, and their
+//! (entry queued and counted on the MAIN completion channel before the
+//! result crosses -- the delegation's result event surfaces on the MAIN
+//! stream, so the main fold stays the channel's one consumer and the
+//! order pairing stays exact), and the live rail sees the same
+//! `ToolCallStarted` / `ToolCallCompleted` pair every dispatched call
+//! fires. The sub-agent's own rounds are NOT projected onto the main
+//! trace here -- the nested sub-trace projection is the chain's next
+//! ticket (#934); its executed calls record onto the sub-agent's PRIVATE
+//! completion channel (dropped with it until #934 lands), and their
 //! promotions ride the shared promotion list.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -118,11 +123,20 @@ pub(crate) fn delegation_dynamic_tool(
             let batch = Arc::clone(&batch);
             let ctx = Arc::clone(&ctx);
             Box::pin(async move {
-                let task = args
-                    .get("prompt")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                // A missing, non-string, or blank prompt is refused up
+                // front (#944 review Advisory A): the schema says
+                // required, but providers do not enforce schemas against a
+                // misbehaving model, and a sub-agent run on an empty task
+                // spends up to a full step budget for nothing. The refusal
+                // rides the same failed-row shape the batch cap uses.
+                let task = match args.get("prompt").and_then(serde_json::Value::as_str) {
+                    Some(task) if !task.trim().is_empty() => task.to_string(),
+                    _ => {
+                        let refusal = "delegation refused: no task prompt was provided".to_string();
+                        land_delegation_entry(&ctx, &name, "", &refusal, false);
+                        return Ok(rig_agent::tool::ToolOutput::text(refusal));
+                    }
+                };
                 // The batch width cap (ADR-0117 Decision 5): the count is
                 // per model-turn (the driver resets it at each turn's usage
                 // record, which precedes the batch's committed calls and --
@@ -177,12 +191,26 @@ struct SubagentReport {
 /// progress, so the watchdog's cap times the whole turn including the
 /// sub-agent's model calls (the un-layered wall clock of Decision 5).
 async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &SubagentCtx) -> SubagentReport {
+    // The sub-agent's PRIVATE completion channel (#944 review Critical 1):
+    // its fold must only ever pair its own dispatches' entries. Recording
+    // into the main channel left one blind FIFO with two consumer
+    // families -- and because rig surfaces a batch's results only after
+    // the whole batch settles, the sub fold stole the main loop's earlier
+    // siblings' queued entries while the main fold could not yet drain
+    // them (the main trace lost a row, another wore its identity, and the
+    // count pairing stayed balanced).
+    let channel = Arc::new(super::adapter::CompletionChannel::new());
     let tools = ctx
         .sub_face
         .iter()
         .cloned()
         .map(|def| {
-            super::adapter::gateway_dynamic_tool(def, Arc::clone(&ctx.state), ctx.dispatch.clone())
+            super::adapter::gateway_dynamic_tool(
+                def,
+                Arc::clone(&ctx.state),
+                Arc::clone(&channel),
+                ctx.dispatch.clone(),
+            )
         })
         .collect::<Vec<_>>();
     let agent = AgentBuilder::new(ctx.model.clone())
@@ -216,7 +244,7 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &SubagentCtx) -> S
             None => break Ok(()),
             Some(Err(err)) => break Err(err),
             Some(Ok(item)) => {
-                fold.event(&item, &ctx.state, &noop_sink);
+                fold.event(&item, &channel, &noop_sink);
                 if let Some(clock) = &ctx.clock {
                     clock.touch();
                 }
@@ -224,19 +252,13 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &SubagentCtx) -> S
         }
     };
     fold.finish();
-    // NO residual drain here, deliberately: the completion queue is shared
-    // with the main loop (earlier siblings' landed entries may sit in it),
-    // and the sub-agent cannot tell its own leftovers from theirs. A
-    // cancelled sub-agent's unpopped entries stay queued and land through
-    // the main finish's residual drain (#921 semantics extended) -- the
-    // accounting stays exact either way.
-    // The sub-agent's consumed queue entries account through the shared
-    // pairing: the runner's finish asserts main-fold landed + this sum
-    // against the recorded count. The folded rounds themselves stay local
-    // until the nested sub-trace projection lands (#934).
-    ctx.state
-        .landed_by_subagents
-        .fetch_add(fold.landed_calls, Ordering::SeqCst);
+    // The folded rounds and any residual queued entries stay local to the
+    // private channel and are dropped with it (the nested sub-trace
+    // projection is #934's scope; before it lands, a sub-agent's internal
+    // calls deliberately leave no main-trace accounting -- the delegation
+    // entry is the sub-agent's one row). Promotions still ride the shared
+    // list: a sub-agent's `result_N` lands on the working set regardless
+    // of the sub-agent's fate.
     match exit {
         Ok(()) => match fold.final_output.take() {
             Some(text) => SubagentReport {
@@ -317,11 +339,12 @@ fn land_delegation_entry(
         )
     };
     ctx.state
+        .main
         .completed
         .lock()
         .expect("completed lock poisoned")
         .push_back(entry.clone());
-    ctx.state.recorded_calls.fetch_add(1, Ordering::SeqCst);
+    ctx.state.main.recorded_calls.fetch_add(1, Ordering::SeqCst);
     entry
 }
 

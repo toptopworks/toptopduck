@@ -1957,3 +1957,411 @@ fn a_subagent_provider_fault_feeds_back_without_escalating_the_turn() {
         row.result_excerpt
     );
 }
+
+/// Review Critical 1 (#944): a mixed batch with a gateway call BEFORE the
+/// delegation call must keep every main-trace row's identity. The shared
+/// completion queue was one blind FIFO across two consumer families, so the
+/// sub-agent's fold stole the earlier sibling's queued entry (rig surfaces
+/// a batch's results only after the whole batch settles): the main agent's
+/// materialize row vanished and the row carried the sub-agent's entry
+/// instead, with the count pairing balanced and nothing logged. This pin
+/// owns the observable contract row by row: each row's summary carries its
+/// own call's SQL, and the promotions keep their dispatch order.
+#[test]
+fn a_mixed_batch_keeps_every_main_row_identity() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "gateway call before the delegation",
+            None,
+            &[
+                (
+                    "tu_a1",
+                    "materialize",
+                    json!({"sql": "SELECT count(*) AS main_count FROM result_1"}),
+                ),
+                (
+                    "tu_d1",
+                    "analyst",
+                    json!({"prompt": "count and materialize the count"}),
+                ),
+            ],
+        ),
+        // The sub-agent's own materialize, consumed inside the delegation
+        // callback (its entry must land on the DISCARDED local sub fold,
+        // never on the main trace's gateway row).
+        batch_turn(
+            "sub: materialize",
+            None,
+            &[(
+                "tu_s1",
+                "materialize",
+                json!({"sql": "SELECT count(*) AS sub_count FROM result_1"}),
+            )],
+        ),
+        text_turn("sub reported"),
+        // The main loop's own second materialize, after the delegation.
+        batch_turn(
+            "main: materialize again",
+            None,
+            &[(
+                "tu_a2",
+                "materialize",
+                json!({"sql": "SELECT count(*) AS main2_count FROM result_1"}),
+            )],
+        ),
+        text_turn("done"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "mix then delegate"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(outcome.termination, Termination::Text("done".into()));
+    // Row identity: the gateway row keeps its OWN SQL on its own row.
+    let round1 = &outcome.trace[0];
+    assert_eq!(round1.calls.len(), 2);
+    assert_eq!(round1.calls[0].name, "materialize");
+    assert!(
+        round1.calls[0].summary.contains("main_count"),
+        "the gateway row carries the main agent's SQL: {}",
+        round1.calls[0].summary
+    );
+    assert!(
+        !round1.calls[0].summary.contains("sub_count"),
+        "the sub-agent's SQL must not reach the gateway row: {}",
+        round1.calls[0].summary
+    );
+    assert_eq!(round1.calls[1].name, "analyst");
+    assert!(round1.calls[1].success);
+    assert!(
+        round1.calls[1].result_excerpt.contains("sub reported"),
+        "the delegation row carries the report: {}",
+        round1.calls[1].result_excerpt
+    );
+    let round2 = &outcome.trace[1];
+    assert_eq!(round2.calls.len(), 1);
+    assert_eq!(round2.calls[0].name, "materialize");
+    assert!(
+        round2.calls[0].summary.contains("main2_count"),
+        "the post-delegation row carries its own SQL: {}",
+        round2.calls[0].summary
+    );
+    // Promotions keep the dispatch order across the delegation boundary:
+    // the main batch's first call promoted before the sub-agent's.
+    let promoted: Vec<String> = outcome
+        .promotions
+        .iter()
+        .map(|p| p.dataset.reference_name.clone())
+        .collect();
+    assert_eq!(promoted, vec!["result_2", "result_3", "result_4"]);
+}
+
+/// Review Important 2 (#944): the batch cap scopes to one model turn's
+/// batch, never to the total. Two consecutive batches of 8 + 1 delegations
+/// all run -- the reset at each turn's usage record is what keeps the 9th
+/// of ONE batch the refusal, not the 9th overall (deleting the reset is
+/// the mutation this pin kills).
+#[test]
+fn the_batch_cap_resets_across_model_turns() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    // Turn one: a full batch of eight delegations.
+    let mut calls = Vec::new();
+    for n in 1..=8usize {
+        calls.push((
+            format!("tu_d1_{n}"),
+            "analyst",
+            json!({ "prompt": format!("batch one task {n}") }),
+        ));
+    }
+    let borrowable1: Vec<(&str, &str, JsonValue)> = calls
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), *name, args.clone()))
+        .collect();
+    let mut script = vec![batch_turn("eight in batch one", None, &borrowable1)];
+    for n in 1..=8 {
+        script.push(text_turn(&format!("sub one report {n}")));
+    }
+    // Turn two: a fresh batch whose own first delegation runs -- the reset
+    // made it delegation #1 of ITS batch, not #9 overall.
+    script.push(batch_turn(
+        "one in batch two",
+        None,
+        &[("tu_d2_1", "analyst", json!({ "prompt": "batch two task" }))],
+    ));
+    script.push(text_turn("sub two report"));
+    script.push(text_turn("done after two batches"));
+    let model = MockCompletionModel::from_stream_turns(script);
+    let outcome = h.run(
+        &delegation_request(&h, "two batches"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("done after two batches".into()),
+        "no refusal anywhere: the cap never spans batches"
+    );
+    let succeeded: usize = outcome.trace[0].calls.iter().filter(|c| c.success).count();
+    assert_eq!(succeeded, 8, "batch one runs all eight");
+    assert!(
+        outcome.trace[0]
+            .calls
+            .iter()
+            .all(|c| !c.result_excerpt.contains("delegation refused")),
+        "batch one never refuses: {:?}",
+        outcome.trace[0]
+            .calls
+            .iter()
+            .map(|c| c.result_excerpt.clone())
+            .collect::<Vec<_>>()
+    );
+    let round2 = &outcome.trace[1];
+    assert_eq!(round2.calls.len(), 1);
+    assert!(round2.calls[0].success, "batch two's first delegation runs");
+}
+
+/// Review Advisory A (#944): a delegation call with no prompt parameter is
+/// refused up front -- the refusal lands the same failed-row shape the
+/// batch cap uses, instead of silently running a sub-agent on an empty
+/// task (the schema says required, but providers do not enforce schemas
+/// against a misbehaving model).
+#[test]
+fn a_delegation_without_a_prompt_is_refused_not_run() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate without a prompt",
+            None,
+            &[(
+                "tu_d1",
+                "analyst",
+                json!({ "task": "not the prompt parameter" }),
+            )],
+        ),
+        text_turn("carried on after the empty-prompt refusal"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate with no prompt"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("carried on after the empty-prompt refusal".into()),
+        "the missing prompt is a tool-level refusal, never a turn failure"
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert_eq!(row.name, "analyst");
+    assert!(!row.success, "the refusal lands a failed row");
+    assert!(
+        row.result_excerpt.contains("no task prompt"),
+        "the refusal names itself: {}",
+        row.result_excerpt
+    );
+}
+
+/// Review Advisory C (#944): a sub-agent that promotes before dying leaves
+/// the promotion standing on the shared working set (ADR-0117 Decision 5's
+/// "stays promoted" clause) -- the failed delegation row is honest about
+/// the death, and the promotion survives it.
+#[test]
+fn a_subagent_that_promotes_then_exhausts_leaves_the_promotion_standing() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let mut script = vec![batch_turn(
+        "delegate",
+        None,
+        &[(
+            "tu_d1",
+            "analyst",
+            json!({"prompt": "materialize then keep exploring"}),
+        )],
+    )];
+    // The sub-agent materializes once, then burns its budget exploring.
+    script.push(batch_turn(
+        "sub: materialize",
+        None,
+        &[(
+            "tu_s1",
+            "materialize",
+            json!({"sql": "SELECT count(*) AS sub_count FROM result_1"}),
+        )],
+    ));
+    for n in 1..=10usize {
+        script.push(batch_turn(
+            &format!("sub round {n}"),
+            None,
+            &[("tu_s", "explore", json!({ "sql": format!("SELECT {n}") }))],
+        ));
+    }
+    script.push(text_turn("recovered after the sub-agent died"));
+    let model = MockCompletionModel::from_stream_turns(script);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate and lose the sub-agent"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("recovered after the sub-agent died".into()),
+        "the sub-agent's budget death is a tool-level failure"
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert_eq!(row.name, "analyst");
+    assert!(!row.success, "the budget exhaustion is a failed row");
+    assert!(
+        row.result_excerpt.contains("did not converge"),
+        "the failure words the budget: {}",
+        row.result_excerpt
+    );
+    // The promotion the sub-agent landed before dying stays standing.
+    let promoted: Vec<&str> = outcome
+        .promotions
+        .iter()
+        .map(|p| p.dataset.reference_name.as_str())
+        .collect();
+    assert_eq!(promoted, vec!["result_2"]);
+}
+
+/// Review Advisory C (#944): the delegation call fires the live rail's
+/// `ToolCallStarted` / `ToolCallCompleted` pair like every dispatched call
+/// (the module doc claims the contract; removing the pair survived every
+/// committed suite before this pin).
+#[test]
+fn delegation_fires_the_live_rail_phase_pair() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(bool, String)>::new()));
+    {
+        let seen = Arc::clone(&seen);
+        h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| match phase {
+            TurnPhase::ToolCallStarted { name, .. } => {
+                seen.lock().unwrap().push((true, name.clone()));
+            }
+            TurnPhase::ToolCallCompleted(entry) => {
+                seen.lock().unwrap().push((false, entry.name.clone()));
+            }
+            _ => {}
+        }));
+    }
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "look around"}))],
+        ),
+        text_turn("sub reported"),
+        text_turn("done"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate once"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert_eq!(outcome.termination, Termination::Text("done".into()));
+    let pair: Vec<(bool, String)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, name)| name == "analyst")
+        .cloned()
+        .collect();
+    assert_eq!(
+        pair,
+        vec![
+            (true, "analyst".to_string()),
+            (false, "analyst".to_string())
+        ],
+        "exactly one started/completed pair fires for the delegation"
+    );
+}
+
+/// The loop-detection arm the module doc's failure-honesty paragraph now
+/// defers to the status-quo paragraph (#944 review Important 3): a
+/// sub-agent's repeated identical calls screen through the SHARED
+/// dispatch seam's detector -- the first repeat draws the steer text, and
+/// a repeat that ignores the nudge aborts the MAIN turn as its budget
+/// protection (an honest Transient), not a sub-agent terminal channel.
+/// The pin's discrimination: if the shared screen did not reach sub-agent
+/// dispatches, the sub-agent would burn its whole budget and the turn
+/// would land Text, not Transient.
+#[test]
+fn a_nudge_ignoring_subagent_aborts_the_main_turn_as_budget_protection() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[(
+                "tu_d1",
+                "analyst",
+                json!({"prompt": "explore forever identically"}),
+            )],
+        ),
+        // Four identical dispatches: the detector's thresholds are
+        // dispatch at arrivals 1-2, steer at 3, abort at 4.
+        batch_turn(
+            "sub: identical call one",
+            None,
+            &[(
+                "tu_s",
+                "explore",
+                json!({ "sql": "SELECT count(*) AS n FROM result_1" }),
+            )],
+        ),
+        batch_turn(
+            "sub: identical call two",
+            None,
+            &[(
+                "tu_s",
+                "explore",
+                json!({ "sql": "SELECT count(*) AS n FROM result_1" }),
+            )],
+        ),
+        batch_turn(
+            "sub: identical call three",
+            None,
+            &[(
+                "tu_s",
+                "explore",
+                json!({ "sql": "SELECT count(*) AS n FROM result_1" }),
+            )],
+        ),
+        batch_turn(
+            "sub: identical call four",
+            None,
+            &[(
+                "tu_s",
+                "explore",
+                json!({ "sql": "SELECT count(*) AS n FROM result_1" }),
+            )],
+        ),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate into a loop"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+
+    assert!(
+        matches!(outcome.termination, Termination::Transient(ref text) if text.contains("loop")),
+        "the nudge-ignoring repeat aborts the main turn as budget protection, got: {:?}",
+        outcome.termination
+    );
+}

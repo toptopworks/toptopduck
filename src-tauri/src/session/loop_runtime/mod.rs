@@ -299,7 +299,12 @@ impl LoopRuntime {
                 cancel: &cancel,
             };
             let mut detector = LoopDetector::default();
-            for DispatchRequest { call, resp } in req_rx {
+            for DispatchRequest {
+                call,
+                channel,
+                resp,
+            } in req_rx
+            {
                 // Mid-batch stop check -- the per-call cancel gate: the rig
                 // executor checks neither cancel nor steering BETWEEN the
                 // calls of one batch, so once the turn is over (a user
@@ -331,7 +336,7 @@ impl LoopRuntime {
                         *state.aborted.lock().expect("aborted lock poisoned") = Some(termination);
                     }
                     let (_, operation_kind, summary) = classify_call(&call);
-                    state
+                    channel
                         .completed
                         .lock()
                         .expect("completed lock poisoned")
@@ -342,7 +347,7 @@ impl LoopRuntime {
                             summary,
                             truncate_trace_excerpt(&refusal, TRACE_EXCERPT_MAX),
                         ));
-                    state.recorded_calls.fetch_add(1, Ordering::SeqCst);
+                    channel.recorded_calls.fetch_add(1, Ordering::SeqCst);
                     let result = crate::provider::tool_calling::ToolResult {
                         tool_use_id: call.id.clone(),
                         content: refusal,
@@ -384,12 +389,12 @@ impl LoopRuntime {
                         // drains its entry by result event, or the finish
                         // drains the queue the abandoned stream left.
                         if let Some(entry) = entry {
-                            state
+                            channel
                                 .completed
                                 .lock()
                                 .expect("completed lock poisoned")
                                 .push_back(entry);
-                            state.recorded_calls.fetch_add(1, Ordering::SeqCst);
+                            channel.recorded_calls.fetch_add(1, Ordering::SeqCst);
                         }
                         if let Some(promotion) = promotion {
                             state
@@ -681,7 +686,12 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
                         )),
                     )
                 } else {
-                    adapter::gateway_dynamic_tool(def, Arc::clone(&state), req_tx.clone())
+                    adapter::gateway_dynamic_tool(
+                        def,
+                        Arc::clone(&state),
+                        Arc::clone(&state.main),
+                        req_tx.clone(),
+                    )
                 }
             })
             .collect::<Vec<_>>();
@@ -728,7 +738,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
                         if matches!(item, MultiTurnStreamItem::CompletionCall(_)) {
                             delegation_batch.store(0, Ordering::SeqCst);
                         }
-                        fold.event(&item, &state, &phases);
+                        fold.event(&item, &state.main, &phases);
                         // Inbound stream activity (ADR-0115): re-arm the
                         // no-progress clock.
                         if let Some(clock) = &clock {
@@ -756,20 +766,19 @@ fn finish(
     termination: Termination,
     fold_replaced: bool,
 ) -> LoopOutcome {
-    let drained = fold.drain_residual(state);
-    let recorded_calls = state.recorded_calls.load(Ordering::SeqCst);
-    // Sub-agent folds consume their own calls' entries off the shared
-    // queue (issue #933): their landed count joins the pairing here, and
-    // entries a cancelled sub-agent left queued land through the drain
-    // above, so every recorded entry still accounts exactly once.
-    let landed_by_subagents = state.landed_by_subagents.load(Ordering::SeqCst);
+    let drained = fold.drain_residual(&state.main);
+    let recorded_calls = state.main.recorded_calls.load(Ordering::SeqCst);
+    // The pairing is scoped to the MAIN channel (#944 review Critical 1):
+    // every sub-agent runs on a private channel whose entries never cross
+    // here, so this assert covers the main fold's own dispatches and the
+    // delegation entries alone.
     // A driver panic swaps in a fresh fold: the entries the dead fold had
     // already landed go with it (#321's honest Transient landing), so the
     // exactly-once pairing has no baseline to check against -- the drain
     // above still salvages the residual queue onto the fresh fold.
     debug_assert!(
-        fold_replaced || fold.landed_calls + landed_by_subagents == recorded_calls,
-        "every executed call's trace entry must land exactly once: {recorded_calls} recorded, {} landed by result event, {drained} drained at finish, {landed_by_subagents} landed inside sub-agents",
+        fold_replaced || fold.landed_calls == recorded_calls,
+        "every executed call's trace entry must land exactly once: {recorded_calls} recorded, {} landed by result event, {drained} drained at finish",
         fold.landed_calls - drained,
     );
     retain_landed_rounds(&mut fold.rounds);
