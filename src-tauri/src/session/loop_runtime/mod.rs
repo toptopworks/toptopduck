@@ -302,6 +302,7 @@ impl LoopRuntime {
             for DispatchRequest {
                 call,
                 channel,
+                origin,
                 resp,
             } in req_rx
             {
@@ -375,6 +376,7 @@ impl LoopRuntime {
                     read,
                     &gate,
                     &mut forward,
+                    origin.as_deref(),
                 ) {
                     Err(DispatchAbort::Gate) => DispatchOutcome::GateCancelled,
                     Err(DispatchAbort::Panic(termination)) => DispatchOutcome::Aborted(termination),
@@ -691,6 +693,9 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
                         Arc::clone(&state),
                         Arc::clone(&state.main),
                         req_tx.clone(),
+                        // A main-loop dispatch carries no originator -- only
+                        // a sub-agent's sub-face names one (issue #934).
+                        None,
                     )
                 }
             })

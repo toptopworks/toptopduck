@@ -135,6 +135,17 @@ pub struct TraceEntry {
     /// emptied -- see [`RecipeTraceEntry::result_excerpt`]); the in-memory
     /// form keeps the success payload for the loop's own next-turn context.
     pub result_excerpt: String,
+    /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
+    /// #934): the sub-agent's round-grouped trajectory -- its thinking, its
+    /// tool string, its calls' bounded excerpts (the terminal report itself
+    /// rides the entry's own excerpt, never the rounds). `None` for every
+    /// ordinary call; the
+    /// delegation entry alone carries it, and the nesting is physically depth
+    /// 1 (the sub-face excludes every delegation tool, ADR-0117 Decision 4),
+    /// so a nested entry never itself carries one. Projects through the same
+    /// slim projection the main rounds take
+    /// ([`RecipeTraceRound::from_live_round`] / `TraceRound::from`).
+    pub sub_trace: Option<Vec<LoopRound>>,
 }
 
 /// Placeholder a failed call degrades to when its dispatch site produced no
@@ -170,6 +181,7 @@ impl TraceEntry {
             summary: summary.into(),
             success: true,
             result_excerpt: result_excerpt.into(),
+            sub_trace: None,
         }
     }
 
@@ -196,6 +208,7 @@ impl TraceEntry {
             } else {
                 message
             },
+            sub_trace: None,
         }
     }
 
@@ -243,6 +256,15 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
         } else {
             entry.result_excerpt.clone()
         },
+        // The nested sub-trace (ADR-0117 Decision 6): the sub-rounds ride the
+        // round-level display mapping, so a sub-round's entries take the same
+        // slim projection above (a successful sub-call's excerpt empties, a
+        // failed one keeps its message) -- recursion is depth-bounded by the
+        // sub-face's delegation exclusion.
+        sub_rounds: entry
+            .sub_trace
+            .as_ref()
+            .map(|rounds| rounds.iter().map(TraceRound::from).collect()),
     }
 }
 
@@ -284,6 +306,19 @@ impl RecipeTraceEntry {
             summary: v.summary,
             success: v.success,
             result_excerpt: v.result_excerpt,
+            // The nested sub-trace persists under the same slim projection
+            // the main rounds take (ADR-0117 Decision 6): each sub-round maps
+            // through `RecipeTraceRound::from_live_round`, so a successful
+            // sub-call's excerpt empties and a failed one keeps its bounded
+            // message. `from_live_round` takes the round by value (it is the
+            // rounds' last consumer), so the borrowed sub-rounds clone once
+            // here -- the persisted form never re-visits them.
+            sub_rounds: entry.sub_trace.as_ref().map(|rounds| {
+                rounds
+                    .iter()
+                    .map(|round| RecipeTraceRound::from_live_round(round.clone()))
+                    .collect()
+            }),
         }
     }
 }
@@ -515,6 +550,7 @@ mod tests {
             summary: "SELECT 1".into(),
             success,
             result_excerpt: excerpt.into(),
+            sub_trace: None,
         };
         let ok = RecipeTraceEntry::from_live_trace(&base(true, "42 rows"));
         assert!(ok.success);
@@ -539,6 +575,7 @@ mod tests {
             summary: "SELECT 1".into(),
             success,
             result_excerpt: excerpt.into(),
+            sub_trace: None,
         };
         let ok = TraceEntryView::from(&base(true, "42 rows"));
         assert!(ok.success);
@@ -565,6 +602,7 @@ mod tests {
             summary: "SELECT 1".into(),
             success: false,
             result_excerpt: String::new(),
+            sub_trace: None,
         };
         let _ = RecipeTraceEntry::from_live_trace(&entry);
     }
@@ -576,5 +614,72 @@ mod tests {
         let cut = truncate_trace_excerpt(&long, 10);
         assert_eq!(cut.chars().count(), 10);
         assert!(cut.ends_with('…'), "ends with ellipsis: {cut}");
+    }
+
+    /// The nested sub-trace projection (ADR-0117 Decision 6, issue #934): a
+    /// delegation entry's sub-rounds ride BOTH reductions under the SAME slim
+    /// projection the main rounds take -- a successful sub-call's excerpt is
+    /// emptied, a failed sub-call keeps its bounded message -- so the
+    /// persisted recipe, the IPC view, and the live event carry the sub-trace
+    /// identically. An entry with no sub-trace projects it as absent (None,
+    /// never an empty placeholder -- the round convention).
+    #[test]
+    fn sub_trace_projects_through_both_reductions() {
+        let sub_round = LoopRound {
+            thinking: Some(ThinkingTrace {
+                duration_ms: 12,
+                text: "child thinking".into(),
+            }),
+            text: Some("child prose".into()),
+            calls: vec![
+                TraceEntry::succeeded(
+                    "tu_c1",
+                    "explore",
+                    OperationKind::Read,
+                    "SELECT 2",
+                    "leaky payload",
+                ),
+                TraceEntry::failed(
+                    "tu_c2",
+                    "materialize",
+                    OperationKind::Write,
+                    "SELECT 3",
+                    "no such table",
+                ),
+            ],
+        };
+        let delegation = TraceEntry {
+            tool_use_id: "tu_d".into(),
+            name: "analyst".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "clean the sheet".into(),
+            success: true,
+            result_excerpt: "done".into(),
+            sub_trace: Some(vec![sub_round]),
+        };
+
+        let persisted = RecipeTraceEntry::from_live_trace(&delegation);
+        let rounds = persisted.sub_rounds.expect("sub-rounds persist");
+        assert_eq!(rounds.len(), 1);
+        let round = &rounds[0];
+        assert_eq!(round.text.as_deref(), Some("child prose"));
+        assert!(
+            round.calls[0].success && round.calls[0].result_excerpt.is_empty(),
+            "a successful sub-call's payload drops (the main-round slim projection)"
+        );
+        assert!(!round.calls[1].success);
+        assert_eq!(round.calls[1].result_excerpt, "no such table");
+
+        let view = TraceEntryView::from(&delegation);
+        let v_rounds = view.sub_rounds.expect("sub-rounds cross IPC");
+        assert_eq!(v_rounds.len(), 1);
+        assert_eq!(v_rounds[0].calls[1].result_excerpt, "no such table");
+
+        // No sub-trace -> absent on both projections.
+        let plain = TraceEntry::succeeded("tu_p", "explore", OperationKind::Read, "SELECT 1", "x");
+        assert!(RecipeTraceEntry::from_live_trace(&plain)
+            .sub_rounds
+            .is_none());
+        assert!(TraceEntryView::from(&plain).sub_rounds.is_none());
     }
 }

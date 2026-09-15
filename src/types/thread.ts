@@ -151,6 +151,13 @@ export interface TraceEntry {
   success: boolean;
   // Bounded excerpt of a FAILED call's result; empty for a successful call.
   result_excerpt: string;
+  // The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
+  // #934): the sub-agent's rounds under the same slim projection the main
+  // trace takes. Optional: absent for every ordinary call (serde
+  // skip_serializing_if none); the nesting is physically depth 1 (the
+  // sub-face excludes every delegation tool), so a nested entry never itself
+  // carries one. Rendered in the delegation modal, never as flat rows.
+  sub_rounds?: TraceRound[];
 }
 
 // The runtime that drove one turn (ADR-0101): the app's built-in loop, or an

@@ -63,6 +63,11 @@ export interface ApprovalRequestPayload {
   // Optional: the backend omits the field for calls without file-delivered
   // parameters (serde skip_serializing_if empty).
   file_attachments?: FileAttachment[];
+  // The call's originator annotation (issue #934): the delegating sub-agent's
+  // name when the call rides a sub-agent's tool face. Optional: the backend
+  // omits the field for a main-loop / external-runtime call (serde
+  // skip_serializing_if none).
+  origin_agent?: string;
 }
 
 // An `approval-resolved` event -- the frontend flips the pending card to its

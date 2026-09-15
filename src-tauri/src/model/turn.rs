@@ -455,6 +455,13 @@ pub struct TraceEntryView {
     /// Bounded excerpt of a FAILED call's result (error / denial message);
     /// empty for a successful call.
     pub result_excerpt: String,
+    /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
+    /// #934): the sub-agent's rounds under the same slim projection the
+    /// main trace takes. Absent for every ordinary call; the nesting is
+    /// physically depth 1 (the sub-face excludes every delegation tool), so
+    /// a nested entry never itself carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_rounds: Option<Vec<TraceRound>>,
 }
 
 /// One discrete progress event of an in-flight turn. ADR-0059 introduced the

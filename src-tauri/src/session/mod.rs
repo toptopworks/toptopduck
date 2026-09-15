@@ -3009,6 +3009,7 @@ mod tests {
             summary: format!("{name} summary"),
             success,
             result_excerpt: format!("{name} excerpt"),
+            sub_trace: None,
         }
     }
 
@@ -4302,6 +4303,7 @@ mod tests {
             summary: "SELECT 1 AS n".into(),
             success: true,
             result_excerpt: String::new(),
+            sub_rounds: None,
         }];
         let harvested_provenance = PersistedTurnProvenance {
             runtime: Some(RuntimeKind::External),

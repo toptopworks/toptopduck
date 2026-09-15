@@ -47,6 +47,11 @@ pub(crate) struct DispatchRequest {
     /// 1: the record follows the CONSUMER, so a fold can only ever pair
     /// its own dispatches' entries).
     pub(crate) channel: Arc<CompletionChannel>,
+    /// The call's originator (issue #934): the delegating sub-agent's name
+    /// when the call rides a sub-agent's tool face, `None` for a main-loop
+    /// call. Rides the request so the approval gate can annotate its card
+    /// ("sub-agent X wants to call Y") without a second channel.
+    pub(crate) origin: Option<String>,
     pub(crate) resp: mpsc::Sender<DispatchOutcome>,
 }
 
@@ -162,6 +167,7 @@ pub(crate) fn gateway_dynamic_tool(
     state: Arc<SharedTurnState>,
     channel: Arc<CompletionChannel>,
     dispatch: mpsc::Sender<DispatchRequest>,
+    origin: Option<String>,
 ) -> rig_agent::tool::DynamicTool {
     let name = def.name.clone();
     rig_agent::tool::DynamicTool::new(
@@ -177,6 +183,7 @@ pub(crate) fn gateway_dynamic_tool(
             let state = Arc::clone(&state);
             let channel = Arc::clone(&channel);
             let dispatch = dispatch.clone();
+            let origin = origin.clone();
             Box::pin(async move {
                 // The blocking dispatch round-trip (channel send + the
                 // caller thread's gated execution) must not sit on the async
@@ -187,6 +194,7 @@ pub(crate) fn gateway_dynamic_tool(
                         .send(DispatchRequest {
                             call,
                             channel,
+                            origin,
                             resp: resp_tx,
                         })
                         .is_err()

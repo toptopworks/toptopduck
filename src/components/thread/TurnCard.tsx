@@ -14,7 +14,8 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { PencilLine } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
-import { TraceRowList } from "./TraceView";
+import { DelegationTraceDialog } from "./DelegationTraceDialog";
+import { TraceRowList } from "./TraceRow";
 import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
 import { FoldToggle } from "./FoldToggle";
@@ -299,7 +300,14 @@ function TraceRoundBlock({
               values={{ count: calls.length }}
             />
           </FoldToggle>
-          {stepsExpanded && <TraceRowList entries={calls} />}
+          {/* renderSubTrace (issue #934): a settled delegation entry carries its
+              nested sub-trace; the affordance opens the modal viewer. */}
+          {stepsExpanded && (
+            <TraceRowList
+              entries={calls}
+              renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+            />
+          )}
         </>
       )}
     </div>

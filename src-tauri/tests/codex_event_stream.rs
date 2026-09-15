@@ -286,6 +286,7 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
         summary: format!("{name} gateway summary"),
         success: true,
         result_excerpt: String::new(),
+        sub_trace: None,
     };
     let gateway = GatewayOutcome {
         trace: vec![

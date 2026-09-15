@@ -2376,6 +2376,7 @@ impl ApprovalSink for TauriApprovalSink {
                 operation_kind: body.operation_kind,
                 summary: body.summary.clone(),
                 file_attachments: body.file_attachments.clone(),
+                origin_agent: body.origin_agent.clone(),
             },
         ) {
             log::warn!(

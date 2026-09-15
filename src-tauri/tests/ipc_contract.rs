@@ -779,7 +779,7 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     // gateway's snake_case enum (read / write / execute / network). The same
     // shape rides TurnRecord.trace AND the ToolCallCompleted progress event,
     // so pin it once here.
-    use toptopduck_lib::{OperationKind, TraceEntryView};
+    use toptopduck_lib::{OperationKind, TraceEntryView, TraceRound};
     assert_wire(
         &TraceEntryView {
             name: "explore".into(),
@@ -787,8 +787,37 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
             summary: "SELECT count(*) FROM orders".into(),
             success: false,
             result_excerpt: "no such table".into(),
+            sub_rounds: None,
         },
         r#"{"name":"explore","operation_kind":"read","summary":"SELECT count(*) FROM orders","success":false,"result_excerpt":"no such table"}"#,
+    );
+    // The nested sub-trace's PRESENT wire form (issue #934, PR #946 review
+    // Important 4): a delegation entry carries its sub-rounds under
+    // `sub_rounds` -- the exact key the TS mirror reads -- so a rename on
+    // the view field cannot pass silently (the absence half above pins
+    // skip-if-none; this pins the key's spelling and the nested round's
+    // own flat shape).
+    assert_wire(
+        &TraceEntryView {
+            name: "analyst".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "clean the sheet".into(),
+            success: true,
+            result_excerpt: String::new(),
+            sub_rounds: Some(vec![TraceRound {
+                thinking: None,
+                text: Some("child prose".into()),
+                calls: vec![TraceEntryView {
+                    name: "explore".into(),
+                    operation_kind: OperationKind::Read,
+                    summary: "SELECT 1".into(),
+                    success: true,
+                    result_excerpt: String::new(),
+                    sub_rounds: None,
+                }],
+            }]),
+        },
+        r#"{"name":"analyst","operation_kind":"execute","summary":"clean the sheet","success":true,"result_excerpt":"","sub_rounds":[{"text":"child prose","calls":[{"name":"explore","operation_kind":"read","summary":"SELECT 1","success":true,"result_excerpt":""}]}]}"#,
     );
 }
 
@@ -1150,6 +1179,7 @@ fn turn_phase_serializes_externally_tagged() {
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            sub_rounds: None,
         }),
         r#"{"ToolCallCompleted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1","success":true,"result_excerpt":""}}"#,
     );
@@ -1193,6 +1223,7 @@ fn turn_record_carries_round_grouped_trace_and_timestamps() {
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            sub_rounds: None,
         }],
     };
     let record = TurnRecord {
