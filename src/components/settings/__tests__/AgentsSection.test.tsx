@@ -1,12 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render } from "@testing-library/react";
-import { IntlProvider } from "react-intl";
 
 import { AgentsSection } from "../AgentsSection";
-import { chooseOption, openSelect } from "./helpers";
-import { TooltipProvider } from "../../ui/tooltip";
+import { chooseOption, openSelect, renderSettings } from "./helpers";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   createAgent,
@@ -61,23 +57,11 @@ function makeListing(agents: AgentEntry[], overrides: Partial<AgentListing> = {}
   return { agents, ignored: [], warnings: [], root_error: null, ...overrides };
 }
 
-// Empty-catalog English IntlProvider + QueryClient (retry: false) -- the
-// defaultMessage literals carry the assertions (the McpSection posture).
-// TooltipProvider mirrors the App ancestor (the pane header's create button
-// carries a Tooltip); the helpers.tsx renderSettings posture.
+// The shared helpers stack (empty-catalog English + retry:false + the App
+// ancestor's TooltipProvider); the defaultMessage literals carry the
+// assertions (the McpSection posture).
 function renderSection(onAppConfigSync = vi.fn()) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <AgentsSection onAppConfigSync={onAppConfigSync} />
-        </IntlProvider>
-      </TooltipProvider>
-    </QueryClientProvider>,
-  );
+  renderSettings(<AgentsSection onAppConfigSync={onAppConfigSync} />);
   return onAppConfigSync;
 }
 
@@ -234,6 +218,15 @@ describe("AgentsSection (issue #932)", () => {
     fireEvent.change(name, { target: { value: "Bad Name!" } });
     expect(name).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByText(/Lowercase letters, digits/)).toBeVisible();
+
+    // The same positive half for the other two fields: a whitespace-only
+    // value is invalid and flags once touched.
+    const description = screen.getByLabelText("Description");
+    fireEvent.change(description, { target: { value: " " } });
+    expect(description).toHaveAttribute("aria-invalid", "true");
+    const preamble = screen.getByLabelText("Preamble");
+    fireEvent.change(preamble, { target: { value: " " } });
+    expect(preamble).toHaveAttribute("aria-invalid", "true");
   });
 
   it("gates Save on an empty name in create mode before any IPC round-trip", async () => {
@@ -252,6 +245,35 @@ describe("AgentsSection (issue #932)", () => {
     // reject used to be the only gate for this shape).
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("returns to the list through the link in the form header", async () => {
+    mockedList.mockResolvedValue(makeListing([]));
+    renderSection();
+    await screen.findByText("No agent definitions yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    expect(await screen.findByLabelText("Name")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Back to agent list" }));
+    expect(await screen.findByText("No agent definitions yet. Click New to create one.")).toBeVisible();
+    expect(screen.queryByLabelText("Name")).toBeNull();
+  });
+
+  it("shows the saving state and locks the back link while a save is pending", async () => {
+    mockedList.mockResolvedValue(makeListing([]));
+    renderSection();
+    await screen.findByText("No agent definitions yet. Click New to create one.");
+
+    // Hold the create IPC pending so the saving state is observable.
+    mockedCreate.mockReturnValue(new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "data-cleaner" } });
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Cleans data" } });
+    fireEvent.change(screen.getByLabelText("Preamble"), { target: { value: "You clean data." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Saving…")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Back to agent list" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   });
 
   it("edits a definition through the form", async () => {
@@ -351,10 +373,28 @@ describe("AgentsSection (issue #932)", () => {
   it("surfaces a failed folder reveal on the pane error face", async () => {
     await renderListed([makeEntry()]);
     mockedAgentsDir.mockResolvedValue("C:\\app\\agents");
-    // A retry must chain a NEW error instance (a shared one keeps the same
-    // identity across rejects).
+    // One rejection, then the default mock arm resolves -- so the recovery
+    // click below also pins that the pane error face clears.
     mockedReveal.mockRejectedValueOnce(new Error("reveal boom"));
     fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    expect(await screen.findByText(/reveal boom/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    await waitFor(() => expect(screen.queryByText(/reveal boom/)).toBeNull());
+  });
+
+  it("keeps a reveal failure out of an open form and back on the pane", async () => {
+    await renderListed([makeEntry()]);
+    mockedAgentsDir.mockResolvedValue("C:\\app\\agents");
+    mockedReveal.mockRejectedValueOnce(new Error("reveal boom"));
+    fireEvent.click(screen.getByRole("button", { name: "Open agents folder" }));
+    expect(await screen.findByText(/reveal boom/)).toBeVisible();
+    // The failure stays on the pane's own error face: opening the edit form
+    // must not adopt it as a save error...
+    fireEvent.click(screen.getByRole("button", { name: "Edit agent data-cleaner" }));
+    expect(await screen.findByLabelText("Name")).toBeVisible();
+    expect(screen.queryByText(/reveal boom/)).toBeNull();
+    // ...and it is still waiting when the form closes.
+    fireEvent.click(screen.getByRole("button", { name: "Back to agent list" }));
     expect(await screen.findByText(/reveal boom/)).toBeVisible();
   });
 
@@ -404,17 +444,5 @@ describe("AgentsSection (issue #932)", () => {
 // A small render variant that captures the sync callback (the describe's
 // enablement/delete cases need to assert on it).
 function renderWithSync(sync: (cfg: unknown) => void) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  const utils = render(
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <AgentsSection onAppConfigSync={sync as never} />
-        </IntlProvider>
-      </TooltipProvider>
-    </QueryClientProvider>,
-  );
-  return utils;
+  renderSettings(<AgentsSection onAppConfigSync={sync as never} />);
 }

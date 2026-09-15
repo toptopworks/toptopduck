@@ -70,7 +70,7 @@ import {
 // (disabling is the single shutdown axis); linked rows are read-only.
 
 // The backend name/description rules, mirrored client-side (the
-// SkillsSection posture) so the dialog gates Save BEFORE an IPC round-trip.
+// SkillsSection posture) so the form gates Save BEFORE an IPC round-trip.
 // The backend remains the authority; these only move the feedback earlier.
 const AGENT_NAME_MAX = 64;
 const AGENT_DESCRIPTION_MAX = 1024;
@@ -109,6 +109,10 @@ export function AgentsSection({
   const [form, setForm] = useState<FormState>({ mode: "closed" });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Reveal failures live apart from `error`: that state is the open form's
+  // error prop, and a late reveal rejection must not render inside a draft
+  // (the GeneralSection dirError posture).
+  const [dirError, setDirError] = useState<string | null>(null);
 
   const { data: listing, error: queryError, refetch, isFetching } = useQuery({
     queryKey: agentKeys.all(),
@@ -181,6 +185,7 @@ export function AgentsSection({
   // error first, then the IPC transport error, then the root scan error.
   const displayError = useMemo(() => {
     if (error) return error;
+    if (dirError) return dirError;
     if (queryError) return fmtError(queryError, intl);
     if (rootError) {
       return intl.formatMessage(
@@ -192,7 +197,7 @@ export function AgentsSection({
       );
     }
     return null;
-  }, [error, queryError, rootError, intl]);
+  }, [error, dirError, queryError, rootError, intl]);
 
   function openEdit(entry: AgentEntry) {
     // The form owns the error face while open (a leftover list error would
@@ -202,13 +207,14 @@ export function AgentsSection({
   }
 
   // Reveal the registry root in the OS file manager (the GeneralSection
-  // revealSessionsDir posture); the pane error face carries a failure.
+  // revealSessionsDir posture): a failure lands on the dedicated pane-level
+  // dir error, never the state an open form shares.
   async function openAgentsDir() {
-    setError(null);
+    setDirError(null);
     try {
       await revealItemInDir(await getAgentsDir());
     } catch (e) {
-      setError(fmtError(e, intl));
+      setDirError(fmtError(e, intl));
     }
   }
 
@@ -342,7 +348,6 @@ export function AgentsSection({
         <Select value={filter} onValueChange={(v) => setFilter(v as EnabledFilter)}>
           <SelectTrigger
             id="agents-enabled-filter"
-            className="w-24"
             aria-label={intl.formatMessage({
               id: "settings.agents.filterLabel",
               defaultMessage: "Filter by status",
@@ -747,7 +752,7 @@ function AgentForm({
 
       <SettingsCard className="divide-y-0">
         <SettingsRow
-          className="py-2.5"
+          dense
           title={(
             <Label htmlFor="agent-name" className="text-muted-foreground">
               <FormattedMessage id="settings.agents.nameLabel" defaultMessage="Name" />
@@ -779,7 +784,7 @@ function AgentForm({
         </SettingsRow>
 
         <SettingsRow
-          className="py-2.5"
+          dense
           title={(
             <Label htmlFor="agent-description" className="text-muted-foreground">
               <FormattedMessage
@@ -807,7 +812,7 @@ function AgentForm({
         </SettingsRow>
 
         <SettingsRow
-          className="py-2.5"
+          dense
           title={(
             <span className="flex items-center gap-1">
               <Label htmlFor="agent-preamble" className="text-muted-foreground">

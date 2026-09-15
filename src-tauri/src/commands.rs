@@ -3425,9 +3425,7 @@ pub fn list_agents(
 /// re-derives app-data layout. Always non-null -- the root is resolved at
 /// setup, mirroring `get_sessions_dir`.
 #[tauri::command]
-pub fn get_agents_dir(
-    agents_root: State<'_, crate::agents::AgentsRoot>,
-) -> Result<String, String> {
+pub fn get_agents_dir(agents_root: State<'_, crate::agents::AgentsRoot>) -> Result<String, String> {
     Ok(agents_root.0.to_string_lossy().into_owned())
 }
 
