@@ -1663,7 +1663,7 @@ fn analyst_spec() -> crate::agents::DelegationSpec {
         name: "analyst".to_string(),
         description: "Open-ended analysis delegate.".to_string(),
         preamble: "You are a focused analyst.".to_string(),
-        skill_bodies: Vec::new(),
+        skill_injections: Vec::new(),
     }
 }
 

@@ -2,7 +2,9 @@
 //! #933, ADR-0117): the pure functions that turn enabled registry entries
 //! into the built-in runtime's named delegation tool family. Everything
 //! here is assembly-time and side-effect-free -- the command boundary
-//! snapshots the enabled entries into [`DelegationSpec`]s once per turn,
+//! snapshots the enabled entries into [`DelegationSpec`]s once per turn
+//! (degradation facts flow back as return values: `from_entry` reports
+//! skipped bindings for the caller to record, never logs them itself),
 //! the session direct-lists each spec's [`DelegationSpec::tool_definition`]
 //! into the tool table, and the loop runtime constructs the sub-agent from
 //! the spec's [`subagent_preamble`] / [`subagent_tool_face`] when the main
@@ -39,6 +41,17 @@ pub const SUBAGENT_STEP_CAP: usize = 10;
 /// bounded by the main step cap and the no-progress watchdog.
 pub const DELEGATION_BATCH_CAP: usize = 8;
 
+/// One resolved skill binding (ADR-0117 Decision 2): the skill's registry
+/// name and its verbatim body, assembled once and carried in `skill_refs`
+/// mark order -- the order IS the injection order (the sub-agent's
+/// preamble renders each body once, in this order), a contract the retired
+/// positional tuple could only state in prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillInjection {
+    pub name: String,
+    pub body: String,
+}
+
 /// One enabled agent definition's turn-assembly snapshot: the declaration
 /// face (name / description / preamble) plus the RESOLVED skill bindings
 /// (each bound skill's body, fetched once at assembly). Owned data only --
@@ -52,39 +65,51 @@ pub struct DelegationSpec {
     pub description: String,
     /// The Markdown body -- the sub-agent's system prompt base.
     pub preamble: String,
-    /// The bound skills' bodies in mark order: `(skill name, body)`.
+    /// The bound skills' injections in mark order (see [`SkillInjection`]).
     /// Assembled once here; the sub-agent never re-resolves them.
-    pub skill_bodies: Vec<(String, String)>,
+    pub skill_injections: Vec<SkillInjection>,
 }
 
 impl DelegationSpec {
-    /// Assemble from a registry entry against the registered skills' bodies.
-    /// A `skill_refs` name whose skill is no longer registered (deleted
-    /// between the entry's scan and this assembly) is SKIPPED with a warn,
-    /// never a refusal -- the ADR-0117 Decision 2 no-breakage clause: a
-    /// stale binding degrades to an unbound sub-agent, and the run stands.
-    pub fn from_entry(entry: &AgentEntry, bodies: &BTreeMap<String, String>) -> Self {
-        let skill_bodies = entry
+    /// Assemble from a registry entry against the registered skills'
+    /// bodies, reporting -- alongside the spec -- every `skill_refs` name
+    /// that resolved to no registered body. Pure: the caller records the
+    /// skips at its own degradation point (`delegation_specs`'s warn
+    /// block). The skip arm is structurally unreachable in production
+    /// assembly (`scan_registered_skills`'s single scan yields both the
+    /// names the entry's marks resolve against and the bodies table handed
+    /// in here, so a bound name is always a key); it stands as the
+    /// defensive clause for future callers. A dangling name degrades to an
+    /// unbound sub-agent, never a refusal -- the ADR-0117 Decision 2
+    /// no-breakage clause.
+    pub fn from_entry(
+        entry: &AgentEntry,
+        bodies: &BTreeMap<String, String>,
+    ) -> (Self, Vec<String>) {
+        let mut skipped = Vec::new();
+        let skill_injections = entry
             .skill_refs
             .iter()
             .filter_map(|name| match bodies.get(name) {
-                Some(body) => Some((name.clone(), body.clone())),
+                Some(body) => Some(SkillInjection {
+                    name: name.clone(),
+                    body: body.clone(),
+                }),
                 None => {
-                    log::warn!(
-                        target: "agents",
-                        "delegation assembly: bound skill `{name}` is no longer registered; \
-                         skipping its injection (ADR-0117 Decision 2)"
-                    );
+                    skipped.push(name.clone());
                     None
                 }
             })
             .collect();
-        Self {
-            name: entry.name.clone(),
-            description: entry.description.clone(),
-            preamble: entry.preamble.clone(),
-            skill_bodies,
-        }
+        (
+            Self {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                preamble: entry.preamble.clone(),
+                skill_injections,
+            },
+            skipped,
+        )
     }
 
     /// The main-face tool definition (ADR-0117 Decision 1): tool name =
@@ -125,7 +150,7 @@ impl DelegationSpec {
 /// this injection the only path a skill body reaches a sub-agent). An
 /// unbound preamble passes through verbatim.
 pub fn subagent_preamble(spec: &DelegationSpec) -> String {
-    if spec.skill_bodies.is_empty() {
+    if spec.skill_injections.is_empty() {
         return spec.preamble.clone();
     }
     let mut prompt = format!(
@@ -133,8 +158,11 @@ pub fn subagent_preamble(spec: &DelegationSpec) -> String {
          instructions follow) ---",
         spec.preamble
     );
-    for (name, body) in &spec.skill_bodies {
-        prompt.push_str(&format!("\n\n# Skill: {name}\n\n{body}"));
+    for injection in &spec.skill_injections {
+        prompt.push_str(&format!(
+            "\n\n# Skill: {}\n\n{}",
+            injection.name, injection.body
+        ));
     }
     prompt
 }
@@ -235,8 +263,8 @@ mod tests {
     /// body in mark order -- the injection set IS the intersection the
     /// registry scan computed, carried into the turn as data.
     #[test]
-    fn from_entry_resolves_bound_skill_bodies_in_mark_order() {
-        let spec = DelegationSpec::from_entry(
+    fn from_entry_resolves_bound_skill_injections_in_mark_order() {
+        let (spec, skipped) = DelegationSpec::from_entry(
             &entry("analyst", &["sql", "pdf-tools"]),
             &bodies(&[
                 ("pdf-tools", "Extract tables first."),
@@ -244,11 +272,18 @@ mod tests {
                 ("unused", "Never injected."),
             ]),
         );
+        assert_eq!(skipped, Vec::<String>::new());
         assert_eq!(
-            spec.skill_bodies,
+            spec.skill_injections,
             vec![
-                ("sql".to_string(), "Prefer CTEs.".to_string()),
-                ("pdf-tools".to_string(), "Extract tables first.".to_string()),
+                SkillInjection {
+                    name: "sql".to_string(),
+                    body: "Prefer CTEs.".to_string(),
+                },
+                SkillInjection {
+                    name: "pdf-tools".to_string(),
+                    body: "Extract tables first.".to_string(),
+                },
             ]
         );
     }
@@ -256,15 +291,25 @@ mod tests {
     /// AC #2 (dangling skip): a bound name whose skill vanished between the
     /// scan and the assembly is skipped -- no body, no refusal, the rest of
     /// the bindings still inject (ADR-0117 Decision 2's no-breakage clause).
+    /// The skip reports back through the return value, not a side effect --
+    /// the caller owns recording it.
     #[test]
     fn from_entry_skips_a_dangling_binding_and_keeps_the_rest() {
-        let spec = DelegationSpec::from_entry(
+        let (spec, skipped) = DelegationSpec::from_entry(
             &entry("analyst", &["sql", "ghost-skill"]),
             &bodies(&[("sql", "Prefer CTEs.")]),
         );
         assert_eq!(
-            spec.skill_bodies,
-            vec![("sql".to_string(), "Prefer CTEs.".to_string())]
+            skipped,
+            vec!["ghost-skill".to_string()],
+            "the dangling binding reports back for the caller to record"
+        );
+        assert_eq!(
+            spec.skill_injections,
+            vec![SkillInjection {
+                name: "sql".to_string(),
+                body: "Prefer CTEs.".to_string(),
+            }]
         );
     }
 
@@ -272,10 +317,13 @@ mod tests {
     /// bound spec appends each body once under the skill's name.
     #[test]
     fn preamble_passes_through_unbound_and_appends_bound_bodies() {
-        let mut spec = DelegationSpec::from_entry(&entry("analyst", &[]), &bodies(&[]));
+        let (mut spec, _) = DelegationSpec::from_entry(&entry("analyst", &[]), &bodies(&[]));
         assert_eq!(subagent_preamble(&spec), "You are a focused analyst.");
 
-        spec.skill_bodies = vec![("sql".to_string(), "Prefer CTEs.".to_string())];
+        spec.skill_injections = vec![SkillInjection {
+            name: "sql".to_string(),
+            body: "Prefer CTEs.".to_string(),
+        }];
         let rendered = subagent_preamble(&spec);
         assert!(rendered.starts_with("You are a focused analyst.\n\n---"));
         assert!(rendered.contains("# Skill: sql\n\nPrefer CTEs."));
@@ -290,7 +338,7 @@ mod tests {
     /// description rides inside, and the single parameter is the prompt.
     #[test]
     fn tool_definition_routes_on_name_with_single_prompt_parameter() {
-        let spec = DelegationSpec::from_entry(&entry("data-cleaner", &[]), &bodies(&[]));
+        let (spec, _) = DelegationSpec::from_entry(&entry("data-cleaner", &[]), &bodies(&[]));
         let def = spec.tool_definition();
         assert_eq!(def.name, "data-cleaner");
         assert!(def.description.contains("data-cleaner"));
