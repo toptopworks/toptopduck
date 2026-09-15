@@ -36,11 +36,13 @@
 //!   builtin posture).
 
 pub mod builtin;
+pub mod delegation;
 pub mod frontmatter;
 pub mod model;
 pub mod registry;
 
 pub use builtin::BuiltinAgentMark;
+pub use delegation::{DelegationSpec, DELEGATION_BATCH_CAP, SUBAGENT_STEP_CAP};
 pub use model::{
     AgentEntry, AgentError, AgentListing, AgentSource, AgentUpdate, AgentWarning, AgentsRoot,
     SkippedAgent,

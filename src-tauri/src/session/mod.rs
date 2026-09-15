@@ -765,6 +765,12 @@ pub struct TurnInputs<'a> {
     /// turn direct-lists them into the tool table and dispatches their
     /// calls to the spawn engine.
     pub cli_tools: &'a [crate::cli_tools::config::CliToolConfig],
+    /// The turn's enabled agent-definition snapshot (issue #933, ADR-0117):
+    /// the command boundary's registry scan, already skill-resolved. Each
+    /// spec direct-lists one named delegation tool into the table; a
+    /// delegation call runs a sub-agent over the subtracted face whose own
+    /// dispatches keep crossing the same shared core.
+    pub delegations: &'a [crate::agents::DelegationSpec],
 }
 
 impl<'a> TurnInputs<'a> {
@@ -780,6 +786,7 @@ impl<'a> TurnInputs<'a> {
             activated: &[],
             skills_root: std::path::Path::new(""),
             cli_tools: &[],
+            delegations: &[],
         }
     }
 }
@@ -1425,6 +1432,14 @@ impl Session {
                             .tools
                             .push(crate::skills::read::read_skill_file_definition());
                     }
+                    // The named delegation tool family (issue #933, ADR-0117
+                    // Decision 1): one tool per enabled agent definition,
+                    // direct-listed like the CLI tools. A delegation call
+                    // runs a sub-agent the loop runtime constructs from the
+                    // spec; disabled definitions simply never list.
+                    for spec in inputs.delegations {
+                        request.tools.push(spec.tool_definition());
+                    }
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
@@ -1489,6 +1504,7 @@ impl Session {
                                 &mut *self.materializer,
                                 &mut mcp,
                                 inputs.cli_tools,
+                                inputs.delegations,
                                 &mut skill_channel,
                                 &read_gate,
                                 approval,
