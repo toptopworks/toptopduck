@@ -778,8 +778,7 @@ pub async fn ask(
     // crosses IPC back out).
     let live = live.inner().clone();
     // ADR-0106: the effective set is single-axis -- config-level enablement
-    // only (see [`LiveProviderConfig::enabled_mcp_servers`]). Skill MCP
-    // references are declarative metadata and arm nothing (Decision 3). Fresh
+    // only (see [`LiveProviderConfig::enabled_mcp_servers`]). Fresh
     // per-turn snapshot of the app-config file; a config edit between turns
     // is reflected next turn.
     let mcp_servers = live.enabled_mcp_servers();
@@ -3615,7 +3614,6 @@ pub fn mount_skill(
     reject_if_in_flight(&handle)?;
     let mut s = handle.session_lock()?;
     s.mount_skill(&name).map_err(SessionError::SkillMount)?;
-    drop(s);
     Ok(())
 }
 

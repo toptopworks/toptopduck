@@ -936,6 +936,48 @@ mod tests {
     }
 
     #[test]
+    fn update_preserves_a_legacy_metadata_block_verbatim() {
+        // The retired extension keys (issue #952) ride under `metadata`, a
+        // nesting level the allowed-tools pin above does not cover. The edit
+        // path parse-mutates only the four spec fields and re-renders the
+        // whole mapping, so a legacy block from a pre-retirement file must
+        // survive an unrelated edit untouched -- the retirement's no-rewrite
+        // guarantee (ADR-0086 calibration).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("legacy");
+        fs::create_dir(&dir).unwrap();
+        fs::write(
+            dir.join(SKILL_MD),
+            "---\nname: legacy\ndescription: d\nmetadata:\n  toptopduck_mcp_servers: github-mcp\n  toptopduck_cli_tools: pandoc\n---\nold body\n",
+        )
+        .unwrap();
+
+        let entry = update_skill(
+            root,
+            &Default::default(),
+            "legacy",
+            update_payload("legacy"),
+        )
+        .unwrap();
+        assert_eq!(entry.body, "Updated body.\n");
+
+        let raw = fs::read_to_string(dir.join(SKILL_MD)).unwrap();
+        assert!(
+            raw.contains("metadata:"),
+            "the metadata mapping must survive the edit: {raw}"
+        );
+        assert!(
+            raw.contains("toptopduck_mcp_servers: github-mcp"),
+            "the retired MCP key must survive verbatim: {raw}"
+        );
+        assert!(
+            raw.contains("toptopduck_cli_tools: pandoc"),
+            "the retired CLI key must survive verbatim: {raw}"
+        );
+    }
+
+    #[test]
     fn update_clears_optional_fields_when_blank() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

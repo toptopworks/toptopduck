@@ -36,8 +36,9 @@ pub enum Acquired {
     /// (`builtin_skill_baselines`) membership -- NOT on the static name set
     /// -- so a user's pre-existing same-named skill keeps its own source
     /// until materialization actually happens. Undeletable; every field
-    /// except `name` is editable (name is the locked identity the CLI
-    /// reference anchors on).
+    /// except `name` is editable (name is the locked identity the builtin
+    /// CLI pairing anchors on -- the companion skill and its CLI
+    /// registration share the name 1:1).
     Builtin,
 }
 

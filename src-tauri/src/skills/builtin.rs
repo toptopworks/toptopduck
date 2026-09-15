@@ -604,6 +604,17 @@ mod tests {
                     frontmatter::get_string(&parsed.frontmatter, "name").unwrap(),
                     def.name
                 );
+                // The retired extension keys lived under `metadata` (issue
+                // #952): a rendered SKILL.md must carry no metadata mapping
+                // at all, so materialization leaves no toptopduck trace.
+                assert!(
+                    parsed
+                        .frontmatter
+                        .get(serde_yaml::Value::String("metadata".into()))
+                        .is_none(),
+                    "{} must render metadata-free",
+                    def.name
+                );
                 assert!(!parsed.body.trim().is_empty(), "body must be non-blank");
             }
         }

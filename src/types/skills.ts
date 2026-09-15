@@ -2,9 +2,10 @@
 // crate::skills::model wire shapes. A skill is an Agent Skills spec directory
 // `<root>/<name>/SKILL.md`; identity IS the spec `name` (kebab-case, <= 64,
 // equals the directory name). `acquired` is loader-derived (linked = symlink /
-// junction onto an external source, local = real directory); the frontmatter
-// carries the prompt fragment (the body). The settings page edits local skills
-// in full and shows linked skills read-only + "open source location".
+// junction onto an external source, local = real directory); the file carries
+// the prompt fragment (the body after the frontmatter). The settings page
+// edits local skills in full and shows linked skills read-only + "open source
+// location".
 
 // Loader-derived link/real-directory posture. Crosses IPC as the bare
 // snake_case variant (mirrors the Rust `#[serde(rename_all = "snake_case")]`).

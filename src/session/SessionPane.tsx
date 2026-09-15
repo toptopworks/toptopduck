@@ -373,7 +373,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // registry is process-global (not per-session), so every pane shares one
   // IPC round-trip. A failed / loading read leaves data undefined, so
   // skillIndex stays undefined and the markers render the verb + name from
-  // the event alone (no MCP tooltip, no drift warning) -- the timeline stays
+  // the event alone (no drift warning) -- the timeline stays
   // readable while the registry resolves.
   const skillListing = useQuery({ queryKey: skillKeys.all(), queryFn: listSkills });
   const skillIndex = useMemo(() => {

@@ -13,8 +13,8 @@
 // to a destructive warning + TriangleAlert glyph + "no longer exists"
 // suffix, so the event stays in the timeline (it happened) but the reader
 // sees the skill is gone. When the registry index is not wired by the
-// caller, the marker renders the verb + name from the event alone -- no MCP
-// tooltip, no missing-skill warning (honest degrade: the timeline is always
+// caller, the marker renders the verb + name from the event alone -- no
+// missing-skill warning (honest degrade: the timeline is always
 // readable, the registry only enriches it).
 
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";

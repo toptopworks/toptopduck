@@ -6,6 +6,7 @@ import type { ReactElement } from "react";
 
 import { SkillsSection } from "../SkillsSection";
 import { TooltipProvider } from "../../ui/tooltip";
+import { chooseOption, openSelect } from "./helpers";
 import {
   createSkill,
   deleteSkill,
@@ -36,7 +37,7 @@ const localSkill: SkillEntry = {
   description: "Work with PDF files.",
   acquired: "local",
   license: "MIT",
-  compatibility: null,
+  compatibility: "requires network",
   body: "Use this skill when working with PDFs.\n",
   link_target: null,
   content_hash: "deadbeef",
@@ -265,7 +266,7 @@ describe("SkillsSection (issue #362)", () => {
           // No edit surface for these: the original values must ride back
           // untouched (null is the wire's frontmatter-key removal signal).
           license: "MIT",
-          compatibility: null,
+          compatibility: "requires network",
         }),
       );
     });
@@ -300,6 +301,52 @@ describe("SkillsSection (issue #362)", () => {
     resolveUpdate(localSkill);
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("filters local and linked rows through the acquired filter", async () => {
+    // The Radix Select's local/linked arms (the AgentsSection filter
+    // posture, driven through the shared pointer helpers): each arm hides
+    // the other source's rows while the row under test stays visible. The
+    // builtin arm is pinned separately in skills-builtin.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill, linkedSkill], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
+    expect(screen.getByText("external-skill")).toBeInTheDocument();
+
+    const filter = screen.getByLabelText("Filter by skill type");
+    openSelect(filter);
+    chooseOption("Local");
+    expect(screen.getByText("pdf-tools")).toBeInTheDocument();
+    expect(screen.queryByText("external-skill")).toBeNull();
+
+    openSelect(filter);
+    chooseOption("Linked");
+    expect(screen.queryByText("pdf-tools")).toBeNull();
+    expect(screen.getByText("external-skill")).toBeInTheDocument();
+  });
+
+  it("rescans the listing from the header refresh button", async () => {
+    // The icon-only header action's one seam: a click re-invokes the list
+    // query. The aria-label carries the accessible name; the spin glyph is
+    // presentational.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    const callsBefore = vi.mocked(listSkills).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    await waitFor(() => {
+      expect(vi.mocked(listSkills).mock.calls.length).toBeGreaterThan(callsBefore);
     });
   });
 

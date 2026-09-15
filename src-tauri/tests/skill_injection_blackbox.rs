@@ -497,11 +497,10 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
     );
 }
 
-/// #656 AC7 / ADR-0106: enablement is the machine-level single axis -- a
+/// #656 / ADR-0106: enablement is the machine-level single axis -- a
 /// configured-but-DISABLED server stays out of the enabled slice entirely
 /// (dormant = no catalog tools; the agent refuses honestly at the capability
-/// boundary). Nothing but the registry's own enablement axis can arm a
-/// server.
+/// boundary).
 #[test]
 fn disabled_mcp_server_stays_out_of_the_enabled_slice() {
     // A live config carrying the server, toggled OFF.

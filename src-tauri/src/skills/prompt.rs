@@ -197,14 +197,8 @@ mod tests {
     /// Write one skill directory with a `---`-fenced SKILL.md (frontmatter +
     /// body). `body` is inserted verbatim between the closing fence and EOF.
     fn put_skill(root: &Path, name: &str, body: &str) {
-        put_skill_fm(root, name, "", body);
-    }
-
-    /// Write one skill directory with extra frontmatter lines.
-    fn put_skill_fm(root: &Path, name: &str, extra_fm: &str, body: &str) {
         std::fs::create_dir_all(root.join(name)).unwrap();
-        let content =
-            format!("---\nname: {name}\ndescription: Test skill {name}.{extra_fm}\n---\n{body}");
+        let content = format!("---\nname: {name}\ndescription: Test skill {name}.\n---\n{body}");
         std::fs::write(root.join(name).join(SKILL_MD), content).unwrap();
     }
 

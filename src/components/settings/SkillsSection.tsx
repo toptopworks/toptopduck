@@ -940,33 +940,31 @@ function SkillDrawer({
           </div>
 
           {!isCreate && (
-            <>
-              <div className="grid gap-1.5">
-                <Label htmlFor="skill-body">
-                  <FormattedMessage
-                    id="settings.skills.fieldBody"
-                    defaultMessage="Instructions"
-                  />
-                </Label>
-                <Textarea
-                  id="skill-body"
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  onBlur={() => setBodyTouched(true)}
-                  disabled={readOnly}
-                  rows={10}
-                  className="font-mono text-sm"
+            <div className="grid gap-1.5">
+              <Label htmlFor="skill-body">
+                <FormattedMessage
+                  id="settings.skills.fieldBody"
+                  defaultMessage="Instructions"
                 />
-                {bodyTouched && bodyInvalid && (
-                  <p className="text-destructive text-xs">
-                    <FormattedMessage
-                      id="settings.skills.fieldBodyRequired"
-                      defaultMessage="Instructions can't be empty."
-                    />
-                  </p>
-                )}
-              </div>
-            </>
+              </Label>
+              <Textarea
+                id="skill-body"
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                onBlur={() => setBodyTouched(true)}
+                disabled={readOnly}
+                rows={10}
+                className="font-mono text-sm"
+              />
+              {bodyTouched && bodyInvalid && (
+                <p className="text-destructive text-xs">
+                  <FormattedMessage
+                    id="settings.skills.fieldBodyRequired"
+                    defaultMessage="Instructions can't be empty."
+                  />
+                </p>
+              )}
+            </div>
           )}
         </div>
 
