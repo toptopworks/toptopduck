@@ -660,11 +660,15 @@ export async function listSkills(): Promise<SkillListing> {
   return invoke<SkillListing>("list_skills");
 }
 
-// Mint a new local skill: <root>/<name>/SKILL.md with the given description +
-// the skeleton body. The name must be kebab-case (<= 64) and free. Returns the
-// entry read back from disk.
-export async function createSkill(name: string, description: string): Promise<SkillEntry> {
-  return invoke<SkillEntry>("create_skill", { name, description });
+// Mint a new local skill: <root>/<name>/SKILL.md with the given description
+// and body. The name must be kebab-case (<= 64) and free, and the body
+// non-blank. Returns the entry read back from disk.
+export async function createSkill(
+  name: string,
+  description: string,
+  body: string,
+): Promise<SkillEntry> {
+  return invoke<SkillEntry>("create_skill", { name, description, body });
 }
 
 // Rewrite one local skill's SKILL.md (frontmatter + body) atomically. `name`

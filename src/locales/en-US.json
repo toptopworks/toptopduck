@@ -478,7 +478,6 @@
   "settings.skills.fieldBodyRequired": "Instructions can't be empty.",
   "settings.skills.fieldDescriptionRequired": "Description is required.",
   "settings.skills.fieldName": "Name",
-  "settings.skills.fieldNameHint": "Use lowercase letters, numbers, and hyphens — for example: pdf-tools",
   "settings.skills.fieldNameInvalid": "Use only lowercase letters, numbers, and hyphens (example: pdf-tools), up to 64 characters.",
   "settings.skills.filterAll": "All",
   "settings.skills.filterLabel": "Filter by skill type",

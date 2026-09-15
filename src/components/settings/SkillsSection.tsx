@@ -155,18 +155,16 @@ export function SkillsSection({
   };
 
   const createMutation = useMutation({
-    mutationFn: ({ name, description }: { name: string; description: string }) =>
-      createSkill(name, description),
-    onSuccess: (entry) => {
+    mutationFn: (draft: { name: string; description: string; body: string }) =>
+      createSkill(draft.name, draft.description, draft.body),
+    onSuccess: () => {
       invalidate();
-      // A stale reject must not ride into the post-create edit drawer.
+      // Drop a stale reject so a reopened drawer never seeds off an
+      // outdated error.
       setError(null);
-      // Straight into the edit drawer for the minted skill: the backend
-      // wrote the skeleton body, and authoring the real one is the natural
-      // next step. The key flip ("" -> the name) remounts the drawer seeded
-      // from the returned entry (createMutation.data bridges the refetch
-      // gap until allSkills carries it).
-      setDrawer({ mode: "edit", name: entry.name });
+      // One-form create: the body was authored in the drawer itself, so a
+      // successful mint closes it -- there is no follow-up edit step.
+      setDrawer({ mode: "closed" });
     },
     onError: (e) => setError(fmtError(e, intl)),
   });
@@ -292,14 +290,7 @@ export function SkillsSection({
       };
     }
     if (drawer.mode === "edit") {
-      // The create result bridges the refetch gap after a create: once the
-      // invalidated query lands, allSkills carries the entry and the
-      // mutation result is never read again. The name guard keeps the
-      // bridge scoped to the freshly minted skill only.
-      const created = createMutation.data;
-      const skill =
-        allSkills.find((s) => s.name === drawer.name) ??
-        (created?.name === drawer.name ? created : null);
+      const skill = allSkills.find((s) => s.name === drawer.name);
       if (!skill) return null;
       return {
         currentName: skill.name,
@@ -313,7 +304,7 @@ export function SkillsSection({
       };
     }
     return null;
-  }, [drawer, allSkills, createMutation.data]);
+  }, [drawer, allSkills]);
 
   const saving = createMutation.isPending || updateMutation.isPending;
 
@@ -345,7 +336,7 @@ export function SkillsSection({
                     setDrawer({ mode: "create" });
                   }}
                 >
-                  <Plus className="size-3.5" aria-hidden />
+                  <Plus className="size-4" aria-hidden />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
@@ -368,7 +359,7 @@ export function SkillsSection({
                     setImportOpen(true);
                   }}
                 >
-                  <Download className="size-3.5" aria-hidden />
+                  <Download className="size-4" aria-hidden />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
@@ -389,7 +380,7 @@ export function SkillsSection({
                   })}
                 >
                   <RefreshCw
-                    className={cn("size-3.5", isFetching && "animate-spin")}
+                    className={cn("size-4", isFetching && "animate-spin")}
                     aria-hidden
                   />
                 </Button>
@@ -520,7 +511,7 @@ export function SkillsSection({
           saving={saving}
           error={error}
           onCancel={() => setDrawer({ mode: "closed" })}
-          onCreate={(name, description) => createMutation.mutate({ name, description })}
+          onCreate={(draft) => createMutation.mutate(draft)}
           onSave={(update) => updateMutation.mutate({ name: drawerDraft.currentName, update })}
           onOpenSource={(target) => void openSource(target)}
         />
@@ -749,7 +740,7 @@ type SkillDrawerProps = {
    *  open. */
   error: string | null;
   onCancel: () => void;
-  onCreate: (name: string, description: string) => void;
+  onCreate: (draft: { name: string; description: string; body: string }) => void;
   onSave: (update: SkillUpdate) => void;
   onOpenSource: (target: string | null) => void;
 };
@@ -777,8 +768,9 @@ function SkillDrawer({
   const [description, setDescription] = useState(draft.description);
   const [body, setBody] = useState(draft.body);
   // Touched flags gate the invalid hints: a freshly opened drawer stays
-  // quiet (every field starts "invalid-able"), the hint appears once the
-  // user has been in the field and left it.
+  // quiet (every field starts "invalid-able"), and blur flags a field only
+  // when the user actually edited it -- the dialog auto-focuses the name
+  // input, so pristine click-away blurs are routine and must not yell.
   const [nameTouched, setNameTouched] = useState(false);
   const [descriptionTouched, setDescriptionTouched] = useState(false);
   const [bodyTouched, setBodyTouched] = useState(false);
@@ -799,12 +791,12 @@ function SkillDrawer({
       trimmedName.length > SKILL_NAME_MAX ||
       !SKILL_NAME_PATTERN.test(trimmedName));
   const descriptionInvalid = description.trim() === "";
-  const bodyInvalid = !isCreate && body.trim() === "";
+  const bodyInvalid = body.trim() === "";
   const formInvalid = nameInvalid || descriptionInvalid || bodyInvalid;
 
   function handleSave() {
     if (isCreate) {
-      onCreate(name.trim(), description.trim());
+      onCreate({ name: name.trim(), description: description.trim(), body });
       return;
     }
     onSave({
@@ -881,36 +873,28 @@ function SkillDrawer({
               id="skill-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              onBlur={() => setNameTouched(true)}
+              onBlur={() => {
+                if (name !== draft.name) setNameTouched(true);
+              }}
               disabled={readOnly || nameLocked}
               placeholder="pdf-tools"
               maxLength={SKILL_NAME_MAX}
             />
-            <p
-              className={cn(
-                "text-xs",
-                !nameLocked && nameTouched && nameInvalid
-                  ? "text-destructive"
-                  : "text-muted-foreground",
-              )}
-            >
-              {nameLocked ? (
+            {nameLocked ? (
+              <p className="text-muted-foreground text-xs">
                 <FormattedMessage
                   id="settings.skills.fieldNameLockedHint"
                   defaultMessage="Built-in skill names are locked"
                 />
-              ) : nameTouched && nameInvalid ? (
+              </p>
+            ) : nameTouched && nameInvalid ? (
+              <p className="text-destructive text-xs">
                 <FormattedMessage
                   id="settings.skills.fieldNameInvalid"
                   defaultMessage="Use only lowercase letters, numbers, and hyphens (example: pdf-tools), up to 64 characters."
                 />
-              ) : (
-                <FormattedMessage
-                  id="settings.skills.fieldNameHint"
-                  defaultMessage="Use lowercase letters, numbers, and hyphens — for example: pdf-tools"
-                />
-              )}
-            </p>
+              </p>
+            ) : null}
           </div>
 
           <div className="grid gap-1.5">
@@ -924,7 +908,9 @@ function SkillDrawer({
               id="skill-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              onBlur={() => setDescriptionTouched(true)}
+              onBlur={() => {
+                if (description !== draft.description) setDescriptionTouched(true);
+              }}
               disabled={readOnly}
               maxLength={SKILL_DESCRIPTION_MAX}
               rows={3}
@@ -939,33 +925,33 @@ function SkillDrawer({
             )}
           </div>
 
-          {!isCreate && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="skill-body">
-                <FormattedMessage
-                  id="settings.skills.fieldBody"
-                  defaultMessage="Instructions"
-                />
-              </Label>
-              <Textarea
-                id="skill-body"
-                value={body}
-                onChange={(e) => setBody(e.target.value)}
-                onBlur={() => setBodyTouched(true)}
-                disabled={readOnly}
-                rows={10}
-                className="font-mono text-sm"
+          <div className="grid gap-1.5">
+            <Label htmlFor="skill-body">
+              <FormattedMessage
+                id="settings.skills.fieldBody"
+                defaultMessage="Instructions"
               />
-              {bodyTouched && bodyInvalid && (
-                <p className="text-destructive text-xs">
-                  <FormattedMessage
-                    id="settings.skills.fieldBodyRequired"
-                    defaultMessage="Instructions can't be empty."
-                  />
-                </p>
-              )}
-            </div>
-          )}
+            </Label>
+            <Textarea
+              id="skill-body"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              onBlur={() => {
+                if (body !== draft.body) setBodyTouched(true);
+              }}
+              disabled={readOnly}
+              rows={10}
+              className="font-mono text-sm"
+            />
+            {bodyTouched && bodyInvalid && (
+              <p className="text-destructive text-xs">
+                <FormattedMessage
+                  id="settings.skills.fieldBodyRequired"
+                  defaultMessage="Instructions can't be empty."
+                />
+              </p>
+            )}
+          </div>
         </div>
 
         {isLinked && (

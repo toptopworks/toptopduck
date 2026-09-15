@@ -517,7 +517,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("skills");
         // Pre-populate the registry with a skill named "taken".
-        super::super::registry::create_skill(&root, "taken", "Already here.").unwrap();
+        super::super::registry::create_skill(
+            &root,
+            "taken",
+            "Already here.",
+            "Pre-existing body.\n",
+        )
+        .unwrap();
         // An external source that collides.
         let lib = tmp.path().join("lib");
         let collide = put_skill(&lib, "taken", "External body.\n");
