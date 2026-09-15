@@ -135,19 +135,110 @@ describe("SkillsSection (issue #362)", () => {
 
     const nameInput = await screen.findByLabelText("Name");
     const descInput = screen.getByLabelText("Description");
+    const bodyInput = screen.getByLabelText("Instructions");
     fireEvent.change(nameInput, { target: { value: "pdf-tools" } });
     fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
+    fireEvent.change(bodyInput, { target: { value: "Use when working with PDFs.\n" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(createSkill).toHaveBeenCalledWith("pdf-tools", "Work with PDF files.");
+      expect(createSkill).toHaveBeenCalledWith(
+        "pdf-tools",
+        "Work with PDF files.",
+        "Use when working with PDFs.\n",
+      );
     });
   });
 
-  it("lands on the edit drawer for the freshly created skill", async () => {
-    // The create dialog only captures name + description; the natural next
-    // step is authoring the body, so the drawer switches straight into edit
-    // mode for the minted skill instead of closing.
+  it("keeps the create drawer quiet when pristine fields blur", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("No skills yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: /New/i }));
+    const nameInput = await screen.findByLabelText("Name");
+
+    // The dialog auto-focuses the name field, so a click-away blur lands
+    // on pristine inputs; empty content must not surface any invalid hint.
+    fireEvent.blur(nameInput);
+    fireEvent.blur(screen.getByLabelText("Description"));
+    fireEvent.blur(screen.getByLabelText("Instructions"));
+    expect(
+      screen.queryByText(/Use only lowercase letters/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Description is required."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Instructions can't be empty."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("arms the description hint once an edited field goes blank", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("No skills yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: /New/i }));
+
+    // A valid edit + blur arms the field without surfacing the hint.
+    fireEvent.change(await screen.findByLabelText("Description"), {
+      target: { value: "Work with PDF files." },
+    });
+    fireEvent.blur(screen.getByLabelText("Description"));
+    expect(
+      screen.queryByText("Description is required."),
+    ).not.toBeInTheDocument();
+
+    // Blanking the armed field surfaces the rule immediately.
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "" },
+    });
+    expect(screen.getByText("Description is required.")).toBeInTheDocument();
+  });
+
+  it("surfaces the create-mode body hint once the armed field goes blank", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("No skills yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: /New/i }));
+
+    // A valid edit + blur arms the field without surfacing the hint.
+    fireEvent.change(await screen.findByLabelText("Instructions"), {
+      target: { value: "Body text.\n" },
+    });
+    fireEvent.blur(screen.getByLabelText("Instructions"));
+    expect(
+      screen.queryByText("Instructions can't be empty."),
+    ).not.toBeInTheDocument();
+
+    // Blanking the armed field surfaces the rule immediately: create mode
+    // owns the body field since the one-form fold.
+    fireEvent.change(screen.getByLabelText("Instructions"), {
+      target: { value: "" },
+    });
+    expect(screen.getByText("Instructions can't be empty.")).toBeInTheDocument();
+  });
+
+  it("closes the drawer after a one-form create", async () => {
+    // The create dialog captures name + description + body in one pass, so
+    // a successful mint closes it instead of stepping into an edit drawer.
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(
@@ -165,18 +256,25 @@ describe("SkillsSection (issue #362)", () => {
     fireEvent.change(screen.getByLabelText("Description"), {
       target: { value: "Work with PDF files." },
     });
+    fireEvent.change(screen.getByLabelText("Instructions"), {
+      target: { value: "Body text.\n" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(createSkill).toHaveBeenCalledWith("pdf-tools", "Work with PDF files.");
+      expect(createSkill).toHaveBeenCalledWith(
+        "pdf-tools",
+        "Work with PDF files.",
+        "Body text.\n",
+      );
     });
-    // The drawer stays open, now in edit mode, seeded from the created
-    // entry -- the body is immediately authorable.
-    const bodyInput = await screen.findByLabelText("Instructions");
-    expect(bodyInput).toHaveValue(localSkill.body);
+    // The mint closes the drawer: the list is the only face left.
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    });
   });
 
-  it("gates the create drawer's Save on a valid name and a non-blank description", async () => {
+  it("gates the create drawer's Save on a valid name, description, and body", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
@@ -203,18 +301,21 @@ describe("SkillsSection (issue #362)", () => {
     ).toBeInTheDocument();
     expect(save).toBeDisabled();
 
-    // Valid name, still no description: gated off.
+    // Valid name + description, still no body: gated off.
     fireEvent.change(nameInput, { target: { value: "pdf-tools" } });
+    fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
     expect(save).toBeDisabled();
 
-    // Both required fields valid: the gate opens.
-    fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
+    // All three fields valid: the gate opens.
+    fireEvent.change(screen.getByLabelText("Instructions"), {
+      target: { value: "Body text.\n" },
+    });
     expect(save).toBeEnabled();
   });
 
   it("gates the edit drawer's Save on a non-blank body", async () => {
-    // Only edit mode owns a body field; clearing it must gate Save behind
-    // the same client-side rule the backend enforces.
+    // Clearing the body must gate Save behind the same client-side rule
+    // the backend enforces (create and edit share it).
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
@@ -415,8 +516,10 @@ describe("SkillsSection (issue #362)", () => {
     fireEvent.click(screen.getByRole("button", { name: /New/i }));
     const nameInput = await screen.findByLabelText("Name");
     const descInput = screen.getByLabelText("Description");
+    const bodyInput = screen.getByLabelText("Instructions");
     fireEvent.change(nameInput, { target: { value: "pdf-tools" } });
     fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
+    fireEvent.change(bodyInput, { target: { value: "Body text.\n" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -431,7 +534,7 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
 
     // A retry that succeeds clears the stale reject: the alert must not
-    // ride into the post-create edit drawer.
+    // ride into a later drawer.
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => {

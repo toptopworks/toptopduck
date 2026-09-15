@@ -32,11 +32,6 @@ use super::model::{
 };
 use crate::util::sha256_hex;
 
-/// The markdown body a freshly minted skill starts with. The spec requires a
-/// non-blank body (it is the prompt fragment); the drawer invites the real
-/// text on first edit.
-pub const SKELETON_BODY: &str = "Describe when and how to use this skill.\n";
-
 /// The one file the registry reads / writes per skill directory.
 const SKILL_MD: &str = "SKILL.md";
 /// Temp-file suffix for the atomic rewrite. Same directory as the target so
@@ -150,17 +145,23 @@ pub fn list_skills(root: &Path, mark: &BuiltinSkillMark) -> SkillListing {
 }
 
 /// Mint a new `local` skill: `<root>/<name>/SKILL.md` with the given
-/// description + the skeleton body. The registry root is created lazily on
-/// first mint. Refuses a name in the builtin reserved set (issue #677) --
-/// statically, independent of what is materialized. Returns the entry for
-/// the written skill (read back, or derived from the written payload on a
-/// transient read-back failure).
-pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillEntry, SkillError> {
+/// description and body. The registry root is created lazily on first mint.
+/// Refuses a name in the builtin reserved set (issue #677) -- statically,
+/// independent of what is materialized. Returns the entry for the written
+/// skill (read back, or derived from the written payload on a transient
+/// read-back failure).
+pub fn create_skill(
+    root: &Path,
+    name: &str,
+    description: &str,
+    body: &str,
+) -> Result<SkillEntry, SkillError> {
     validate_skill_name(name)?;
     if super::builtin::is_reserved_skill_name(name) {
         return Err(SkillError::ReservedSkillName(name.to_string()));
     }
     validate_description(description)?;
+    validate_body(body)?;
     fs::create_dir_all(root).map_err(|e| fs_err("create skills root", root, e))?;
     let dir = root.join(name);
     if dir.exists() {
@@ -173,7 +174,7 @@ pub fn create_skill(root: &Path, name: &str, description: &str) -> Result<SkillE
         Value::String("description".into()),
         Value::String(description.into()),
     );
-    let content = frontmatter::render_skill_md(&fm, SKELETON_BODY)?;
+    let content = frontmatter::render_skill_md(&fm, body)?;
     if let Err(e) = write_skill_md(&dir, &content) {
         // Do not leave an empty directory behind a failed mint (it would
         // surface as NameTaken on the user's retry).
@@ -857,14 +858,15 @@ mod tests {
     }
 
     #[test]
-    fn create_mints_directory_with_skeleton_skill_md() {
+    fn create_mints_directory_with_the_authored_body() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("skills"); // minted lazily
-        let entry = create_skill(&root, "pdf-tools", "Work with PDF files.").unwrap();
+        let entry =
+            create_skill(&root, "pdf-tools", "Work with PDF files.", "Body text.\n").unwrap();
         assert_eq!(entry.name, "pdf-tools");
         assert_eq!(entry.description, "Work with PDF files.");
         assert_eq!(entry.acquired, Acquired::Local);
-        assert_eq!(entry.body, SKELETON_BODY);
+        assert_eq!(entry.body, "Body text.\n");
         // The minted file is on disk + spec-valid (list reads it back).
         let raw = fs::read_to_string(root.join("pdf-tools").join(SKILL_MD)).unwrap();
         assert!(raw.starts_with("---\nname: pdf-tools\n"));
@@ -889,20 +891,24 @@ mod tests {
     }
 
     #[test]
-    fn create_refuses_invalid_name_blank_description_and_duplicates() {
+    fn create_refuses_invalid_name_blank_fields_and_duplicates() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         assert!(matches!(
-            create_skill(root, "Bad_Name", "d"),
+            create_skill(root, "Bad_Name", "d", "b"),
             Err(SkillError::InvalidName(_))
         ));
         assert!(matches!(
-            create_skill(root, "ok-name", "   "),
+            create_skill(root, "ok-name", "   ", "b"),
             Err(SkillError::InvalidSkill(_))
         ));
-        create_skill(root, "taken", "d").unwrap();
         assert!(matches!(
-            create_skill(root, "taken", "d"),
+            create_skill(root, "blank-body", "d", "   "),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        create_skill(root, "taken", "d", "b").unwrap();
+        assert!(matches!(
+            create_skill(root, "taken", "d", "b"),
             Err(SkillError::NameTaken(_))
         ));
     }
@@ -1227,7 +1233,7 @@ mod tests {
     fn create_skill_refuses_a_reserved_builtin_name() {
         let root = tempfile::tempdir().expect("root");
         assert_eq!(
-            create_skill(root.path(), "pandoc", "mine").unwrap_err(),
+            create_skill(root.path(), "pandoc", "mine", "b").unwrap_err(),
             SkillError::ReservedSkillName("pandoc".to_string())
         );
         // Nothing landed on disk.
@@ -1264,7 +1270,7 @@ mod tests {
     #[test]
     fn update_skill_refuses_renaming_a_user_skill_onto_a_reserved_name() {
         let root = tempfile::tempdir().expect("root");
-        create_skill(root.path(), "my-tool", "desc").expect("create");
+        create_skill(root.path(), "my-tool", "desc", "b").expect("create");
         let mut rename = update_payload("my-tool");
         rename.name = "office-cli".to_string();
         assert_eq!(
@@ -1303,7 +1309,7 @@ mod tests {
     #[test]
     fn list_skills_marks_materialized_names_as_builtin() {
         let root = tempfile::tempdir().expect("root");
-        create_skill(root.path(), "my-tool", "desc").expect("create");
+        create_skill(root.path(), "my-tool", "desc", "b").expect("create");
         let def = super::super::builtin::find_skill_definition("python").unwrap();
         std::fs::create_dir_all(root.path().join("python")).expect("mkdir");
         std::fs::write(

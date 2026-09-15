@@ -268,7 +268,7 @@ export function AgentsSection({
                     setForm({ mode: "create" });
                   }}
                 >
-                  <Plus className="size-3.5" aria-hidden />
+                  <Plus className="size-4" aria-hidden />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
@@ -288,7 +288,7 @@ export function AgentsSection({
                   })}
                   onClick={() => void openAgentsDir()}
                 >
-                  <FolderOpen className="size-3.5" aria-hidden />
+                  <FolderOpen className="size-4" aria-hidden />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
@@ -312,7 +312,7 @@ export function AgentsSection({
                   })}
                 >
                   <RefreshCw
-                    className={cn("size-3.5", isFetching && "animate-spin")}
+                    className={cn("size-4", isFetching && "animate-spin")}
                     aria-hidden
                   />
                 </Button>

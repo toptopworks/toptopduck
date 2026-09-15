@@ -3343,17 +3343,19 @@ pub fn list_skills(
 }
 
 /// Mint a new `local` skill (issue #362): `<root>/<name>/SKILL.md` with the
-/// given description + the skeleton body. The name must be spec-shaped
-/// (kebab-case, <= 64) and free; the registry root is minted lazily on first
-/// create. Returns the entry for the written skill (read back, or derived
-/// from the written payload on a transient read-back failure).
+/// given description and body. The name must be spec-shaped (kebab-case,
+/// <= 64) and free, and the body non-blank; the registry root is minted
+/// lazily on first create. Returns the entry for the written skill (read
+/// back, or derived from the written payload on a transient read-back
+/// failure).
 #[tauri::command]
 pub fn create_skill(
     root: State<'_, SkillsRoot>,
     name: String,
     description: String,
+    body: String,
 ) -> Result<SkillEntry, SkillError> {
-    crate::skills::registry::create_skill(&root.0, &name, &description)
+    crate::skills::registry::create_skill(&root.0, &name, &description, &body)
 }
 
 /// Rewrite one `local` skill's `SKILL.md` (frontmatter + body) atomically

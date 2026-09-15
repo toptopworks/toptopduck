@@ -478,7 +478,6 @@
   "settings.skills.fieldBodyRequired": "指令内容不能为空。",
   "settings.skills.fieldDescriptionRequired": "描述不能为空。",
   "settings.skills.fieldName": "名称",
-  "settings.skills.fieldNameHint": "请使用小写字母、数字和连字符，例如：pdf-tools",
   "settings.skills.fieldNameInvalid": "只能使用小写字母、数字和连字符（例如：pdf-tools），最多 64 个字符。",
   "settings.skills.filterAll": "全部",
   "settings.skills.filterLabel": "按类型筛选",
