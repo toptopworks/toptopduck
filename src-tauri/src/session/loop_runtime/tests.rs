@@ -96,12 +96,18 @@ impl ApprovalSink for NoopSink {
 #[derive(Default)]
 struct RecordingSink {
     request_ids: Mutex<Vec<uuid::Uuid>>,
+    /// The originator annotation each emitted card carried (issue #934),
+    /// parallel to `request_ids`: the origin-wiring pin asserts the
+    /// delegating sub-agent's name rode the gate END TO END (None = a
+    /// main-loop / external-runtime call).
+    origins: Mutex<Vec<Option<String>>>,
 }
 
 impl ApprovalSink for RecordingSink {
     fn emit_request(&self, body: &crate::approval::ApprovalRequestBody) {
         let id = uuid::Uuid::parse_str(&body.request_id).expect("the gate stamps uuid ids");
         self.request_ids.lock().unwrap().push(id);
+        self.origins.lock().unwrap().push(body.origin_agent.clone());
     }
     fn emit_resolved(
         &self,
@@ -1968,6 +1974,264 @@ fn a_cancel_during_the_subagent_lands_the_whole_turn_cancelled() {
         token,
     );
     assert_eq!(outcome.termination, Termination::Cancelled);
+    // The checkpoint-path landing (PR #946 review Important 3): the token
+    // fires mid-generation, the sub-agent's own watcher aborts its in-flight
+    // request, and the run RETURNS through the checkpoint exit -- the
+    // normal collection then lands the cancelled entry (the aborted
+    // vocabulary, no sub-trace: nothing completed). The Drop-guard arm --
+    // the driver abandoning the future outright -- is the next test.
+    let row = outcome
+        .trace
+        .iter()
+        .flat_map(|round| &round.calls)
+        .find(|call| call.name == "analyst")
+        .expect("the cancelled delegation still lands its trace row");
+    assert!(!row.success);
+    assert!(
+        row.result_excerpt.contains("aborted: cancelled"),
+        "the cancelled collection words itself as an abort: {}",
+        row.result_excerpt
+    );
+}
+
+/// The abandonment guard's Drop arm (PR #946 review Important 3): a cancel
+/// that lands while the sub-agent is parked on a GATED call's result -- no
+/// generation in flight for its own watcher to abort -- is the one window
+/// where the driver's notify wins the race and DROPS the delegation's
+/// future tree mid-run. The guard then collects and lands the cancelled
+/// entry itself: the completed first round (a real explore over result_1)
+/// rides under it as the nested sub-trace, instead of vanishing with the
+/// dropped future while the trace loses the row entirely. The gated card
+/// never resolves -- the cancel is the user's answer to it.
+#[test]
+fn an_abandoned_delegation_keeps_its_completed_calls_under_the_entry() {
+    use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let cli_tool = CliToolConfig {
+        name: "pandoc".into(),
+        description: "convert".into(),
+        executable: "/bin/pandoc".into(),
+        argv_template: vec!["-o".into(), "{output}".into()],
+        params: vec![CliToolParam {
+            name: "output".into(),
+            description: "target".into(),
+            delivery: CliParamDelivery::Argv,
+            varargs: false,
+        }],
+        env: Default::default(),
+        enabled: true,
+        source: Default::default(),
+        baseline: None,
+    };
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_d1",
+                "analyst",
+                json!({"prompt": "explore then convert"}),
+            )],
+        ),
+        // The sub-agent's first round: a real dispatch that completes (its
+        // entry pairs with the fold's result event).
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_s1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        // The sub-agent's second round: the GATED tool -- the dispatch
+        // parks on the approval condvar and the sub parks on its result,
+        // which is where the cancel below abandons the run.
+        batch_turn(
+            "",
+            None,
+            &[("tu_s2", "pandoc", json!({"output": "out.pdf"}))],
+        ),
+    ]);
+    let approval = Arc::new(ApprovalState::new());
+    let sink = Arc::new(RecordingSink::default());
+    let token = Arc::new(CancelToken::new());
+    // The user's stop: request the token shortly after the gated card
+    // appears. The sub is parked on the gated call's result with no
+    // generation in flight, so its own watcher has no checkpoint to abort
+    // -- the driver's notify wins and drops the delegation future
+    // mid-run, deterministically (mutation-verified: disarming the guard
+    // reddens this pin).
+    let stopper = {
+        let sink = Arc::clone(&sink);
+        let token = Arc::clone(&token);
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            loop {
+                if !sink.request_ids.lock().unwrap().is_empty() {
+                    std::thread::sleep(Duration::from_millis(100));
+                    token.request();
+                    return;
+                }
+                if start.elapsed() > Duration::from_secs(5) {
+                    panic!("no approval card arrived");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let mut request = delegation_request(&h, "delegate then stop mid-approval");
+    request.tools.push(ToolDefinition {
+        name: "pandoc".into(),
+        description: "test-external tool".into(),
+        input_schema: json!({"type": "object"}),
+    });
+    let outcome = h.run_turn(
+        &request,
+        mock_runtime(model),
+        Arc::clone(&token),
+        24,
+        None,
+        std::slice::from_ref(&cli_tool),
+        approval.as_ref(),
+        sink.as_ref(),
+    );
+    stopper.join().unwrap();
+    assert_eq!(outcome.termination, Termination::Cancelled);
+    let row = outcome
+        .trace
+        .iter()
+        .flat_map(|round| &round.calls)
+        .find(|call| call.name == "analyst")
+        .expect("the abandoned delegation still lands its trace row");
+    assert!(!row.success);
+    assert!(
+        row.result_excerpt.contains("aborted: cancelled"),
+        "the abandoned collection words itself as an abort: {}",
+        row.result_excerpt
+    );
+    let sub = row
+        .sub_trace
+        .as_ref()
+        .expect("the completed first round rides the cancelled entry");
+    assert!(
+        sub.iter()
+            .any(|round| round.calls.iter().any(|c| c.name == "explore")),
+        "the sub-agent's completed explore stays under the entry"
+    );
+}
+
+/// The approval-origin wiring pin (issue #934, PR #946 review Important 1):
+/// a sub-agent's gated call carries its delegator's name onto the approval
+/// card END TO END -- the sub-face's dispatch names the sub-agent, the
+/// shared dispatch core threads it onto the request, and the emitted card
+/// body reads it (the frontend renders "Sub-agent X wants to call Y" from
+/// this wire field). A main-loop call in the SAME turn carries no origin
+/// (the None half), so the pin covers both arms of the wiring. The gated
+/// tool is a CLI tool the harness cannot actually run -- the responder
+/// allows, the spawn fails as a route error, and the models converge on
+/// their scripted next turns; only the cards are under test.
+#[test]
+fn subagent_gated_calls_carry_their_originator_onto_the_card() {
+    use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+    let mut h = Harness::new();
+    h.delegations = vec![analyst_spec()];
+    let cli_tool = CliToolConfig {
+        name: "pandoc".into(),
+        description: "convert".into(),
+        executable: "/bin/pandoc".into(),
+        argv_template: vec!["-o".into(), "{output}".into()],
+        params: vec![CliToolParam {
+            name: "output".into(),
+            description: "target".into(),
+            delivery: CliParamDelivery::Argv,
+            varargs: false,
+        }],
+        env: Default::default(),
+        enabled: true,
+        source: Default::default(),
+        baseline: None,
+    };
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "convert the sheet"}))],
+        ),
+        // The sub-agent's first turn calls the GATED tool -- its card is
+        // the pin's subject.
+        batch_turn(
+            "",
+            None,
+            &[("tu_s1", "pandoc", json!({"output": "sub.pdf"}))],
+        ),
+        text_turn("converted under delegation."),
+        // The main loop then calls the same gated tool itself -- its card
+        // must carry NO originator.
+        batch_turn(
+            "",
+            None,
+            &[("tu_2", "pandoc", json!({"output": "main.pdf"}))],
+        ),
+        text_turn("done both ways."),
+    ]);
+    let approval = Arc::new(ApprovalState::new());
+    let sink = Arc::new(RecordingSink::default());
+    let responder = {
+        let approval = Arc::clone(&approval);
+        let sink = Arc::clone(&sink);
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut answered = 0;
+            while answered < 2 {
+                let ids = sink.request_ids.lock().unwrap().clone();
+                if ids.len() > answered {
+                    approval
+                        .respond(ids[answered], ApprovalResponse::AllowOnce)
+                        .expect("respond ok");
+                    answered += 1;
+                    continue;
+                }
+                if start.elapsed() > Duration::from_secs(5) {
+                    panic!("only {answered} approval requests arrived");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    // The request must advertise the CLI tool alongside the delegation
+    // spec, so the subtracted sub-face carries it (the model-facing table
+    // and the CLI config are the two halves of a gated external call).
+    let mut request = delegation_request(&h, "delegate a conversion");
+    request.tools.push(ToolDefinition {
+        name: "pandoc".into(),
+        description: "test-external tool".into(),
+        input_schema: json!({"type": "object"}),
+    });
+    let outcome = h.run_turn(
+        &request,
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        24,
+        None,
+        std::slice::from_ref(&cli_tool),
+        approval.as_ref(),
+        sink.as_ref(),
+    );
+    responder.join().unwrap();
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("done both ways.".into()),
+        "both gated calls feed back and the turn converges"
+    );
+    let origins = sink.origins.lock().unwrap().clone();
+    assert_eq!(
+        origins,
+        vec![Some("analyst".to_string()), None],
+        "the sub-agent's card names its delegator; the main loop's carries none"
+    );
 }
 
 /// AC #4 (the provider-fault arm): a sub-agent whose model call faults

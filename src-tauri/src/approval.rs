@@ -434,7 +434,8 @@ pub struct ApprovalRequest {
     /// File-delivery values for the card's expand-on-demand view; empty for
     /// every call shape without file-delivered parameters (built-ins, MCP).
     pub file_attachments: Vec<FileAttachment>,
-    /// The call's originator annotation (ADR-0117 Decision 6, issue #934):
+    /// The call's originator annotation (ADR-0117 Decision 4 -- the approval
+    /// popup names the originator; issue #934):
     /// the delegating sub-agent's name when the call rides a sub-agent's
     /// tool face, `None` for every main-loop / external-runtime call. The
     /// card renders it ("sub-agent X wants to call Y") so the approver

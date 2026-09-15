@@ -137,7 +137,9 @@ pub struct TraceEntry {
     pub result_excerpt: String,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's round-grouped trajectory -- its thinking, its
-    /// tool string, its terminal report. `None` for every ordinary call; the
+    /// tool string, its calls' bounded excerpts (the terminal report itself
+    /// rides the entry's own excerpt, never the rounds). `None` for every
+    /// ordinary call; the
     /// delegation entry alone carries it, and the nesting is physically depth
     /// 1 (the sub-face excludes every delegation tool, ADR-0117 Decision 4),
     /// so a nested entry never itself carries one. Projects through the same

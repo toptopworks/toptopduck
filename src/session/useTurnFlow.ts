@@ -264,6 +264,7 @@ export function buildLiveRounds(
         running: r.running,
         success: r.success,
         resultExcerpt: r.resultExcerpt,
+        subRounds: r.subRounds,
       })),
   }));
 }
@@ -278,20 +279,41 @@ export function buildLiveRounds(
  *  prose and thinking block. The row mapping is identity with the
  *  ToolCallCompleted payload, so the optimistic trace equals the backend's
  *  recorded rounds. */
+
+/** A live row whose completion event has landed (`success` no longer null):
+ *  the settled projection's input shape. */
+export type SettledLiveRow = LiveRoundRow & { success: boolean };
+
+/** The type guard the two settled consumers share: a row still at
+ *  `success === null` (a gate-cancelled call, resolved-deny with no
+ *  dispatch) has NO backend trace entry. */
+export function isSettledRow(row: LiveRoundRow): row is SettledLiveRow {
+  return row.success !== null;
+}
+
+/** Project one settled live row onto its trace-entry shape (issue #297's
+ *  optimistic parity): the live rail's settled row and the optimistic
+ *  projection consume the SAME mapping, so the hand-synced field list
+ *  lives here once -- a new optional field carried by one arm can never be
+ *  silently severed from the other (PR #946 review: subRounds was). */
+export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
+  return {
+    name: row.name,
+    operation_kind: row.operationKind,
+    summary: row.summary,
+    success: row.success,
+    result_excerpt: row.resultExcerpt,
+    sub_rounds: row.subRounds,
+  };
+}
+
 export function liveRoundsToTrace(rounds: ReadonlyArray<LiveRound>): TraceRound[] {
   const trace: TraceRound[] = [];
   for (const round of rounds) {
     const calls: TraceEntry[] = [];
     for (const row of round.rows) {
-      if (row.success === null) continue;
-      calls.push({
-        name: row.name,
-        operation_kind: row.operationKind,
-        summary: row.summary,
-        success: row.success,
-        result_excerpt: row.resultExcerpt,
-        sub_rounds: row.subRounds,
-      });
+      if (!isSettledRow(row)) continue;
+      calls.push(traceEntryFromRow(row));
     }
     // A round with prose or thinking but no completed calls still records
     // (a cancel mid-batch); an entirely empty round drops.

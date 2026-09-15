@@ -622,7 +622,6 @@
   "thread.trace.thinkingToggle": "思考 · {sec}s",
   "thread.trace.viewSubtrace": "子轨迹",
   "thread.trace.subtraceTitle": "子智能体轨迹 · {name}",
-  "thread.trace.subtraceEmpty": "子智能体没有记录任何轮次。",
   "thread.trace.toggle": "轨迹 · {count} 次调用",
   "viz.chartLabel": "图表",
   "viz.error.invalidJson": "规格不是合法的 JSON",

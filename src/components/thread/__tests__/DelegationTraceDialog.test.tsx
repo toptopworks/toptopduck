@@ -97,4 +97,31 @@ describe("TraceRowList delegation affordance (issue #934)", () => {
     const affordances = container.querySelectorAll(".subtrace-open");
     expect(affordances).toHaveLength(1);
   });
+
+  // The affordance's click isolation (PR #946 review): the whole summary
+  // line is the row fold's click target, so opening the modal must not
+  // also toggle the fold. The positive control first -- clicking the
+  // summary line grows the expand block, proving the fold path is live in
+  // this composition (otherwise the negative half would be vacuous).
+  it("opening the modal leaves the row's summary fold collapsed", () => {
+    const { container } = renderWithProviders(
+      <TraceRowList
+        entries={[DELEGATION]}
+        renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+      />,
+    );
+    // The chevron toggle's click bubbles to the line's one toggle handler
+    // (TraceSummaryFold's contract); it stays addressable once the fold's
+    // block duplicates the summary text.
+    const toggles = container.querySelectorAll(".summary-fold-toggle");
+    expect(toggles).toHaveLength(1);
+    fireEvent.click(toggles[0]);
+    expect(container.querySelector(".summary-fold-block")).not.toBeNull();
+    fireEvent.click(toggles[0]);
+    expect(container.querySelector(".summary-fold-block")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /sub-trace/i }));
+    expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
+    // Opening the modal must not also toggle the row's summary fold.
+    expect(container.querySelector(".summary-fold-block")).toBeNull();
+  });
 });

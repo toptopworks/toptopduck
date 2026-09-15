@@ -785,7 +785,9 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         summary: summary.clone(),
         file_attachments,
         // An external runtime's bridge-originated call carries no sub-agent
-        // originator (delegation is built-in-only, ADR-0117 Decision 2).
+        // originator (delegation is built-in-only -- ADR-0117's v1
+        // calibration scopes the delegation family to the built-in runtime;
+        // external bridge faces carry none).
         origin_agent: None,
     };
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {

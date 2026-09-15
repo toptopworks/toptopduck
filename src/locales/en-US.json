@@ -622,7 +622,6 @@
   "thread.trace.thinkingToggle": "Thinking · {sec}s",
   "thread.trace.viewSubtrace": "Sub-trace",
   "thread.trace.subtraceTitle": "Sub-agent trace · {name}",
-  "thread.trace.subtraceEmpty": "The sub-agent recorded no rounds.",
   "thread.trace.toggle": "Trace · {count} {count, plural, one {call} other {calls}}",
   "viz.chartLabel": "Chart",
   "viz.error.invalidJson": "the spec is not valid JSON",

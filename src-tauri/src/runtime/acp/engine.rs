@@ -1488,7 +1488,9 @@ fn decide_permission(
         // is the registered-CLI card's channel); the field rides empty.
         file_attachments: Vec::new(),
         // An external CLI's permission request has no sub-agent originator
-        // (delegation is built-in-only, ADR-0117 Decision 2).
+        // (delegation is built-in-only -- ADR-0117's v1 calibration scopes
+        // the delegation family to the built-in runtime; external bridge
+        // faces carry none).
         origin_agent: None,
     };
     if allowed {

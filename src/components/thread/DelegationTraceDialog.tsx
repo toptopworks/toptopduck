@@ -27,18 +27,11 @@ import type { TraceEntry, TraceRound } from "../../types/thread";
 
 /** The dialog's scrollable body: one section per sub-round, the thinking
  *  fold + prose + tool string rendered exactly as the main trace renders
- *  them. Empty rounds degrade to an honest empty note. */
+ *  them. Never empty here: the dialog's self-guard below is the single
+ *  gate, and no producer emits an empty sub-rounds array (the round
+ *  convention is none-never-empty -- an empty-note branch at this layer
+ *  was unreachable dead code, removed per the #946 review). */
 function DelegationSubTraceBody({ rounds }: { rounds: ReadonlyArray<TraceRound> }) {
-  if (rounds.length === 0) {
-    return (
-      <p className="m-0 text-sm text-muted-foreground">
-        <FormattedMessage
-          id="thread.trace.subtraceEmpty"
-          defaultMessage="The sub-agent recorded no rounds."
-        />
-      </p>
-    );
-  }
   return (
     <div className="space-y-3">
       {rounds.map((round, i) => (

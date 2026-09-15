@@ -50,7 +50,7 @@ export function OperationBadge({ kind }: { kind: OperationKind }) {
 // The success/failure glyph at a row's head: Check (muted) on success,
 // TriangleAlert (destructive) on failure. The aria-label names the outcome so
 // the row is legible without color (ADR-0047 not-color-alone).
-export function SuccessGlyph({ success }: { success: boolean }) {
+function SuccessGlyph({ success }: { success: boolean }) {
   const intl = useIntl();
   return success ? (
     <span
@@ -136,9 +136,10 @@ export function TraceRow({
 // TurnRecord carries it) when collapsed. The chrome rides the shared
 // TraceList so the live exchange's row list renders identically (issue #620).
 // `renderSubTrace` is the delegation view-affordance injection (issue #934):
-// the settled trace's caller (TurnCard) supplies it for entries carrying a
-// nested sub-trace; the sub-trace viewer itself passes none (a sub-agent's
-// calls never carry their own sub-trace).
+// the settled trace's caller (TurnCard) supplies it for every row -- the
+// dialog self-guards to the rows carrying a nested sub-trace -- and the
+// sub-trace viewer itself passes none (a sub-agent's calls never carry
+// their own sub-trace).
 export function TraceRowList({
   entries,
   renderSubTrace,

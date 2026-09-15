@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { DelegationTraceDialog } from "./DelegationTraceDialog";
 import { OperationBadge, TraceRow } from "./TraceRow";
 import { TraceSummaryFold } from "./TraceSummaryFold";
-import type { LiveRoundRow } from "../../session/useTurnFlow";
+import { isSettledRow, traceEntryFromRow, type LiveRoundRow } from "../../session/useTurnFlow";
 import type { ApprovalResponse } from "../../types/approval";
 
 // The execution-trace renderers (ADR-0078, issue #297): the expanded tool-call
@@ -202,7 +202,7 @@ export function LiveRow({
         {resolvedLabel(intl, resolvedResponse)}
       </Badge>
     ) : null;
-  if (row.running || row.success === null) {
+  if (row.running || !isSettledRow(row)) {
     return (
       <li className="trace-row live-running py-0.5 text-xs">
         <TraceSummaryFold
@@ -229,15 +229,10 @@ export function LiveRow({
   // The delegation row's sub-trace rides the optimistic turn flow (issue
   // #934): the entry the settled row renders carries what the live
   // ToolCallCompleted delivered, sub-trace included, so the view affordance
-  // is present before any refetch could ever widen it.
-  const entry = {
-    name: row.name,
-    operation_kind: row.operationKind,
-    summary: row.summary,
-    success: row.success,
-    result_excerpt: row.resultExcerpt,
-    sub_rounds: row.subRounds,
-  };
+  // is present before any refetch could ever widen it. The projection is
+  // the one `traceEntryFromRow` mapping (PR #946 review: a second
+  // hand-written literal here is how the field list drifted).
+  const entry = traceEntryFromRow(row);
   return (
     <TraceRow
       entry={entry}

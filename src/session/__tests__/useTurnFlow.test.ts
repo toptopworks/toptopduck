@@ -386,6 +386,41 @@ describe("useTurnFlow", () => {
       expect(row).toMatchObject({ running: false, success: true, key: "call-0" });
     });
 
+    // The full live pipeline for a delegation row (PR #946 review Critical
+    // 1): the completion event's sub_rounds ride the phase handler into
+    // the grouped rounds through buildLiveRounds -- the one hop whose row
+    // literal once dropped the field. Driving the real hook puts the
+    // ingestion (applyPhase) and the grouping (buildLiveRounds) both under
+    // test; the pure projection onto the trace entry is the next test.
+    it("a completed delegation row carries its sub-rounds through the live pipeline", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "analyst", operation_kind: "execute", summary: "clean the sheet" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+          success: true,
+          result_excerpt: "",
+          sub_rounds: [{ text: "child prose", calls: [] }],
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        name: "analyst",
+        subRounds: [{ text: "child prose", calls: [] }],
+      });
+    });
+
     it("appends a completed row for a gate-denied call (no started event)", async () => {
       const { deps } = setup();
       vi.mocked(askQuestion).mockImplementation(
