@@ -682,8 +682,15 @@ impl LiveProviderConfig {
     /// The builtin agent-definitions startup window (issue #932, ADR-0117
     /// Decision 3): materialize / adopt / clean the shipped set against the
     /// registry under the write lock, persisting only when the mark moved.
-    /// Failures are the caller's to log-and-degrade (the next startup
-    /// retries).
+    /// The window also binds default enablement to the mark difference
+    /// (issue #948): every name it newly records -- first materialization,
+    /// the adopt self-heal, a shipped-set evolution addition -- enters the
+    /// enablement set, so a fresh install lands the builtin set enabled
+    /// (Decision 3's fallback). A previously recorded name never differs,
+    /// which keeps an explicit disable from reviving -- even when a deleted
+    /// file re-materializes under the record -- and migrates nothing on
+    /// existing installs. Failures are the caller's to log-and-degrade (the
+    /// next startup retries).
     pub fn materialize_builtin_agents(
         &self,
         agents_root: &std::path::Path,
@@ -693,7 +700,16 @@ impl LiveProviderConfig {
             .lock()
             .expect("app-config write_lock poisoned");
         let mut cfg = self.load_for_write()?;
+        let mark_before = cfg.materialized_builtin_agents.clone();
         if crate::agents::builtin::reconcile(agents_root, &mut cfg.materialized_builtin_agents) {
+            // A non-empty difference implies the reconcile reported dirty,
+            // so an enablement write never persists without the mark write
+            // landing beside it (mark-only dirt -- a dropped stale record,
+            // a file rewritten under its record -- persists with no
+            // enablement change).
+            for name in cfg.materialized_builtin_agents.difference(&mark_before) {
+                cfg.enabled_agents.insert(name.clone());
+            }
             self.store_inner(cfg)?;
         }
         Ok(())
@@ -2466,6 +2482,92 @@ mod tests {
             .expect("rename a disabled name");
         assert!(!stored.enabled_agents.contains("other"));
         assert!(!stored.enabled_agents.contains("ghost"));
+    }
+
+    /// The window's default-enable binding (issue #948): a fresh install
+    /// materializes the shipped set and the newly recorded names land in
+    /// the enablement set -- ADR-0117 Decision 3's fallback (zero custom
+    /// entries still give the main turn the delegation face).
+    #[test]
+    fn materialize_builtin_agents_lands_newly_recorded_names_enabled() {
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        live.materialize_builtin_agents(agents.path())
+            .expect("startup window");
+        assert!(agents.path().join("general-purpose.md").exists());
+        assert!(live.load().enabled_agents.contains("general-purpose"));
+    }
+
+    /// An explicit disable cannot revive: the toggle touches only the
+    /// enablement set (never the mark), so the next window's difference is
+    /// empty -- and stays empty when a deleted file re-materializes under
+    /// the recorded mark.
+    #[test]
+    fn materialize_builtin_agents_does_not_revive_an_explicit_disable() {
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        live.materialize_builtin_agents(agents.path())
+            .expect("startup window");
+        live.set_agent_enabled("general-purpose", false)
+            .expect("disable the builtin");
+
+        live.materialize_builtin_agents(agents.path())
+            .expect("second window");
+        assert!(!live.load().enabled_agents.contains("general-purpose"));
+
+        // The disabled-name delete-and-rematerialize path: the file rewrites
+        // under the existing record, so the difference stays empty.
+        std::fs::remove_file(agents.path().join("general-purpose.md"))
+            .expect("remove the definition");
+        live.materialize_builtin_agents(agents.path())
+            .expect("third window");
+        assert!(agents.path().join("general-purpose.md").exists());
+        assert!(!live.load().enabled_agents.contains("general-purpose"));
+    }
+
+    /// The symmetric delete-and-rematerialize edge for an enabled name: the
+    /// file rewrites under the recorded mark (difference empty) and the
+    /// enablement entry rides the config through untouched.
+    #[test]
+    fn materialize_builtin_agents_keeps_an_enabled_name_through_rematerialize() {
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        live.materialize_builtin_agents(agents.path())
+            .expect("startup window");
+        std::fs::remove_file(agents.path().join("general-purpose.md"))
+            .expect("remove the definition");
+        live.materialize_builtin_agents(agents.path())
+            .expect("second window");
+        assert!(agents.path().join("general-purpose.md").exists());
+        assert!(live.load().enabled_agents.contains("general-purpose"));
+    }
+
+    /// The adopt self-heal enables too: shipped content on disk with the
+    /// mark missing (an interrupted persist -- the store lost both the mark
+    /// and its enablement) is adopted into both sets when the window runs.
+    #[test]
+    fn materialize_builtin_agents_enables_an_adopted_shipped_file() {
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        live.materialize_builtin_agents(agents.path())
+            .expect("startup window");
+        // Rewind to the interrupted-persist shape: the shipped file stays,
+        // the mark and its enablement entry are gone.
+        {
+            let _guard = live
+                .write_lock
+                .lock()
+                .expect("app-config write_lock poisoned");
+            let mut cfg = live.load_for_write().expect("load");
+            cfg.materialized_builtin_agents.clear();
+            cfg.enabled_agents.clear();
+            live.store_inner(cfg).expect("rewind the record");
+        }
+        live.materialize_builtin_agents(agents.path())
+            .expect("second window");
+        let cfg = live.load();
+        assert!(cfg.materialized_builtin_agents.contains("general-purpose"));
+        assert!(cfg.enabled_agents.contains("general-purpose"));
     }
 
     // --- last model posture (issue #581, ADR-0100) --------------------------
