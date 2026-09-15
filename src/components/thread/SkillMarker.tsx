@@ -105,13 +105,6 @@ export function SkillMarker({
     : event.kind === "Unmount"
       ? "text-muted-foreground"
       : "text-primary"; // Mount | Activate.
-  // The MCP declaration is registry state, not carried by the event.
-  // Disclosed only on a Mount whose skill is still carried -- the declaration
-  // is operative only while the skill is mounted; an Unmount's declaration is
-  // no longer in force, and a missing skill has no declaration to read.
-  // (The `skill` truthiness check covers both "not wired" and "wired but
-  // missing" -- either way `skill` is undefined and the guard short-circuits.)
-  const mcpServers = event.kind === "Mount" && skill ? skill.mcp_servers : [];
   const missingSuffix = missing ? (
     <FormattedMessage
       id="thread.skill.missingSuffix"
@@ -128,31 +121,18 @@ export function SkillMarker({
     event.kind === "Activate" && event.actor === "Agent" ? (
       <FormattedMessage id="thread.skill.byAgent" defaultMessage=" · by Agent" />
     ) : null;
-  const mcpDetail = mcpServers.length > 0 ? (
-    <FormattedMessage
-      id="thread.skill.declaresMcp"
-      defaultMessage="Declares MCP: {servers}"
-      values={{ servers: mcpServers.join(", ") }}
-    />
-  ) : null;
   // TriangleAlert overrides the kind glyph on drift; the kind glyph stays
   // when the skill is still in the registry.
   const MarkerIcon = missing ? TriangleAlert : Icon;
   // The tooltip carries the verbatim name + drift suffix (so a marker
   // truncated by the fixed skill-row width still discloses the state on
-  // hover) plus the MCP declaration when operative. Declared once so the
-  // visible copy and the tooltip copy cannot drift apart.
+  // hover). Declared once so the visible copy and the tooltip copy cannot
+  // drift apart.
   const tooltipText = (
     <>
       {text}
       {actorNote}
       {missingSuffix}
-      {mcpDetail !== null && (
-        <>
-          <br />
-          {mcpDetail}
-        </>
-      )}
     </>
   );
   return (

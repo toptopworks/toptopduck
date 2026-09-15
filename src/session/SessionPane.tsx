@@ -367,8 +367,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // Stale datasets are excluded -- they cannot be the target of a new question.
   const datasetLabels = s.datasets.filter((d) => !d.stale);
   // Skill registry keyed by spec name (ADR-0086, issue #366): the thread rail's
-  // Skill lifecycle markers look up their name here to surface declared MCP
-  // servers + flag a name the registry no longer carries (resume drift). The
+  // Skill lifecycle markers look up their name here to flag a name the
+  // registry no longer carries (resume drift). The
   // query reuses the ComposerContextPanel cache (skillKeys.all()) -- the
   // registry is process-global (not per-session), so every pane shares one
   // IPC round-trip. A failed / loading read leaves data undefined, so

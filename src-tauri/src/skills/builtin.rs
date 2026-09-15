@@ -3,10 +3,9 @@
 //! registration entry (same name, 1:1).
 //!
 //! The shipped definition set is a compile-time constant mirroring
-//! [`crate::cli_tools::builtin::BUILTIN_DEFINITIONS`]: each entry names its
-//! CLI tool through the declarative frontmatter key
-//! `metadata.toptopduck_cli_tools` (issue #674) and carries a per-locale
-//! (en-US / zh-CN) description + body. The prose is app-curated -- a skill
+//! [`crate::cli_tools::builtin::BUILTIN_DEFINITIONS`]: each entry pairs 1:1
+//! with its CLI tool by name and carries a per-locale (en-US / zh-CN)
+//! description + body. The prose is app-curated -- a skill
 //! body enters the system prompt, so it is a trust boundary: a third-party
 //! `SKILL.md` is never auto-absorbed (the manual import flow stays the only
 //! path for those; ADR-0109 Decision 5).
@@ -61,7 +60,7 @@ impl BuiltinSkillDefinition {
     }
 
     /// The rendered SKILL.md bytes for a locale: the spec frontmatter
-    /// (`name` + `description`) + the declarative CLI reference + the body.
+    /// (`name` + `description`) + the body.
     /// Deterministic by construction (the mapping is built in a fixed order
     /// and serde_yaml preserves insertion order), so hashing the output is
     /// the baseline anchor.
@@ -76,7 +75,6 @@ impl BuiltinSkillDefinition {
             serde_yaml::Value::String("description".into()),
             serde_yaml::Value::String(prose.description.into()),
         );
-        frontmatter::set_cli_tools(&mut fm, &[self.name.to_string()]);
         frontmatter::render_skill_md(&fm, prose.body)
     }
 
@@ -606,10 +604,6 @@ mod tests {
                     frontmatter::get_string(&parsed.frontmatter, "name").unwrap(),
                     def.name
                 );
-                assert_eq!(
-                    frontmatter::cli_tools(&parsed.frontmatter),
-                    vec![def.name.to_string()]
-                );
                 assert!(!parsed.body.trim().is_empty(), "body must be non-blank");
             }
         }
@@ -950,7 +944,7 @@ mod tests {
         // unedited posture) but the record hash matches no CURRENT shipped
         // render. Reachable in production by a version whose prose evolved.
         let stale = format!(
-            "---\nname: pandoc\ndescription: {}\nmetadata:\n  toptopduck_cli_tools: pandoc\n---\nOld body.\n",
+            "---\nname: pandoc\ndescription: {}\n---\nOld body.\n",
             "older description"
         );
         std::fs::write(&file, &stale).expect("write stale body");

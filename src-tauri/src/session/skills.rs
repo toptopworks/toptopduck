@@ -398,8 +398,6 @@ impl SkillActivationFixture {
             description: format!("{name} description"),
             body: body.to_string(),
             content_hash: format!("{name}-hash"),
-            mcp_servers: Vec::new(),
-            cli_tools: Vec::new(),
         }
     }
 

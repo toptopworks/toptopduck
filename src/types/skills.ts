@@ -3,11 +3,8 @@
 // `<root>/<name>/SKILL.md`; identity IS the spec `name` (kebab-case, <= 64,
 // equals the directory name). `acquired` is loader-derived (linked = symlink /
 // junction onto an external source, local = real directory); the frontmatter
-// carries the prompt fragment (the body) + optional MCP server references
-// (the `metadata.toptopduck_mcp_servers` extension key) + optional CLI tool
-// references (the `metadata.toptopduck_cli_tools` extension key). The settings
-// page edits local skills in full and shows linked skills read-only + "open
-// source location".
+// carries the prompt fragment (the body). The settings page edits local skills
+// in full and shows linked skills read-only + "open source location".
 
 // Loader-derived link/real-directory posture. Crosses IPC as the bare
 // snake_case variant (mirrors the Rust `#[serde(rename_all = "snake_case")]`).
@@ -28,12 +25,6 @@ export interface SkillEntry {
   license: string | null;
   // The spec compatibility field, when present.
   compatibility: string | null;
-  // The ids under metadata.toptopduck_mcp_servers (empty when absent).
-  mcp_servers: string[];
-  // The names under metadata.toptopduck_cli_tools (issue #674, ADR-0108
-  // Decision 7; empty when absent). Declarative only -- a reference never
-  // configures or enables the tool.
-  cli_tools: string[];
   // The Markdown body after the frontmatter -- the prompt fragment.
   body: string;
   // The resolved link target for `linked` skills (the "open source location"
@@ -94,11 +85,6 @@ export interface SkillUpdate {
   // Blank / null removes the key from frontmatter.
   license: string | null;
   compatibility: string | null;
-  // Empty removes the metadata.toptopduck_mcp_servers extension key.
-  mcp_servers: string[];
-  // Empty removes the metadata.toptopduck_cli_tools extension key (issue
-  // #674) -- the exact mcp_servers semantics.
-  cli_tools: string[];
   // Required non-blank (a skill without a prompt fragment has nothing to
   // inject on mount).
   body: string;
@@ -140,7 +126,7 @@ export type SkillLifecycleActor = "User" | "Agent";
 // A skill lifecycle event (ADR-0086, issue #363; ADR-0110, issue #698):
 // first-class timeline slot, never a turn. Carries only the spec `name`
 // (the stable identity) plus, for an Activate, the initiation actor -- the
-// prompt fragment / MCP references live in the registry and are looked up at
+// prompt fragment lives in the registry and is looked up at
 // assembly time, never snapshotted into the timeline. Mirrors the Rust
 // SkillLifecycleEvent. The mounted and activated sets are folded from the
 // event sequence, never stored as snapshots.

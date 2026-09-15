@@ -86,8 +86,8 @@ pub enum SkillLifecycleActor {
 /// A skill lifecycle event (ADR-0086, issue #363; ADR-0110, issue #698):
 /// first-class in the thread, never a turn. Carries only the spec `name`
 /// (the skill's stable identity, equal to its directory name) plus, for an
-/// `Activate`, the initiation actor -- the prompt fragment / MCP references
-/// live in the registry and are looked up at assembly time, never snapshotted
+/// `Activate`, the initiation actor -- the prompt fragment lives in the
+/// registry and is looked up at assembly time, never snapshotted
 /// into the timeline (a skill's content evolution is captured per-turn by
 /// [`crate::model::SkillProvenance::content_hash`], not by
 /// lifecycle events). Isomorphic to [`SourceLifecycleEvent`]: always visible,

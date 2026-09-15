@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 
 import { SkillsSection } from "../SkillsSection";
+import { chooseOption, openSelect } from "./helpers";
 import { TooltipProvider } from "../../ui/tooltip";
 import { listSkills, restoreBuiltinSkill } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
@@ -31,8 +32,6 @@ const builtinSkill: SkillEntry = {
   acquired: "builtin",
   license: null,
   compatibility: null,
-  mcp_servers: [],
-  cli_tools: ["pandoc"],
   body: "Use the `pandoc` tool…\n",
   link_target: null,
   content_hash: "hash-of-shipped-body",
@@ -69,8 +68,6 @@ function renderSection(baselines: Record<string, { hash: string; locale: string 
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
           <SkillsSection
-            mcpServerLabels={{}}
-            configuredCliIds={["pandoc"]}
             builtinSkillBaselines={baselines}
             onAppConfigSync={onSync}
           />
@@ -141,10 +138,15 @@ describe("SkillsSection builtin rows (issue #677)", () => {
   it("filters builtin rows through the acquired filter", async () => {
     renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
     await screen.findByTestId("skill-row");
-    const filter = document.getElementById("skills-acquired-filter") as HTMLSelectElement;
-    fireEvent.change(filter, { target: { value: "builtin" } });
+    // Radix Select opens on a pointer sequence and commits on an option
+    // click (the AgentsSection filter posture) -- fireEvent.change is
+    // inert on it.
+    const filter = screen.getByLabelText("Filter by skill type");
+    openSelect(filter);
+    chooseOption("System");
     expect(screen.getByTestId("skill-row")).toBeInTheDocument();
-    fireEvent.change(filter, { target: { value: "local" } });
+    openSelect(filter);
+    chooseOption("Local");
     expect(screen.queryByTestId("skill-row")).toBeNull();
   });
 });

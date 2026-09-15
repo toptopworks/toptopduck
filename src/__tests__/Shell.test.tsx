@@ -1569,8 +1569,6 @@ function skillEntry(name: string): SkillEntry {
     acquired: "local",
     license: null,
     compatibility: null,
-    mcp_servers: [],
-    cli_tools: [],
     body: "",
     link_target: null,
     content_hash: "ab".repeat(32),
