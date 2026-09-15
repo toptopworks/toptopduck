@@ -54,6 +54,9 @@ export interface LiveCall {
   /** null until the completion event lands (a running dispatch). */
   success: boolean | null;
   resultExcerpt: string;
+  /** The delegation entry's nested sub-rounds (issue #934), delivered by the
+   *  completion event; undefined for an ordinary call. */
+  subRounds?: TraceRound[];
 }
 
 /** One row of the in-flight turn's live trace: a tool call MERGED with its
@@ -83,10 +86,16 @@ export interface LiveTraceRow {
     requestId: string;
     response: ApprovalResponse | null;
     fileAttachments?: FileAttachment[];
+    /** The delegating sub-agent's name (issue #934): the card renders it as
+     *  "sub-agent X wants to call Y". undefined for a main-loop call. */
+    originAgent?: string;
   } | null;
   running: boolean;
   success: boolean | null;
   resultExcerpt: string;
+  /** The delegation entry's nested sub-rounds (issue #934), carried through
+   *  the merge so the settled row renders the view affordance. */
+  subRounds?: TraceRound[];
 }
 
 /** One live round's row: a `LiveTraceRow` with the round membership stripped
@@ -170,10 +179,12 @@ export function mergeLiveTrace(
           requestId: match.requestId,
           response: match.status.kind === "resolved" ? match.status.response : null,
           fileAttachments: match.fileAttachments,
+          originAgent: match.originAgent,
         },
         running: call.running,
         success: call.success,
         resultExcerpt: call.resultExcerpt,
+        subRounds: call.subRounds,
       });
     } else {
       rows.push({
@@ -187,6 +198,7 @@ export function mergeLiveTrace(
         running: call.running,
         success: call.success,
         resultExcerpt: call.resultExcerpt,
+        subRounds: call.subRounds,
       });
     }
   }
@@ -208,6 +220,7 @@ export function mergeLiveTrace(
         requestId: a.requestId,
         response: a.status.kind === "resolved" ? a.status.response : null,
         fileAttachments: a.fileAttachments,
+        originAgent: a.originAgent,
       },
       running: false,
       success: null,
@@ -277,6 +290,7 @@ export function liveRoundsToTrace(rounds: ReadonlyArray<LiveRound>): TraceRound[
         summary: row.summary,
         success: row.success,
         result_excerpt: row.resultExcerpt,
+        sub_rounds: row.subRounds,
       });
     }
     // A round with prose or thinking but no completed calls still records
@@ -396,6 +410,7 @@ function callRow(
   running: boolean,
   success: boolean | null,
   resultExcerpt: string,
+  subRounds?: TraceRound[],
 ): LiveCall {
   return {
     key: `call-${seq}`,
@@ -404,6 +419,7 @@ function callRow(
     operationKind,
     summary,
     running,
+    subRounds,
     success,
     resultExcerpt,
   };
@@ -471,7 +487,15 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
       ...live,
       calls: live.calls.map((c, i) =>
         i === idx
-          ? { ...c, running: false, success: entry.success, resultExcerpt: entry.result_excerpt }
+          ? {
+              ...c,
+              running: false,
+              success: entry.success,
+              resultExcerpt: entry.result_excerpt,
+              // The delegation entry's nested sub-trace rides the completion
+              // event (issue #934); undefined for an ordinary call.
+              subRounds: entry.sub_rounds,
+            }
           : c,
       ),
     };
@@ -490,6 +514,7 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
         false,
         entry.success,
         entry.result_excerpt,
+        entry.sub_rounds,
       ),
     ],
   };

@@ -306,6 +306,10 @@ pub struct ApprovalRequestBody {
     /// as `[]` on every card.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub file_attachments: Vec<FileAttachment>,
+    /// The call's originator annotation (issue #934): the delegating
+    /// sub-agent's name, `None` for a main-loop / external-runtime call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_agent: Option<String>,
 }
 
 /// Hard cap on each file attachment's content in `char`s (issue #672). The
@@ -362,6 +366,10 @@ pub struct ApprovalRequestPayload {
     /// #672); omitted when empty (calls without file-delivered parameters).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub file_attachments: Vec<FileAttachment>,
+    /// The call's originator annotation (issue #934): the delegating
+    /// sub-agent's name; omitted for a main-loop / external-runtime call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_agent: Option<String>,
 }
 
 /// Full `approval-resolved` event payload -- the frontend uses this to flip a
@@ -426,6 +434,12 @@ pub struct ApprovalRequest {
     /// File-delivery values for the card's expand-on-demand view; empty for
     /// every call shape without file-delivered parameters (built-ins, MCP).
     pub file_attachments: Vec<FileAttachment>,
+    /// The call's originator annotation (ADR-0117 Decision 6, issue #934):
+    /// the delegating sub-agent's name when the call rides a sub-agent's
+    /// tool face, `None` for every main-loop / external-runtime call. The
+    /// card renders it ("sub-agent X wants to call Y") so the approver
+    /// knows WHO is asking, not just what.
+    pub origin_agent: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +607,7 @@ impl ApprovalState {
             tool: request.key.tool.clone(),
             operation_kind: request.operation_kind,
             summary: truncate_summary(&request.summary, SUMMARY_MAX_CHARS),
+            origin_agent: request.origin_agent.clone(),
             // The expand-on-demand contents ride the same broadcast as the
             // summary, so each is capped the same way (issue #672) -- the
             // truncation is visible via the ellipsis, never a silent cut.
@@ -948,6 +963,7 @@ mod tests {
             operation_kind: OperationKind::Read,
             summary: "SELECT 1".into(),
             file_attachments: Vec::new(),
+            origin_agent: None,
         };
         let outcome = state.gate(req, &sink, &cancel).expect("builtin allowed");
         assert_eq!(outcome, GateOutcome::Allow);
@@ -967,6 +983,7 @@ mod tests {
             operation_kind: OperationKind::Network,
             summary: "GET /x".into(),
             file_attachments: Vec::new(),
+            origin_agent: None,
         };
         let outcome = state.gate(req, &sink, &cancel).expect("trusted allowed");
         assert_eq!(outcome, GateOutcome::Allow);
@@ -984,10 +1001,66 @@ mod tests {
             operation_kind: OperationKind::Network,
             summary: "GET /x".into(),
             file_attachments: Vec::new(),
+            origin_agent: None,
         };
         let outcome = state.gate(req, &sink, &cancel).expect("no-confirm allowed");
         assert_eq!(outcome, GateOutcome::Allow);
         assert_eq!(sink.request_count(), 0);
+    }
+
+    /// The originator annotation rides the gate to the card (issue #934): a
+    /// sub-agent-originated call's request body carries its delegating
+    /// sub-agent's name (so the card reads "sub-agent X wants to call Y"),
+    /// a main-loop call omits the field entirely (serde skip, not null).
+    #[test]
+    fn gate_carries_the_origin_agent_annotation_onto_the_card() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: Some("analyst".into()),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        let body = sink.last_request().expect("body recorded");
+        assert_eq!(
+            body.origin_agent.as_deref(),
+            Some("analyst"),
+            "the delegating sub-agent's name rides the card"
+        );
+        // The wire form carries the annotation under its serde-skip name --
+        // present for an originated call, absent for a plain one.
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"origin_agent\":\"analyst\""), "{json}");
+        let plain = ApprovalRequestBody {
+            request_id: "r".into(),
+            server: "acme".into(),
+            tool: "fetch".into(),
+            operation_kind: OperationKind::Network,
+            summary: "GET /x".into(),
+            file_attachments: Vec::new(),
+            origin_agent: None,
+        };
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("origin_agent"));
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        assert_eq!(
+            handle.join().expect("gate thread").expect("allow"),
+            GateOutcome::Allow
+        );
     }
 
     #[test]
@@ -1009,6 +1082,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             (
                 state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
@@ -1063,6 +1137,7 @@ mod tests {
                         content: "short".into(),
                     },
                 ],
+                origin_agent: None,
             };
             (
                 state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
@@ -1108,6 +1183,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1131,6 +1207,7 @@ mod tests {
             operation_kind: OperationKind::Network,
             summary: "GET /y".into(),
             file_attachments: Vec::new(),
+            origin_agent: None,
         };
         let outcome2 = state.gate(req, &sink2, &cancel2).expect("trusted now");
         assert_eq!(outcome2, GateOutcome::Allow);
@@ -1152,6 +1229,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1182,6 +1260,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1224,6 +1303,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_arc_c, &cancel_c)
         });
@@ -1246,6 +1326,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1310,6 +1391,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             a_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1323,6 +1405,7 @@ mod tests {
             operation_kind: OperationKind::Network,
             summary: "GET /y".into(),
             file_attachments: Vec::new(),
+            origin_agent: None,
         };
         let b_cancel = CancelToken::new();
         let b_sink = RecordingSink::default();
@@ -1363,6 +1446,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1408,6 +1492,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1577,6 +1662,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "S".repeat(1000),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });

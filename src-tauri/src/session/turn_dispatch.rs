@@ -208,6 +208,7 @@ pub(crate) fn dispatch_gated_call(
     read: &crate::skills::read::SkillReadGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
+    origin: Option<&str>,
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), DispatchAbort> {
     // Issue #321: guard the dispatch against a panic. The materialize path
     // registers result_N partway through try_materialize; a panic in any
@@ -228,6 +229,7 @@ pub(crate) fn dispatch_gated_call(
             read,
             gate,
             on_phase,
+            origin,
         )
     }) {
         Err(detail) => Err(DispatchAbort::Panic(Termination::Transient(detail))),
@@ -247,6 +249,7 @@ fn dispatch_gated_call_inner(
     read: &crate::skills::read::SkillReadGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
+    origin: Option<&str>,
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
     // Meta-tool trio dispatch (ADR-0105): the classification -- list / search
     // run locally against the aggregator's catalog (read-only, short of the
@@ -334,6 +337,10 @@ fn dispatch_gated_call_inner(
         operation_kind,
         summary: summary.clone(),
         file_attachments,
+        // The originator annotation (issue #934): the delegating sub-agent's
+        // name rides the gate so the approval card reads "sub-agent X wants
+        // to call Y"; a main-loop call carries none.
+        origin_agent: origin.map(str::to_string),
     };
     // ADR-0080: every tool call passes the gate before dispatch. Built-in tools
     // classify Allow (zero approval); external tools would suspend here.
@@ -1214,6 +1221,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("the failing explore dispatches");
         assert!(result.is_error, "the unknown-table explore failed");
@@ -1262,6 +1270,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("the materialize dispatches");
         let entry = entry.expect("a dispatched call records an entry");
@@ -1341,6 +1350,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut forward,
+            None,
         )
         .expect("a denial is a tool result, not an abort");
         responder.join().expect("responder thread");
@@ -1426,6 +1436,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("the CLI call dispatches");
         assert!(
@@ -1541,6 +1552,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("a denial is a tool result, not an abort");
         responder.join().expect("responder thread");
@@ -1623,6 +1635,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut forward,
+            None,
         )
         .expect("a denial is a tool result, not an abort");
         responder.join().expect("responder thread");
@@ -1709,6 +1722,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("an allowed call dispatches");
         // The unreachable transport is a route failure -- a tool-level error
@@ -1837,6 +1851,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut |_| {},
+            None,
         )
         .expect_err("a dispatch panic aborts");
         match &abort {
@@ -2083,6 +2098,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("the local meta-tool serves");
         assert!(!result.is_error, "a catalog read succeeds");
@@ -2149,6 +2165,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("the activation serves");
         assert!(!result.is_error, "an activation is a success");
@@ -2220,6 +2237,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("a malformed activation still resolves to a result");
         assert!(result.is_error, "a malformed input is refused");
@@ -2281,6 +2299,7 @@ mod tests {
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
+            None,
         )
         .expect("a malformed meta call is the call's own error, not an abort");
         assert!(result.is_error, "a missing query is an error result");

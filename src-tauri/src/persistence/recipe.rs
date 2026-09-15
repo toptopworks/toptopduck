@@ -212,6 +212,16 @@ pub struct RecipeTraceEntry {
     /// success payload is rebuilt on resume anyway), so persisting it would
     /// add noise without value.
     pub result_excerpt: String,
+    /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
+    /// #934): the sub-agent's rounds persisted under the SAME slim projection
+    /// the main rounds take (a successful sub-call's excerpt empties, a
+    /// failed one keeps its bounded message) -- no full-tool-result channel
+    /// opens for the sub-trace (the .duck stays a bounded-text recipe).
+    /// Absent for every ordinary call and for pre-#934 sessions (serde
+    /// default). The nesting is physically depth 1 (the sub-face excludes
+    /// every delegation tool), so a nested entry never itself carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_rounds: Option<Vec<RecipeTraceRound>>,
 }
 
 /// One round of a turn's persisted execution trace (ADR-0078, grouped per
@@ -354,6 +364,7 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
         summary: truncate_trace_summary(sql),
         success: true,
         result_excerpt: String::new(),
+        sub_rounds: None,
     };
     // Failure-message guard (issue #316): shared with the live trace mapping
     // (`RecipeTraceEntry::from_live_trace`) -- a failed entry must carry

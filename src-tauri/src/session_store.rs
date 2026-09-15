@@ -1124,6 +1124,7 @@ mod tests {
                 operation_kind: OperationKind::Network,
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
+                origin_agent: None,
             };
             approval_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });

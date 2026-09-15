@@ -784,6 +784,9 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         operation_kind,
         summary: summary.clone(),
         file_attachments,
+        // An external runtime's bridge-originated call carries no sub-agent
+        // originator (delegation is built-in-only, ADR-0117 Decision 2).
+        origin_agent: None,
     };
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
         Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),

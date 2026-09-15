@@ -1487,6 +1487,9 @@ fn decide_permission(
         // ACP permission requests carry no file-delivery values (issue #672
         // is the registered-CLI card's channel); the field rides empty.
         file_attachments: Vec::new(),
+        // An external CLI's permission request has no sub-agent originator
+        // (delegation is built-in-only, ADR-0117 Decision 2).
+        origin_agent: None,
     };
     if allowed {
         // The policy auto-allows; pick the first allow_* option.

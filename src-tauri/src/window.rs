@@ -563,6 +563,14 @@ mod tests {
     fn window_history_carries_no_trace_data_adr_0078() {
         let trace_failure_excerpt = "SENTINEL_TRACE_FAILURE";
         let trace_summary = "SENTINEL_TRACE_SUMMARY";
+        // The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
+        // #934) rides the same exclusion: the sub-agent's rounds live under
+        // the delegation entry in the persisted trace, and NONE of it -- prose
+        // or sub-call summaries or sub-call failure excerpts -- may reach the
+        // LLM window any more than the main trace's rows may.
+        let sub_prose = "SENTINEL_SUB_PROSE";
+        let sub_summary = "SENTINEL_SUB_SUMMARY";
+        let sub_failure = "SENTINEL_SUB_FAILURE";
         let poisoned_trace = vec![TraceRound {
             thinking: None,
             text: None,
@@ -573,6 +581,7 @@ mod tests {
                     summary: trace_summary.into(),
                     success: false,
                     result_excerpt: trace_failure_excerpt.into(),
+                    sub_rounds: None,
                 },
                 TraceEntryView {
                     name: "materialize".into(),
@@ -580,6 +589,26 @@ mod tests {
                     summary: trace_summary.into(),
                     success: true,
                     result_excerpt: String::new(),
+                    sub_rounds: None,
+                },
+                TraceEntryView {
+                    name: "analyst".into(),
+                    operation_kind: OperationKind::Execute,
+                    summary: trace_summary.into(),
+                    success: true,
+                    result_excerpt: String::new(),
+                    sub_rounds: Some(vec![TraceRound {
+                        thinking: None,
+                        text: Some(sub_prose.into()),
+                        calls: vec![TraceEntryView {
+                            name: "explore".into(),
+                            operation_kind: OperationKind::Read,
+                            summary: sub_summary.into(),
+                            success: false,
+                            result_excerpt: sub_failure.into(),
+                            sub_rounds: None,
+                        }],
+                    }]),
                 },
             ],
         }];
@@ -618,6 +647,10 @@ mod tests {
             !full.contains(trace_summary),
             "ADR-0078: a trace summary leaked into an in-window Full TurnPayload:\n{full}"
         );
+        assert!(
+            !full.contains(sub_prose) && !full.contains(sub_summary) && !full.contains(sub_failure),
+            "ADR-0117: sub-trace detail leaked into an in-window Full TurnPayload:\n{full}"
+        );
 
         // Far-window (Summary payload): 21 turns, turn 1 carries the poisoned
         // trace and falls out of the N=20 window into a Summary.
@@ -632,6 +665,12 @@ mod tests {
         assert!(
             !summary.contains(trace_summary),
             "ADR-0078: a trace summary leaked into a far-window Summary TurnPayload:\n{summary}"
+        );
+        assert!(
+            !summary.contains(sub_prose)
+                && !summary.contains(sub_summary)
+                && !summary.contains(sub_failure),
+            "ADR-0117: sub-trace detail leaked into a far-window Summary TurnPayload:\n{summary}"
         );
     }
 

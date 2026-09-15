@@ -33,6 +33,10 @@ export interface ApprovalEntry {
    * the approval-time snapshot of each file-delivered parameter. undefined
    * for calls without them (the backend omits the field). */
   fileAttachments?: FileAttachment[];
+  /** The call's originator (issue #934): the delegating sub-agent's name.
+   * undefined for a main-loop / external-runtime call (the backend omits the
+   * field); the card renders it as "sub-agent X wants to call Y". */
+  originAgent?: string;
   status: { kind: "pending" } | { kind: "resolved"; response: ApprovalResponse };
 }
 
@@ -82,6 +86,7 @@ export function useApprovalEvents(): UseApprovalEvents {
           operationKind: ev.operation_kind,
           summary: ev.summary,
           fileAttachments: ev.file_attachments,
+          originAgent: ev.origin_agent,
           status: { kind: "pending" },
         };
         const existing = prev.get(ev.session_id) ?? [];

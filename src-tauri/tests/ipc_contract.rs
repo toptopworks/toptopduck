@@ -787,6 +787,7 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
             summary: "SELECT count(*) FROM orders".into(),
             success: false,
             result_excerpt: "no such table".into(),
+            sub_rounds: None,
         },
         r#"{"name":"explore","operation_kind":"read","summary":"SELECT count(*) FROM orders","success":false,"result_excerpt":"no such table"}"#,
     );
@@ -1150,6 +1151,7 @@ fn turn_phase_serializes_externally_tagged() {
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            sub_rounds: None,
         }),
         r#"{"ToolCallCompleted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1","success":true,"result_excerpt":""}}"#,
     );
@@ -1193,6 +1195,7 @@ fn turn_record_carries_round_grouped_trace_and_timestamps() {
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            sub_rounds: None,
         }],
     };
     let record = TurnRecord {

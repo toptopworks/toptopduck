@@ -585,6 +585,14 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
             summary: entry.summary.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
+            // The nested sub-trace (ADR-0117 Decision 6, issue #934) resumes
+            // verbatim: the sub-rounds map through the round-level mapping
+            // below, so a reopened session renders the sub-trace under the
+            // delegation entry exactly as the live turn recorded it.
+            sub_rounds: entry
+                .sub_rounds
+                .as_ref()
+                .map(|rounds| rounds.iter().map(TraceRound::from).collect()),
         }
     }
 }
@@ -1305,6 +1313,66 @@ mod tests {
     }
 
     // --- phase 2: resolve_active --------------------------------------------
+
+    /// The nested sub-trace round-trips from the recipe (ADR-0117 Decision 6,
+    /// issue #934): a persisted delegation entry's sub-rounds survive the
+    /// .duck serialization verbatim and rebuild onto the display view under
+    /// the delegation entry -- a reopened session renders the sub-trace the
+    /// live turn recorded, and a pre-#934 entry (no `sub_rounds` key on the
+    /// wire) resumes without one.
+    #[test]
+    fn the_nested_sub_trace_round_trips_from_the_recipe() {
+        use crate::approval::OperationKind;
+        use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
+
+        let persisted = RecipeTraceEntry {
+            name: "analyst".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "clean the sheet".into(),
+            success: false,
+            result_excerpt: "no such table".into(),
+            sub_rounds: Some(vec![RecipeTraceRound {
+                thinking: None,
+                text: Some("child prose".into()),
+                calls: vec![RecipeTraceEntry {
+                    name: "explore".into(),
+                    operation_kind: OperationKind::Read,
+                    summary: "SELECT 1".into(),
+                    success: true,
+                    result_excerpt: String::new(),
+                    sub_rounds: None,
+                }],
+            }]),
+        };
+        // The .duck wire round-trip: sub_rounds serialize under the
+        // delegation entry and deserialize back field-identical.
+        let json = serde_json::to_value(&persisted).expect("entry serializes");
+        let back: RecipeTraceEntry = serde_json::from_value(json).expect("entry deserializes");
+        assert_eq!(back, persisted, "the sub-trace round-trips verbatim");
+
+        // The resume projection: the display view carries the sub-rounds
+        // under the delegation entry.
+        let view = TraceEntryView::from(&back);
+        let rounds = view.sub_rounds.expect("sub-rounds resume");
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].text.as_deref(), Some("child prose"));
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(rounds[0].calls[0].success);
+
+        // A pre-#934 entry (no sub_rounds key on the wire) resumes without
+        // one -- the serde default degrades honestly.
+        let legacy_json = serde_json::json!({
+            "name": "explore",
+            "operation_kind": "read",
+            "summary": "SELECT 1",
+            "success": true,
+            "result_excerpt": "",
+        });
+        let legacy: RecipeTraceEntry =
+            serde_json::from_value(legacy_json).expect("legacy entry deserializes");
+        assert!(legacy.sub_rounds.is_none());
+        assert!(TraceEntryView::from(&legacy).sub_rounds.is_none());
+    }
 
     #[test]
     fn resolve_active_restores_when_recipe_active_still_registered() {

@@ -48,11 +48,13 @@
 //! stream, so the main fold stays the channel's one consumer and the
 //! order pairing stays exact), and the live rail sees the same
 //! `ToolCallStarted` / `ToolCallCompleted` pair every dispatched call
-//! fires. The sub-agent's own rounds are NOT projected onto the main
-//! trace here -- the nested sub-trace projection is the chain's next
-//! ticket (#934); its executed calls record onto the sub-agent's PRIVATE
-//! completion channel (dropped with it until #934 lands), and their
-//! promotions ride the shared promotion list.
+//! fires. The sub-agent's own rounds hang under that entry as the NESTED
+//! SUB-TRACE (ADR-0117 Decision 6, issue #934): its executed calls record
+//! onto the sub-agent's PRIVATE completion channel, the run's local fold
+//! drains it, and the fold's rounds ride the report onto the entry --
+//! projected through the same slim projection the main rounds take, never
+//! onto the main trace as flat rows. Their promotions ride the shared
+//! promotion list.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -69,7 +71,9 @@ use crate::approval::OperationKind;
 use crate::cancel::CancelToken;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::ToolDefinition;
-use crate::session::loop_contract::{truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX};
+use crate::session::loop_contract::{
+    retain_landed_rounds, truncate_trace_excerpt, LoopRound, TraceEntry, TRACE_EXCERPT_MAX,
+};
 use crate::session::progress::ProgressClock;
 
 use super::adapter::{emit_phase, next_call_id, DispatchRequest, PhaseSink, SharedTurnState};
@@ -133,7 +137,7 @@ pub(crate) fn delegation_dynamic_tool(
                     Some(task) if !task.trim().is_empty() => task.to_string(),
                     _ => {
                         let refusal = "delegation refused: no task prompt was provided".to_string();
-                        land_delegation_entry(&ctx, &name, "", &refusal, false);
+                        land_delegation_entry(&ctx, &name, "", &refusal, false, Vec::new());
                         return Ok(rig_agent::tool::ToolOutput::text(refusal));
                     }
                 };
@@ -151,7 +155,7 @@ pub(crate) fn delegation_dynamic_tool(
                          {DELEGATION_BATCH_CAP} delegations (the cap); defer the task to a \
                          later batch or narrow the delegation"
                     );
-                    land_delegation_entry(&ctx, &name, &task, &refusal, false);
+                    land_delegation_entry(&ctx, &name, &task, &refusal, false, Vec::new());
                     return Ok(rig_agent::tool::ToolOutput::text(refusal));
                 }
                 emit_phase(
@@ -163,7 +167,14 @@ pub(crate) fn delegation_dynamic_tool(
                     },
                 );
                 let report = run_subagent(&spec, &task, &ctx).await;
-                let entry = land_delegation_entry(&ctx, &name, &task, &report.text, report.success);
+                let entry = land_delegation_entry(
+                    &ctx,
+                    &name,
+                    &task,
+                    &report.text,
+                    report.success,
+                    report.rounds,
+                );
                 emit_phase(
                     &ctx.phases,
                     TurnPhase::ToolCallCompleted(crate::model::TraceEntryView::from(&entry)),
@@ -176,10 +187,18 @@ pub(crate) fn delegation_dynamic_tool(
 
 /// A sub-agent run's terminal report: the text the main model reads plus
 /// the success flag the trace entry records (a failed run keeps its
-/// excerpt in the failed-entry shape).
+/// excerpt in the failed-entry shape), plus the run's round-grouped
+/// trajectory -- the nested sub-trace (ADR-0117 Decision 6, issue #934)
+/// that hangs under the delegation entry.
 struct SubagentReport {
     text: String,
     success: bool,
+    /// Every round the run's local fold accumulated, including entries the
+    /// finish-time residual drain landed after a cancellation abandoned the
+    /// event stream (the main loop's #921 posture -- a cancelled sub-agent's
+    /// completed calls stay visible under the delegation entry instead of
+    /// vanishing with the private channel; PR #944 review Advisory G).
+    rounds: Vec<LoopRound>,
 }
 
 /// Run one sub-agent to its terminal reply (ADR-0117 Decisions 2/4/5) and
@@ -191,6 +210,15 @@ struct SubagentReport {
 /// progress, so the watchdog's cap times the whole turn including the
 /// sub-agent's model calls (the un-layered wall clock of Decision 5).
 async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &SubagentCtx) -> SubagentReport {
+    // The promotions watermark for the orphan note (PR #944 review Advisory
+    // G): a failed run names the result_N it promoted before dying -- they
+    // entered the shared working set with no visible producer in the report.
+    let promotions_before = ctx
+        .state
+        .promotions
+        .lock()
+        .expect("promotions lock poisoned")
+        .len();
     // The sub-agent's PRIVATE completion channel (#944 review Critical 1):
     // its fold must only ever pair its own dispatches' entries. Recording
     // into the main channel left one blind FIFO with two consumer
@@ -210,6 +238,10 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &SubagentCtx) -> S
                 Arc::clone(&ctx.state),
                 Arc::clone(&channel),
                 ctx.dispatch.clone(),
+                // The originator annotation (issue #934): every sub-face
+                // dispatch names its delegating sub-agent, so the approval
+                // card reads "sub-agent X wants to call Y".
+                Some(spec.name.clone()),
             )
         })
         .collect::<Vec<_>>();
@@ -252,29 +284,65 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &SubagentCtx) -> S
         }
     };
     fold.finish();
-    // The folded rounds and any residual queued entries stay local to the
-    // private channel and are dropped with it (the nested sub-trace
-    // projection is #934's scope; before it lands, a sub-agent's internal
-    // calls deliberately leave no main-trace accounting -- the delegation
-    // entry is the sub-agent's one row). Promotions still ride the shared
-    // list: a sub-agent's `result_N` lands on the working set regardless
-    // of the sub-agent's fate.
+    // A cancellation that abandoned the event stream mid-call leaves the
+    // private channel's recorded entries queued with no result event ever
+    // coming for them -- drain them onto the fold (the #921 residual-drain
+    // posture the main finish applies; PR #944 review Advisory G), so the
+    // cancelled sub-agent's completed calls still project under the
+    // delegation entry.
+    fold.drain_residual(&channel);
+    // The same landed-round filter the main finish applies
+    // (`retain_landed_rounds`): drop a round nothing landed on, so a batch
+    // that confirmed but whose every call was gate-cancelled before dispatch
+    // persists no empty ghost round under the delegation entry.
+    retain_landed_rounds(&mut fold.rounds);
+    let rounds = std::mem::take(&mut fold.rounds);
+    // Promotions still ride the shared list: a sub-agent's `result_N` lands
+    // on the working set regardless of the sub-agent's fate.
     match exit {
         Ok(()) => match fold.final_output.take() {
             Some(text) => SubagentReport {
                 text,
                 success: true,
+                rounds,
             },
             None => SubagentReport {
                 text: "sub-agent failed: ended without a final report".to_string(),
                 success: false,
+                rounds,
             },
         },
-        Err(err) => SubagentReport {
-            text: subagent_failure_text(&err),
-            success: false,
-        },
+        Err(err) => {
+            let mut text = subagent_failure_text(&err);
+            // The orphan note (PR #944 review Advisory G): a failed
+            // sub-agent's already-landed promotions enter the working set
+            // with no visible producer in the report -- name them so the
+            // main model (and the trace reader) can account for them.
+            let promoted = promoted_since(&ctx.state, promotions_before);
+            if !promoted.is_empty() {
+                text.push_str(&format!(
+                    " (promoted before dying: {})",
+                    promoted.join(", ")
+                ));
+            }
+            SubagentReport {
+                text,
+                success: false,
+                rounds,
+            }
+        }
     }
+}
+
+/// The result names promoted since the `before` watermark (PR #944 review
+/// Advisory G). The shared promotion list is append-only and the sub-agent
+/// is the only promoter while it runs (sequential execution), so the tail
+/// slice is exactly this run's promotions.
+fn promoted_since(state: &SharedTurnState, before: usize) -> Vec<String> {
+    state.promotions.lock().expect("promotions lock poisoned")[before..]
+        .iter()
+        .map(|p| p.dataset.reference_name.clone())
+        .collect()
 }
 
 /// Map a sub-agent's structured run error onto the honest failure /
@@ -320,8 +388,9 @@ fn land_delegation_entry(
     task: &str,
     report: &str,
     success: bool,
+    rounds: Vec<LoopRound>,
 ) -> TraceEntry {
-    let entry = if success {
+    let mut entry = if success {
         TraceEntry::succeeded(
             next_call_id(),
             name.to_string(),
@@ -338,6 +407,13 @@ fn land_delegation_entry(
             truncate_trace_excerpt(report, TRACE_EXCERPT_MAX),
         )
     };
+    // The nested sub-trace (ADR-0117 Decision 6, issue #934): the sub-agent's
+    // rounds hang under the delegation entry. Absent when the run produced
+    // none -- a refused (blank prompt / batch cap) or never-started
+    // delegation carries no sub-trace, so no empty placeholder persists.
+    if !rounds.is_empty() {
+        entry.sub_trace = Some(rounds);
+    }
     ctx.state
         .main
         .completed

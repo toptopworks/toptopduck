@@ -1735,8 +1735,8 @@ fn delegation_runs_a_subagent_over_the_shared_face_with_one_numberer() {
         .collect();
     assert_eq!(promoted, vec!["result_2", "result_3"]);
     // The main trace carries the delegation as ONE call row on its round;
-    // the sub-agent internal rounds do not project onto it here (#934
-    // owns the nested sub-trace).
+    // the sub-agent's rounds hang under it as the NESTED sub-trace
+    // (ADR-0117 Decision 6, issue #934), never as additional flat rows.
     assert_eq!(outcome.trace.len(), 2, "main rounds only");
     let round1 = &outcome.trace[0];
     assert_eq!(round1.calls.len(), 1);
@@ -1749,7 +1749,38 @@ fn delegation_runs_a_subagent_over_the_shared_face_with_one_numberer() {
         "the report rides the excerpt: {}",
         round1.calls[0].result_excerpt
     );
+    // The nested sub-trace: the sub-agent's tool-bearing round with its
+    // executed materialize (the result_2 promotion) under the entry.
+    let sub = round1.calls[0]
+        .sub_trace
+        .as_ref()
+        .expect("the sub-trace hangs under the delegation entry");
+    assert_eq!(sub.len(), 1, "one sub round (the tool-bearing turn)");
+    assert_eq!(sub[0].calls.len(), 1);
+    assert_eq!(sub[0].calls[0].name, "materialize");
+    assert!(sub[0].calls[0].success, "the sub-agent's call succeeded");
     assert_eq!(outcome.trace[1].calls[0].name, "materialize");
+
+    // Live card <-> persisted row are same-source (PR #944 review Advisory
+    // G): every call the rail saw as a completed card also lands in the
+    // record -- the sub-agent's materialize under the delegation entry, the
+    // delegation itself, then the main loop's own. No ghost row runs on the
+    // live rail and vanishes from the trace.
+    let completed_names: Vec<String> = h
+        .phases
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ToolCallCompleted(view) => Some(view.name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        completed_names,
+        vec!["materialize", "analyst", "materialize"],
+        "the sub-agent's card completed first, then the delegation, then the main loop's own"
+    );
 }
 
 /// AC #3: the same-batch width cap. One model turn carries nine delegation
@@ -1814,7 +1845,11 @@ fn the_ninth_delegation_of_one_batch_is_refused_with_an_explicit_text() {
 /// running and converges afterwards; the failed delegation row carries
 /// the budget wording. (The sub-agent repeated calls use DISTINCT
 /// arguments so the dispatch seam identical-arguments screen stays out of
-/// the picture -- this pin owns the step-cap path.)
+/// the picture -- this pin owns the step-cap path.) The sub-agent's first
+/// round MATERIALIZES before the burn, so the pin also carries the orphan
+/// note (PR #944 review Advisory G): the promotion entered the shared
+/// working set with no visible producer in the report -- the failure text
+/// names it -- and the burned rounds persist under the entry.
 #[test]
 fn a_subagent_step_cap_failure_feeds_back_without_escalating_the_turn() {
     let mut h = Harness::new();
@@ -1823,9 +1858,22 @@ fn a_subagent_step_cap_failure_feeds_back_without_escalating_the_turn() {
     let mut script = vec![batch_turn(
         "delegate",
         None,
-        &[("tu_d1", "analyst", json!({"prompt": "explore forever"}))],
+        &[(
+            "tu_d1",
+            "analyst",
+            json!({"prompt": "materialize then explore forever"}),
+        )],
     )];
-    for n in 1..=10usize {
+    script.push(batch_turn(
+        "sub round 1",
+        None,
+        &[(
+            "tu_s1",
+            "materialize",
+            json!({"sql": "SELECT count(*) AS n FROM result_1"}),
+        )],
+    ));
+    for n in 2..=10usize {
         script.push(batch_turn(
             &format!("sub round {n}"),
             None,
@@ -1858,6 +1906,20 @@ fn a_subagent_step_cap_failure_feeds_back_without_escalating_the_turn() {
         "the failure words the budget: {}",
         row.result_excerpt
     );
+    assert!(
+        row.result_excerpt
+            .contains("promoted before dying: result_2"),
+        "the orphan note names the promotion that outlived the run: {}",
+        row.result_excerpt
+    );
+    // The burned rounds persist under the failed entry: the sub-agent's
+    // whole trajectory (the materialize + the explores) stays answerable.
+    let sub = row
+        .sub_trace
+        .as_ref()
+        .expect("the burned rounds hang under the failed delegation entry");
+    assert_eq!(sub.len(), 10, "one round per burned step");
+    assert_eq!(sub[0].calls[0].name, "materialize");
 }
 
 /// AC #6: cancellation forwarded into a running sub-agent lands the WHOLE

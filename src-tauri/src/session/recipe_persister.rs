@@ -780,6 +780,7 @@ mod tests {
                 summary: "SELECT 1".into(),
                 success: true,
                 result_excerpt: String::new(),
+                sub_rounds: None,
             }],
         }];
         let provenance = PersistedTurnProvenance {

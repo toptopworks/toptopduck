@@ -746,6 +746,66 @@ describe("useTurnFlow", () => {
       ]);
     });
 
+    // The delegation entry's nested sub-trace rides the optimistic turn
+    // flow (issue #934): a completed row's subRounds project onto the entry's
+    // sub_rounds verbatim, so the optimistic trace equals the backend's
+    // recorded rounds for a delegation turn, view affordance included.
+    it("liveRoundsToTrace carries a delegation row's sub-rounds onto the entry", () => {
+      const delegation: LiveTraceRow = {
+        key: "call-0",
+        step: 1,
+        name: "analyst",
+        server: null,
+        operationKind: "execute",
+        summary: "clean the sheet",
+        approval: null,
+        running: false,
+        success: true,
+        resultExcerpt: "",
+        subRounds: [
+          {
+            text: "Checking the sheet first.",
+            calls: [
+              {
+                name: "explore",
+                operation_kind: "read",
+                summary: "SELECT count(*) AS n FROM result_1",
+                success: true,
+                result_excerpt: "",
+              },
+            ],
+          },
+        ],
+      };
+      expect(liveRoundsToTrace([{ rows: [delegation] }])).toEqual([
+        {
+          calls: [
+            {
+              name: "analyst",
+              operation_kind: "execute",
+              summary: "clean the sheet",
+              success: true,
+              result_excerpt: "",
+              sub_rounds: [
+                {
+                  text: "Checking the sheet first.",
+                  calls: [
+                    {
+                      name: "explore",
+                      operation_kind: "read",
+                      summary: "SELECT count(*) AS n FROM result_1",
+                      success: true,
+                      result_excerpt: "",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+    });
+
     it("liveRoundsToTrace keeps a prose-only round (a cancel mid-batch)", () => {
       // A round that emitted prose but completed no calls still records as a
       // round carrying the text -- matching the backend, which opens the

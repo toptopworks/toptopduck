@@ -293,3 +293,34 @@ describe("LiveRow approval card file values", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+// The approval card's originator annotation (issue #934): a sub-agent's
+// call names its delegator above the card head ("sub-agent X wants to call
+// Y"); a main-loop call renders no annotation row.
+describe("LiveRow approval originator annotation (issue #934)", () => {
+  it("names the delegating sub-agent above the card head", () => {
+    renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: {
+            requestId: "req-1",
+            response: null,
+            fileAttachments: undefined,
+            originAgent: "analyst",
+          },
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Sub-agent analyst wants to call:")).toBeInTheDocument();
+    // The card head still renders the tool + its summary.
+    expect(screen.getByText(SUMMARY)).toBeInTheDocument();
+  });
+
+  it("renders no annotation for a main-loop call", () => {
+    const { container } = renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} />,
+    );
+    expect(container.querySelector(".approval-origin")).toBeNull();
+  });
+});
