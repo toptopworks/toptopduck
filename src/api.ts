@@ -662,7 +662,8 @@ export async function listSkills(): Promise<SkillListing> {
 
 // Mint a new local skill: <root>/<name>/SKILL.md with the given description
 // and body. The name must be kebab-case (<= 64) and free, and the body
-// non-blank. Returns the entry read back from disk.
+// non-blank. Returns the entry for the written skill (read back, or derived
+// from the written payload on a transient read-back failure).
 export async function createSkill(
   name: string,
   description: string,

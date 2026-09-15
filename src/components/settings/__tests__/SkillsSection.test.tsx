@@ -207,6 +207,35 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.getByText("Description is required.")).toBeInTheDocument();
   });
 
+  it("surfaces the create-mode body hint once the armed field goes blank", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByText("No skills yet. Click New to create one.");
+
+    fireEvent.click(screen.getByRole("button", { name: /New/i }));
+
+    // A valid edit + blur arms the field without surfacing the hint.
+    fireEvent.change(await screen.findByLabelText("Instructions"), {
+      target: { value: "Body text.\n" },
+    });
+    fireEvent.blur(screen.getByLabelText("Instructions"));
+    expect(
+      screen.queryByText("Instructions can't be empty."),
+    ).not.toBeInTheDocument();
+
+    // Blanking the armed field surfaces the rule immediately: create mode
+    // owns the body field since the one-form fold.
+    fireEvent.change(screen.getByLabelText("Instructions"), {
+      target: { value: "" },
+    });
+    expect(screen.getByText("Instructions can't be empty.")).toBeInTheDocument();
+  });
+
   it("closes the drawer after a one-form create", async () => {
     // The create dialog captures name + description + body in one pass, so
     // a successful mint closes it instead of stepping into an edit drawer.

@@ -574,7 +574,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 - Reserve `{colors.primary}` (teal) for primary CTAs, active states, and focus rings. One accent, used scarcely.
 - Use brightness-step surfaces + functional shadow tiers for depth. In-content cards carry `shadow-sm`; floating popovers carry `shadow-md`; dialogs carry `shadow-lg`.
 - Render every SQL snippet, data value, and file path in the system monospace stack via `{typography.code}`.
-- Keep button height at 36px, topbar at 40px, and header icon-button hit areas at 28px with a 14px glyph — compact workbench density.
+- Keep button height at 36px, topbar at 40px, and header icon-button hit areas at 28px — a 14px glyph on the topbar chrome family (see `topbar`), a 16px glyph on settings-pane header buttons — compact workbench density.
 - Use 1px hairlines (`{colors.border}` / `{colors.border-dark}`) for all visual separation.
 - Support both light and dark modes as equals. Neither is the "default."
 - Apply `{typography.label-caps}` with CSS `text-transform: uppercase` for badges and section labels.

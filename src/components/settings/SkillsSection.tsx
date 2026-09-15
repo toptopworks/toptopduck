@@ -7,6 +7,7 @@ import { Download, Plus, Puzzle, RefreshCw, RotateCcw, Trash2 } from "lucide-rea
 import type {
   BuiltinSkillBaseline,
   SkillAcquired,
+  SkillCreate,
   SkillEntry,
   SkillUpdate,
   SkippedSkill,
@@ -155,7 +156,7 @@ export function SkillsSection({
   };
 
   const createMutation = useMutation({
-    mutationFn: (draft: { name: string; description: string; body: string }) =>
+    mutationFn: (draft: SkillCreate) =>
       createSkill(draft.name, draft.description, draft.body),
     onSuccess: () => {
       invalidate();
@@ -740,7 +741,7 @@ type SkillDrawerProps = {
    *  open. */
   error: string | null;
   onCancel: () => void;
-  onCreate: (draft: { name: string; description: string; body: string }) => void;
+  onCreate: (draft: SkillCreate) => void;
   onSave: (update: SkillUpdate) => void;
   onOpenSource: (target: string | null) => void;
 };
@@ -769,8 +770,9 @@ function SkillDrawer({
   const [body, setBody] = useState(draft.body);
   // Touched flags gate the invalid hints: a freshly opened drawer stays
   // quiet (every field starts "invalid-able"), and blur flags a field only
-  // when the user actually edited it -- the dialog auto-focuses the name
-  // input, so pristine click-away blurs are routine and must not yell.
+  // when its value drifted from the draft seed -- the dialog auto-focuses
+  // the name input, so pristine click-away blurs are routine and must not
+  // yell.
   const [nameTouched, setNameTouched] = useState(false);
   const [descriptionTouched, setDescriptionTouched] = useState(false);
   const [bodyTouched, setBodyTouched] = useState(false);

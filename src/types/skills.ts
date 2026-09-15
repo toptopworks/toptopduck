@@ -91,6 +91,15 @@ export interface SkillUpdate {
   body: string;
 }
 
+// The create payload of create_skill: what the one-form create drawer
+// submits. A mint carries no license/compatibility (those keys do not exist
+// at birth), which is why this stays distinct from SkillUpdate.
+export interface SkillCreate {
+  name: string;
+  description: string;
+  body: string;
+}
+
 // Typed reject for the skills commands (issue #362). Adjacently tagged
 // `{ kind, data }` like every other typed IPC error; the kind set is DISJOINT
 // from SessionError / SaveError / StoreCommandError so fmtError's dispatch
