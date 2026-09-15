@@ -198,34 +198,6 @@ impl LoopRuntime {
             let clock = self.no_progress_cap.map(|timeout| {
                 ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout)
             });
-            // The turn's sub-agent context (issue #933, ADR-0117): the
-            // shared execution collaborators wrapped with the subtracted
-            // sub-face, built once for the whole delegation family. The
-            // clock rides it too -- a sub-agent's generation activity is
-            // turn progress, so its inbound events re-arm the same
-            // un-layered watchdog (Decision 5).
-            // Derived ONCE here (review DRY): the same set drives the
-            // context build below and the driver's tool-table split, so
-            // there is exactly one place that knows a delegation name.
-            let delegation_names: std::collections::BTreeSet<String> =
-                delegations.iter().map(|spec| spec.name.clone()).collect();
-            let subagent_ctx = if delegation_names.is_empty() {
-                None
-            } else {
-                Some(subagent::subagent_ctx(
-                    self.model.clone(),
-                    Arc::clone(&state),
-                    req_tx.clone(),
-                    Arc::clone(&phases),
-                    clock.clone(),
-                    Arc::clone(&cancel),
-                    self.protocol,
-                    request.thought_level.clone(),
-                    request.max_tokens as u64,
-                    &request.tools,
-                    &delegation_names,
-                ))
-            };
             // The driver: one scoped thread owning a dedicated single-thread
             // runtime. The dispatch server below outlives it -- its request
             // channel closes when the driver's context (and with it every
@@ -242,13 +214,15 @@ impl LoopRuntime {
                 let protocol = self.protocol;
                 let clock = clock.clone();
                 let token = Arc::clone(&cancel);
-                let delegations = delegations.to_vec();
-                // MOVED, not cloned: the context owns a dispatch-channel
-                // sender, and any copy left on THIS scope's stack would keep
-                // the server loop's `req_rx` open past the drive -- the
-                // server waits for channel close, the scope waits for the
-                // server, a deadlock by construction (#933).
-                let subagent_ctx = subagent_ctx;
+                // Keyed by name (issue #945): the map IS the name set --
+                // the driver's tool-table split reads it directly, no
+                // parallel `BTreeSet` to keep in step.
+                let delegations: std::collections::BTreeMap<String, crate::agents::DelegationSpec> =
+                    delegations
+                        .iter()
+                        .cloned()
+                        .map(|spec| (spec.name.clone(), spec))
+                        .collect();
                 scope.spawn(move || {
                     let runtime = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -278,8 +252,6 @@ impl LoopRuntime {
                         clock: clock.clone(),
                         token,
                         delegations,
-                        delegation_names,
-                        subagent_ctx,
                     }))
                 })
             };
@@ -588,15 +560,12 @@ struct DriveInputs {
     /// inbound stream event -- the generation segment's liveness signal.
     clock: Option<Arc<ProgressClock>>,
     token: Arc<CancelToken>,
-    /// The turn's delegation specs (issue #933): owned copies, matched by
-    /// name against the request's tool table.
-    delegations: Vec<crate::agents::DelegationSpec>,
-    /// The specs' names, derived once in `run` (the single place that
-    /// knows what a delegation name is).
-    delegation_names: std::collections::BTreeSet<String>,
-    /// The shared sub-agent context for the family; `None` when the turn
-    /// carries no delegation tool at all (the zero-cost posture).
-    subagent_ctx: Option<Arc<subagent::SubagentCtx>>,
+    /// The turn's delegation specs (issue #933), keyed by name: owned
+    /// copies matched directly against the request's tool table. The map
+    /// IS the name set -- no parallel `BTreeSet` to keep in step (the
+    /// sub-agent context, built on the driver, derives its names from the
+    /// keys).
+    delegations: std::collections::BTreeMap<String, crate::agents::DelegationSpec>,
 }
 
 /// How the driver's consumption loop ended.
@@ -634,8 +603,6 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         clock,
         token,
         delegations,
-        delegation_names,
-        subagent_ctx,
     } = inputs;
     // The whole windowed conversation rides the request (the app assembled
     // it; the loop runtime re-feeds it verbatim) split at rig's boundary:
@@ -669,37 +636,65 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
     // calls), so the batch width cap counts exactly one model-turn's
     // delegations under the pinned sequential execution.
     let delegation_batch = Arc::new(AtomicUsize::new(0));
-    let tools =
+    let gateway = |def| {
+        adapter::gateway_dynamic_tool(
+            def,
+            Arc::clone(&state),
+            Arc::clone(&state.main),
+            req_tx.clone(),
+            // A main-loop dispatch carries no originator -- only a
+            // sub-agent's sub-face names one (issue #934).
+            None,
+        )
+    };
+    // The empty family keeps the zero-cost posture (issue #945): no
+    // sub-agent context (whose construction clones the whole tool table
+    // into the sub-face), no per-name lookups -- straight gateway
+    // adapters. A non-empty family builds the context ONCE here, for the
+    // whole family (ADR-0117 Decision 4's "sub-face is a property of the
+    // turn"); the clock rides it too -- a sub-agent's generation activity
+    // is turn progress, so its inbound events re-arm the same un-layered
+    // watchdog (Decision 5). The context's dispatch-channel sender is
+    // cloned from this scope's `req_tx` -- both drop when the drive ends,
+    // so the dispatch server below observes channel close and exits
+    // (#933's join order).
+    let tools = if delegations.is_empty() {
         request
             .tools
             .iter()
             .cloned()
-            .map(|def| {
-                if delegation_names.contains(&def.name) {
-                    let spec = delegations
-                        .iter()
-                        .find(|spec| spec.name == def.name)
-                        .expect("the name set is built from the specs themselves");
-                    subagent::delegation_dynamic_tool(
-                        spec.clone(),
-                        Arc::clone(&delegation_batch),
-                        Arc::clone(subagent_ctx.as_ref().expect(
-                            "a delegation tool implies the turn built the sub-agent context",
-                        )),
-                    )
-                } else {
-                    adapter::gateway_dynamic_tool(
-                        def,
-                        Arc::clone(&state),
-                        Arc::clone(&state.main),
-                        req_tx.clone(),
-                        // A main-loop dispatch carries no originator -- only
-                        // a sub-agent's sub-face names one (issue #934).
-                        None,
-                    )
-                }
+            .map(&gateway)
+            .collect::<Vec<_>>()
+    } else {
+        let delegation_names: std::collections::BTreeSet<&str> =
+            delegations.keys().map(String::as_str).collect();
+        let subagent_ctx = subagent::subagent_ctx(
+            model.clone(),
+            Arc::clone(&state),
+            req_tx.clone(),
+            Arc::clone(&phases),
+            clock.clone(),
+            Arc::clone(&token),
+            protocol,
+            request.thought_level.clone(),
+            request.max_tokens as u64,
+            &request.tools,
+            &delegation_names,
+        );
+        request
+            .tools
+            .iter()
+            .cloned()
+            .map(|def| match delegations.get(&def.name) {
+                Some(spec) => subagent::delegation_dynamic_tool(
+                    spec.clone(),
+                    Arc::clone(&delegation_batch),
+                    Arc::clone(&subagent_ctx),
+                ),
+                None => gateway(def),
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    };
     let agent = AgentBuilder::new(model)
         .preamble(request.system.as_str())
         .max_tokens(request.max_tokens as u64)

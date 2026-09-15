@@ -883,8 +883,10 @@ struct AssembledTurnInputs<'a> {
     cli_tools: Vec<crate::cli_tools::config::CliToolConfig>,
     /// The turn's delegation snapshot (issue #933, ADR-0117): the enabled
     /// agent definitions with their bound skill bodies resolved. One scan
-    /// under the same held lock as the skills + CLI reads, so the family
-    /// cannot change between the assembly and the turn.
+    /// alongside the skills + CLI reads; the guarantee is the snapshot
+    /// itself -- the turn consumes this one consistent family, while the
+    /// on-disk registry and the enablement store may change freely
+    /// afterwards (the next turn re-reads).
     delegations: Vec<crate::agents::DelegationSpec>,
     keychain: &'a crate::provider::keychain::KeychainStore,
 }

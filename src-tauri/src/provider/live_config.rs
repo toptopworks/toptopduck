@@ -553,12 +553,22 @@ impl LiveProviderConfig {
         for warning in &listing.warnings {
             log::warn!(target: "agents", "delegation assembly: {warning:?}");
         }
-        listing
-            .agents
-            .iter()
-            .filter(|entry| entry.enabled)
-            .map(|entry| crate::agents::DelegationSpec::from_entry(entry, &bodies))
-            .collect()
+        let mut specs = Vec::new();
+        for entry in listing.agents.iter().filter(|entry| entry.enabled) {
+            let (spec, skipped) = crate::agents::DelegationSpec::from_entry(entry, &bodies);
+            // The single degradation record (issue #945): `from_entry` is
+            // pure, so the dangling-binding skips report back here and log
+            // beside the registry's own faults above.
+            for name in skipped {
+                log::warn!(
+                    target: "agents",
+                    "delegation assembly: bound skill `{name}` is no longer registered; \
+                     skipping its injection (ADR-0117 Decision 2)"
+                );
+            }
+            specs.push(spec);
+        }
+        specs
     }
 
     /// Mint + enable as one composite (issue #932): the file mint lands
@@ -2944,7 +2954,7 @@ mod tests {
     /// the real config path (create-lands-enabled + the enablement toggle),
     /// mirroring the wiring pin's non-empty direction posture.
     #[test]
-    fn delegation_specs_list_enabled_entries_with_resolved_skill_bodies() {
+    fn delegation_specs_list_enabled_entries_with_resolved_skill_injections() {
         let (_dir, live) = live();
         let agents = tempfile::tempdir().expect("agents root");
         let skills = tempfile::tempdir().expect("skills root");
@@ -2991,13 +3001,11 @@ mod tests {
         // The binding resolved to the registered skill's body alone -- the
         // dangling mark contributes nothing and refuses nothing.
         assert_eq!(
-            specs[0].skill_bodies,
-            vec![(
-                "sql".to_string(),
-                "Prefer CTEs.
-"
-                .to_string()
-            )]
+            specs[0].skill_injections,
+            vec![crate::agents::SkillInjection {
+                name: "sql".to_string(),
+                body: "Prefer CTEs.\n".to_string(),
+            }]
         );
     }
 

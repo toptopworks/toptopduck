@@ -42,7 +42,7 @@ pub mod model;
 pub mod registry;
 
 pub use builtin::BuiltinAgentMark;
-pub use delegation::{DelegationSpec, DELEGATION_BATCH_CAP, SUBAGENT_STEP_CAP};
+pub use delegation::{DelegationSpec, SkillInjection, DELEGATION_BATCH_CAP, SUBAGENT_STEP_CAP};
 pub use model::{
     AgentEntry, AgentError, AgentListing, AgentSource, AgentUpdate, AgentWarning, AgentsRoot,
     SkippedAgent,

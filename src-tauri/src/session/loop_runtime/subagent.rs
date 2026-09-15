@@ -545,10 +545,8 @@ pub(crate) fn subagent_ctx(
     thought_level: Option<String>,
     max_tokens: u64,
     tools: &[ToolDefinition],
-    delegation_names: &std::collections::BTreeSet<String>,
+    delegation_names: &std::collections::BTreeSet<&str>,
 ) -> Arc<SubagentCtx> {
-    let names: std::collections::BTreeSet<&str> =
-        delegation_names.iter().map(String::as_str).collect();
     Arc::new(SubagentCtx {
         model,
         state,
@@ -559,7 +557,7 @@ pub(crate) fn subagent_ctx(
         protocol,
         thought_level,
         max_tokens,
-        sub_face: subagent_tool_face(tools, &names),
+        sub_face: subagent_tool_face(tools, delegation_names),
     })
 }
 
