@@ -230,6 +230,11 @@ export function GeneralSection({
           )}
         />
 
+      </SettingsCard>
+
+      {/* The sessions directory is its own group (a structural directory
+       * change, visually apart from the appearance prefs above). */}
+      <SettingsCard className="mt-4">
         <SettingsRow
           title={(
             <FormattedMessage

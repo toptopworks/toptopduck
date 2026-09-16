@@ -104,6 +104,15 @@ describe("AgentsSection (issue #932)", () => {
     expect(
       screen.getByRole("button", { name: "Delete agent data-cleaner" }),
     ).toBeVisible();
+    // The Disabled badge rides the disabled row and its name dims (the
+    // legibility pair); the enabled row carries neither.
+    expect(screen.getByText("Disabled")).toBeVisible();
+    expect(screen.getByText("general-purpose").className).toContain(
+      "text-muted-foreground/60",
+    );
+    expect(screen.getByText("data-cleaner").className).not.toContain(
+      "text-muted-foreground/60",
+    );
   });
 
   it("surfaces skipped files as a warning line", async () => {

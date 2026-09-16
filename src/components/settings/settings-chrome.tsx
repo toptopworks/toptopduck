@@ -1,6 +1,8 @@
 import { type ComponentProps, type ReactNode } from "react";
+import { Info } from "lucide-react";
 
 import { cn } from "../../lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 // Settings-page layout chrome (ADR-0075, issue #281). The redesign replaces the
 // old single-fieldset panes with card-grouped ROWS: a card is a bordered,
@@ -19,6 +21,48 @@ import { cn } from "../../lib/utils";
  *  cn(SETTINGS_TOOLTIP_CLASS, "max-w-...") rather than restyling. */
 export const SETTINGS_TOOLTIP_CLASS =
   "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
+
+/** A field or section hint: an info icon + tooltip anchored after the
+ *  label or section title (the ImportSkillsDialog import-mode posture).
+ *  `label` is the trigger's accessible name; `children` render as the
+ *  muted body. */
+export function FieldHint({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" className="text-muted-foreground shrink-0" aria-label={label}>
+          <Info className="size-4" aria-hidden />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent
+        side="top"
+        align="start"
+        sideOffset={3}
+        className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+      >
+        <div className="text-muted-foreground text-sm">{children}</div>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** The settings row badge (the DESIGN.md badge-secondary token:
+ *  typography.badge 12px/500 on rounded.md with 2px 8px padding, muted
+ *  surface + muted-foreground text) -- the shared chrome for row badges
+ *  that are not state alerts. */
+export function NameBadge({ children }: { children: ReactNode }) {
+  return (
+    <span className="bg-muted text-muted-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+      {children}
+    </span>
+  );
+}
 
 /** A bordered group of hairline-divided setting rows. Rows are the direct
  *  children; `divide-y` paints the separators between them. */

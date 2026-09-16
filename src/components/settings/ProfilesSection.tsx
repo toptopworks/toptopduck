@@ -35,7 +35,13 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import {
+  PaneHeader,
+  SETTINGS_TOOLTIP_CLASS,
+  SettingsCard,
+  SettingsRow,
+} from "./settings-chrome";
 import { ProviderEndpointFields } from "./ProviderEndpointFields";
 import { ProviderKeyField } from "./ProviderKeyField";
 import { ProviderPresetField } from "./ProviderPresetField";
@@ -586,20 +592,30 @@ export function ProfilesSection({
   // The key-status refresh button -- lives in the PaneHeader action slot when
   // ProfilesSection owns its header, or in the profile-list toolbar when the
   // header is hidden (issue #489: RuntimeSection owns the section-level hero).
+  // The shared header-action posture: icon-only ghost with the tooltip skin,
+  // aria-label sourced from the same key as the tooltip.
   const refreshButton = (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon"
-      onClick={handleRefreshKeys}
-      disabled={keysLoading}
-      aria-label={intl.formatMessage({
-        id: "settings.profiles.refresh",
-        defaultMessage: "Refresh key status",
-      })}
-    >
-      <RefreshCw className={cn("size-4", keysLoading && "animate-spin")} aria-hidden />
-    </Button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-foreground size-7"
+          onClick={handleRefreshKeys}
+          disabled={keysLoading}
+          aria-label={intl.formatMessage({
+            id: "common.refresh",
+            defaultMessage: "Refresh",
+          })}
+        >
+          <RefreshCw className={cn("size-4", keysLoading && "animate-spin")} aria-hidden />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+        <FormattedMessage id="common.refresh" defaultMessage="Refresh" />
+      </TooltipContent>
+    </Tooltip>
   );
 
   return (

@@ -461,6 +461,9 @@ describe("McpSection (issue #387)", () => {
     expect(screen.getByText("Live").className).not.toContain(
       "text-muted-foreground",
     );
+    // The Disabled badge rides the quieted row; the enabled row has none
+    // (getByText's single match is that discrimination).
+    expect(screen.getByText("Disabled")).toBeVisible();
   });
 
   it("gates the row's action buttons while the enable toggle is in flight (ADR-0106)", async () => {

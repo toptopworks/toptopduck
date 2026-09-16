@@ -579,26 +579,30 @@ export function LocalCliTab({
             defaultMessage="Detected CLI adapters"
           />
         </span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => void handleRescan()}
-          disabled={rescanning}
-          aria-label={intl.formatMessage({
-            id: "settings.runtime.localCli.rescanAria",
-            defaultMessage: "Rescan adapters",
-          })}
-        >
-          <RefreshCw
-            className={cn("size-3.5", rescanning && "animate-spin")}
-            aria-hidden
-          />
-          <FormattedMessage
-            id="settings.runtime.localCli.rescan"
-            defaultMessage="Rescan"
-          />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="text-muted-foreground hover:text-foreground size-7"
+              onClick={() => void handleRescan()}
+              disabled={rescanning}
+              aria-label={intl.formatMessage({
+                id: "common.rescan",
+                defaultMessage: "Rescan",
+              })}
+            >
+              <RefreshCw
+                className={cn("size-4", rescanning && "animate-spin")}
+                aria-hidden
+              />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+            <FormattedMessage id="common.rescan" defaultMessage="Rescan" />
+          </TooltipContent>
+        </Tooltip>
       </div>
 
       {isPending && (

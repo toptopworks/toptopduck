@@ -824,10 +824,7 @@ export function McpServerForm({
             disabled={saving}
             onClick={onCancel}
           >
-            <FormattedMessage
-              id="settings.mcp.form.cancel"
-              defaultMessage="Cancel"
-            />
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
         </div>
       </SettingsCard>
