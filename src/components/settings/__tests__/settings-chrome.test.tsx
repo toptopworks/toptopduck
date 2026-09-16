@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, screen } from "@testing-library/react";
-import { Pencil, Plus, RefreshCw, Trash2, Zap } from "lucide-react";
+import { Pencil, Plus, RefreshCw, Trash2, X, Zap } from "lucide-react";
 
 import {
+  DialogHeaderButton,
   FieldHint,
   FoldHead,
   HeaderActionButton,
@@ -45,6 +46,31 @@ describe("HeaderActionButton", () => {
       <HeaderActionButton label="Scanning…" icon={RefreshCw} disabled spinning />,
     );
     const button = screen.getByRole("button", { name: "Scanning…" });
+    expect(button).toBeDisabled();
+    expect(button.querySelector("svg")).toHaveClass("animate-spin");
+  });
+});
+
+describe("DialogHeaderButton", () => {
+  it("derives the accessible name from the label and fires onClick", () => {
+    const onClick = vi.fn();
+    renderSettings(
+      <DialogHeaderButton
+        label="Refresh sources"
+        icon={RefreshCw}
+        onClick={onClick}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Refresh sources" });
+    fireEvent.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the in-flight posture: disabled passthrough, spinning icon", () => {
+    renderSettings(
+      <DialogHeaderButton label="Close" icon={X} disabled spinning />,
+    );
+    const button = screen.getByRole("button", { name: "Close" });
     expect(button).toBeDisabled();
     expect(button.querySelector("svg")).toHaveClass("animate-spin");
   });

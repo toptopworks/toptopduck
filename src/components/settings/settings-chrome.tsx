@@ -251,7 +251,8 @@ export function RowRemoveButton({
  *  row's detail panel (issue #964). The accessible name is the row name and
  *  the state rides `aria-expanded` -- no verb enters the name, mirroring the
  *  fold-head posture. The chevron swap (down when expanded, right when
- *  collapsed) is the only stateful skin. */
+ *  collapsed) is the only stateful skin. Both call sites sit outside
+ *  clickable rows, so the handler takes no event. */
 export function RowFoldChevron({
   label,
   expanded,
@@ -513,7 +514,8 @@ export function SourceFold({
   // Both verbs resolve up front; the toggle's aria-label below is a plain
   // choice between the named labels (SidebarToggle / StatusDot posture).
   // Never fold these back into a single in-ternary call: formatjs extract
-  // does not cross function boundaries.
+  // only matches a direct literal descriptor argument, so an in-ternary
+  // descriptor is not recognized.
   const expandLabel = intl.formatMessage(
     { id: "settings.importSource.expand", defaultMessage: "Expand {label}" },
     { label },
