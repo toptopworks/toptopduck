@@ -397,6 +397,21 @@ pub struct AppConfig {
     /// pre-#932 file has no key, so serde(default) fills an empty set.
     #[serde(default)]
     pub materialized_builtin_agents: BTreeSet<String>,
+    /// The skill enablement axis (issue #961, ADR-0118 Decision 2): the
+    /// DISABLED skill-name set. Enablement is the default polarity -- absence
+    /// means enabled, so existing skills (pre-#961 configs), newly created /
+    /// imported skills, and hand-placed directories are all enabled with
+    /// zero bookkeeping; the dormant-on-disable semantics match the MCP
+    /// servers' default-on axis. Dangling entries (a name whose directory is
+    /// gone) are kept -- the seed and listing consumers intersect with the
+    /// registry scan, so a stale name is inert by construction (the
+    /// `last_model_postures` dangling-kept precedent) -- EXCEPT on a
+    /// same-name rebirth: the create / import / rename / delete composites
+    /// in `LiveProviderConfig` keep the set honest there (a reborn skill
+    /// lands enabled, a renamed skill carries its disablement). Forward-compat: a
+    /// pre-#961 file has no key, so serde(default) fills an empty set.
+    #[serde(default)]
+    pub disabled_skills: BTreeSet<String>,
 }
 
 impl AppConfig {
@@ -422,6 +437,7 @@ impl AppConfig {
             last_model_postures: BTreeMap::new(),
             enabled_agents: BTreeSet::new(),
             materialized_builtin_agents: BTreeSet::new(),
+            disabled_skills: BTreeSet::new(),
         }
     }
 
@@ -535,6 +551,9 @@ impl AppConfig {
         // -- the `last_model_postures` dangling-kept precedent).
         retain_name_shape(&mut self.enabled_agents);
         retain_name_shape(&mut self.materialized_builtin_agents);
+        // The skill enablement set rides the same repair (issue #961):
+        // trimmed, blank-dropped, dangling-kept.
+        retain_name_shape(&mut self.disabled_skills);
     }
 }
 
@@ -587,6 +606,49 @@ mod tests {
         // pointer -- ADR-0098).
         let provider = ProviderConfig::default();
         assert_eq!(provider, crate::model::ProviderConfig::defaults());
+    }
+
+    #[test]
+    fn disabled_skills_defaults_empty_and_fills_for_pre_field_files() {
+        // The skill enablement axis (issue #961, ADR-0118 Decision 2): a
+        // DISABLED-name set with enable-by-default polarity -- absence means
+        // enabled, so a pre-#961 file (no key) deserializes to "everything
+        // enabled" without a migration, and a freshly created / imported /
+        // hand-placed skill is enabled with zero bookkeeping. The inverse
+        // polarity (an enabled-name set, the agent-definitions shape) would
+        // need a one-time migration to honor "existing skills count as all
+        // enabled" and would silently disable hand-placed files -- rejected.
+        let cfg = AppConfig::defaults();
+        assert!(cfg.disabled_skills.is_empty(), "default: nothing disabled");
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(json.contains("\"disabled_skills\""), "always serialized");
+        let back: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.disabled_skills.is_empty());
+        // A pre-#961 document carries no key; serde(default) fills empty.
+        let stripped = json.replace(",\"disabled_skills\":[]", "");
+        let legacy: AppConfig = serde_json::from_str(&stripped).expect("legacy parse");
+        assert!(legacy.disabled_skills.is_empty());
+    }
+
+    #[test]
+    fn normalize_shape_repairs_disabled_skills_names() {
+        // The same trim + drop-blank repair the agent-definitions name sets
+        // get (issue #932): a hand-edited file's whitespace padding and blank
+        // entries never survive a write; dangling names stay KEPT (the reader
+        // intersects with the registry scan, so a stale name is inert).
+        let mut cfg = AppConfig::defaults();
+        cfg.disabled_skills = ["  pdf-tools  ", "", "sql-coach"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        cfg.normalize();
+        assert_eq!(
+            cfg.disabled_skills,
+            ["pdf-tools", "sql-coach"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        );
     }
 
     #[test]

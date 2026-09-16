@@ -37,6 +37,7 @@ function skill(name: string): SkillEntry {
     body: "",
     link_target: null,
     content_hash: "ab".repeat(32),
+    enabled: true,
   };
 }
 
@@ -207,7 +208,7 @@ describe("QuestionBar pre-activation chips (ADR-0112, issue #716)", () => {
     // the last one.
     const textarea = screen.getByLabelText("提问");
     expect(
-      screen.getByRole("list", { name: "预激活技能" }).parentElement,
+      screen.getByRole("list", { name: "技能" }).parentElement,
     ).toBe(textarea.parentElement);
     expect(screen.getByRole("listitem")).toHaveTextContent("charting");
   });

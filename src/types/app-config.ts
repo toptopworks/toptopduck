@@ -164,4 +164,14 @@ export interface AppConfig {
   // into the registry -- the builtin-identity anchor, not the static shipped
   // set (which lives in code). Mirrors the Rust BTreeSet.
   materialized_builtin_agents: string[];
+  // The skill enablement axis (issue #961, ADR-0118 Decision 2): the
+  // DISABLED skill-name set. Absence means enabled (default-on polarity --
+  // existing skills, new creates, imports, and hand-placed directories all
+  // read enabled with zero bookkeeping); disabled = dormant (out of the
+  // new-session seed, grayed in the settings pane; the directory stays).
+  // Mirrors the Rust BTreeSet (crosses IPC as an array); serde(default)
+  // fills an empty set for a pre-#961 file. Dangling entries are kept --
+  // the consumers intersect with the registry scan, so a stale name is
+  // inert.
+  disabled_skills: string[];
 }

@@ -69,6 +69,7 @@ function baseAppConfig(shell: Pick<AppConfig["shell"], "sidebar_collapsed">): Ap
     last_model_postures: {},
     enabled_agents: [],
     materialized_builtin_agents: [],
+    disabled_skills: [],
   };
 }
 

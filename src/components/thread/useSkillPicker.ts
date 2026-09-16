@@ -1,8 +1,9 @@
 import { useMemo, useState, type KeyboardEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { listActivatedSkills, listSkills } from "../../api";
-import { sessionKeys, skillKeys } from "../../session/queryKeys";
+import { listSkills } from "../../api";
+import { skillKeys } from "../../session/queryKeys";
+import { useActivatedSkills } from "./useActivatedSkills";
 import type { SkillEntry } from "../../types/skills";
 import {
   clampHighlight,
@@ -84,6 +85,13 @@ export function useSkillPicker({
     queryFn: listSkills,
     enabled,
   });
+  // Deliberately NOT filtered on the enablement axis (issue #961, ADR-0118
+  // Decision 1): "disabled = out of the seed (undiscoverable)" is the MODEL
+  // side -- a disabled skill never enters a new session's seed, so the model
+  // never sees it. The picker is the USER's explicit override channel (the
+  // trust gate's own expression): an explicit pick of a disabled skill mounts
+  // it for that session by design; permanent removal goes through the
+  // enablement axis in settings.
   const registry = useMemo(() => listing?.skills ?? [], [listing]);
   // Display-only activation truth (Decision 5): session mode reads the
   // activated set; cold start keeps the query disabled -- no session exists,
@@ -93,11 +101,9 @@ export function useSkillPicker({
   // listing failure (which renders the error row): the badges are pure
   // display, so a failed read misstates nothing actionable, while a failed
   // listing hides the panel's whole substance.
-  const { data: activated } = useQuery({
-    queryKey: sessionKeys.activatedSkills(sessionId ?? ""),
-    queryFn: () => listActivatedSkills(sessionId as string),
-    enabled: enabled && sessionId !== null,
-  });
+  const { data: activated } = useActivatedSkills(
+    enabled ? sessionId : null,
+  );
   const activatedNames = useMemo(() => new Set(activated ?? []), [activated]);
 
   const rows = useMemo(

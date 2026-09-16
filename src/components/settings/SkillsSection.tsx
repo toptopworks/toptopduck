@@ -19,6 +19,7 @@ import {
   listSkills,
   restoreBuiltinSkill,
   updateSkill,
+  setSkillEnabled,
 } from "../../api";
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
 import { fmtError } from "../../lib/error-presentation";
@@ -43,6 +44,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
 import { Label } from "../ui/label";
 import {
   Select,
@@ -208,6 +210,22 @@ export function SkillsSection({
       setError(fmtError(e, intl));
       setConfirmRestore(null);
     },
+  });
+
+  // The enablement-axis row Switch (issue #961): the command returns the
+  // updated FULL config (synced wholesale, the restore contract) and the
+  // listing refetches so each row's `enabled` follows. A success also drops
+  // a stale reject (the create/update precedent) -- the banner must not
+  // outlive the failure it reported.
+  const toggleEnabledMutation = useMutation({
+    mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
+      setSkillEnabled(name, enabled),
+    onSuccess: (cfg) => {
+      setError(null);
+      onAppConfigSync(cfg);
+      invalidate();
+    },
+    onError: (e) => setError(fmtError(e, intl)),
   });
 
   const allSkills = useMemo<SkillEntry[]>(
@@ -433,6 +451,14 @@ export function SkillsSection({
               key={skill.name}
               skill={skill}
               edited={isEditedBuiltin(skill)}
+              // Per-row gate (the AgentsSection #932 precedent): only the
+              // row whose toggle is in flight locks its switch.
+              busy={
+                toggleEnabledMutation.isPending &&
+                toggleEnabledMutation.variables?.name === skill.name
+              }
+              onToggleEnabled={(enabled) =>
+                toggleEnabledMutation.mutate({ name: skill.name, enabled })}
               onOpen={() => openEdit(skill)}
               // A builtin skill is undeletable (issue #677): no delete entry
               // point renders -- disabling the companion CLI tool is the
@@ -584,6 +610,10 @@ type SkillRowProps = {
   skill: SkillEntry;
   /** The Edited derivation (builtin rows only, issue #677). */
   edited: boolean;
+  /** The enablement switch is mid-flight (any row): gate every row's switch. */
+  busy?: boolean;
+  /** Flip the row's enablement axis (issue #961). */
+  onToggleEnabled: (enabled: boolean) => void;
   onOpen: () => void;
   /** Undefined on builtin rows: undeletable (issue #677). */
   onDelete?: () => void;
@@ -591,7 +621,15 @@ type SkillRowProps = {
   onRestore?: () => void;
 };
 
-function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps) {
+function SkillRow({
+  skill,
+  edited,
+  busy = false,
+  onToggleEnabled,
+  onOpen,
+  onDelete,
+  onRestore,
+}: SkillRowProps) {
   const intl = useIntl();
   return (
     <div
@@ -605,7 +643,11 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
           onOpen();
         }
       }}
-      className={ROW_CLASS}
+      // Dormant-on-disable gray-out (issue #961): the disabled row reads
+      // faded (the switch + actions keep full contrast -- management stays
+      // first-class) and carries data-disabled as the test/styling hook.
+      className={`${ROW_CLASS} ${skill.enabled ? "" : "opacity-60"}`}
+      data-disabled={skill.enabled ? undefined : "true"}
     >
       <Puzzle className="text-muted-foreground size-4 shrink-0" aria-hidden />
       <div className="min-w-0 flex-1">
@@ -643,6 +685,21 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
+        <Switch
+          checked={skill.enabled}
+          disabled={busy}
+          onCheckedChange={onToggleEnabled}
+          aria-label={intl.formatMessage(
+            {
+              id: "settings.skills.enabledLabel",
+              defaultMessage: "Enable skill {name}",
+            },
+            { name: skill.name },
+          )}
+          // The row is one big open-edit button: the switch click must not
+          // ride the row's onClick up into the drawer.
+          onClick={(e) => e.stopPropagation()}
+        />
         {onRestore && (
           <RowActionButton
             label={intl.formatMessage(

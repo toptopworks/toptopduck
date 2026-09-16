@@ -203,6 +203,7 @@ describe("ImportSkillsDialog (issue #367)", () => {
         body: "Body.\n",
         link_target: "/home/u/.claude/skills/alpha",
         content_hash: "abc",
+        enabled: true,
       },
     };
     vi.mocked(importSkills).mockResolvedValue([imported]);

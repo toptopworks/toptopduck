@@ -31,6 +31,11 @@ export interface SkillEntry {
   // The resolved link target for `linked` skills (the "open source location"
   // anchor); null for `local`.
   link_target: string | null;
+  // The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
+  // in the new-session seed's reach; disabled = dormant (grayed row, the
+  // directory kept). Default-on polarity -- the backend overlays the
+  // app-config disabled-name set before the rows cross IPC.
+  enabled: boolean;
   // SHA-256 hex of the WHOLE SKILL.md bytes (frontmatter + body) at the
   // registry scan (ADR-0086, issue #381). The drift anchor the TurnCard
   // compares each turn's SkillProvenance.content_hash against to surface

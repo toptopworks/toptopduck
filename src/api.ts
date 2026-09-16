@@ -660,6 +660,17 @@ export async function listSkills(): Promise<SkillListing> {
   return invoke<SkillListing>("list_skills");
 }
 
+// Flip one skill's machine-level enablement (issue #961, ADR-0118 Decision
+// 2): the app-config disabled-name set is the single axis. Disabled =
+// dormant (out of the new-session seed; the directory stays). Returns the
+// updated FULL app-config (the frontend-sync contract).
+export async function setSkillEnabled(
+  name: string,
+  enabled: boolean,
+): Promise<AppConfig> {
+  return invoke<AppConfig>("set_skill_enabled", { name, enabled });
+}
+
 // Mint a new local skill: <root>/<name>/SKILL.md with the given description
 // and body. The name must be kebab-case (<= 64) and free, and the body
 // non-blank. Returns the entry for the written skill (read back, or derived

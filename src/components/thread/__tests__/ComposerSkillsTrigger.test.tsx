@@ -39,6 +39,7 @@ function skill(name: string): SkillEntry {
     body: "",
     link_target: null,
     content_hash: "ab".repeat(32),
+    enabled: true,
   };
 }
 
