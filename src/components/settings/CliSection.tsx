@@ -243,17 +243,15 @@ export function CliSection({
                 setFormTarget({ tool: blankCliTool(), isEdit: false })}
             />
             <HeaderActionButton
-              label={intl.formatMessage(
-                scanning
-                  ? {
-                      id: "settings.cli.rescanning",
-                      defaultMessage: "Scanning…",
-                    }
-                  : {
-                      id: "common.rescan",
-                      defaultMessage: "Rescan",
-                    },
-              )}
+              label={scanning
+                ? intl.formatMessage({
+                    id: "settings.cli.rescanning",
+                    defaultMessage: "Scanning…",
+                  })
+                : intl.formatMessage({
+                    id: "common.rescan",
+                    defaultMessage: "Rescan",
+                  })}
               icon={RefreshCw}
               spinning={scanning}
               disabled={scanning}
