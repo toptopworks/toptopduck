@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import {
@@ -33,7 +33,13 @@ import {
   SelectValue,
 } from "../ui/select";
 import { Textarea } from "../ui/textarea";
-import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
+import {
+  FoldHead,
+  PaneHeader,
+  RowRemoveButton,
+  SettingsCard,
+  SettingsRow,
+} from "./settings-chrome";
 
 // MCP server add / edit form (issue #388). A full-page replacement for the
 // server list with Form / JSON dual-mode, bidirectional sync, and a save flow:
@@ -1057,11 +1063,11 @@ function KvEditor({
   const intl = useIntl();
   const [expanded, setExpanded] = useState(entries.length > 0);
 
-  function handleExpand() {
-    setExpanded(true);
+  function handleExpandChange(next: boolean) {
+    setExpanded(next);
     // Auto-add a blank row when expanding with no entries so the user has
     // an immediate input to fill in.
-    if (entries.length === 0) {
+    if (next && entries.length === 0) {
       actions.add();
     }
   }
@@ -1149,119 +1155,80 @@ function KvEditor({
       };
 
   return (
-    <div data-testid="mcp-kv-editor" className="px-4 py-2.5">
-      {/* Collapsible header — click to expand/collapse */}
-      {!expanded ? (
-        <button
-          type="button"
-          onClick={handleExpand}
-          className="flex w-full items-center gap-1.5 text-left"
-        >
-          <ChevronRight
-            className="text-muted-foreground size-4 shrink-0"
-            aria-hidden
-          />
-          <span className="text-muted-foreground text-sm font-medium">
-            {L.section}
-          </span>
-        </button>
-      ) : (
-        <>
-          <div className="mb-2 flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => setExpanded(false)}
-              className="flex items-center gap-1.5 text-left"
-            >
-              <ChevronRight
-                className="text-muted-foreground size-4 shrink-0 rotate-90"
-                aria-hidden
-              />
-              <span className="text-muted-foreground text-sm font-medium">
-                {L.section}
-              </span>
-            </button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={actions.add}
-            >
-              <Plus className="size-4" aria-hidden />
-              {L.add}
-            </Button>
-          </div>
-
-          {entries.length === 0 ? (
-            <p className="text-muted-foreground text-xs">{L.empty}</p>
-          ) : (
-            <div className="space-y-1.5">
-              {entries.map((entry, i) => (
-                <div key={entry.id} className="flex items-center gap-2">
-                  <Input
-                    className="w-40 font-mono text-xs"
-                    value={entry.key}
-                    onChange={(e) =>
-                      actions.update(i, { key: e.target.value })}
-                    placeholder={isHeaders ? "Header" : "KEY"}
-                    aria-label={L.keyLabel(i + 1)}
-                  />
-                  <Input
-                    className="flex-1 font-mono text-xs"
-                    value={entry.value}
-                    onChange={(e) =>
-                      actions.update(i, { value: e.target.value })}
-                    placeholder={
-                      entry.isSecret ? "Stored in keychain" : "value"
-                    }
-                    type={entry.isSecret ? "password" : "text"}
-                    aria-label={L.valueLabel(i + 1)}
-                  />
-                  <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={entry.isSecret}
-                      onChange={(e) =>
-                        actions.update(i, { isSecret: e.target.checked })}
-                      className="size-3.5 cursor-pointer accent-primary"
-                      aria-label={intl.formatMessage(
-                        {
-                          id: "settings.mcp.form.envSecretLabel",
-                          defaultMessage: "Secret (row {row})",
-                        },
-                        { row: i + 1 },
-                      )}
-                    />
-                    <FormattedMessage
-                      id="settings.mcp.form.envSecret"
-                      defaultMessage="Secret"
-                    />
-                  </label>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="text-muted-foreground hover:text-destructive size-7 shrink-0"
-                    onClick={() => actions.remove(i)}
-                    aria-label={L.removeLabel(i + 1)}
-                  >
-                    <Trash2 className="size-3.5" aria-hidden />
-                  </Button>
-                </div>
-              ))}
-              {entries.some((entry) => entry.isSecret) && (
-                <p className="text-muted-foreground text-xs">
-                  <FormattedMessage
-                    id="settings.mcp.form.secretHint"
-                    defaultMessage="Leave a secret row's value empty to keep its stored value; deleting a row clears the stored value when you save."
-                  />
-                </p>
-              )}
-            </div>
-          )}
-        </>
+    <FoldHead
+      title={L.section}
+      expanded={expanded}
+      onExpandedChange={handleExpandChange}
+      action={(
+        <Button type="button" variant="ghost" size="sm" onClick={actions.add}>
+          <Plus className="size-4" aria-hidden />
+          {L.add}
+        </Button>
       )}
-    </div>
+    >
+      {entries.length === 0 ? (
+        <p className="text-muted-foreground text-xs">{L.empty}</p>
+      ) : (
+        <div className="space-y-1.5">
+          {entries.map((entry, i) => (
+            <div key={entry.id} className="flex items-center gap-2">
+              <Input
+                className="w-40 font-mono text-xs"
+                value={entry.key}
+                onChange={(e) =>
+                  actions.update(i, { key: e.target.value })}
+                placeholder={isHeaders ? "Header" : "KEY"}
+                aria-label={L.keyLabel(i + 1)}
+              />
+              <Input
+                className="flex-1 font-mono text-xs"
+                value={entry.value}
+                onChange={(e) =>
+                  actions.update(i, { value: e.target.value })}
+                placeholder={
+                  entry.isSecret ? "Stored in keychain" : "value"
+                }
+                type={entry.isSecret ? "password" : "text"}
+                aria-label={L.valueLabel(i + 1)}
+              />
+              <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  checked={entry.isSecret}
+                  onChange={(e) =>
+                    actions.update(i, { isSecret: e.target.checked })}
+                  className="size-3.5 cursor-pointer accent-primary"
+                  aria-label={intl.formatMessage(
+                    {
+                      id: "settings.mcp.form.envSecretLabel",
+                      defaultMessage: "Secret (row {row})",
+                    },
+                    { row: i + 1 },
+                  )}
+                />
+                <FormattedMessage
+                  id="settings.mcp.form.envSecret"
+                  defaultMessage="Secret"
+                />
+              </label>
+              <RowRemoveButton
+                label={L.removeLabel(i + 1)}
+                icon={Trash2}
+                onClick={() => actions.remove(i)}
+              />
+            </div>
+          ))}
+          {entries.some((entry) => entry.isSecret) && (
+            <p className="text-muted-foreground text-xs">
+              <FormattedMessage
+                id="settings.mcp.form.secretHint"
+                defaultMessage="Leave a secret row's value empty to keep its stored value; deleting a row clears the stored value when you save."
+              />
+            </p>
+          )}
+        </div>
+      )}
+    </FoldHead>
   );
 }
 

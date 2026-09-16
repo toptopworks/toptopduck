@@ -1,7 +1,12 @@
-import { type ComponentProps, type ReactNode } from "react";
-import { Info } from "lucide-react";
+import {
+  type ComponentProps,
+  type MouseEventHandler,
+  type ReactNode,
+} from "react";
+import { type LucideIcon, ChevronRight, Info, Loader2 } from "lucide-react";
 
 import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 // Settings-page layout chrome (ADR-0075, issue #281). The redesign replaces the
@@ -23,14 +28,18 @@ export const SETTINGS_TOOLTIP_CLASS =
   "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
 
 /** A field or section hint: an info icon + tooltip anchored after the
- *  label or section title (the ImportSkillsDialog import-mode posture).
- *  `label` is the trigger's accessible name; `children` render as the
- *  muted body. */
+ *  label or section title (the ImportSkillsDialog import-mode posture, now
+ *  itself a consumer). `label` is the trigger's accessible name; `children`
+ *  render as the muted body. An optional `title` promotes the body to the
+ *  titled block posture: a medium-weight heading line in the popover
+ *  surface foreground, then the muted body below (issue #958). */
 export function FieldHint({
   label,
+  title,
   children,
 }: {
   label: string;
+  title?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -46,9 +55,129 @@ export function FieldHint({
         sideOffset={3}
         className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
       >
-        <div className="text-muted-foreground text-sm">{children}</div>
+        <div
+          className={cn("text-muted-foreground text-sm", title && "space-y-1")}
+        >
+          {title && (
+            <p className="text-popover-foreground font-medium">{title}</p>
+          )}
+          {children}
+        </div>
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+/** A pane-header icon action: an icon-only ghost Button whose single `label`
+ *  is the one source for both the accessible name and the tooltip -- call
+ *  sites resolve the message descriptor (including conditionals like
+ *  Scanning…/Rescan) once and the component writes it to both, ending the
+ *  aria + tooltip double-write. `spinning` adds the in-flight rotate to the
+ *  icon (issue #958). */
+export function HeaderActionButton({
+  label,
+  icon: Icon,
+  spinning,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  icon: LucideIcon;
+  spinning?: boolean;
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="text-muted-foreground hover:text-foreground size-7"
+          aria-label={label}
+          disabled={disabled}
+          onClick={onClick}
+        >
+          <Icon className={cn("size-4", spinning && "animate-spin")} aria-hidden />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** A row-level icon action: the small bare ghost (no tooltip) on list rows,
+ *  the in-row counterpart of the pane-header posture -- Edit / Test /
+ *  Restore hover to the foreground, Delete to destructive (issue #958).
+ *  `spinning` swaps the icon for a rotating Loader2 (the in-flight Test
+ *  button); `onClick` receives the event so row-embedded buttons can
+ *  stopPropagation against their clickable row. */
+export function RowActionButton({
+  label,
+  icon: Icon,
+  destructive,
+  spinning,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  icon: LucideIcon;
+  /** Delete-style actions hover to destructive; the rest to the foreground. */
+  destructive?: boolean;
+  spinning?: boolean;
+  disabled?: boolean;
+  onClick?: MouseEventHandler<HTMLButtonElement>;
+}) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      className={cn(
+        "text-muted-foreground shrink-0",
+        destructive ? "hover:text-destructive" : "hover:text-foreground",
+      )}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {spinning ? (
+        <Loader2 className="size-4 animate-spin" aria-hidden />
+      ) : (
+        <Icon className="size-4" aria-hidden />
+      )}
+    </Button>
+  );
+}
+
+/** A row-end icon action inside an editor: the destructive-hover icon button
+ *  that removes a field row (the remove-parameter / remove-env /
+ *  remove-header buttons), no tooltip. Sibling of RowActionButton -- the
+ *  editor rows run tighter than the list rows, so the hit box shrinks to
+ *  size-7 with the size-3.5 glyph (issue #958). */
+export function RowRemoveButton({
+  label,
+  icon: Icon,
+  onClick,
+}: {
+  label: string;
+  icon: LucideIcon;
+  onClick?: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      size="icon"
+      variant="ghost"
+      className="text-muted-foreground hover:text-destructive size-7 shrink-0"
+      aria-label={label}
+      onClick={onClick}
+    >
+      <Icon className="size-3.5" aria-hidden />
+    </Button>
   );
 }
 
@@ -166,6 +295,84 @@ export function PaneHeader({
         )}
       </div>
       {action && <div className="shrink-0">{action}</div>}
+    </div>
+  );
+}
+
+/** A controlled chevron fold head over field rows: a muted title button with
+ *  a rotating chevron, an optional hint anchored beside the title, an
+ *  optional right-hand action beside the expanded head, and the field rows
+ *  below -- unifying the CliToolForm SectionFold and the MCP KvEditor fold
+ *  (issue #958). Drift adjudications folded in:
+ *  - The fold button always carries `aria-expanded` (the KvEditor copy had
+ *    none; both states of the SectionFold copy did -- the SectionFold wins).
+ *  - The collapsed button is not full-width: the hint rides beside the
+ *    button (a button cannot nest the hint's button), so a `w-full` hit
+ *    area would push the hint off the row (the KvEditor copy's full-width
+ *    hit area is retired along with its missing hint).
+ *  - The `px-4 py-2.5` wrapper lives here, not at the call sites.
+ *
+ *  `onExpandedChange` is the single expansion signal; call sites hang their
+ *  expand-time side effects (seeding a blank row into an empty section) on
+ *  it. */
+export function FoldHead({
+  title,
+  hint,
+  expanded,
+  onExpandedChange,
+  action,
+  children,
+  ...props
+}: {
+  title: ReactNode;
+  /** The field hint (the info-icon tooltip) anchored after the title. */
+  hint?: ReactNode;
+  expanded: boolean;
+  onExpandedChange: (next: boolean) => void;
+  /** The right-hand affordance (the Add button); rendered only expanded. */
+  action?: ReactNode;
+  children: ReactNode;
+  // The fold title is the ReactNode slot above, not the div's native hover
+  // tooltip -- Omit keeps the two from crossing into `ReactNode & string`.
+} & Omit<ComponentProps<"div">, "title">) {
+  // One trigger serves both states: only the chevron rotation, the
+  // aria-expanded value, and the toggle direction change with the state.
+  const trigger = (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      onClick={() => onExpandedChange(!expanded)}
+      className="flex items-center gap-1.5 text-left"
+    >
+      <ChevronRight
+        className={cn(
+          "text-muted-foreground size-4 shrink-0",
+          expanded && "rotate-90",
+        )}
+        aria-hidden
+      />
+      <span className="text-muted-foreground text-sm font-medium">{title}</span>
+    </button>
+  );
+  return (
+    <div className="px-4 py-2.5" {...props}>
+      {!expanded ? (
+        <div className="flex items-center gap-1.5">
+          {trigger}
+          {hint}
+        </div>
+      ) : (
+        <>
+          <div className="mb-2 flex items-center justify-between">
+            <span className="flex items-center gap-1">
+              {trigger}
+              {hint}
+            </span>
+            {action}
+          </div>
+          {children}
+        </>
+      )}
     </div>
   );
 }

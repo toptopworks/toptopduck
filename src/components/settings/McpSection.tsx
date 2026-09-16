@@ -6,7 +6,6 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
-  Loader2,
   MinusCircle,
   Pencil,
   Plus,
@@ -40,10 +39,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import {
+  HeaderActionButton,
   NameBadge,
+  RowActionButton,
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
@@ -377,49 +377,25 @@ export function McpSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  aria-label={intl.formatMessage({
-                    id: "settings.mcp.new",
-                    defaultMessage: "New",
-                  })}
-                  onClick={handleAdd}
-                >
-                  <Plus className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage id="settings.mcp.new" defaultMessage="New" />
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  aria-label={intl.formatMessage({
-                    id: "common.import",
-                    defaultMessage: "Import",
-                  })}
-                  onClick={() => {
-                    setImportEpoch((n) => n + 1);
-                    setImportOpen(true);
-                  }}
-                >
-                  <Download className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage id="common.import" defaultMessage="Import" />
-              </TooltipContent>
-            </Tooltip>
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "settings.mcp.new",
+                defaultMessage: "New",
+              })}
+              icon={Plus}
+              onClick={handleAdd}
+            />
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "common.import",
+                defaultMessage: "Import",
+              })}
+              icon={Download}
+              onClick={() => {
+                setImportEpoch((n) => n + 1);
+                setImportOpen(true);
+              }}
+            />
           </div>
         )}
       />
@@ -679,63 +655,46 @@ function McpServerRow({
             )}
           />
 
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-foreground shrink-0"
+          <RowActionButton
             disabled={toggling || probeState.kind === "testing"}
-            aria-label={intl.formatMessage(
+            spinning={probeState.kind === "testing"}
+            label={intl.formatMessage(
               {
                 id: "settings.mcp.testLabel",
                 defaultMessage: "Test server {name}",
               },
               { name: server.display_name },
             )}
+            icon={Zap}
             onClick={onProbe}
-          >
-            {probeState.kind === "testing" ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden />
-            ) : (
-              <Zap className="size-4" aria-hidden />
-            )}
-          </Button>
+          />
 
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-foreground shrink-0"
+          <RowActionButton
             disabled={toggling}
-            aria-label={intl.formatMessage(
+            label={intl.formatMessage(
               {
                 id: "settings.mcp.editLabel",
                 defaultMessage: "Edit server {name}",
               },
               { name: server.display_name },
             )}
+            icon={Pencil}
             onClick={onEdit}
-          >
-            <Pencil className="size-4" aria-hidden />
-          </Button>
+          />
 
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-destructive shrink-0"
+          <RowActionButton
+            destructive
             disabled={toggling}
-            aria-label={intl.formatMessage(
+            label={intl.formatMessage(
               {
                 id: "settings.mcp.deleteLabel",
                 defaultMessage: "Delete server {name}",
               },
               { name: server.display_name },
             )}
+            icon={Trash2}
             onClick={onDelete}
-          >
-            <Trash2 className="size-4" aria-hidden />
-          </Button>
+          />
         </div>
       </div>
 

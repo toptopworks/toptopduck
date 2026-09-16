@@ -49,12 +49,12 @@ import {
 } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
   FieldHint,
+  HeaderActionButton,
+  RowActionButton,
   NameBadge,
   PaneHeader,
-  SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
@@ -252,78 +252,34 @@ export function AgentsSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  aria-label={intl.formatMessage({
-                    id: "settings.agents.add",
-                    defaultMessage: "New agent",
-                  })}
-                  onClick={() => {
-                    setError(null);
-                    setForm({ mode: "create" });
-                  }}
-                >
-                  <Plus className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage id="settings.agents.add" defaultMessage="New agent" />
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  aria-label={intl.formatMessage({
-                    id: "settings.agents.openDir",
-                    defaultMessage: "Open agents folder",
-                  })}
-                  onClick={() => void openAgentsDir()}
-                >
-                  <FolderOpen className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage
-                  id="settings.agents.openDir"
-                  defaultMessage="Open agents folder"
-                />
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  onClick={() => void refetch()}
-                  aria-label={intl.formatMessage({
-                    id: "common.refresh",
-                    defaultMessage: "Refresh",
-                  })}
-                >
-                  <RefreshCw
-                    className={cn("size-4", isFetching && "animate-spin")}
-                    aria-hidden
-                  />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage
-                  id="common.refresh"
-                  defaultMessage="Refresh"
-                />
-              </TooltipContent>
-            </Tooltip>
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "settings.agents.add",
+                defaultMessage: "New agent",
+              })}
+              icon={Plus}
+              onClick={() => {
+                setError(null);
+                setForm({ mode: "create" });
+              }}
+            />
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "settings.agents.openDir",
+                defaultMessage: "Open agents folder",
+              })}
+              icon={FolderOpen}
+              onClick={() => void openAgentsDir()}
+            />
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "common.refresh",
+                defaultMessage: "Refresh",
+              })}
+              icon={RefreshCw}
+              spinning={isFetching}
+              onClick={() => void refetch()}
+            />
           </div>
         )}
       />
@@ -624,39 +580,30 @@ function AgentRow({
           { name: agent.name },
         )}
       />
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        className="text-muted-foreground hover:text-foreground shrink-0"
-        aria-label={intl.formatMessage(
+      <RowActionButton
+        label={intl.formatMessage(
           {
             id: "settings.agents.editLabel",
             defaultMessage: "Edit agent {name}",
           },
           { name: agent.name },
         )}
+        icon={Pencil}
         onClick={onEdit}
-      >
-        <Pencil className="size-4" aria-hidden />
-      </Button>
+      />
       {onDelete && (
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="text-muted-foreground hover:text-destructive shrink-0"
-          aria-label={intl.formatMessage(
+        <RowActionButton
+          destructive
+          label={intl.formatMessage(
             {
               id: "settings.agents.deleteLabel",
               defaultMessage: "Delete agent {name}",
             },
             { name: agent.name },
           )}
+          icon={Trash2}
           onClick={onDelete}
-        >
-          <Trash2 className="size-4" aria-hidden />
-        </Button>
+        />
       )}
     </div>
   );

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Pencil, Plus, RefreshCw, RotateCcw, Terminal, Trash2 } from "lucide-react";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 import type { AppConfig } from "../../types/app-config";
 import type { BuiltinScanEntry, CliToolConfig } from "../../types/cli-tool";
@@ -24,12 +23,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import {
+  HeaderActionButton,
   NameBadge,
+  RowActionButton,
   PaneHeader,
-  SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
 } from "./settings-chrome";
 import { blankCliTool } from "../../types/cli-tool";
@@ -234,67 +233,32 @@ export function CliSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  aria-label={intl.formatMessage({
-                    id: "settings.cli.new",
-                    defaultMessage: "New",
-                  })}
-                  onClick={() => setFormTarget({ tool: blankCliTool(), isEdit: false })}
-                >
-                  <Plus className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage id="settings.cli.new" defaultMessage="New" />
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  disabled={scanning}
-                  aria-label={intl.formatMessage(
-                    scanning
-                      ? {
-                          id: "settings.cli.rescanning",
-                          defaultMessage: "Scanning…",
-                        }
-                      : {
-                          id: "common.rescan",
-                          defaultMessage: "Rescan",
-                        },
-                  )}
-                  onClick={() => void handleRescan()}
-                >
-                  <RefreshCw
-                    className={cn("size-4", scanning && "animate-spin")}
-                    aria-hidden
-                  />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                {scanning ? (
-                  <FormattedMessage
-                    id="settings.cli.rescanning"
-                    defaultMessage="Scanning…"
-                  />
-                ) : (
-                  <FormattedMessage
-                    id="common.rescan"
-                    defaultMessage="Rescan"
-                  />
-                )}
-              </TooltipContent>
-            </Tooltip>
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "settings.cli.new",
+                defaultMessage: "New",
+              })}
+              icon={Plus}
+              onClick={() =>
+                setFormTarget({ tool: blankCliTool(), isEdit: false })}
+            />
+            <HeaderActionButton
+              label={intl.formatMessage(
+                scanning
+                  ? {
+                      id: "settings.cli.rescanning",
+                      defaultMessage: "Scanning…",
+                    }
+                  : {
+                      id: "common.rescan",
+                      defaultMessage: "Rescan",
+                    },
+              )}
+              icon={RefreshCw}
+              spinning={scanning}
+              disabled={scanning}
+              onClick={() => void handleRescan()}
+            />
           </div>
         )}
       />
@@ -645,62 +609,48 @@ function CliToolRow({
           )}
         />
 
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="text-muted-foreground hover:text-foreground shrink-0"
+        <RowActionButton
           disabled={toggling}
-          aria-label={intl.formatMessage(
+          label={intl.formatMessage(
             {
               id: "settings.cli.editLabel",
               defaultMessage: "Edit tool {name}",
             },
             { name: tool.name },
           )}
+          icon={Pencil}
           onClick={onEdit}
-        >
-          <Pencil className="size-4" aria-hidden />
-        </Button>
+        />
 
         {onRestore && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-foreground shrink-0"
+          <RowActionButton
             disabled={toggling}
-            aria-label={intl.formatMessage(
+            label={intl.formatMessage(
               {
                 id: "settings.cli.restoreLabel",
                 defaultMessage: "Restore built-in definition for tool {name}",
               },
               { name: tool.name },
             )}
+            icon={RotateCcw}
             onClick={onRestore}
-          >
-            <RotateCcw className="size-4" aria-hidden />
-          </Button>
+          />
         )}
 
         {onDelete && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-destructive shrink-0"
+          <RowActionButton
+            destructive
             disabled={toggling}
-            aria-label={intl.formatMessage(
+            label={intl.formatMessage(
               {
                 id: "settings.cli.deleteLabel",
                 defaultMessage: "Delete tool {name}",
               },
               { name: tool.name },
             )}
+            icon={Trash2}
             onClick={onDelete}
-          >
-            <Trash2 className="size-4" aria-hidden />
-          </Button>
+          />
         )}
       </div>
     </div>

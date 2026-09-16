@@ -1,6 +1,5 @@
 import { useState } from "react";
-import type { ReactNode } from "react";
-import { ArrowLeft, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import type { AppConfig } from "../../types/app-config";
@@ -22,7 +21,9 @@ import { Switch } from "../ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
   FieldHint,
+  FoldHead,
   PaneHeader,
+  RowRemoveButton,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
   SettingsRow,
@@ -291,277 +292,263 @@ export function CliToolForm({
          * chevron fold head (expanding an empty section seeds one blank
          * row), the info tooltip, the Add affordance beside the expanded
          * head, and one icon-button row per entry. */}
-        <div className="px-4 py-2.5">
-          <SectionFold
-            title={(
+        <FoldHead
+          title={(
+            <FormattedMessage
+              id="settings.cli.form.params"
+              defaultMessage="Parameters"
+            />
+          )}
+          hint={(
+            <FieldHint
+              label={intl.formatMessage({
+                id: "settings.cli.form.paramsHintAria",
+                defaultMessage: "Parameters explanation",
+              })}
+            >
               <FormattedMessage
-                id="settings.cli.form.params"
-                defaultMessage="Parameters"
+                id="settings.cli.form.paramsHint"
+                defaultMessage="A '{'name'}' placeholder in the fixed arguments receives the parameter's value (argv) or its temp-file path (file); a stdin parameter is written to the tool's standard input instead. The string[] toggle lets a parameter take multiple values, appended at the end of the command line."
               />
-            )}
-            hint={(
-              <FieldHint
-                label={intl.formatMessage({
-                  id: "settings.cli.form.paramsHintAria",
-                  defaultMessage: "Parameters explanation",
-                })}
-              >
-                <FormattedMessage
-                  id="settings.cli.form.paramsHint"
-                  defaultMessage="A '{'name'}' placeholder in the fixed arguments receives the parameter's value (argv) or its temp-file path (file); a stdin parameter is written to the tool's standard input instead. The string[] toggle lets a parameter take multiple values, appended at the end of the command line."
-                />
-              </FieldHint>
-            )}
-            expanded={paramsExpanded}
-            onExpandedChange={toggleParams}
-            action={(
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={addBlankParam}
-              >
-                <Plus className="size-4" aria-hidden />
-                <FormattedMessage
-                  id="settings.cli.form.addParam"
-                  defaultMessage="Add parameter"
-                />
-              </Button>
-            )}
-          >
-            {/* Index keys are safe here by construction: every input is fully
-           * controlled (value + onChange come from the params array in
-           * state), so an index-keyed re-render after a delete can never
-           * show stale DOM values. A stable row-id array would add machinery
-           * the wire type cannot carry (rows are keyed by their editable
-           * name, which can be empty or duplicate mid-edit). */}
-            {tool.params.length === 0 ? (
-              <p className="text-muted-foreground text-xs">
-                <FormattedMessage
-                  id="settings.cli.form.paramsEmpty"
-                  defaultMessage="No parameters. Click Add parameter to create one."
-                />
-              </p>
-            ) : (
-              <div className="space-y-1.5">
-                {tool.params.map((param, index) => (
-                  <div
-                    key={index}
-                    data-testid={`cli-param-row-${index}`}
-                    className="flex items-center gap-2"
+            </FieldHint>
+          )}
+          expanded={paramsExpanded}
+          onExpandedChange={toggleParams}
+          action={(
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={addBlankParam}
+            >
+              <Plus className="size-4" aria-hidden />
+              <FormattedMessage
+                id="settings.cli.form.addParam"
+                defaultMessage="Add parameter"
+              />
+            </Button>
+          )}
+        >
+          {/* Index keys are safe here by construction: every input is fully
+         * controlled (value + onChange come from the params array in
+         * state), so an index-keyed re-render after a delete can never
+         * show stale DOM values. A stable row-id array would add machinery
+         * the wire type cannot carry (rows are keyed by their editable
+         * name, which can be empty or duplicate mid-edit). */}
+          {tool.params.length === 0 ? (
+            <p className="text-muted-foreground text-xs">
+              <FormattedMessage
+                id="settings.cli.form.paramsEmpty"
+                defaultMessage="No parameters. Click Add parameter to create one."
+              />
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {tool.params.map((param, index) => (
+                <div
+                  key={index}
+                  data-testid={`cli-param-row-${index}`}
+                  className="flex items-center gap-2"
+                >
+                  <Input
+                    className="w-40 font-mono text-xs"
+                    value={param.name}
+                    placeholder="input"
+                    aria-label={intl.formatMessage(
+                      { id: "settings.cli.form.paramName", defaultMessage: "Parameter name (row {row})" },
+                      { row: index + 1 },
+                    )}
+                    onChange={(e) => patchParam(index, { name: e.target.value })}
+                  />
+                  <Input
+                    className="flex-1 text-xs"
+                    value={param.description}
+                    placeholder={intl.formatMessage({
+                      id: "settings.cli.form.paramDescription",
+                      defaultMessage: "What the agent should pass here",
+                    })}
+                    aria-label={intl.formatMessage(
+                      { id: "settings.cli.form.paramDescriptionLabel", defaultMessage: "Parameter description (row {row})" },
+                      { row: index + 1 },
+                    )}
+                    onChange={(e) => patchParam(index, { description: e.target.value })}
+                  />
+                  {/* Delivery (issue #672, ADR-0108 Decision 4): how the value
+                 * reaches the child, declared per parameter. The varargs
+                 * block is an argv-tail construct, so its delivery locks to
+                 * argv when the toggle is on (the backend refuses the
+                 * combination -- this keeps the form honest up front). */}
+                  <Select
+                    value={param.varargs ? "argv" : param.delivery}
+                    disabled={param.varargs}
+                    onValueChange={(delivery) =>
+                      patchParam(index, { delivery: delivery as CliToolParam["delivery"] })}
                   >
-                    <Input
-                      className="w-40 font-mono text-xs"
-                      value={param.name}
-                      placeholder="input"
+                    <SelectTrigger
+                      className="cli-delivery h-8 w-36 shrink-0 text-xs"
                       aria-label={intl.formatMessage(
-                        { id: "settings.cli.form.paramName", defaultMessage: "Parameter name (row {row})" },
+                        {
+                          id: "settings.cli.form.deliveryLabel",
+                          defaultMessage: "Value delivery (row {row})",
+                        },
                         { row: index + 1 },
                       )}
-                      onChange={(e) => patchParam(index, { name: e.target.value })}
-                    />
-                    <Input
-                      className="flex-1 text-xs"
-                      value={param.description}
-                      placeholder={intl.formatMessage({
-                        id: "settings.cli.form.paramDescription",
-                        defaultMessage: "What the agent should pass here",
-                      })}
-                      aria-label={intl.formatMessage(
-                        { id: "settings.cli.form.paramDescriptionLabel", defaultMessage: "Parameter description (row {row})" },
-                        { row: index + 1 },
-                      )}
-                      onChange={(e) => patchParam(index, { description: e.target.value })}
-                    />
-                    {/* Delivery (issue #672, ADR-0108 Decision 4): how the value
-                   * reaches the child, declared per parameter. The varargs
-                   * block is an argv-tail construct, so its delivery locks to
-                   * argv when the toggle is on (the backend refuses the
-                   * combination -- this keeps the form honest up front). */}
-                    <Select
-                      value={param.varargs ? "argv" : param.delivery}
-                      disabled={param.varargs}
-                      onValueChange={(delivery) =>
-                        patchParam(index, { delivery: delivery as CliToolParam["delivery"] })}
                     >
-                      <SelectTrigger
-                        className="cli-delivery h-8 w-36 shrink-0 text-xs"
-                        aria-label={intl.formatMessage(
-                          {
-                            id: "settings.cli.form.deliveryLabel",
-                            defaultMessage: "Value delivery (row {row})",
-                          },
-                          { row: index + 1 },
-                        )}
-                      >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="argv">
-                          <FormattedMessage
-                            id="settings.cli.form.deliveryArgv"
-                            defaultMessage="Command line (argv)"
-                          />
-                        </SelectItem>
-                        <SelectItem value="file">
-                          <FormattedMessage
-                            id="settings.cli.form.deliveryFile"
-                            defaultMessage="Temp file (path on the command line)"
-                          />
-                        </SelectItem>
-                        <SelectItem value="stdin">
-                          <FormattedMessage
-                            id="settings.cli.form.deliveryStdin"
-                            defaultMessage="Standard input (stdin)"
-                          />
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                    {/* The varargs toggle: the tooltip + the aria-label carry
-                     * the meaning, no visible text. TooltipTrigger asChild
-                     * would clobber the Switch's data-state -- the span
-                     * isolates the trigger. */}
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="inline-flex">
-                          <Switch
-                            checked={param.varargs}
-                            onCheckedChange={(varargs) =>
-                              patchParam(index, { varargs, ...(varargs ? { delivery: "argv" } : {}) })}
-                            aria-label={intl.formatMessage(
-                              { id: "settings.cli.form.varargsLabel", defaultMessage: "string[] (row {row})" },
-                              { row: index + 1 },
-                            )}
-                          />
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="argv">
                         <FormattedMessage
-                          id="settings.cli.form.varargsTooltip"
-                          defaultMessage="Lets this parameter take multiple values, appended at the end of the command line."
+                          id="settings.cli.form.deliveryArgv"
+                          defaultMessage="Command line (argv)"
                         />
-                      </TooltipContent>
-                    </Tooltip>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="text-muted-foreground hover:text-destructive size-7 shrink-0"
-                      aria-label={intl.formatMessage(
-                        { id: "settings.cli.form.removeParam", defaultMessage: "Remove parameter (row {row})" },
-                        { row: index + 1 },
-                      )}
-                      onClick={() =>
-                        setTool((prev) => ({
-                          ...prev,
-                          params: prev.params.filter((_, i) => i !== index),
-                        }))}
-                    >
-                      <Trash2 className="size-3.5" aria-hidden />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </SectionFold>
-        </div>
+                      </SelectItem>
+                      <SelectItem value="file">
+                        <FormattedMessage
+                          id="settings.cli.form.deliveryFile"
+                          defaultMessage="Temp file (path on the command line)"
+                        />
+                      </SelectItem>
+                      <SelectItem value="stdin">
+                        <FormattedMessage
+                          id="settings.cli.form.deliveryStdin"
+                          defaultMessage="Standard input (stdin)"
+                        />
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {/* The varargs toggle: the tooltip + the aria-label carry
+                   * the meaning, no visible text. TooltipTrigger asChild
+                   * would clobber the Switch's data-state -- the span
+                   * isolates the trigger. */}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex">
+                        <Switch
+                          checked={param.varargs}
+                          onCheckedChange={(varargs) =>
+                            patchParam(index, { varargs, ...(varargs ? { delivery: "argv" } : {}) })}
+                          aria-label={intl.formatMessage(
+                            { id: "settings.cli.form.varargsLabel", defaultMessage: "string[] (row {row})" },
+                            { row: index + 1 },
+                          )}
+                        />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                      <FormattedMessage
+                        id="settings.cli.form.varargsTooltip"
+                        defaultMessage="Lets this parameter take multiple values, appended at the end of the command line."
+                      />
+                    </TooltipContent>
+                  </Tooltip>
+                  <RowRemoveButton
+                    label={intl.formatMessage(
+                      { id: "settings.cli.form.removeParam", defaultMessage: "Remove parameter (row {row})" },
+                      { row: index + 1 },
+                    )}
+                    icon={Trash2}
+                    onClick={() =>
+                      setTool((prev) => ({
+                        ...prev,
+                        params: prev.params.filter((_, i) => i !== index),
+                      }))}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </FoldHead>
 
         {/* --- Env editor (the KvEditor fold chrome, same posture) --------- */}
-        <div className="px-4 py-2.5">
-          <SectionFold
-            title={(
+        <FoldHead
+          title={(
+            <FormattedMessage
+              id="settings.cli.form.env"
+              defaultMessage="Environment variables (optional, non-secret)"
+            />
+          )}
+          hint={(
+            <FieldHint
+              label={intl.formatMessage({
+                id: "settings.cli.form.envHintAria",
+                defaultMessage: "Environment variables explanation",
+              })}
+            >
               <FormattedMessage
-                id="settings.cli.form.env"
-                defaultMessage="Environment variables (optional, non-secret)"
+                id="settings.cli.form.envHint"
+                defaultMessage="Literal values merged over the inherited environment at launch. Secret-named keys (api key, token, …) are refused."
               />
-            )}
-            hint={(
-              <FieldHint
-                label={intl.formatMessage({
-                  id: "settings.cli.form.envHintAria",
-                  defaultMessage: "Environment variables explanation",
-                })}
-              >
-                <FormattedMessage
-                  id="settings.cli.form.envHint"
-                  defaultMessage="Literal values merged over the inherited environment at launch. Secret-named keys (api key, token, …) are refused."
-                />
-              </FieldHint>
-            )}
-            expanded={envExpanded}
-            onExpandedChange={toggleEnv}
-            action={(
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={addBlankEnv}
-              >
-                <Plus className="size-4" aria-hidden />
-                <FormattedMessage
-                  id="settings.cli.form.addEnv"
-                  defaultMessage="Add variable"
-                />
-              </Button>
-            )}
-          >
-            {envRows.length === 0 ? (
-              <p className="text-muted-foreground text-xs">
-                <FormattedMessage
-                  id="settings.cli.form.envEmpty"
-                  defaultMessage="No environment variables. Click Add variable to create one."
-                />
-              </p>
-            ) : (
-              <div className="space-y-1.5">
-                {envRows.map((row, index) => (
-                  <div key={index} className="flex items-center gap-2">
-                    <Input
-                      className="w-40 font-mono text-xs"
-                      value={row.key}
-                      placeholder="LOG_LEVEL"
-                      aria-label={intl.formatMessage(
-                        { id: "settings.cli.form.envKey", defaultMessage: "Env name (row {row})" },
-                        { row: index + 1 },
+            </FieldHint>
+          )}
+          expanded={envExpanded}
+          onExpandedChange={toggleEnv}
+          action={(
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={addBlankEnv}
+            >
+              <Plus className="size-4" aria-hidden />
+              <FormattedMessage
+                id="settings.cli.form.addEnv"
+                defaultMessage="Add variable"
+              />
+            </Button>
+          )}
+        >
+          {envRows.length === 0 ? (
+            <p className="text-muted-foreground text-xs">
+              <FormattedMessage
+                id="settings.cli.form.envEmpty"
+                defaultMessage="No environment variables. Click Add variable to create one."
+              />
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {envRows.map((row, index) => (
+                <div key={index} className="flex items-center gap-2">
+                  <Input
+                    className="w-40 font-mono text-xs"
+                    value={row.key}
+                    placeholder="LOG_LEVEL"
+                    aria-label={intl.formatMessage(
+                      { id: "settings.cli.form.envKey", defaultMessage: "Env name (row {row})" },
+                      { row: index + 1 },
+                    )}
+                    onChange={(e) =>
+                      setEnvRows((prev) =>
+                        prev.map((r, i) => (i === index ? { ...r, key: e.target.value } : r)),
                       )}
-                      onChange={(e) =>
-                        setEnvRows((prev) =>
-                          prev.map((r, i) => (i === index ? { ...r, key: e.target.value } : r)),
-                        )}
-                    />
-                    <Input
-                      className="flex-1 font-mono text-xs"
-                      value={row.value}
-                      placeholder="info"
-                      aria-label={intl.formatMessage(
-                        { id: "settings.cli.form.envValue", defaultMessage: "Env value (row {row})" },
-                        { row: index + 1 },
+                  />
+                  <Input
+                    className="flex-1 font-mono text-xs"
+                    value={row.value}
+                    placeholder="info"
+                    aria-label={intl.formatMessage(
+                      { id: "settings.cli.form.envValue", defaultMessage: "Env value (row {row})" },
+                      { row: index + 1 },
+                    )}
+                    onChange={(e) =>
+                      setEnvRows((prev) =>
+                        prev.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)),
                       )}
-                      onChange={(e) =>
-                        setEnvRows((prev) =>
-                          prev.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)),
-                        )}
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="text-muted-foreground hover:text-destructive size-7 shrink-0"
-                      aria-label={intl.formatMessage(
-                        { id: "settings.cli.form.removeEnv", defaultMessage: "Remove env (row {row})" },
-                        { row: index + 1 },
-                      )}
-                      onClick={() =>
-                        setEnvRows((prev) => prev.filter((_, i) => i !== index))}
-                    >
-                      <Trash2 className="size-3.5" aria-hidden />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </SectionFold>
-        </div>
+                  />
+                  <RowRemoveButton
+                    label={intl.formatMessage(
+                      { id: "settings.cli.form.removeEnv", defaultMessage: "Remove env (row {row})" },
+                      { row: index + 1 },
+                    )}
+                    icon={Trash2}
+                    onClick={() =>
+                      setEnvRows((prev) => prev.filter((_, i) => i !== index))}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </FoldHead>
 
         {error && (
           <p className="settings-error text-destructive px-4 py-1.5 text-sm">{error}</p>
@@ -590,70 +577,5 @@ export function CliToolForm({
         </div>
       </SettingsCard>
     </div>
-  );
-}
-
-/** The MCP form's KvEditor section chrome: a chevron fold head over the
- *  field rows, with an optional right-hand action beside the expanded head.
- *  The fold head is a plain toggle button; the field hint (itself a button)
- *  rides outside it -- a button cannot nest a button. */
-function SectionFold({
-  title,
-  hint,
-  expanded,
-  onExpandedChange,
-  action,
-  children,
-}: {
-  title: ReactNode;
-  /** The field hint (the info-icon tooltip) anchored after the title. */
-  hint: ReactNode;
-  expanded: boolean;
-  onExpandedChange: (next: boolean) => void;
-  /** The right-hand affordance (the Add button); rendered only expanded. */
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  if (!expanded) {
-    return (
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          aria-expanded={false}
-          onClick={() => onExpandedChange(true)}
-          className="flex items-center gap-1.5 text-left"
-        >
-          <ChevronRight
-            className="text-muted-foreground size-4 shrink-0"
-            aria-hidden
-          />
-          <span className="text-muted-foreground text-sm font-medium">{title}</span>
-        </button>
-        {hint}
-      </div>
-    );
-  }
-  return (
-    <>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="flex items-center gap-1">
-          <button
-            type="button"
-            aria-expanded
-            onClick={() => onExpandedChange(false)}
-            className="flex items-center gap-1.5 text-left"
-          >
-            <ChevronRight
-              className="text-muted-foreground size-4 shrink-0 rotate-90"
-              aria-hidden
-            />
-            <span className="text-muted-foreground text-sm font-medium">{title}</span>
-          </button>
-          {hint}
-        </span>
-        {action}
-      </div>
-      {children}
-    </>
   );
 }

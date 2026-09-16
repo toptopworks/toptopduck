@@ -17,10 +17,10 @@ import type {
   ProbeError,
   ProbeOk,
 } from "../../types/runtime";
-import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
+  HeaderActionButton,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
   SettingsRow,
@@ -579,30 +579,16 @@ export function LocalCliTab({
             defaultMessage="Detected CLI adapters"
           />
         </span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="text-muted-foreground hover:text-foreground size-7"
-              onClick={() => void handleRescan()}
-              disabled={rescanning}
-              aria-label={intl.formatMessage({
-                id: "common.rescan",
-                defaultMessage: "Rescan",
-              })}
-            >
-              <RefreshCw
-                className={cn("size-4", rescanning && "animate-spin")}
-                aria-hidden
-              />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-            <FormattedMessage id="common.rescan" defaultMessage="Rescan" />
-          </TooltipContent>
-        </Tooltip>
+        <HeaderActionButton
+          label={intl.formatMessage({
+            id: "common.rescan",
+            defaultMessage: "Rescan",
+          })}
+          icon={RefreshCw}
+          spinning={rescanning}
+          disabled={rescanning}
+          onClick={() => void handleRescan()}
+        />
       </div>
 
       {isPending && (
