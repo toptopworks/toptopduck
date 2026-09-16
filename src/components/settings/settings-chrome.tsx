@@ -3,9 +3,11 @@ import {
   type MouseEventHandler,
   type ReactNode,
 } from "react";
-import { type LucideIcon, ChevronRight, Info, Loader2 } from "lucide-react";
+import { type LucideIcon, ArrowLeft, ChevronRight, Info, Loader2 } from "lucide-react";
+import { useIntl } from "react-intl";
 
 import { cn } from "../../lib/utils";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
@@ -108,6 +110,32 @@ export function HeaderActionButton({
         {label}
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+/** The editor form's back link: the ArrowLeft labeled-text button escaping a
+ *  form pane back to its list (issue #960). `children` is the label slot --
+ *  the three call sites' copy differs -- while `onClick` / `disabled` pass
+ *  straight through: the chrome layer does not know the saving semantics. */
+export function PaneBackLink({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
+      onClick={onClick}
+      disabled={disabled}
+    >
+      <ArrowLeft className="size-4" aria-hidden />
+      {children}
+    </button>
   );
 }
 
@@ -377,6 +405,105 @@ export function FoldHead({
           </div>
           {children}
         </>
+      )}
+    </div>
+  );
+}
+
+/** The import dialog's source fold head (issue #960): the select-all checkbox
+ *  slot beside a single expand toggle carrying the source label, its optional
+ *  config path, the discovered-count badge, and the trailing chevron. The
+ *  expand/collapse verb rides the toggle's aria-label so the path / badge text
+ *  never leaks into the accessible name; `children` renders the expanded
+ *  panel below the hairline divider. The toggle handler is a plain toggler,
+ *  unlike FoldHead's `onExpandedChange(next)`: the dialogs' callers only flip
+ *  Set membership, with no expand-time side-effect hook to feed. */
+export function SourceFold({
+  label,
+  path,
+  count,
+  expanded,
+  onToggleExpand,
+  selectAll,
+  children,
+}: {
+  label: string;
+  /** The mono source path after the label; hidden when absent (an MCP source
+   *  whose config file was not found). */
+  path?: string | null;
+  count: number;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  /** The select-all checkbox slot: state, disabled, and handler pass
+   *  straight through; its accessible name is the source `label`. */
+  selectAll: {
+    checked: boolean;
+    disabled?: boolean;
+    onToggleAll: () => void;
+  };
+  children: ReactNode;
+}) {
+  const intl = useIntl();
+  return (
+    <div className="border-border rounded-lg border">
+      <div className="hover:bg-accent/50 flex items-center gap-2 px-3 py-2.5">
+        <input
+          type="checkbox"
+          checked={selectAll.checked}
+          onChange={selectAll.onToggleAll}
+          disabled={selectAll.disabled}
+          aria-label={label}
+          className="size-4"
+        />
+        <button
+          type="button"
+          onClick={onToggleExpand}
+          aria-expanded={expanded}
+          aria-label={
+            expanded
+              ? intl.formatMessage(
+                  {
+                    id: "settings.importSource.collapse",
+                    defaultMessage: "Collapse {label}",
+                  },
+                  { label },
+                )
+              : intl.formatMessage(
+                  {
+                    id: "settings.importSource.expand",
+                    defaultMessage: "Expand {label}",
+                  },
+                  { label },
+                )
+          }
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <div className="flex min-w-0 items-baseline gap-1.5">
+            <span className="shrink-0 text-sm font-medium">{label}</span>
+            {path && (
+              <span
+                className="text-muted-foreground truncate font-mono text-xs"
+                title={path}
+              >
+                {path}
+              </span>
+            )}
+          </div>
+          <Badge variant="secondary" className="ml-auto shrink-0">
+            {count}
+          </Badge>
+          <ChevronRight
+            className={cn(
+              "size-4 shrink-0 transition-transform",
+              expanded && "rotate-90",
+            )}
+            aria-hidden
+          />
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="border-border border-t px-3 py-2">{children}</div>
       )}
     </div>
   );

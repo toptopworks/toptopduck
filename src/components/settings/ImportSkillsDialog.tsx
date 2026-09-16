@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, Plus, RefreshCw, X } from "lucide-react";
+import { Plus, RefreshCw, X } from "lucide-react";
 
 import type {
   DiscoveredSkill,
@@ -16,7 +16,7 @@ import { skillKeys } from "../../session/queryKeys";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { FieldHint } from "./settings-chrome";
+import { FieldHint, SourceFold } from "./settings-chrome";
 import {
   Select,
   SelectContent,
@@ -410,105 +410,59 @@ function SourceRow({
   onToggleSourceAll,
   onToggleSkill,
 }: SourceRowProps) {
-  const intl = useIntl();
   const selectedInSource = importableDirs.filter((d) => selected.has(d)).length;
   const allSelected =
     importableDirs.length > 0 && selectedInSource === importableDirs.length;
 
   return (
-    <div className="border-border rounded-lg border">
-      {/* Collapsed header: select-all checkbox + single expand toggle carrying
-          label + path + count badge + chevron (one aria-expanded element, not
-          two). The aria-label carries the expand/collapse action so the path /
-          badge text never leaks into the accessible name. */}
-      <div className="hover:bg-accent/50 flex items-center gap-2 px-3 py-2.5">
-        <input
-          type="checkbox"
-          checked={allSelected}
-          onChange={onToggleSourceAll}
-          disabled={importableDirs.length === 0}
-          aria-label={source.label}
-          className="size-4"
-        />
+    <SourceFold
+      label={source.label}
+      path={source.path}
+      count={source.skills.length}
+      expanded={expanded}
+      onToggleExpand={onToggleExpand}
+      selectAll={{
+        checked: allSelected,
+        disabled: importableDirs.length === 0,
+        onToggleAll: onToggleSourceAll,
+      }}
+    >
+      {/* Expanded panel: skill checkboxes + selected M / N + select-all
+          link. */}
+      <div className="text-muted-foreground mb-1.5 flex items-center justify-between text-xs">
+        <span>
+          <FormattedMessage
+            id="settings.skills.importSelectedCount"
+            defaultMessage="Selected {selected} / {total}"
+            values={{
+              selected: selectedInSource,
+              total: importableDirs.length,
+            }}
+          />
+        </span>
         <button
           type="button"
-          onClick={onToggleExpand}
-          aria-expanded={expanded}
-          aria-label={
-            expanded
-              ? intl.formatMessage(
-                  {
-                    id: "settings.skills.importCollapse",
-                    defaultMessage: "Collapse {label}",
-                  },
-                  { label: source.label },
-                )
-              : intl.formatMessage(
-                  {
-                    id: "settings.skills.importExpand",
-                    defaultMessage: "Expand {label}",
-                  },
-                  { label: source.label },
-                )
-          }
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={onToggleSourceAll}
+          disabled={importableDirs.length === 0}
+          className="hover:text-foreground disabled:opacity-50"
         >
-          <span className="truncate text-sm font-medium">{source.label}</span>
-          <span className="text-muted-foreground truncate font-mono text-xs">
-            {source.path}
-          </span>
-          <Badge variant="secondary" className="ml-auto shrink-0">
-            {source.skills.length}
-          </Badge>
-          <ChevronRight
-            className={cn(
-              "size-4 shrink-0 transition-transform",
-              expanded && "rotate-90",
-            )}
-            aria-hidden
+          <FormattedMessage
+            id="settings.skills.importSelectAll"
+            defaultMessage="Select all"
           />
         </button>
       </div>
-
-      {/* Expanded: skill checkboxes + selected M / N + select-all link. */}
-      {expanded && (
-        <div className="border-border border-t px-3 py-2">
-          <div className="text-muted-foreground mb-1.5 flex items-center justify-between text-xs">
-            <span>
-              <FormattedMessage
-                id="settings.skills.importSelectedCount"
-                defaultMessage="Selected {selected} / {total}"
-                values={{
-                  selected: selectedInSource,
-                  total: importableDirs.length,
-                }}
-              />
-            </span>
-            <button
-              type="button"
-              onClick={onToggleSourceAll}
-              disabled={importableDirs.length === 0}
-              className="hover:text-foreground disabled:opacity-50"
-            >
-              <FormattedMessage
-                id="settings.skills.importSelectAll"
-                defaultMessage="Select all"
-              />
-            </button>
-          </div>
-          <div className="grid gap-0.5">
-            {source.skills.map((skill) => (
-              <SkillRow
-                key={skill.source_dir}
-                skill={skill}
-                checked={selected.has(skill.source_dir)}
-                onToggle={() => onToggleSkill(skill.source_dir)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+      <div className="grid gap-0.5">
+        {source.skills.map((skill) => (
+          <SkillRow
+            key={skill.source_dir}
+            skill={skill}
+            checked={selected.has(skill.source_dir)}
+            onToggle={() => onToggleSkill(skill.source_dir)}
+          />
+        ))}
+      </div>
+    </SourceFold>
   );
 }
 

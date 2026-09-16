@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowLeft, Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import type { AppConfig } from "../../types/app-config";
@@ -22,6 +22,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
   FieldHint,
   FoldHead,
+  PaneBackLink,
   PaneHeader,
   RowRemoveButton,
   SETTINGS_TOOLTIP_CLASS,
@@ -174,20 +175,14 @@ export function CliToolForm({
 
   return (
     <div>
-      {/* Back link (the McpServerForm posture): the discard path out of the
-       * form; the in-card footer carries the save + explicit cancel. */}
-      <button
-        type="button"
-        className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
-        onClick={onCancel}
-        disabled={saving}
-      >
-        <ArrowLeft className="size-4" aria-hidden />
+      {/* Back link: the discard path out of the form; the in-card footer
+       * carries the save + explicit cancel. */}
+      <PaneBackLink onClick={onCancel} disabled={saving}>
         <FormattedMessage
           id="settings.cli.form.backToList"
           defaultMessage="Back to CLI list"
         />
-      </button>
+      </PaneBackLink>
 
       <PaneHeader
         className="mb-3"

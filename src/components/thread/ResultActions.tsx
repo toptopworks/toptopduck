@@ -209,6 +209,9 @@ export function ResultActions({
             ) : (
               <Download aria-hidden="true" className="w-3.5 h-3.5" />
             )}
+            {/* The sr-only span carries the accessible name (NOT aria-label),
+                matching the QuestionBar submit/stop precedent so getByLabelText
+                stays scoped. */}
             <span className="sr-only">{busy ? stopLabel : exportLabel}</span>
           </Button>
         </TooltipTrigger>

@@ -157,6 +157,10 @@ describe("McpSection (issue #387)", () => {
     expect(
       screen.getByText("Not tested yet. Click Test to check connectivity."),
     ).toBeInTheDocument();
+    // The idle dot announces its state from the locale catalog.
+    expect(
+      screen.getByRole("img", { name: "Not tested" }),
+    ).toBeInTheDocument();
   });
 
   it("shows tool list after a successful probe", async () => {
@@ -183,6 +187,10 @@ describe("McpSection (issue #387)", () => {
       expect(screen.getByText("Search the web")).toBeInTheDocument();
       expect(screen.getByText("fetch")).toBeInTheDocument();
     });
+    // The connected dot announces its state from the locale catalog.
+    expect(
+      screen.getByRole("img", { name: "Connected" }),
+    ).toBeInTheDocument();
   });
 
   it("shows error message after a failed probe", async () => {
@@ -208,6 +216,26 @@ describe("McpSection (issue #387)", () => {
         screen.getByText("Connection failed: spawn failed: ENOENT"),
       ).toBeInTheDocument();
     });
+    // The failed dot announces its state from the locale catalog.
+    expect(
+      screen.getByRole("img", { name: "Connection failed" }),
+    ).toBeInTheDocument();
+  });
+
+  it("announces the testing state on the status dot while a probe runs", () => {
+    const server = makeServer({ id: "srv-1", display_name: "My Server" });
+    // A never-resolving probe keeps the row in the testing state.
+    vi.mocked(probeMcpServer).mockImplementation(() => new Promise(() => {}));
+
+    renderWithProviders(
+      <McpSection appConfig={makeAppConfig([server])} onCommit={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Test/ }));
+
+    expect(
+      screen.getByRole("img", { name: "Testing" }),
+    ).toBeInTheDocument();
   });
 
   it("opens delete confirmation dialog on delete button click", () => {
