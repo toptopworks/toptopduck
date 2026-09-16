@@ -249,7 +249,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     // codex is initially undetected.
     expect(screen.getAllByText("Not installed")).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "Rescan adapters" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
     await waitFor(() => expect(vi.mocked(rescanAdapters)).toHaveBeenCalledTimes(1));
     // After rescan, codex is detected and its binary path appears.
     await waitFor(() => expect(screen.getByText("/usr/bin/codex")).toBeInTheDocument());
@@ -267,7 +267,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
     await screen.findByText("gemini-cli");
 
-    const rescanButton = screen.getByRole("button", { name: "Rescan adapters" });
+    const rescanButton = screen.getByRole("button", { name: "Rescan" });
     fireEvent.click(rescanButton);
     await waitFor(() => expect(vi.mocked(rescanAdapters)).toHaveBeenCalled());
     expect(rescanButton).toBeDisabled();
@@ -287,7 +287,7 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Local CLI" }));
     await screen.findByText("gemini-cli");
 
-    fireEvent.click(screen.getByRole("button", { name: "Rescan adapters" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
     expect(await screen.findByText("scan timeout")).toBeInTheDocument();
   });
 
@@ -318,18 +318,18 @@ describe("RuntimeSection (issue #489, ADR-0091)", () => {
     expect(screen.queryByText("Available")).not.toBeInTheDocument();
     expect(screen.queryByText("Not installed")).not.toBeInTheDocument();
     // Rescan is present + not disabled.
-    const rescanButton = screen.getByRole("button", { name: "Rescan adapters" });
+    const rescanButton = screen.getByRole("button", { name: "Rescan" });
     expect(rescanButton).toBeEnabled();
   });
 
-  it("keeps the Refresh key status button in the profile-list toolbar when hideHeader is active", async () => {
+  it("keeps the Refresh button in the profile-list toolbar when hideHeader is active", async () => {
     // RuntimeSection always passes hideHeader to ProfilesSection, so the refresh
     // button must relocate from the PaneHeader action slot to the profile-list
     // toolbar and remain findable + clickable (issue #489/#493). The button is
     // disabled while the initial key-status fetch is in flight (keysLoading);
     // findByRole waits for it to settle + become enabled.
     renderSection();
-    const refreshButton = await screen.findByRole("button", { name: "Refresh key status" });
+    const refreshButton = await screen.findByRole("button", { name: "Refresh" });
     await waitFor(() => expect(refreshButton).toBeEnabled());
   });
 });

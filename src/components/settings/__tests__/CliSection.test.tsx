@@ -168,12 +168,34 @@ describe("CliSection", () => {
       <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "New" }));
-    fireEvent.click(screen.getByRole("button", { name: "Add parameter" }));
+    // The empty sections start collapsed (the KvEditor posture): expanding
+    // the head seeds one blank row, then one more via Add makes two.
+    fireEvent.click(screen.getByRole("button", { name: "Parameters" }));
     fireEvent.click(screen.getByRole("button", { name: "Add parameter" }));
     const deliveries = screen.getAllByRole("combobox", {
       name: /Value delivery \(row \d\)/,
     });
     expect(deliveries).toHaveLength(2);
+  });
+
+  it("folds the empty sections and seeds a blank row on expand", () => {
+    // The KvEditor posture: a section with no rows starts collapsed (no Add
+    // affordance, no rows); the chevron head expands it and seeds one blank
+    // row; a second toggle collapses it again.
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    expect(
+      screen.queryByRole("button", { name: "Add parameter" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Parameters" }));
+    expect(
+      screen.getByRole("button", { name: "Add parameter" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("cli-param-row-0")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Parameters" }));
+    expect(screen.queryByTestId("cli-param-row-0")).not.toBeInTheDocument();
   });
 
   it("edits a multi-line tool description in the textarea (issue #683 rider)", async () => {
@@ -197,7 +219,7 @@ describe("CliSection", () => {
     fireEvent.change(screen.getByLabelText(/Executable/), {
       target: { value: "pandoc" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
     await waitFor(() => {
       expect(upsertCliTool).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -205,6 +227,52 @@ describe("CliSection", () => {
           description: "Converts documents.\nAlso reads markdown and writes docx.",
         }),
       );
+    });
+  });
+
+  it("returns to the list through the form's back link", () => {
+    // The McpServerForm posture: the back link above the pane header is the
+    // discard path; the footer Cancel is its in-card twin.
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    expect(screen.getByText("Register CLI tool")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to CLI list" }));
+    expect(
+      screen.getByText("No CLI tools registered yet. Click New to register one."),
+    ).toBeInTheDocument();
+  });
+
+  it("pins the in-flight save state (Saving… label, disabled footer)", async () => {
+    // The McpServerForm save footer: the busy spin swaps the label and
+    // gates the footer buttons until the upsert settles, then the section
+    // returns to the list.
+    let resolveUpsert: (value: AppConfig) => void = () => {};
+    vi.mocked(upsertCliTool).mockImplementation(
+      () =>
+        new Promise<AppConfig>((resolve) => {
+          resolveUpsert = resolve;
+        }),
+    );
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.change(screen.getByLabelText(/Name \(locked after save\)/), {
+      target: { value: "my-pandoc" },
+    });
+    fireEvent.change(screen.getByLabelText(/Description/), {
+      target: { value: "Converts documents." },
+    });
+    fireEvent.change(screen.getByLabelText(/Executable/), {
+      target: { value: "pandoc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    resolveUpsert(makeAppConfig([]));
+    await waitFor(() => {
+      expect(screen.queryByText("Register CLI tool")).not.toBeInTheDocument();
     });
   });
 

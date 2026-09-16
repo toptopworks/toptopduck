@@ -34,7 +34,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -56,6 +55,7 @@ import {
 import { Textarea } from "../ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
+  NameBadge,
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
@@ -376,8 +376,8 @@ export function SkillsSection({
                   className="text-muted-foreground hover:text-foreground size-7"
                   onClick={() => void refetch()}
                   aria-label={intl.formatMessage({
-                    id: "settings.skills.rescan",
-                    defaultMessage: "Rescan",
+                    id: "common.refresh",
+                    defaultMessage: "Refresh",
                   })}
                 >
                   <RefreshCw
@@ -388,8 +388,8 @@ export function SkillsSection({
               </TooltipTrigger>
               <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
                 <FormattedMessage
-                  id="settings.skills.rescan"
-                  defaultMessage="Rescan"
+                  id="common.refresh"
+                  defaultMessage="Refresh"
                 />
               </TooltipContent>
             </Tooltip>
@@ -653,7 +653,7 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.name}</span>
-          <Badge variant="secondary" className="shrink-0">
+          <NameBadge>
             {skill.acquired === "linked" ? (
               <FormattedMessage
                 id="settings.skills.acquiredLinked"
@@ -670,14 +670,14 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
                 defaultMessage="local"
               />
             )}
-          </Badge>
+          </NameBadge>
           {edited && (
-            <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+            <NameBadge>
               <FormattedMessage
                 id="settings.skills.editedBadge"
                 defaultMessage="Edited"
               />
-            </span>
+            </NameBadge>
           )}
         </div>
         <p className="text-muted-foreground truncate text-xs">
@@ -1036,9 +1036,9 @@ function IgnoredDirectoriesSection({ skipped }: IgnoredDirectoriesSectionProps) 
             defaultMessage="Ignored directories"
           />
         </span>
-        <Badge variant="secondary" className="shrink-0">
+        <NameBadge>
           {skipped.length}
-        </Badge>
+        </NameBadge>
       </summary>
       <div className="border-border border-t px-4 py-3">
         <p className="text-muted-foreground mb-2 text-xs">

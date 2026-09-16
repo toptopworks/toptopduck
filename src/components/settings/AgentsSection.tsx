@@ -7,7 +7,6 @@ import {
   ArrowLeft,
   Bot,
   FolderOpen,
-  Info,
   Loader2,
   Pencil,
   Plus,
@@ -38,7 +37,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -53,6 +51,8 @@ import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
+  FieldHint,
+  NameBadge,
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
@@ -307,7 +307,7 @@ export function AgentsSection({
                   className="text-muted-foreground hover:text-foreground size-7"
                   onClick={() => void refetch()}
                   aria-label={intl.formatMessage({
-                    id: "settings.agents.refreshLabel",
+                    id: "common.refresh",
                     defaultMessage: "Refresh",
                   })}
                 >
@@ -319,7 +319,7 @@ export function AgentsSection({
               </TooltipTrigger>
               <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
                 <FormattedMessage
-                  id="settings.agents.refreshLabel"
+                  id="common.refresh"
                   defaultMessage="Refresh"
                 />
               </TooltipContent>
@@ -533,29 +533,6 @@ export function AgentsSection({
   );
 }
 
-/** One form field's hint, as an info icon + tooltip anchored after the field
- *  label (the ImportSkillsDialog import-mode posture). `label` is the
- *  trigger's accessible name; `children` render inside the tooltip. */
-function FieldHint({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button type="button" className="text-muted-foreground shrink-0" aria-label={label}>
-          <Info className="size-3.5" aria-hidden />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent
-        side="top"
-        align="start"
-        sideOffset={3}
-        className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
-      >
-        {children}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 /** The cautionary-disclosure row (the DESIGN warning-indicator pattern: an
  *  8px amber dot + tinted text, never a solid amber fill). */
 function WarningLine({ children }: { children: ReactNode }) {
@@ -587,7 +564,15 @@ function AgentRow({
   const intl = useIntl();
   return (
     <div className="hover:bg-accent flex items-center gap-3 px-4 py-3">
-      <Bot className="text-muted-foreground size-4 shrink-0" aria-hidden />
+      <Bot
+        className={cn(
+          "size-4 shrink-0",
+          // A disabled agent is dormant: the glyph dims with the name, the
+          // CLI row's disabled-icon treatment.
+          agent.enabled ? "text-muted-foreground" : "text-muted-foreground/40",
+        )}
+        aria-hidden
+      />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span
@@ -599,7 +584,7 @@ function AgentRow({
           >
             {agent.name}
           </span>
-          <Badge variant="secondary" className="shrink-0">
+          <NameBadge>
             {agent.source === "builtin" ? (
               <FormattedMessage
                 id="settings.agents.sourceBuiltin"
@@ -610,7 +595,12 @@ function AgentRow({
             ) : (
               <FormattedMessage id="settings.agents.sourceUser" defaultMessage="Custom" />
             )}
-          </Badge>
+          </NameBadge>
+          {!agent.enabled && (
+            <NameBadge>
+              <FormattedMessage id="common.disabled" defaultMessage="Disabled" />
+            </NameBadge>
+          )}
         </div>
         <p
           className={

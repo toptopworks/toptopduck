@@ -445,7 +445,7 @@ describe("SkillsSection (issue #362)", () => {
     );
     await screen.findByText("pdf-tools");
     const callsBefore = vi.mocked(listSkills).mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => {
       expect(vi.mocked(listSkills).mock.calls.length).toBeGreaterThan(callsBefore);
     });

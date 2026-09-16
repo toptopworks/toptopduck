@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain } from "lucide-react";
+import { Box } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
@@ -70,7 +70,7 @@ const EMPTY_POSTURE: ModelPosture = { model: null, thought_level: null };
 // a pure selector (ADR-0099 Decision 1, calibrating ADR-0071's in-popover
 // configuration duties into retirement).
 //
-// Trigger glyph: a lucide Brain, the Settings runtime section's icon -- the
+// Trigger glyph: a lucide Box, the Settings runtime section's icon -- the
 // unified entry glyph (NOT a provider logo; ADR-0071). Hover Tooltip: an
 // honest "{provider} · {model}" preview for the built-in runtime (+ an
 // honest "no key" mark when the active profile has no key, ADR-0019) or the
@@ -864,9 +864,9 @@ export function ComposerProviderPicker({
                   )}
                 >
                   {/* The unified entry glyph is the Settings runtime section's
-                    Brain icon. Still NOT a provider logo (ADR-0071); the
+                    Box icon. Still NOT a provider logo (ADR-0071); the
                     aria-label + tooltip are unchanged. */}
-                  <Brain className="size-4 shrink-0" aria-hidden />
+                  <Box className="size-4 shrink-0" aria-hidden />
                 </button>
               </PopoverTrigger>
             </TooltipTrigger>

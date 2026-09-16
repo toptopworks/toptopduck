@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Pencil, Plus, RefreshCw, RotateCcw, Terminal, Trash2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -28,6 +27,7 @@ import {
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import {
+  NameBadge,
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
@@ -234,37 +234,67 @@ export function CliSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={scanning}
-              onClick={() => void handleRescan()}
-            >
-              <RefreshCw
-                className={cn("size-4", scanning && "animate-spin")}
-                aria-hidden
-              />
-              {scanning ? (
-                <FormattedMessage
-                  id="settings.cli.rescanning"
-                  defaultMessage="Scanning…"
-                />
-              ) : (
-                <FormattedMessage
-                  id="settings.cli.rescan"
-                  defaultMessage="Rescan"
-                />
-              )}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setFormTarget({ tool: blankCliTool(), isEdit: false })}
-            >
-              <Plus className="size-4" aria-hidden />
-              <FormattedMessage id="settings.cli.new" defaultMessage="New" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  aria-label={intl.formatMessage({
+                    id: "settings.cli.new",
+                    defaultMessage: "New",
+                  })}
+                  onClick={() => setFormTarget({ tool: blankCliTool(), isEdit: false })}
+                >
+                  <Plus className="size-4" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage id="settings.cli.new" defaultMessage="New" />
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  disabled={scanning}
+                  aria-label={intl.formatMessage(
+                    scanning
+                      ? {
+                          id: "settings.cli.rescanning",
+                          defaultMessage: "Scanning…",
+                        }
+                      : {
+                          id: "common.rescan",
+                          defaultMessage: "Rescan",
+                        },
+                  )}
+                  onClick={() => void handleRescan()}
+                >
+                  <RefreshCw
+                    className={cn("size-4", scanning && "animate-spin")}
+                    aria-hidden
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                {scanning ? (
+                  <FormattedMessage
+                    id="settings.cli.rescanning"
+                    defaultMessage="Scanning…"
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="common.rescan"
+                    defaultMessage="Rescan"
+                  />
+                )}
+              </TooltipContent>
+            </Tooltip>
           </div>
         )}
       />
@@ -447,7 +477,7 @@ function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
   return (
     <div
       data-testid={`builtin-cli-row-${entry.name}`}
-      className="hover:bg-accent/50 flex items-center gap-3 px-4 py-3"
+      className="hover:bg-accent flex items-center gap-3 px-4 py-3"
     >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -508,17 +538,6 @@ function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
   );
 }
 
-/** The row-name badge chrome (issue #683): the DESIGN.md badge token,
- * typography.badge (12px/500) on rounded.md with 2px 8px padding, in the
- * secondary coloring shared by the row badges that are not state alerts. */
-function NameBadge({ children }: { children: ReactNode }) {
-  return (
-    <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs font-medium leading-none">
-      {children}
-    </span>
-  );
-}
-
 function CliToolRow({
   tool,
   toggling,
@@ -551,7 +570,7 @@ function CliToolRow({
   return (
     <div
       data-testid={`cli-tool-row-${tool.name}`}
-      className="hover:bg-accent/50 flex items-center gap-3 px-4 py-3"
+      className="hover:bg-accent flex items-center gap-3 px-4 py-3"
     >
       <Terminal
         className={cn(
@@ -591,7 +610,7 @@ function CliToolRow({
           {!tool.enabled && (
             <NameBadge>
               <FormattedMessage
-                id="settings.cli.disabledBadge"
+                id="common.disabled"
                 defaultMessage="Disabled"
               />
             </NameBadge>
@@ -610,121 +629,77 @@ function CliToolRow({
 
       <div className="flex shrink-0 items-center gap-0.5">
         {/* The enable toggle (ADR-0106): the row's machine-level state,
-         * before the action buttons (the MCP row's layout). */}
-        <Tooltip>
-          {/* The span isolates the trigger: TooltipTrigger asChild would
-           * clobber the Switch's data-state (the MCP row's fix). */}
-          <TooltipTrigger asChild>
-            <span className="mr-1.5 inline-flex">
-              <Switch
-                checked={tool.enabled}
-                disabled={toggling}
-                onCheckedChange={onToggleEnabled}
-                aria-label={intl.formatMessage(
-                  {
-                    id: "settings.cli.enableToggleLabel",
-                    defaultMessage: "Toggle tool {name}",
-                  },
-                  { name: tool.name },
-                )}
-              />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-            {tool.enabled ? (
-              <FormattedMessage
-                id="settings.mcp.enabledTooltip"
-                defaultMessage="Enabled"
-              />
-            ) : (
-              <FormattedMessage
-                id="settings.mcp.disabledTooltip"
-                defaultMessage="Disabled"
-              />
-            )}
-          </TooltipContent>
-        </Tooltip>
+         * before the action buttons (the agent row's bare Switch -- the
+         * aria-label carries the state, no tooltip wrapper). */}
+        <Switch
+          checked={tool.enabled}
+          disabled={toggling}
+          onCheckedChange={onToggleEnabled}
+          aria-label={intl.formatMessage(
+            {
+              id: "settings.cli.enableToggleLabel",
+              defaultMessage: "Toggle tool {name}",
+            },
+            { name: tool.name },
+          )}
+        />
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="text-muted-foreground h-7 w-7 p-0"
-              disabled={toggling}
-              aria-label={intl.formatMessage(
-                {
-                  id: "settings.cli.editLabel",
-                  defaultMessage: "Edit tool {name}",
-                },
-                { name: tool.name },
-              )}
-              onClick={onEdit}
-            >
-              <Pencil className="size-4" aria-hidden />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-            <FormattedMessage id="settings.mcp.edit" defaultMessage="Edit" />
-          </TooltipContent>
-        </Tooltip>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="text-muted-foreground hover:text-foreground shrink-0"
+          disabled={toggling}
+          aria-label={intl.formatMessage(
+            {
+              id: "settings.cli.editLabel",
+              defaultMessage: "Edit tool {name}",
+            },
+            { name: tool.name },
+          )}
+          onClick={onEdit}
+        >
+          <Pencil className="size-4" aria-hidden />
+        </Button>
 
         {onRestore && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground h-7 w-7 p-0"
-                disabled={toggling}
-                aria-label={intl.formatMessage(
-                  {
-                    id: "settings.cli.restoreLabel",
-                    defaultMessage: "Restore built-in definition for tool {name}",
-                  },
-                  { name: tool.name },
-                )}
-                onClick={onRestore}
-              >
-                <RotateCcw className="size-4" aria-hidden />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-              <FormattedMessage
-                id="settings.cli.restoreTooltip"
-                defaultMessage="Restore built-in definition"
-              />
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-foreground shrink-0"
+            disabled={toggling}
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.cli.restoreLabel",
+                defaultMessage: "Restore built-in definition for tool {name}",
+              },
+              { name: tool.name },
+            )}
+            onClick={onRestore}
+          >
+            <RotateCcw className="size-4" aria-hidden />
+          </Button>
         )}
 
         {onDelete && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground hover:text-destructive h-7 w-7 p-0"
-                disabled={toggling}
-                aria-label={intl.formatMessage(
-                  {
-                    id: "settings.cli.deleteLabel",
-                    defaultMessage: "Delete tool {name}",
-                  },
-                  { name: tool.name },
-                )}
-                onClick={onDelete}
-              >
-                <Trash2 className="size-4" aria-hidden />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-              <FormattedMessage id="common.delete" defaultMessage="Delete" />
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-destructive shrink-0"
+            disabled={toggling}
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.cli.deleteLabel",
+                defaultMessage: "Delete tool {name}",
+              },
+              { name: tool.name },
+            )}
+            onClick={onDelete}
+          >
+            <Trash2 className="size-4" aria-hidden />
+          </Button>
         )}
       </div>
     </div>

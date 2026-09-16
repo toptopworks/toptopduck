@@ -40,10 +40,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import {
+  NameBadge,
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
@@ -377,22 +377,49 @@ export function McpSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Button type="button" size="sm" onClick={handleAdd}>
-              <Plus className="size-4" aria-hidden />
-              <FormattedMessage id="settings.mcp.new" defaultMessage="New" />
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setImportEpoch((n) => n + 1);
-                setImportOpen(true);
-              }}
-            >
-              <Download className="size-4" aria-hidden />
-              <FormattedMessage id="common.import" defaultMessage="Import" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  aria-label={intl.formatMessage({
+                    id: "settings.mcp.new",
+                    defaultMessage: "New",
+                  })}
+                  onClick={handleAdd}
+                >
+                  <Plus className="size-4" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage id="settings.mcp.new" defaultMessage="New" />
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground size-7"
+                  aria-label={intl.formatMessage({
+                    id: "common.import",
+                    defaultMessage: "Import",
+                  })}
+                  onClick={() => {
+                    setImportEpoch((n) => n + 1);
+                    setImportOpen(true);
+                  }}
+                >
+                  <Download className="size-4" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
+                <FormattedMessage id="common.import" defaultMessage="Import" />
+              </TooltipContent>
+            </Tooltip>
           </div>
         )}
       />
@@ -576,7 +603,7 @@ function McpServerRow({
   return (
     <div
       data-testid={`mcp-server-row-${server.id}`}
-      className="hover:bg-accent/50 px-4 py-3"
+      className="hover:bg-accent px-4 py-3"
     >
       <div className="flex items-center gap-3">
         <button
@@ -607,19 +634,21 @@ function McpServerRow({
             >
               {server.display_name}
             </span>
+            {!server.enabled && (
+              <NameBadge>
+                <FormattedMessage id="common.disabled" defaultMessage="Disabled" />
+              </NameBadge>
+            )}
             {probeState.kind === "done" &&
               probeState.result.connected &&
               probeState.result.tools.length > 0 && (
-              <Badge
-                variant="secondary"
-                className="shrink-0 text-muted-foreground font-normal"
-              >
+              <NameBadge>
                 <FormattedMessage
                   id="settings.mcp.toolCount"
                   defaultMessage="{count} tools"
                   values={{ count: probeState.result.tools.length }}
                 />
-              </Badge>
+              </NameBadge>
             )}
           </div>
           <div className="text-muted-foreground mt-1 truncate text-xs">
@@ -634,122 +663,78 @@ function McpServerRow({
         <div className="flex shrink-0 items-center gap-0.5">
           {/* The enable toggle (ADR-0106): the row's machine-level state.
            * Sits BEFORE the action buttons so it reads as the row's primary
-           * control, not an action. */}
-          <Tooltip>
-            {/* The span isolates the trigger: TooltipTrigger asChild stamps
-             * its own data-state ("closed"/"open") onto the child, and on the
-             * Switch root that would clobber the switch's data-state
-             * ("checked"/"unchecked") — the track's data-variant backgrounds
-             * would never match, leaving a bare floating thumb. */}
-            <TooltipTrigger asChild>
-              <span className="mr-1.5 inline-flex">
-                <Switch
-                  checked={server.enabled}
-                  disabled={toggling}
-                  onCheckedChange={onToggleEnabled}
-                  aria-label={intl.formatMessage(
-                    {
-                      id: "settings.mcp.enableToggleLabel",
-                      defaultMessage: "Toggle server {name}",
-                    },
-                    { name: server.display_name },
-                  )}
-                />
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-              {server.enabled ? (
-                <FormattedMessage
-                  id="settings.mcp.enabledTooltip"
-                  defaultMessage="Enabled"
-                />
-              ) : (
-                <FormattedMessage
-                  id="settings.mcp.disabledTooltip"
-                  defaultMessage="Disabled"
-                />
-              )}
-            </TooltipContent>
-          </Tooltip>
+           * control, not an action (the agent row's bare Switch -- the
+           * aria-label carries the state, no tooltip wrapper). */}
+          <Switch
+            checked={server.enabled}
+            disabled={toggling}
+            onCheckedChange={onToggleEnabled}
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.mcp.enableToggleLabel",
+                defaultMessage: "Toggle server {name}",
+              },
+              { name: server.display_name },
+            )}
+          />
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground h-7 w-7 p-0"
-                disabled={toggling || probeState.kind === "testing"}
-                aria-label={intl.formatMessage(
-                  {
-                    id: "settings.mcp.testLabel",
-                    defaultMessage: "Test server {name}",
-                  },
-                  { name: server.display_name },
-                )}
-                onClick={onProbe}
-              >
-                {probeState.kind === "testing" ? (
-                  <Loader2 className="size-4 animate-spin" aria-hidden />
-                ) : (
-                  <Zap className="size-4" aria-hidden />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-              <FormattedMessage id="settings.mcp.test" defaultMessage="Test" />
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-foreground shrink-0"
+            disabled={toggling || probeState.kind === "testing"}
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.mcp.testLabel",
+                defaultMessage: "Test server {name}",
+              },
+              { name: server.display_name },
+            )}
+            onClick={onProbe}
+          >
+            {probeState.kind === "testing" ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden />
+            ) : (
+              <Zap className="size-4" aria-hidden />
+            )}
+          </Button>
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground h-7 w-7 p-0"
-                disabled={toggling}
-                aria-label={intl.formatMessage(
-                  {
-                    id: "settings.mcp.editLabel",
-                    defaultMessage: "Edit server {name}",
-                  },
-                  { name: server.display_name },
-                )}
-                onClick={onEdit}
-              >
-                <Pencil className="size-4" aria-hidden />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-              <FormattedMessage id="settings.mcp.edit" defaultMessage="Edit" />
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-foreground shrink-0"
+            disabled={toggling}
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.mcp.editLabel",
+                defaultMessage: "Edit server {name}",
+              },
+              { name: server.display_name },
+            )}
+            onClick={onEdit}
+          >
+            <Pencil className="size-4" aria-hidden />
+          </Button>
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground hover:text-destructive h-7 w-7 p-0"
-                disabled={toggling}
-                aria-label={intl.formatMessage(
-                  {
-                    id: "settings.mcp.deleteLabel",
-                    defaultMessage: "Delete server {name}",
-                  },
-                  { name: server.display_name },
-                )}
-                onClick={onDelete}
-              >
-                <Trash2 className="size-4" aria-hidden />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-              <FormattedMessage id="common.delete" defaultMessage="Delete" />
-            </TooltipContent>
-          </Tooltip>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-destructive shrink-0"
+            disabled={toggling}
+            aria-label={intl.formatMessage(
+              {
+                id: "settings.mcp.deleteLabel",
+                defaultMessage: "Delete server {name}",
+              },
+              { name: server.display_name },
+            )}
+            onClick={onDelete}
+          >
+            <Trash2 className="size-4" aria-hidden />
+          </Button>
         </div>
       </div>
 

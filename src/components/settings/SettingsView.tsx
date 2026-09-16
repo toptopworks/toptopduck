@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import {
   ArrowLeft,
-  Brain,
+  Box,
   Cable, Terminal,
   Database,
   Puzzle,
@@ -83,7 +83,7 @@ function SectionIcon({ section }: { section: SettingsSection }) {
     case "agents":
       return <Bot className="size-4 shrink-0" aria-hidden />;
     case "runtime":
-      return <Brain className="size-4 shrink-0" aria-hidden />;
+      return <Box className="size-4 shrink-0" aria-hidden />;
     case "database-engine":
       return <Database className="size-4 shrink-0" aria-hidden />;
     case "privacy":
