@@ -35,6 +35,7 @@ const builtinSkill: SkillEntry = {
   body: "Use the `pandoc` tool…\n",
   link_target: null,
   content_hash: "hash-of-shipped-body",
+  enabled: true,
 };
 
 const restoredConfig = {

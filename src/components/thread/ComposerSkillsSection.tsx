@@ -6,7 +6,6 @@ import { Plus } from "lucide-react";
 import { Input } from "../ui/input";
 import { TruncatingTooltip } from "./TruncatingTooltip";
 import {
-  listActivatedSkills,
   listMountedSkills,
   listSkills,
   mountSkill,
@@ -16,6 +15,7 @@ import { fmtError } from "../../lib/error-presentation";
 import { SkillActiveBadge } from "./SkillActiveBadge";
 import { log } from "../../lib/log";
 import { sessionKeys, skillKeys } from "../../session/queryKeys";
+import { useActivatedSkills } from "./useActivatedSkills";
 import type { SkillEntry } from "../../types/skills";
 import { filterSkills } from "./skillPickerLogic";
 
@@ -144,11 +144,8 @@ export function ComposerSkillsSection({
   // The activation state read (issue #699): session-mode only, like the
   // mounted query above. Draft mode leaves it disabled -- no IPC, no
   // affordance, an empty set.
-  const { data: activated, error: activatedQueryError } = useQuery({
-    queryKey: sessionKeys.activatedSkills(sessionId ?? ""),
-    queryFn: () => listActivatedSkills(sessionId as string),
-    enabled: sessionId !== null,
-  });
+  const { data: activated, error: activatedQueryError } =
+    useActivatedSkills(sessionId);
   const activatedSet = useMemo(() => new Set(activated ?? []), [activated]);
   const intentSet = useMemo(
     () => new Set(activationIntents ?? []),

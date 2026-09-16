@@ -12,6 +12,7 @@ import {
   deleteSkill,
   listSkills,
   listSkillSources,
+  setSkillEnabled,
   updateSkill,
 } from "../../../api";
 import type { SkillEntry } from "../../../types/skills";
@@ -27,6 +28,7 @@ vi.mock("../../../api", () => ({
   deleteSkill: vi.fn(),
   listSkillSources: vi.fn(),
   importSkills: vi.fn(),
+  setSkillEnabled: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
@@ -41,6 +43,7 @@ const localSkill: SkillEntry = {
   body: "Use this skill when working with PDFs.\n",
   link_target: null,
   content_hash: "deadbeef",
+  enabled: true,
 };
 
 const linkedSkill: SkillEntry = {
@@ -52,6 +55,7 @@ const linkedSkill: SkillEntry = {
   body: "External body.\n",
   link_target: "/home/u/.claude/skills/external-skill",
   content_hash: "deadbeef",
+  enabled: true,
 };
 
 // Empty-catalog English IntlProvider: FormattedMessage falls back to
@@ -76,6 +80,56 @@ describe("SkillsSection (issue #362)", () => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(listSkillSources).mockResolvedValue([]);
+  });
+
+  it("flips a row's enablement through setSkillEnabled and syncs the config", async () => {
+    // The enablement axis row Switch (issue #961): unchecking rides the
+    // setSkillEnabled IPC and syncs the returned full app-config wholesale
+    // (the restore command's state-only-sync contract).
+    const onAppConfigSync = vi.fn();
+    const synced = {} as Awaited<ReturnType<typeof setSkillEnabled>>;
+    vi.mocked(setSkillEnabled).mockResolvedValue(synced);
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill],
+      ignored: [],
+      root_error: null,
+    });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={onAppConfigSync}
+      />,
+    );
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByRole("switch", { name: "Enable skill pdf-tools" }));
+    await waitFor(() =>
+      expect(setSkillEnabled).toHaveBeenCalledWith("pdf-tools", false),
+    );
+    await waitFor(() => expect(onAppConfigSync).toHaveBeenCalledWith(synced));
+  });
+
+  it("marks a disabled row grayed out while its switch stays operable", async () => {
+    // Dormant-on-disable (issue #961): a disabled skill renders as a grayed
+    // row (data-disabled carries the state for tests + styling hooks), the
+    // switch reads unchecked, and the row itself stays clickable (the
+    // edit drawer still opens -- disabling hides from discovery, not from
+    // management).
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [{ ...localSkill, enabled: false }],
+      ignored: [],
+      root_error: null,
+    });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    const row = await screen.findByTestId("skill-row");
+    expect(row).toHaveAttribute("data-disabled", "true");
+    expect(
+      screen.getByRole("switch", { name: "Enable skill pdf-tools" }),
+    ).not.toBeChecked();
   });
 
   it("lists the skills returned by listSkills", async () => {

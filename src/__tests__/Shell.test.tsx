@@ -1557,6 +1557,7 @@ function baseAppConfig(
     last_model_postures: {},
     enabled_agents: [],
     materialized_builtin_agents: [],
+    disabled_skills: [],
   };
 }
 
@@ -1572,6 +1573,7 @@ function skillEntry(name: string): SkillEntry {
     body: "",
     link_target: null,
     content_hash: "ab".repeat(32),
+    enabled: true,
   };
 }
 

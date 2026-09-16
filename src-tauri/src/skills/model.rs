@@ -67,6 +67,13 @@ pub struct SkillEntry {
     pub body: String,
     /// The resolved link target for `linked` skills; `null` for `local`.
     pub link_target: Option<String>,
+    /// The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
+    /// in the session seed's reach + rendered normally in the settings pane;
+    /// disabled = dormant (grayed row, directory kept). The registry scan
+    /// constructs rows config-blind at `true` (the default-on polarity); the
+    /// listing command overlays the config's disabled-name set before the
+    /// rows cross IPC.
+    pub enabled: bool,
     /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at the
     /// registry scan (ADR-0086, issue #381). The drift anchor the frontend
     /// compares each turn's `SkillProvenance.content_hash` against to surface
@@ -492,6 +499,7 @@ mod tests {
             compatibility: None,
             body: "Body text.\n".into(),
             link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
+            enabled: true,
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -515,6 +523,7 @@ mod tests {
             compatibility: None,
             body: "Body.\n".into(),
             link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
+            enabled: true,
             content_hash: "abc".into(),
         };
         let imported = ImportOutcome::Imported(entry.clone());

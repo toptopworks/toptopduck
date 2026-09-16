@@ -491,6 +491,9 @@ fn skill_from_str(
         compatibility: frontmatter::get_string(fm, "compatibility"),
         body: parsed.body,
         link_target,
+        // Config-blind default-on (issue #961): the listing command
+        // overlays the disabled-name set before the rows cross IPC.
+        enabled: true,
         content_hash,
     })
 }

@@ -94,6 +94,22 @@ fn push_body_frame(out: &mut String, skill: &SkillPromptFragment) {
 /// discoverable surface. The built-in system prompt embeds it via
 /// [`build_tool_system_prompt`]; the external-runtime ACP path wraps it
 /// standalone via [`render_skill_block`] (issue #702 parity).
+/// The injection-time description clamp (issue #961, ADR-0118 Decision 3):
+/// an index row carries at most 360 chars of the spec description in total,
+/// a truncation ending in `…`. Counts CHARS, not bytes -- a CJK-heavy
+/// description clamps at the same visible length and never splits a code
+/// point. Injection-side only: the registry's 1024 spec ceiling and every
+/// full-text local consumer (settings pane) are untouched.
+fn clamp_description(description: &str) -> String {
+    const MAX_CHARS: usize = 360;
+    if description.chars().count() <= MAX_CHARS {
+        return description.to_string();
+    }
+    let mut clamped: String = description.chars().take(MAX_CHARS - 1).collect();
+    clamped.push('…');
+    clamped
+}
+
 fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String]) -> String {
     let mut out = String::new();
     let index: Vec<&SkillPromptFragment> = skills
@@ -105,12 +121,20 @@ fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String])
             "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，\
              调用 activate_skill 工具加载其完整说明：\n",
         );
-        // Description verbatim, no truncation (an index cap policy is a
-        // separately deferred ADR-0110 item). A degraded empty description
-        // renders as an empty tail -- the entry stays, so a skill never
-        // silently disappears from the discoverable set.
+        // Description clamped at injection (issue #961, ADR-0118 Decision 3
+        // -- the formerly deferred ADR-0110 index-cap item): at most 360
+        // chars total, a truncation ending in `…`. The clamp is a guardrail,
+        // not the norm -- discovery quality stays a curation responsibility
+        // (ADR-0110 Decision 7), and every local consumer (settings pane,
+        // registry storage) keeps the full text. A degraded empty
+        // description renders as an empty tail -- the entry stays, so a
+        // skill never silently disappears from the discoverable set.
         for f in index {
-            out.push_str(&format!("- `{}` — {}\n", f.name, f.description));
+            out.push_str(&format!(
+                "- `{}` — {}\n",
+                f.name,
+                clamp_description(&f.description)
+            ));
         }
     }
     for f in skills.iter().filter(|f| is_activated(&f.name, activated)) {
@@ -989,6 +1013,40 @@ mod tests {
             !block.starts_with('\n'),
             "no leading newlines in standalone context block"
         );
+    }
+
+    #[test]
+    fn index_entries_clamp_descriptions_at_360_chars() {
+        // ADR-0118 Decision 3 (issue #961): the index row's description
+        // clamps at 360 chars total, the truncation ending in `…` -- one
+        // rendering point for both consumers (the built-in system prompt's
+        // index block and the standalone ACP block ride the same disclosure
+        // rendering). The clamp counts CHARS, not bytes: a CJK-heavy
+        // description clamps at the same visible length and never splits a
+        // code point. The fragment itself and the settings pane's
+        // full-text consumption are untouched (the registry's 1024 spec
+        // ceiling stands).
+        let long = "长".repeat(400);
+        let skills = [fragment("sql-coach", &long, "Body.\n")];
+        let prompt = render_skill_disclosure(&skills, &[]);
+        let expected_row = format!("- `sql-coach` — {}…\n", "长".repeat(359));
+        assert!(
+            prompt.contains(&expected_row),
+            "clamped row with ellipsis tail"
+        );
+        assert!(
+            !prompt.contains(&"长".repeat(360)),
+            "no 360-char run survived the clamp"
+        );
+    }
+
+    #[test]
+    fn short_descriptions_render_verbatim_beside_the_clamp() {
+        // The guardrail, not the norm: a curated description under the cap
+        // renders byte-identically -- the clamp only ever trims.
+        let skills = [fragment("pdf-tools", "Read PDFs.", "Body.\n")];
+        let prompt = render_skill_disclosure(&skills, &[]);
+        assert!(prompt.contains("- `pdf-tools` — Read PDFs.\n"));
     }
 
     #[test]

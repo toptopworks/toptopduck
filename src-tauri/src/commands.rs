@@ -265,19 +265,23 @@ pub fn create_session(
         // persists it (ADR-0100 Decision 1; see the helper's doc).
         apply_startup_posture(&handle, &posture)?;
         let mut s = handle.session_lock()?;
-        // Auto-include (issue #677, ADR-0109 Decision 6): the MATERIALIZED
-        // builtin skills whose companion CLI entries are detected + enabled
-        // seed the folded active set's INITIAL state -- no Mount event, no
-        // timeline entry, nothing persisted (the recipe stays event-only).
-        // The materialized gate is the side-table mark (the same anchor the
-        // frontend's `acquired: builtin` derives from), so a reverse-conflict
-        // user file is never seeded.
-        let auto_skills = crate::skills::builtin::auto_included_names(
+        // Mount seeding (issue #961, ADR-0118 Decision 1; the #677 builtin
+        // auto-include generalized): the registry INTERSECT the enablement
+        // axis seeds the folded active set's INITIAL state -- no Mount
+        // event, no timeline entry, nothing persisted (the recipe stays
+        // event-only). A materialized builtin additionally requires its
+        // companion CLI entry detected + enabled (the two-axis conjunction);
+        // the materialized gate is the side-table mark (the same anchor the
+        // frontend's `acquired: builtin` derives from), so a
+        // reverse-conflict user file is never seeded.
+        let cfg = live.load();
+        let seed = crate::skills::seed_skill_names(
             &live.cli_tools(),
-            &crate::skills::BuiltinSkillMark::from_config(&live.load()),
+            &crate::skills::BuiltinSkillMark::from_config(&cfg),
+            &cfg.disabled_skills,
             &skills_root.0,
         );
-        s.seed_initial_skills(auto_skills);
+        s.seed_initial_skills(seed);
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
@@ -2177,6 +2181,10 @@ pub async fn open_duck(
     // the initial set, so an explicit in-session unmount keeps winning. The
     // materialized gate (the side-table mark, mirroring the creation path)
     // keeps a reverse-conflict user file out.
+    // Issue #961 (ADR-0118 Decision 7) keeps this resume seed BUILTIN-ONLY:
+    // the general registry∩enabled seed feeds session creation alone, so a
+    // resumed session never absorbs newly enabled USER skills (the frozen
+    // capability face -- the picker is the escape hatch).
     let auto_skills = crate::skills::builtin::auto_included_names(
         &live.cli_tools(),
         &crate::skills::BuiltinSkillMark::from_config(&cfg),
@@ -3339,8 +3347,29 @@ pub fn list_skills(
     // The builtin mark comes from the app-config side table so a
     // materialized builtin skill reads `acquired: builtin` while a user's
     // pre-existing same-named skill keeps its own source (issue #677).
-    let mark = crate::skills::BuiltinSkillMark::from_config(&live.load());
-    crate::skills::registry::list_skills(&root.0, &mark)
+    // The enablement overlay (issue #961) rides the same config read: each
+    // row's `enabled` = NOT in the disabled-name set (default-on).
+    let cfg = live.load();
+    let mark = crate::skills::BuiltinSkillMark::from_config(&cfg);
+    crate::skills::apply_enablement(
+        crate::skills::registry::list_skills(&root.0, &mark),
+        &cfg.disabled_skills,
+    )
+}
+
+/// Set one skill's machine-level enablement (issue #961, ADR-0118 Decision
+/// 2): the app-config disabled-name set is the single axis. Disabled =
+/// dormant (out of the new-session seed, grayed in the settings pane; the
+/// directory stays). Returns the updated FULL app-config (the frontend-sync
+/// contract, the agent-definitions precedent).
+#[tauri::command]
+pub fn set_skill_enabled(
+    live: State<'_, LiveProviderConfig>,
+    name: String,
+    enabled: bool,
+) -> Result<crate::app_config::AppConfig, crate::skills::SkillError> {
+    live.set_skill_enabled(&name, enabled)
+        .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))
 }
 
 /// Mint a new `local` skill (issue #362): `<root>/<name>/SKILL.md` with the

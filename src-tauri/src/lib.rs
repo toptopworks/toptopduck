@@ -513,6 +513,7 @@ pub fn run() {
             commands::create_skill,
             commands::update_skill,
             commands::delete_skill,
+            commands::set_skill_enabled,
             commands::list_agents,
             commands::get_agents_dir,
             commands::create_agent,

@@ -68,6 +68,7 @@ const { appConfigWith } = vi.hoisted(() => {
       last_model_postures: {},
       enabled_agents: [],
       materialized_builtin_agents: [],
+      disabled_skills: [],
     };
   }
   return { appConfigWith };

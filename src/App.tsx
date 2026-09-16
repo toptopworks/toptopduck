@@ -24,7 +24,7 @@ import { QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillsTrigger } from "./components/thread/ComposerSkillsTrigger";
-import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
+import { SkillChips } from "./components/thread/SkillChips";
 import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
@@ -1211,11 +1211,19 @@ export default function App() {
                           onPick: handleSkillPick,
                           chips: {
                             node: (
-                              // The ADR-0112 pre-activation chips flow inline
-                              // in the input area (the composer-held intents
-                              // since the last submit); the caret seats right
-                              // after the last chip.
-                              <ComposerSkillChips names={pendingActivations} />
+                              // The skill chips flow inline in the input
+                              // area (the composer-held intents UNION the
+                              // session's activated truth, issue #961); the
+                              // caret seats right after the last chip. A
+                              // component (not a direct hook call) so the
+                              // queries ride the provider subtree.
+                              <SkillChips
+                                sessionId={activeSessionId}
+                                intents={pendingActivations}
+                                onIntentRemove={handleRemoveActivation}
+                                onRemoveError={(e) =>
+                                  setShellError(toAppError(e, intl, "shell"))}
+                              />
                             ),
                             onBackspace: handleChipBackspace,
                           },

@@ -745,6 +745,36 @@ impl LiveProviderConfig {
         self.store_inner(cfg)
     }
 
+    /// Flip one skill's enablement on the config-level axis (issue #961,
+    /// ADR-0118 Decision 2). Disabled = dormant (out of the new-session
+    /// seed, grayed in the settings pane; the directory stays); enabled =
+    /// the default-on posture. Read-modify-write under the same write lock
+    /// as every config write. Returns the updated FULL config (the
+    /// ADR-0109 Decision 9 frontend-sync contract).
+    pub fn set_skill_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write()?;
+        let trimmed = name.trim().to_string();
+        if enabled {
+            cfg.disabled_skills.remove(&trimmed);
+        } else {
+            if trimmed.is_empty() {
+                return Err(app_config::WriteError::Validation(
+                    "a skill name must not be blank".into(),
+                ));
+            }
+            cfg.disabled_skills.insert(trimmed);
+        }
+        self.store_inner(cfg)
+    }
+
     /// Carry one agent definition's enablement across a rename (issue #932):
     /// an enabled definition that renames keeps its enabled state (the entry
     /// moves `from` -> `to` in the name set); a disabled rename is a no-op --
@@ -2440,6 +2470,45 @@ mod tests {
         assert!(!cfg.enabled_agents.contains("old-name"));
         assert!(cfg.enabled_agents.contains("new-name"));
         assert!(agents.path().join("new-name.md").exists());
+    }
+
+    #[test]
+    fn set_skill_enabled_round_trips_and_keeps_siblings() {
+        // The skill enablement axis (issue #961): the DISABLED-name polarity
+        // -- disabling lands the name in the set, enabling removes it; a
+        // sibling entry and an unrelated pref survive the read-modify-write,
+        // and a fresh load reads the set back off disk.
+        let (_dir, live) = live();
+        live.set_skill_enabled("pdf-tools", false)
+            .expect("disable pdf-tools");
+        let stored = live
+            .set_skill_enabled("sql-coach", false)
+            .expect("disable sql-coach");
+        assert!(stored.disabled_skills.contains("pdf-tools"));
+        assert!(stored.disabled_skills.contains("sql-coach"));
+        // Re-enabling one entry leaves the sibling alone.
+        let stored = live
+            .set_skill_enabled("pdf-tools", true)
+            .expect("enable pdf-tools");
+        assert!(!stored.disabled_skills.contains("pdf-tools"));
+        assert!(stored.disabled_skills.contains("sql-coach"));
+        assert_eq!(
+            live.load().disabled_skills,
+            ["sql-coach".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn set_skill_enabled_refuses_a_blank_disable() {
+        // A blank name can only ever be a malformed write (no skill is named
+        // ""), so the disable is refused at the validation boundary instead
+        // of landing an entry normalize would then silently drop.
+        let (_dir, live) = live();
+        let err = live.set_skill_enabled("   ", false).expect_err("refused");
+        assert!(
+            matches!(err, app_config::WriteError::Validation(_)),
+            "validation refusal, got {err:?}"
+        );
     }
 
     #[test]

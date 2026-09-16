@@ -102,6 +102,7 @@ describe("Thread", () => {
       body: "",
       link_target: null,
       content_hash: "deadbeef",
+      enabled: true,
     };
   }
 
@@ -2791,6 +2792,7 @@ describe("Thread", () => {
         body: "",
         link_target: null,
         content_hash: contentHash,
+        enabled: true,
       };
     }
     function skillIndex(...skills: SkillEntry[]): Map<string, SkillEntry> {
