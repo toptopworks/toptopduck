@@ -311,7 +311,6 @@
   "settings.mcp.import.discovered": "Discovered {count} importable {count, plural, one {server} other {servers}}",
   "settings.mcp.import.empty": "No MCP server sources found.",
   "settings.mcp.import.loading": "Reading config…",
-  "settings.mcp.import.notFound": "No MCP config file found for this source. Make sure the application is installed and has been configured.",
   "settings.mcp.import.partialFailure": "{error} (+{count} more)",
   "settings.mcp.import.refresh": "Refresh sources",
   "settings.mcp.import.secretsBadge": "{count} secret(s)",

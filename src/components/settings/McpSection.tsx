@@ -3,8 +3,6 @@ import { FormattedMessage, useIntl } from "react-intl";
 import {
   AlertCircle,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   Download,
   MinusCircle,
   Pencil,
@@ -44,6 +42,7 @@ import {
   HeaderActionButton,
   NameBadge,
   RowActionButton,
+  RowFoldChevron,
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
@@ -582,19 +581,11 @@ function McpServerRow({
       className="hover:bg-accent px-4 py-3"
     >
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
-          onClick={onToggleRow}
-          aria-label={server.display_name}
-          aria-expanded={expanded}
-        >
-          {expanded ? (
-            <ChevronDown className="size-4" aria-hidden />
-          ) : (
-            <ChevronRight className="size-4" aria-hidden />
-          )}
-        </button>
+        <RowFoldChevron
+          label={server.display_name}
+          expanded={expanded}
+          onToggle={onToggleRow}
+        />
 
         <StatusDot probeState={probeState} />
 

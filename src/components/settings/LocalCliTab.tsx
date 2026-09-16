@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Loader2, RefreshCw } from "lucide-react";
+import { Loader2, RefreshCw } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
@@ -21,6 +21,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
   HeaderActionButton,
+  RowFoldChevron,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
   SettingsRow,
@@ -718,19 +719,11 @@ export function LocalCliTab({
                       </Badge>
                     )}
                     {(hasFoldContent || expanded) && (
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
-                        onClick={() => toggleRow(a.id)}
-                        aria-label={a.display_name}
-                        aria-expanded={expanded}
-                      >
-                        {expanded ? (
-                          <ChevronDown className="size-4" aria-hidden />
-                        ) : (
-                          <ChevronRight className="size-4" aria-hidden />
-                        )}
-                      </button>
+                      <RowFoldChevron
+                        label={a.display_name}
+                        expanded={expanded}
+                        onToggle={() => toggleRow(a.id)}
+                      />
                     )}
                   </div>
                 )}

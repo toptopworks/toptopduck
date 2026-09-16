@@ -221,7 +221,7 @@ describe("McpImportDialog (issue #390)", () => {
     expect(screen.queryByText("Codex")).not.toBeInTheDocument();
   });
 
-  it("hides source with discovery error when it has no servers", async () => {
+  it("shows source with discovery error when it has no servers", async () => {
     mockDiscover(
       [makeDiscovered({ display_name: "srv-a" })],
       new Error("malformed JSON"),
@@ -229,14 +229,40 @@ describe("McpImportDialog (issue #390)", () => {
 
     renderWithProviders(<McpImportDialog {...defaultProps} />);
 
-    // Claude Desktop (has servers) is visible.
+    // Both rows are visible — an error source stays listed so the failure
+    // is not silent (0 badge, collapsed by default like any other row).
     await waitFor(() => {
       expect(screen.getByText("Claude Desktop")).toBeInTheDocument();
+      expect(screen.getByText("Codex")).toBeInTheDocument();
     });
+    expect(screen.getByText("0")).toBeInTheDocument();
 
-    // Codex (error, 0 servers) is hidden.
-    expect(screen.queryByText("Codex")).not.toBeInTheDocument();
-    expect(screen.queryByText(/malformed JSON/)).not.toBeInTheDocument();
+    // Nothing to select in an error source: its select-all is disabled.
+    const codexCheckbox = screen
+      .getAllByRole("checkbox")
+      .find((c) => c.getAttribute("aria-label") === "Codex")!;
+    expect(codexCheckbox).toBeDisabled();
+
+    // The failure rides the expanded panel.
+    expandSource("Codex");
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText(/malformed JSON/)).toBeInTheDocument();
+  });
+
+  it("shows error rows instead of the empty state when every source fails", async () => {
+    mockDiscover(new Error("boom-a"), new Error("boom-b"));
+
+    renderWithProviders(<McpImportDialog {...defaultProps} />);
+
+    // Both sources errored — both rows stay listed; the "no sources found"
+    // empty state must not render, it would lie about what happened.
+    await waitFor(() => {
+      expect(screen.getByText("Claude Desktop")).toBeInTheDocument();
+      expect(screen.getByText("Codex")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("No MCP server sources found."),
+    ).not.toBeInTheDocument();
   });
 
   it("shows secrets badge for servers with keychain env keys", async () => {

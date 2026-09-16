@@ -333,6 +333,13 @@ function GroupingToggle({
   const intl = useIntl();
   const [open, setOpen] = useState(false);
 
+  // One resolution, two slots: the popover heading and the radiogroup's
+  // accessible name read the same label variable (issue #964).
+  const groupingLabel = intl.formatMessage({
+    id: "sidebar.grouping.label",
+    defaultMessage: "Group by",
+  });
+
   const pick = (mode: SidebarGrouping) => {
     setOpen(false);
     onSwitch(mode);
@@ -378,19 +385,13 @@ function GroupingToggle({
         className="sidebar-grouping-menu w-44 p-1"
       >
         <div className="px-2 py-1 text-xs text-muted-foreground">
-          <FormattedMessage id="sidebar.grouping.label" defaultMessage="Group by" />
+          {groupingLabel}
         </div>
         {/* Mutually-exclusive modes -> radio semantics. Tab cycles between the
             two options (a legal radiogroup keyboard model); arrow-key roving
             is not required. aria-checked carries the selected state; a trailing
             Check mirrors the selection visually. */}
-        <div
-          role="radiogroup"
-          aria-label={intl.formatMessage({
-            id: "sidebar.grouping.label",
-            defaultMessage: "Group by",
-          })}
-        >
+        <div role="radiogroup" aria-label={groupingLabel}>
           <button
             type="button"
             role="radio"

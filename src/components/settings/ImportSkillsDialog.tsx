@@ -16,7 +16,7 @@ import { skillKeys } from "../../session/queryKeys";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { FieldHint, SourceFold } from "./settings-chrome";
+import { DialogHeaderButton, FieldHint, SourceFold } from "./settings-chrome";
 import {
   Select,
   SelectContent,
@@ -215,36 +215,24 @@ export function ImportSkillsDialog({ onClose }: Props) {
               />
             </DialogTitle>
             <div className="flex items-center gap-1">
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground"
-                aria-label={intl.formatMessage({
+              <DialogHeaderButton
+                label={intl.formatMessage({
                   id: "settings.skills.importRefresh",
                   defaultMessage: "Refresh sources",
                 })}
+                icon={RefreshCw}
+                spinning={isFetching}
                 onClick={() => void refetch()}
-              >
-                <RefreshCw
-                  className={cn("size-4", isFetching && "animate-spin")}
-                  aria-hidden
-                />
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground"
-                aria-label={intl.formatMessage({
+              />
+              <DialogHeaderButton
+                label={intl.formatMessage({
                   id: "common.close",
                   defaultMessage: "Close",
                 })}
-                onClick={onClose}
+                icon={X}
                 disabled={importMutation.isPending}
-              >
-                <X className="size-4" aria-hidden />
-              </Button>
+                onClick={onClose}
+              />
             </div>
           </div>
           <DialogDescription>
