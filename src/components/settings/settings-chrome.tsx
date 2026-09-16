@@ -22,9 +22,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 export const SETTINGS_TOOLTIP_CLASS =
   "bg-popover text-popover-foreground border shadow-md rounded-lg px-2.5 py-1.5";
 
-/** One form field's hint: an info icon + tooltip anchored after the field
- *  label (the ImportSkillsDialog import-mode posture). `label` is the
- *  trigger's accessible name; `children` render as the muted body. */
+/** A field or section hint: an info icon + tooltip anchored after the
+ *  label or section title (the ImportSkillsDialog import-mode posture).
+ *  `label` is the trigger's accessible name; `children` render as the
+ *  muted body. */
 export function FieldHint({
   label,
   children,
@@ -45,7 +46,7 @@ export function FieldHint({
         sideOffset={3}
         className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
       >
-        <p className="text-muted-foreground text-sm">{children}</p>
+        <div className="text-muted-foreground text-sm">{children}</div>
       </TooltipContent>
     </Tooltip>
   );

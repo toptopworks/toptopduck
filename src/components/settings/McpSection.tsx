@@ -664,8 +664,9 @@ function McpServerRow({
           {/* The enable toggle (ADR-0106): the row's machine-level state.
            * Sits BEFORE the action buttons so it reads as the row's primary
            * control, not an action (the agent row's bare Switch -- the
-           * aria-label carries the state, no tooltip wrapper). */}
+           * native switch semantics carry the state, no tooltip wrapper). */}
           <Switch
+            className="mr-1.5"
             checked={server.enabled}
             disabled={toggling}
             onCheckedChange={onToggleEnabled}

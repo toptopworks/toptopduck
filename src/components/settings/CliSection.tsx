@@ -630,8 +630,9 @@ function CliToolRow({
       <div className="flex shrink-0 items-center gap-0.5">
         {/* The enable toggle (ADR-0106): the row's machine-level state,
          * before the action buttons (the agent row's bare Switch -- the
-         * aria-label carries the state, no tooltip wrapper). */}
+         * native switch semantics carry the state, no tooltip wrapper). */}
         <Switch
+          className="mr-1.5"
           checked={tool.enabled}
           disabled={toggling}
           onCheckedChange={onToggleEnabled}

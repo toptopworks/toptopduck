@@ -120,6 +120,15 @@ export function CliToolForm({
         defaultMessage: "Description and executable are required.",
       });
     }
+    // A folded-away blank parameter row (expanding an empty section seeds
+    // one) must fail here by name, not at the backend -- the row can be
+    // collapsed out of view when Save is clicked.
+    if (tool.params.some((param) => param.name.trim().length === 0)) {
+      return intl.formatMessage({
+        id: "settings.cli.form.paramNameRequired",
+        defaultMessage: "Parameter name cannot be empty.",
+      });
+    }
     return null;
   }
 
@@ -278,9 +287,9 @@ export function CliToolForm({
         </SettingsRow>
 
         {/* --- Parameter table ------------------------------------------------ */}
-        {/* The MCP form's KvEditor chrome: a chevron fold head (expanding an
-         * empty section seeds one blank row), the field hint as an info
-         * tooltip beside the title, the Add affordance beside the expanded
+        {/* The KvEditor fold chrome plus a FieldHint beside the title: a
+         * chevron fold head (expanding an empty section seeds one blank
+         * row), the info tooltip, the Add affordance beside the expanded
          * head, and one icon-button row per entry. */}
         <div className="px-4 py-2.5">
           <SectionFold
@@ -409,9 +418,9 @@ export function CliToolForm({
                       </SelectContent>
                     </Select>
                     {/* The varargs toggle: the tooltip + the aria-label carry
-                     * the meaning, no visible text (the enable-switch tooltip
-                     * posture). TooltipTrigger asChild would clobber the
-                     * Switch's data-state -- the span isolates the trigger. */}
+                     * the meaning, no visible text. TooltipTrigger asChild
+                     * would clobber the Switch's data-state -- the span
+                     * isolates the trigger. */}
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span className="inline-flex">

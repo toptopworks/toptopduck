@@ -230,6 +230,22 @@ describe("CliSection", () => {
     });
   });
 
+  it("shows the Save label on the edit-mode footer (the Add-vs-Save fork)", () => {
+    // The create flow pins the Add arm (the description and save-state
+    // tests click Add); the edit flow must read Save -- the fork's other
+    // arm, which no other test asserts.
+    renderWithProviders(
+      <CliSection
+        appConfig={makeAppConfig([makeTool()])}
+        onCliToolsChanged={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit tool pandoc" }),
+    );
+    expect(screen.getByRole("button", { name: "Save" })).toBeVisible();
+  });
+
   it("returns to the list through the form's back link", () => {
     // The McpServerForm posture: the back link above the pane header is the
     // discard path; the footer Cancel is its in-card twin.
