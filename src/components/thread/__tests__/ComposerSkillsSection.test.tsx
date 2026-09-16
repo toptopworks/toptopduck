@@ -15,7 +15,7 @@ import {
 } from "../../../api";
 import { sessionKeys } from "../../../session/queryKeys";
 import { TooltipProvider } from "../../ui/tooltip";
-import type { SkillEntry } from "../../../types/skills";
+import { skillEntry } from "../../../test-fixtures";
 
 // The mount trust gate under ADR-0112 (issue #716): the list keeps the
 // checkbox authority (mount) and the Active badge (display only); the
@@ -39,20 +39,6 @@ vi.mock("../../../api", async (importOriginal) => {
   };
 });
 
-function skill(name: string): SkillEntry {
-  return {
-    name,
-    description: `${name} skill`,
-    acquired: "local",
-    license: null,
-    compatibility: null,
-    body: "",
-    link_target: null,
-    content_hash: "ab".repeat(32),
-    enabled: true,
-  };
-}
-
 function renderSection(ui: ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -75,7 +61,7 @@ describe("ComposerSkillsSection trust gate + intent union (ADR-0112)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue({
-      skills: [skill("charting"), skill("cleaning")],
+      skills: [skillEntry("charting"), skillEntry("cleaning")],
       ignored: [],
       root_error: null,
     });

@@ -9,6 +9,7 @@ import { Thread } from "../Thread";
 import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { SkillEntry } from "../../../types/skills";
+import { skillEntry } from "../../../test-fixtures";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
 
 // A materialized-record fixture (reference_name overridden per test) -- the
@@ -86,24 +87,6 @@ describe("Thread", () => {
   // step: the exchange's head is the surface under test, not its body.
   function bareLiveTurn(): LiveTurn {
     return { question: "q", askedAt: 1724232000000, step: null, rounds: [] };
-  }
-
-  // Build a registry SkillEntry with only the fields the skill-marker render
-  // path reads (name). The other declaration fields are filled with benign
-  // defaults -- the marker never inspects them, and keeping the helper narrow
-  // keeps the tests focused on the marker behavior under test.
-  function skillEntry(name: string): SkillEntry {
-    return {
-      name,
-      description: `${name} description.`,
-      acquired: "local",
-      license: null,
-      compatibility: null,
-      body: "",
-      link_target: null,
-      content_hash: "deadbeef",
-      enabled: true,
-    };
   }
 
   it("renders a multi-promotion turn as a primary result link + a muted antecedents line (ADR-0084)", () => {
@@ -2782,25 +2765,12 @@ describe("Thread", () => {
         provenance: { skills: [{ name, content_hash: contentHash }] },
       };
     }
-    function registrySkill(name: string, contentHash: string): SkillEntry {
-      return {
-        name,
-        description: `${name} description.`,
-        acquired: "local",
-        license: null,
-        compatibility: null,
-        body: "",
-        link_target: null,
-        content_hash: contentHash,
-        enabled: true,
-      };
-    }
     function skillIndex(...skills: SkillEntry[]): Map<string, SkillEntry> {
       return new Map(skills.map((s) => [s.name, s]));
     }
 
     it("surfaces the modified badge when the skill's content_hash changed since the turn", () => {
-      const index = skillIndex(registrySkill("sql-coach", "registry-hash"));
+      const index = skillIndex(skillEntry("sql-coach", { content_hash: "registry-hash" }));
       renderThread(
         <Thread
           entries={[{ entry: "Turn", data: turnWithSkill("sql-coach", "turn-hash") }]}
@@ -2814,7 +2784,7 @@ describe("Thread", () => {
     });
 
     it("hides the drift badge when content_hash matches the registry", () => {
-      const index = skillIndex(registrySkill("sql-coach", "same-hash"));
+      const index = skillIndex(skillEntry("sql-coach", { content_hash: "same-hash" }));
       renderThread(
         <Thread
           entries={[{ entry: "Turn", data: turnWithSkill("sql-coach", "same-hash") }]}
@@ -2827,7 +2797,7 @@ describe("Thread", () => {
     });
 
     it("hides the drift badge when content_hash is empty (v3->v4 migration, no baseline)", () => {
-      const index = skillIndex(registrySkill("sql-coach", "registry-hash"));
+      const index = skillIndex(skillEntry("sql-coach", { content_hash: "registry-hash" }));
       renderThread(
         <Thread
           entries={[{ entry: "Turn", data: turnWithSkill("sql-coach", "") }]}

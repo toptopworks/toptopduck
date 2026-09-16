@@ -9,6 +9,7 @@ import {
   type ActivationOwner,
 } from "../turn-visual";
 import type { SkillEntry } from "../../../types/skills";
+import { skillEntry } from "../../../test-fixtures";
 import type { ThreadEntry, TurnRuntime } from "../../../types/thread";
 
 // The issue #721 run-position contract, pinned at the pure-algebra seam. The
@@ -231,10 +232,10 @@ const skillNamed = (
   entry: "Skill",
   data: { kind, name, actor: null },
 });
-// The fold inputs only ever read has()/get() here, so a minimal cast keeps
-// the fixture light (Thread.test.tsx exercises the full SkillEntry shape).
+// The fold inputs only ever read has()/get() here, so the registry rows come
+// straight from the shared factory (no per-file literals or casts).
 const registry = (...names: string[]): ReadonlyMap<string, SkillEntry> =>
-  new Map(names.map((n) => [n, { name: n } as SkillEntry]));
+  new Map(names.map((n) => [n, skillEntry(n)]));
 
 describe("lifecycleVisualRows (fold segmentation, issue #737)", () => {
   it("folds at the threshold exactly; one below stays scatter", () => {

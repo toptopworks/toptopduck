@@ -9,6 +9,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 import { importSkills, listSkillSources } from "../../../api";
 import * as dialogPlugin from "@tauri-apps/plugin-dialog";
 import type { ImportOutcome, SkillSource } from "../../../types/skills";
+import { skillEntry } from "../../../test-fixtures";
 
 // The dialog drives everything through IPC + the directory picker; mock both
 // so the test never touches Tauri.
@@ -194,17 +195,13 @@ describe("ImportSkillsDialog (issue #367)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([claudeSource]);
     const imported: ImportOutcome = {
       kind: "imported",
-      data: {
-        name: "alpha",
+      data: skillEntry("alpha", {
         description: "First skill.",
         acquired: "linked",
-        license: null,
-        compatibility: null,
         body: "Body.\n",
         link_target: "/home/u/.claude/skills/alpha",
         content_hash: "abc",
-        enabled: true,
-      },
+      }),
     };
     vi.mocked(importSkills).mockResolvedValue([imported]);
     const onClose = vi.fn();

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 
 import { listAdapters, setDefaultRuntime } from "../../../api";
-import type { AppConfig } from "../../../types/app-config";
+import { baseAppConfig } from "../../../test-fixtures";
 import type { AdapterEntry } from "../../../types/runtime";
 import { DefaultRuntimeControl } from "../DefaultRuntimeControl";
 import { chooseOption, openSelect, renderSettings } from "./helpers";
@@ -31,37 +31,13 @@ const mockAdapters: AdapterEntry[] = [
 
 // The config the write IPC returns after persisting (mirrors the sessions-dir
 // dedicated-IPC shape: persist + return the updated document for feed-back).
-const updatedConfig: AppConfig = {
+const updatedConfig = baseAppConfig({
   format_version: 1,
-  theme: "system",
-  locale: "system",
   engine: { memory_limit: "512MB", threads: 4, row_cap: 10_000 },
   privacy: { send_samples: false },
-  provider: {
-    profiles: [
-      {
-        id: "default",
-        display_name: "Anthropic",
-        protocol: "anthropic",
-        base_url: "https://api.anthropic.com",
-        model: "claude-sonnet-4-6",
-      },
-    ],
-    active_profile: "default",
-  },
-  export: { last_dir: null, default_format: "csv" },
   tunables: { window_turns: 5, far_window: 20 },
   shell: { sidebar_collapsed: false, sidebar_grouping: "time" },
-  cli_tools: { tools: [] },
-  mcp_servers: { servers: [] },
-  sessions_dir: null,
-  default_runtime: { kind: "built_in" },
-  builtin_skill_baselines: {},
-  last_model_postures: {},
-  enabled_agents: [],
-  materialized_builtin_agents: [],
-  disabled_skills: [],
-};
+});
 
 function renderControl(
   overrides: Partial<React.ComponentProps<typeof DefaultRuntimeControl>> = {},

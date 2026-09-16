@@ -7,7 +7,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ComposerSkillsTrigger } from "../ComposerSkillsTrigger";
 import { listActivatedSkills, listMountedSkills, listSkills, mountSkill, unmountSkill } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
-import type { SkillEntry } from "../../../types/skills";
+import { skillEntry } from "../../../test-fixtures";
 
 // The Skills trigger chip + its popover section (issue #365). The session
 // mode pins live in the pane-level black box (Shell.test.tsx); these tests
@@ -28,20 +28,6 @@ vi.mock("../../../api", async (importOriginal) => {
     activateSkill: vi.fn(async () => {}),
   };
 });
-
-function skill(name: string): SkillEntry {
-  return {
-    name,
-    description: `${name} skill`,
-    acquired: "local",
-    license: null,
-    compatibility: null,
-    body: "",
-    link_target: null,
-    content_hash: "ab".repeat(32),
-    enabled: true,
-  };
-}
 
 function renderTrigger(ui: ReactElement) {
   const queryClient = new QueryClient({
@@ -64,7 +50,7 @@ const DRAFT_PROPS = {
 describe("ComposerSkillsTrigger draft mode (ADR-0092 / #500)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(listSkills).mockResolvedValue({ skills: [skill("charting"), skill("cleaning")], ignored: [], root_error: null });
+    vi.mocked(listSkills).mockResolvedValue({ skills: [skillEntry("charting"), skillEntry("cleaning")], ignored: [], root_error: null });
     vi.mocked(listMountedSkills).mockResolvedValue([]);
     vi.mocked(listActivatedSkills).mockResolvedValue([]);
   });
@@ -121,9 +107,9 @@ describe("ComposerSkillsTrigger draft mode (ADR-0092 / #500)", () => {
     // with pandoc auto-included -- but the badge reports the USER's
     // pending picks alone (system skills mount themselves; the panel
     // treats them as plain rows, an explicit check absorbed at submit).
-    const builtin = { ...skill("pandoc"), acquired: "builtin" as const };
+    const builtin = skillEntry("pandoc", { acquired: "builtin" });
     vi.mocked(listSkills).mockResolvedValue({
-      skills: [builtin, skill("charting")],
+      skills: [builtin, skillEntry("charting")],
       ignored: [],
       root_error: null,
     });

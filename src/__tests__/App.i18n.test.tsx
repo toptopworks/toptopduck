@@ -37,6 +37,10 @@ vi.mock("@tauri-apps/api/window", () => {
 
 // appConfigWith lives in the hoisted block so the hoisted api mock factory can
 // call it (factories run above imports; only vi.hoisted values are in scope).
+// That hoist is also why the config stays a hand-rolled literal: the shared
+// baseAppConfig factory (src/test-fixtures, issue #967) is a normal import and
+// cannot reach inside vi.hoisted -- new AppConfig schema fields must be added
+// here by hand.
 const { appConfigWith } = vi.hoisted(() => {
   function appConfigWith(locale: "system" | "zh-CN" | "en-US"): AppConfig {
     return {

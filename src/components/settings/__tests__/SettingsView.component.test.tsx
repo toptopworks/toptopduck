@@ -18,6 +18,7 @@ import type { AppConfig } from "../../../types/app-config";
 import type { AdapterEntry } from "../../../types/runtime";
 import type { SettingsSection } from "../sections";
 import { chooseOption, openSelect, renderSettings } from "./helpers";
+import { baseAppConfig } from "../../../test-fixtures";
 
 // SettingsView reaches the per-profile keychain surface (issue #153); mock the
 // IPC functions so the view never hits Tauri. listProviderProfiles feeds the
@@ -95,12 +96,8 @@ function SettingsViewHarness({
 }
 
 describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => {
-  const baseConfig: AppConfig = {
-    format_version: 2,
-    theme: "system",
-    locale: "system",
+  const baseConfig = baseAppConfig({
     engine: { memory_limit: "512MB", threads: 2, row_cap: 1000 },
-    privacy: { send_samples: true },
     provider: {
       profiles: [
         {
@@ -113,19 +110,8 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       ],
       active_profile: "default",
     },
-    export: { last_dir: null, default_format: "csv" },
     tunables: { window_turns: 10, far_window: 30 },
-    shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
-    cli_tools: { tools: [] },
-    mcp_servers: { servers: [] },
-    sessions_dir: null,
-    default_runtime: { kind: "built_in" },
-    builtin_skill_baselines: {},
-    last_model_postures: {},
-    enabled_agents: [],
-    materialized_builtin_agents: [],
-    disabled_skills: [],
-  };
+  });
   const profileKeysDefault = [{ profile_id: "default", has_key: false, keychain_fault: null }];
 
   const twoProfileConfig: AppConfig = {

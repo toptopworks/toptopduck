@@ -7,8 +7,7 @@ import { SkillsSection } from "../SkillsSection";
 import { chooseOption, openSelect } from "./helpers";
 import { TooltipProvider } from "../../ui/tooltip";
 import { listSkills, restoreBuiltinSkill } from "../../../api";
-import type { AppConfig } from "../../../types/app-config";
-import type { SkillEntry } from "../../../types/skills";
+import { baseAppConfig, skillEntry } from "../../../test-fixtures";
 
 // The builtin-skill surface of the settings pane (issue #677): the built-in
 // badge + no delete entry, the Edited derivation off the baseline side table,
@@ -26,35 +25,14 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
 }));
 
-const builtinSkill: SkillEntry = {
-  name: "pandoc",
+const builtinSkill = skillEntry("pandoc", {
   description: "Convert documents between formats.",
   acquired: "builtin",
-  license: null,
-  compatibility: null,
   body: "Use the `pandoc` tool…\n",
-  link_target: null,
   content_hash: "hash-of-shipped-body",
-  enabled: true,
-};
+});
 
-const restoredConfig = {
-  format_version: 1,
-  theme: "system",
-  locale: "system",
-  engine: {},
-  privacy: {},
-  provider: {},
-  export: {},
-  tunables: {},
-  shell: {},
-  mcp_servers: { servers: [] },
-  cli_tools: { tools: [] },
-  builtin_skill_baselines: {},
-  sessions_dir: null,
-  default_runtime: { kind: "builtin" },
-  last_model_postures: {},
-} as unknown as AppConfig;
+const restoredConfig = baseAppConfig();
 
 // The pane under test, parameterized by the side table (the Edited
 // derivation's anchor). Empty-catalog English IntlProvider: FormattedMessage

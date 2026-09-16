@@ -35,42 +35,16 @@ vi.mock("../../api", async (importOriginal) => {
 
 import { getAppConfig, setAppConfig } from "../../api";
 import { useAppConfigState } from "../useAppConfigState";
+import { baseAppConfig as sharedBaseAppConfig } from "../../test-fixtures";
 
 function baseAppConfig(shell: Pick<AppConfig["shell"], "sidebar_collapsed">): AppConfig {
-  return {
+  // The wrapper fills `sidebar_grouping: "flat"` (the serde default) so callers
+  // stay focused on the collapse prefs they actually exercise. Grouping-specific
+  // tests spread the wrapper and override `shell` with the mode under test.
+  return sharedBaseAppConfig({
     format_version: 1,
-    theme: "system",
-    locale: "system",
-    engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
-    privacy: { send_samples: true },
-    provider: {
-      profiles: [
-        {
-          id: "default",
-          display_name: "Anthropic",
-          protocol: "anthropic",
-          base_url: "https://api.anthropic.com",
-          model: "claude-sonnet-4-6",
-        },
-      ],
-      active_profile: "default",
-    },
-    export: { last_dir: null, default_format: "csv" },
-    tunables: { window_turns: 6, far_window: 12 },
-    // The helper fills `sidebar_grouping: "flat"` (the serde default) so callers
-    // stay focused on the collapse prefs they actually exercise. Grouping-specific
-    // tests build their own AppConfig literal with the mode under test.
     shell: { ...shell, sidebar_grouping: "flat" },
-    cli_tools: { tools: [] },
-    mcp_servers: { servers: [] },
-    sessions_dir: null,
-    default_runtime: { kind: "built_in" },
-    builtin_skill_baselines: {},
-    last_model_postures: {},
-    enabled_agents: [],
-    materialized_builtin_agents: [],
-    disabled_skills: [],
-  };
+  });
 }
 
 function renderAppConfigState() {

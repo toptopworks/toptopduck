@@ -7,7 +7,7 @@ import { catalogFor } from "../../../i18n";
 import { listActivatedSkills, listSkills } from "../../../api";
 import { ComposerSkillChips } from "../ComposerSkillChips";
 import { QuestionBar } from "../QuestionBar";
-import type { SkillEntry } from "../../../types/skills";
+import { skillEntry } from "../../../test-fixtures";
 
 // QuestionBar routes all of its chrome (placeholder / aria-label / button
 // labels / phase feedback) through react-intl (ADR-0052), so its tests render
@@ -25,20 +25,6 @@ function renderQuestionBar(ui: ReactElement) {
       </IntlProvider>
     </QueryClientProvider>,
   );
-}
-
-function skill(name: string): SkillEntry {
-  return {
-    name,
-    description: `${name} skill`,
-    acquired: "local",
-    license: null,
-    compatibility: null,
-    body: "",
-    link_target: null,
-    content_hash: "ab".repeat(32),
-    enabled: true,
-  };
 }
 
 vi.mock("../../../api", async (importOriginal) => {
@@ -249,7 +235,7 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue({
-      skills: [skill("charting"), skill("data-cleaning")],
+      skills: [skillEntry("charting"), skillEntry("data-cleaning")],
       ignored: [],
       root_error: null,
     });
@@ -447,8 +433,8 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   it("shows a provenance badge on every row (personal vs built-in)", async () => {
     vi.mocked(listSkills).mockResolvedValue({
       skills: [
-        skill("charting"),
-        { ...skill("data-cleaning"), acquired: "builtin" },
+        skillEntry("charting"),
+        skillEntry("data-cleaning", { acquired: "builtin" }),
       ],
       ignored: [],
       root_error: null,
