@@ -13,7 +13,7 @@ import { discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
-import { SourceFold } from "./settings-chrome";
+import { DialogHeaderButton, SourceFold } from "./settings-chrome";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -74,7 +74,8 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
   // Parallel discovery: fire discoverMcpServers for all sources at once.
   // Each source is independent — a read failure on one does not block the
   // others (Promise.allSettled). Per-source errors are shown inline under
-  // the affected source row.
+  // the affected source row; a not-found config (no servers, no error)
+  // keeps its source hidden.
   const { data: sources, error: sourcesError, refetch, isFetching } = useQuery({
     queryKey: ["mcp-import-sources"],
     queryFn: async (): Promise<McpImportSource[]> => {
@@ -244,8 +245,10 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
 
   const selectedCount = selected.size;
 
-  // Build the visible source list from the registry so servers already in the
-  // config are excluded, and sources with zero remaining servers are hidden.
+  // Build the visible source list from the registry so servers already in
+  // the config are excluded. A source with no servers stays hidden unless
+  // discovery failed for it: an error source stays listed so the failure is
+  // not silent, while a not-found config is normal and stays hidden.
   const sourceList = useMemo(() => {
     const bySource = new Map<ImportSource, DiscoveredServer[]>();
     for (const { source, server } of serverRegistry.values()) {
@@ -258,7 +261,7 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
       servers: bySource.get(id) ?? [],
       configPath: sources?.find((s) => s.id === id)?.configPath ?? null,
       error: sources?.find((s) => s.id === id)?.error ?? null,
-    })).filter((s) => s.servers.length > 0);
+    })).filter((s) => s.servers.length > 0 || s.error !== null);
   }, [serverRegistry, sources]);
 
   return (
@@ -287,36 +290,24 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
               />
             </DialogTitle>
             <div className="flex items-center gap-1">
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground"
-                aria-label={intl.formatMessage({
+              <DialogHeaderButton
+                label={intl.formatMessage({
                   id: "settings.mcp.import.refresh",
                   defaultMessage: "Refresh sources",
                 })}
+                icon={RefreshCw}
+                spinning={isFetching}
                 onClick={() => void refetch()}
-              >
-                <RefreshCw
-                  className={cn("size-4", isFetching && "animate-spin")}
-                  aria-hidden
-                />
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="text-muted-foreground"
-                aria-label={intl.formatMessage({
+              />
+              <DialogHeaderButton
+                label={intl.formatMessage({
                   id: "common.close",
                   defaultMessage: "Close",
                 })}
-                onClick={onClose}
+                icon={X}
                 disabled={importing}
-              >
-                <X className="size-4" aria-hidden />
-              </Button>
+                onClick={onClose}
+              />
             </div>
           </div>
           <DialogDescription>
@@ -469,16 +460,6 @@ function SourceRow({
             values={{ error: source.error }}
           />
         </div>
-      )}
-
-      {/* Empty source (config not found / no servers) */}
-      {source.servers.length === 0 && !source.error && (
-        <p className="text-muted-foreground py-2 text-center text-xs">
-          <FormattedMessage
-            id="settings.mcp.import.notFound"
-            defaultMessage="No MCP config file found for this source. Make sure the application is installed and has been configured."
-          />
-        </p>
       )}
 
       {source.servers.length > 0 && (

@@ -3,7 +3,7 @@ import {
   type MouseEventHandler,
   type ReactNode,
 } from "react";
-import { type LucideIcon, ArrowLeft, ChevronRight, Info, Loader2 } from "lucide-react";
+import { type LucideIcon, ArrowLeft, ChevronDown, ChevronRight, Info, Loader2 } from "lucide-react";
 import { useIntl } from "react-intl";
 
 import { cn } from "../../lib/utils";
@@ -113,6 +113,40 @@ export function HeaderActionButton({
   );
 }
 
+/** The dialog-title action: a small ghost icon button beside an import
+ *  dialog's title (issue #964). Deliberately its own posture -- dialogs get
+ *  no tooltip (the pane-header `HeaderActionButton` skin does not apply
+ *  inside a modal) and keep the compact `size="sm"` ghost shell; `label` is
+ *  the single source for the accessible name, `spinning` adds the in-flight
+ *  rotate. */
+export function DialogHeaderButton({
+  label,
+  icon: Icon,
+  spinning,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  icon: LucideIcon;
+  spinning?: boolean;
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      className="text-muted-foreground"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <Icon className={cn("size-4", spinning && "animate-spin")} aria-hidden />
+    </Button>
+  );
+}
+
 /** The editor form's back link: the ArrowLeft labeled-text button escaping a
  *  form pane back to its list (issue #960). `children` is the label slot --
  *  the three call sites' copy differs -- while `onClick` / `disabled` pass
@@ -210,6 +244,39 @@ export function RowRemoveButton({
     >
       <Icon className="size-3.5" aria-hidden />
     </Button>
+  );
+}
+
+/** The row-level fold toggle: the bare chevron button that expands a list
+ *  row's detail panel (issue #964). The accessible name is the row name and
+ *  the state rides `aria-expanded` -- no verb enters the name, mirroring the
+ *  fold-head posture. The chevron swap (down when expanded, right when
+ *  collapsed) is the only stateful skin. Both call sites sit outside
+ *  clickable rows, so the handler takes no event. */
+export function RowFoldChevron({
+  label,
+  expanded,
+  onToggle,
+}: {
+  /** The row name; becomes the button's accessible name verbatim. */
+  label: string;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+      onClick={onToggle}
+      aria-label={label}
+      aria-expanded={expanded}
+    >
+      {expanded ? (
+        <ChevronDown className="size-4" aria-hidden />
+      ) : (
+        <ChevronRight className="size-4" aria-hidden />
+      )}
+    </button>
   );
 }
 
@@ -444,6 +511,19 @@ export function SourceFold({
   children: ReactNode;
 }) {
   const intl = useIntl();
+  // Both verbs resolve up front; the toggle's aria-label below is a plain
+  // choice between the named labels (SidebarToggle / StatusDot posture).
+  // Never fold these back into a single in-ternary call: formatjs extract
+  // only matches a direct literal descriptor argument, so an in-ternary
+  // descriptor is not recognized.
+  const expandLabel = intl.formatMessage(
+    { id: "settings.importSource.expand", defaultMessage: "Expand {label}" },
+    { label },
+  );
+  const collapseLabel = intl.formatMessage(
+    { id: "settings.importSource.collapse", defaultMessage: "Collapse {label}" },
+    { label },
+  );
   return (
     <div className="border-border rounded-lg border">
       <div className="hover:bg-accent/50 flex items-center gap-2 px-3 py-2.5">
@@ -459,23 +539,7 @@ export function SourceFold({
           type="button"
           onClick={onToggleExpand}
           aria-expanded={expanded}
-          aria-label={
-            expanded
-              ? intl.formatMessage(
-                  {
-                    id: "settings.importSource.collapse",
-                    defaultMessage: "Collapse {label}",
-                  },
-                  { label },
-                )
-              : intl.formatMessage(
-                  {
-                    id: "settings.importSource.expand",
-                    defaultMessage: "Expand {label}",
-                  },
-                  { label },
-                )
-          }
+          aria-label={expanded ? collapseLabel : expandLabel}
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
           <div className="flex min-w-0 items-baseline gap-1.5">

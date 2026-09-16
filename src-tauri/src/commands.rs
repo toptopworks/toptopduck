@@ -1477,8 +1477,9 @@ pub async fn probe_mcp_server(
 /// source's local config file (Claude Desktop / Codex), parses server
 /// definitions, and returns them as [`DiscoveredServer`] entries for the
 /// frontend to show in an import checklist. Returns an empty vec when the
-/// config file is not found (the frontend shows a "not found" message -- this
-/// is NOT an error). A parse error (malformed file) returns an error string.
+/// config file is not found (this is NOT an error; the frontend hides a
+/// source only when it has neither servers nor a discovery error). A parse
+/// error (malformed file) returns an error string.
 #[tauri::command]
 pub fn discover_mcp_servers(
     source: crate::mcp::import::ImportSource,

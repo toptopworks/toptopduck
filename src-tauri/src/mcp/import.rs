@@ -82,8 +82,8 @@ pub struct DiscoveryResult {
 
 /// Discover MCP servers from an external config (issue #390). Returns the
 /// parsed server list + the config file path, or empty servers if the config
-/// file is not found (the frontend shows a "not found" message -- this is NOT
-/// an error).
+/// file is not found (this is NOT an error; the frontend hides a source only
+/// when it has neither servers nor a discovery error).
 ///
 /// Parse errors (malformed JSON / TOML) return an error string so the frontend
 /// can tell the user the file exists but could not be read.
@@ -110,8 +110,8 @@ pub fn discover(source: ImportSource) -> Result<DiscoveryResult, String> {
 const MAX_CONFIG_SIZE: u64 = 8 * 1024 * 1024;
 
 /// Read a config file, returning `None` when not found (intentionally not an
-/// error -- the frontend shows a "not found" message). Files exceeding
-/// [`MAX_CONFIG_SIZE`] are rejected before reading to avoid OOM.
+/// error -- a source whose config is absent simply stays hidden). Files
+/// exceeding [`MAX_CONFIG_SIZE`] are rejected before reading to avoid OOM.
 fn read_config(path: &Path) -> Result<Option<String>, String> {
     if let Ok(metadata) = std::fs::metadata(path) {
         if metadata.len() > MAX_CONFIG_SIZE {

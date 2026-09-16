@@ -311,7 +311,6 @@
   "settings.mcp.import.discovered": "已发现 {count} 个可导入的{count, plural, one {服务器} other {服务器}}",
   "settings.mcp.import.empty": "未找到 MCP 服务器来源。",
   "settings.mcp.import.loading": "正在读取配置…",
-  "settings.mcp.import.notFound": "未找到此来源的 MCP 配置文件。请确保已安装并配置了相应应用。",
   "settings.mcp.import.partialFailure": "{error}（还有 {count} 个）",
   "settings.mcp.import.refresh": "刷新来源",
   "settings.mcp.import.secretsBadge": "{count} 个机密",
