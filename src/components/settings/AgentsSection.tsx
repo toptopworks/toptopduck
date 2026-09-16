@@ -4,7 +4,6 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
-  ArrowLeft,
   Bot,
   FolderOpen,
   Loader2,
@@ -52,6 +51,7 @@ import { Textarea } from "../ui/textarea";
 import {
   FieldHint,
   HeaderActionButton,
+  PaneBackLink,
   RowActionButton,
   NameBadge,
   PaneHeader,
@@ -663,18 +663,12 @@ function AgentForm({
 
   return (
     <div>
-      <button
-        type="button"
-        className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
-        onClick={onCancel}
-        disabled={saving}
-      >
-        <ArrowLeft className="size-4" aria-hidden />
+      <PaneBackLink onClick={onCancel} disabled={saving}>
         <FormattedMessage
           id="settings.agents.backToList"
           defaultMessage="Back to agent list"
         />
-      </button>
+      </PaneBackLink>
       <PaneHeader
         title={editing ? (
           <FormattedMessage

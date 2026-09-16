@@ -6,8 +6,10 @@ import {
   FieldHint,
   FoldHead,
   HeaderActionButton,
+  PaneBackLink,
   RowActionButton,
   RowRemoveButton,
+  SourceFold,
 } from "../settings-chrome";
 import { renderSettings } from "./helpers";
 
@@ -194,5 +196,102 @@ describe("FieldHint", () => {
     const title = screen.getByText("Import mode");
     expect(title.tagName).toBe("P");
     expect(title).toHaveClass("text-popover-foreground", "font-medium");
+  });
+});
+
+describe("SourceFold", () => {
+  it("keeps the verb in the toggle's accessible name beside the checkbox", () => {
+    renderSettings(
+      <SourceFold
+        label="Claude Desktop"
+        path="/home/user/.claude/mcp.json"
+        count={3}
+        expanded={false}
+        onToggleExpand={() => {}}
+        selectAll={{ checked: false, onToggleAll: () => {} }}
+      >
+        <p>server checkboxes</p>
+      </SourceFold>,
+    );
+    // The expand/collapse verb rides the aria-label so the path / badge text
+    // never leaks into the accessible name.
+    const toggle = screen.getByRole("button", { name: "Expand Claude Desktop" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // The select-all checkbox is a sibling control named by the source label,
+    // not nested in the toggle.
+    const checkbox = screen.getByRole("checkbox", { name: "Claude Desktop" });
+    expect(checkbox).not.toBeDisabled();
+    // Collapsed keeps the panel unmounted.
+    expect(screen.queryByText("server checkboxes")).toBeNull();
+  });
+
+  it("announces collapse and mounts the children panel while expanded", () => {
+    renderSettings(
+      <SourceFold
+        label="Claude Desktop"
+        count={3}
+        expanded
+        onToggleExpand={() => {}}
+        selectAll={{ checked: false, onToggleAll: () => {} }}
+      >
+        <p>server checkboxes</p>
+      </SourceFold>,
+    );
+    const toggle = screen.getByRole("button", {
+      name: "Collapse Claude Desktop",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("server checkboxes")).toBeInTheDocument();
+  });
+
+  it("passes the checkbox state through and reports both toggles", () => {
+    const onToggleAll = vi.fn();
+    const onToggleExpand = vi.fn();
+    renderSettings(
+      <SourceFold
+        label="Codex"
+        count={0}
+        expanded={false}
+        onToggleExpand={onToggleExpand}
+        selectAll={{ checked: true, disabled: true, onToggleAll }}
+      >
+        <p>rows</p>
+      </SourceFold>,
+    );
+    const checkbox = screen.getByRole("checkbox", { name: "Codex" });
+    expect(checkbox).toBeDisabled();
+    expect(checkbox).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Codex" }));
+    expect(onToggleExpand).toHaveBeenCalledTimes(1);
+    fireEvent.click(checkbox);
+    expect(onToggleAll).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("PaneBackLink", () => {
+  it("renders the shared ArrowLeft posture over the label slot", () => {
+    const onClick = vi.fn();
+    renderSettings(
+      <PaneBackLink onClick={onClick}>Back to MCP list</PaneBackLink>,
+    );
+    const link = screen.getByRole("button", { name: "Back to MCP list" });
+    // The exact posture the form panes hand-rendered, now from one export.
+    expect(link).toHaveClass(
+      "text-muted-foreground",
+      "hover:text-foreground",
+      "mb-2",
+      "flex",
+      "items-center",
+      "gap-1.5",
+      "text-sm",
+    );
+    expect(link.querySelector("svg")).toHaveClass("lucide-arrow-left");
+    fireEvent.click(link);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the disabled state through", () => {
+    renderSettings(<PaneBackLink onClick={() => {}} disabled>Back</PaneBackLink>);
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
   });
 });

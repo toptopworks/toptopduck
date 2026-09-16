@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { ArrowLeft, Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import {
@@ -35,6 +35,7 @@ import {
 import { Textarea } from "../ui/textarea";
 import {
   FoldHead,
+  PaneBackLink,
   PaneHeader,
   RowRemoveButton,
   SettingsCard,
@@ -702,18 +703,12 @@ export function McpServerForm({
   return (
     <div data-testid="mcp-server-form">
       {/* Back link */}
-      <button
-        type="button"
-        className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
-        onClick={onCancel}
-        disabled={saving}
-      >
-        <ArrowLeft className="size-4" aria-hidden />
+      <PaneBackLink onClick={onCancel} disabled={saving}>
         <FormattedMessage
           id="settings.mcp.backToList"
           defaultMessage="Back to MCP list"
         />
-      </button>
+      </PaneBackLink>
 
       <PaneHeader
         className="mb-3"

@@ -705,24 +705,29 @@ function McpServerRow({
 
 /** The colored status dot reflecting the probe outcome. Uses `role="img"` +
  *  `aria-label` so screen readers announce the connection state (idle / testing
- *  / connected / failed). */
+ *  / connected / failed); all four labels come from the locale catalog
+ *  (issue #960). */
 function StatusDot({ probeState }: { probeState: ProbeState }) {
+  const intl = useIntl();
   const dotClass = "size-2.5 shrink-0 rounded-full";
   if (probeState.kind === "idle") {
+    // One read feeds both slots: the aria label and the tooltip share the
+    // catalog string instead of the same-id double-write.
+    const notTested = intl.formatMessage({
+      id: "settings.mcp.notTestedHint",
+      defaultMessage: "Not tested",
+    });
     return (
       <Tooltip>
         <TooltipTrigger asChild>
           <span
             role="img"
-            aria-label="Not tested"
+            aria-label={notTested}
             className={cn(dotClass, "bg-muted-foreground/40 cursor-help")}
           />
         </TooltipTrigger>
         <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-          <FormattedMessage
-            id="settings.mcp.notTestedHint"
-            defaultMessage="Not tested"
-          />
+          {notTested}
         </TooltipContent>
       </Tooltip>
     );
@@ -731,7 +736,10 @@ function StatusDot({ probeState }: { probeState: ProbeState }) {
     return (
       <span
         role="img"
-        aria-label="Testing"
+        aria-label={intl.formatMessage({
+          id: "settings.mcp.statusTesting",
+          defaultMessage: "Testing",
+        })}
         className={cn(dotClass, "bg-yellow-500 animate-pulse")}
       />
     );
@@ -740,7 +748,10 @@ function StatusDot({ probeState }: { probeState: ProbeState }) {
     return (
       <CheckCircle2
         role="img"
-        aria-label="Connected"
+        aria-label={intl.formatMessage({
+          id: "settings.mcp.statusConnected",
+          defaultMessage: "Connected",
+        })}
         className={cn("size-4 shrink-0 text-green-500")}
       />
     );
@@ -748,7 +759,10 @@ function StatusDot({ probeState }: { probeState: ProbeState }) {
   return (
     <AlertCircle
       role="img"
-      aria-label="Connection failed"
+      aria-label={intl.formatMessage({
+        id: "settings.mcp.statusConnectionFailed",
+        defaultMessage: "Connection failed",
+      })}
       className={cn("size-4 shrink-0 text-destructive")}
     />
   );

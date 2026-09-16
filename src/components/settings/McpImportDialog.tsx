@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronRight, Loader2, RefreshCw, X } from "lucide-react";
+import { AlertCircle, Loader2, RefreshCw, X } from "lucide-react";
 
 import type {
   DiscoveredServer,
@@ -13,6 +13,7 @@ import { discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
+import { SourceFold } from "./settings-chrome";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -446,122 +447,77 @@ function SourceRow({
     sourceKeys.length > 0 && selectedInSource === sourceKeys.length;
 
   return (
-    <div className="border-border rounded-lg border">
-      {/* Collapsed header: select-all checkbox + expand toggle */}
-      <div className="hover:bg-accent/50 flex items-center gap-2 px-3 py-2.5">
-        <input
-          type="checkbox"
-          checked={allSelected}
-          onChange={onToggleSourceAll}
-          disabled={source.servers.length === 0}
-          aria-label={label}
-          className="size-4"
-        />
-        <button
-          type="button"
-          onClick={onToggleExpand}
-          aria-expanded={expanded}
-          aria-label={
-            expanded
-              ? intl.formatMessage(
-                  { id: "settings.mcp.import.collapse", defaultMessage: "Collapse {label}" },
-                  { label },
-                )
-              : intl.formatMessage(
-                  { id: "settings.mcp.import.expand", defaultMessage: "Expand {label}" },
-                  { label },
-                )
-          }
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-        >
-          <div className="flex min-w-0 items-baseline gap-1.5">
-            <span className="shrink-0 text-sm font-medium">{label}</span>
-            {source.configPath && (
-              <span
-                className="text-muted-foreground truncate font-mono text-xs"
-                title={source.configPath}
-              >
-                {source.configPath}
-              </span>
-            )}
-          </div>
-          <Badge variant="secondary" className="ml-auto shrink-0">
-            {source.servers.length}
-          </Badge>
-          <ChevronRight
-            className={cn(
-              "size-4 shrink-0 transition-transform",
-              expanded && "rotate-90",
-            )}
-            aria-hidden
+    <SourceFold
+      label={label}
+      path={source.configPath}
+      count={source.servers.length}
+      expanded={expanded}
+      onToggleExpand={onToggleExpand}
+      selectAll={{
+        checked: allSelected,
+        disabled: source.servers.length === 0,
+        onToggleAll: onToggleSourceAll,
+      }}
+    >
+      {/* Per-source discovery error */}
+      {source.error && (
+        <div className="text-destructive mb-2 flex items-center gap-2 text-sm" role="alert">
+          <AlertCircle className="size-4 shrink-0" aria-hidden />
+          <FormattedMessage
+            id="settings.mcp.import.sourceError"
+            defaultMessage="Failed to read config: {error}"
+            values={{ error: source.error }}
           />
-        </button>
-      </div>
-
-      {/* Expanded: server checkboxes + selected M / N + select-all link */}
-      {expanded && (
-        <div className="border-border border-t px-3 py-2">
-          {/* Per-source discovery error */}
-          {source.error && (
-            <div className="text-destructive mb-2 flex items-center gap-2 text-sm" role="alert">
-              <AlertCircle className="size-4 shrink-0" aria-hidden />
-              <FormattedMessage
-                id="settings.mcp.import.sourceError"
-                defaultMessage="Failed to read config: {error}"
-                values={{ error: source.error }}
-              />
-            </div>
-          )}
-
-          {/* Empty source (config not found / no servers) */}
-          {source.servers.length === 0 && !source.error && (
-            <p className="text-muted-foreground py-2 text-center text-xs">
-              <FormattedMessage
-                id="settings.mcp.import.notFound"
-                defaultMessage="No MCP config file found for this source. Make sure the application is installed and has been configured."
-              />
-            </p>
-          )}
-
-          {source.servers.length > 0 && (
-            <>
-              <div className="text-muted-foreground mb-1.5 flex items-center justify-between text-xs">
-                <span>
-                  <FormattedMessage
-                    id="settings.mcp.import.selectedCount"
-                    defaultMessage="Selected {selected} / {total}"
-                    values={{ selected: selectedInSource, total: source.servers.length }}
-                  />
-                </span>
-                <button
-                  type="button"
-                  onClick={onToggleSourceAll}
-                  className="hover:text-foreground"
-                >
-                  <FormattedMessage
-                    id="settings.mcp.import.selectAll"
-                    defaultMessage="Select all"
-                  />
-                </button>
-              </div>
-              <div className="grid gap-0.5">
-                {source.servers.map((server) => (
-                  <ServerRow
-                    key={server.display_name}
-                    server={server}
-                    sourceId={source.id}
-                    checked={selected.has(
-                      selectionKey(source.id, server.display_name),
-                    )}
-                    onToggle={() => onToggleServer(selectionKey(source.id, server.display_name))}
-                  />
-                ))}
-              </div>
-            </>
-          )}
         </div>
       )}
-    </div>
+
+      {/* Empty source (config not found / no servers) */}
+      {source.servers.length === 0 && !source.error && (
+        <p className="text-muted-foreground py-2 text-center text-xs">
+          <FormattedMessage
+            id="settings.mcp.import.notFound"
+            defaultMessage="No MCP config file found for this source. Make sure the application is installed and has been configured."
+          />
+        </p>
+      )}
+
+      {source.servers.length > 0 && (
+        <>
+          <div className="text-muted-foreground mb-1.5 flex items-center justify-between text-xs">
+            <span>
+              <FormattedMessage
+                id="settings.mcp.import.selectedCount"
+                defaultMessage="Selected {selected} / {total}"
+                values={{ selected: selectedInSource, total: source.servers.length }}
+              />
+            </span>
+            <button
+              type="button"
+              onClick={onToggleSourceAll}
+              className="hover:text-foreground"
+            >
+              <FormattedMessage
+                id="settings.mcp.import.selectAll"
+                defaultMessage="Select all"
+              />
+            </button>
+          </div>
+          <div className="grid gap-0.5">
+            {source.servers.map((server) => (
+              <ServerRow
+                key={server.display_name}
+                server={server}
+                sourceId={source.id}
+                checked={selected.has(
+                  selectionKey(source.id, server.display_name),
+                )}
+                onToggle={() => onToggleServer(selectionKey(source.id, server.display_name))}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </SourceFold>
   );
 }
 

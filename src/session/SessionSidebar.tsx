@@ -152,6 +152,14 @@ export function SessionSidebar({
     grouping,
   );
 
+  // One read feeds both the gear's aria-label and its tooltip -- the last
+  // remaining descriptor double-write in the tree collapses to a single
+  // variable (issue #960).
+  const settingsLabel = intl.formatMessage({
+    id: "header.settings",
+    defaultMessage: "Settings",
+  });
+
   return (
     // ADR-0067 (issue #171): the shell-skeleton visual rules ride inline
     // utilities over the ADR-0050 token (see styles.css for the retirement
@@ -282,18 +290,13 @@ export function SessionSidebar({
                 type="button"
                 variant="ghost"
                 size="icon"
-                aria-label={intl.formatMessage({
-                  id: "header.settings",
-                  defaultMessage: "Settings",
-                })}
+                aria-label={settingsLabel}
                 onClick={onOpenSettings}
               >
                 <Settings className="size-4" aria-hidden />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>
-              <FormattedMessage id="header.settings" defaultMessage="Settings" />
-            </TooltipContent>
+            <TooltipContent>{settingsLabel}</TooltipContent>
           </Tooltip>
         </div>
       )}
