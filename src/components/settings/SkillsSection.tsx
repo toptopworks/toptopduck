@@ -214,11 +214,14 @@ export function SkillsSection({
 
   // The enablement-axis row Switch (issue #961): the command returns the
   // updated FULL config (synced wholesale, the restore contract) and the
-  // listing refetches so each row's `enabled` follows.
+  // listing refetches so each row's `enabled` follows. A success also drops
+  // a stale reject (the create/update precedent) -- the banner must not
+  // outlive the failure it reported.
   const toggleEnabledMutation = useMutation({
     mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
       setSkillEnabled(name, enabled),
     onSuccess: (cfg) => {
+      setError(null);
       onAppConfigSync(cfg);
       invalidate();
     },
@@ -448,7 +451,12 @@ export function SkillsSection({
               key={skill.name}
               skill={skill}
               edited={isEditedBuiltin(skill)}
-              busy={toggleEnabledMutation.isPending}
+              // Per-row gate (the AgentsSection #932 precedent): only the
+              // row whose toggle is in flight locks its switch.
+              busy={
+                toggleEnabledMutation.isPending &&
+                toggleEnabledMutation.variables?.name === skill.name
+              }
               onToggleEnabled={(enabled) =>
                 toggleEnabledMutation.mutate({ name: skill.name, enabled })}
               onOpen={() => openEdit(skill)}

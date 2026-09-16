@@ -272,15 +272,12 @@ pub fn create_session(
         // event-only). A materialized builtin additionally requires its
         // companion CLI entry detected + enabled (the two-axis conjunction);
         // the materialized gate is the side-table mark (the same anchor the
-        // frontend's `acquired: builtin` derives from), so a
-        // reverse-conflict user file is never seeded.
+        // frontend's `acquired: builtin` derives from) -- the mark gates the
+        // BUILTIN arm only: a reverse-conflict user file reads `acquired:
+        // local` and rides the user arm, seeded like any user skill unless
+        // disabled (ADR-0118 Decision 1).
         let cfg = live.load();
-        let seed = crate::skills::seed_skill_names(
-            &live.cli_tools(),
-            &crate::skills::BuiltinSkillMark::from_config(&cfg),
-            &cfg.disabled_skills,
-            &skills_root.0,
-        );
+        let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
         s.seed_initial_skills(seed);
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
@@ -3348,13 +3345,9 @@ pub fn list_skills(
     // materialized builtin skill reads `acquired: builtin` while a user's
     // pre-existing same-named skill keeps its own source (issue #677).
     // The enablement overlay (issue #961) rides the same config read: each
-    // row's `enabled` = NOT in the disabled-name set (default-on).
-    let cfg = live.load();
-    let mark = crate::skills::BuiltinSkillMark::from_config(&cfg);
-    crate::skills::apply_enablement(
-        crate::skills::registry::list_skills(&root.0, &mark),
-        &cfg.disabled_skills,
-    )
+    // row's `enabled` = NOT in the disabled-name set (default-on). Both read
+    // off ONE snapshot via the config-bound assembly helper.
+    crate::skills::list_with_enablement(&live.load(), &root.0)
 }
 
 /// Set one skill's machine-level enablement (issue #961, ADR-0118 Decision
@@ -3377,21 +3370,24 @@ pub fn set_skill_enabled(
 /// <= 64) and free, and the body non-blank; the registry root is minted
 /// lazily on first create. Returns the entry for the written skill (read
 /// back, or derived from the written payload on a transient read-back
-/// failure).
+/// failure). The mint is composite with a stale-disabled-entry clear, so a
+/// same-name rebirth lands enabled (issue #961, ADR-0118 Decision 2).
 #[tauri::command]
 pub fn create_skill(
     root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
     name: String,
     description: String,
     body: String,
 ) -> Result<SkillEntry, SkillError> {
-    crate::skills::registry::create_skill(&root.0, &name, &description, &body)
+    live.create_skill(&root.0, &name, &description, &body)
 }
 
 /// Rewrite one `local` skill's `SKILL.md` (frontmatter + body) atomically
 /// (issue #362). `name` addresses the current directory; `update.name` is the
-/// identity to write -- a different value renames the directory. Refuses a
-/// `linked` skill (read-only), an unknown skill, and a taken rename target.
+/// identity to write -- a different value renames the directory and carries
+/// the disablement entry with it (issue #961). Refuses a `linked` skill
+/// (read-only), an unknown skill, and a taken rename target.
 #[tauri::command]
 pub fn update_skill(
     root: State<'_, SkillsRoot>,
@@ -3399,21 +3395,21 @@ pub fn update_skill(
     name: String,
     update: SkillUpdate,
 ) -> Result<SkillEntry, SkillError> {
-    let mark = crate::skills::BuiltinSkillMark::from_config(&live.load());
-    crate::skills::registry::update_skill(&root.0, &mark, &name, update)
+    live.update_skill(&root.0, &name, update)
 }
 
 /// Delete a skill from the registry (issue #362). A `local` skill's directory
 /// is removed with all its contents; a `linked` skill's LINK is removed
-/// without touching the external source directory.
+/// without touching the external source directory. The delete is composite
+/// with a stale-disabled-entry drop, so a same-name rebirth after the delete
+/// lands enabled (issue #961).
 #[tauri::command]
 pub fn delete_skill(
     root: State<'_, SkillsRoot>,
     live: State<'_, LiveProviderConfig>,
     name: String,
 ) -> Result<(), SkillError> {
-    let mark = crate::skills::BuiltinSkillMark::from_config(&live.load());
-    crate::skills::registry::delete_skill(&root.0, &mark, &name)
+    live.delete_skill(&root.0, &name)
 }
 
 /// Restore one builtin skill's SKILL.md to the shipped baseline (issue #677,
@@ -3558,14 +3554,31 @@ pub fn list_skill_sources(
 /// per-item failure never aborts the rest -- the frontend folds each `Failed`
 /// through `fmtError` and invalidates the skills query once for the whole
 /// batch. Each item is re-validated + name-re-checked at commit time (no
-/// cached discovery status crosses the wire).
+/// cached discovery status crosses the wire). Every `Imported` outcome is
+/// additionally composite with a stale-disabled-entry clear, so a same-name
+/// rebirth via import lands enabled (issue #961, ADR-0118 Decision 2).
 #[tauri::command]
 pub fn import_skills(
     root: State<'_, SkillsRoot>,
+    live: State<'_, LiveProviderConfig>,
     items: Vec<ImportItem>,
     mode: ImportMode,
 ) -> Vec<ImportOutcome> {
-    import_skills_impl(&root.0, &items, mode)
+    let outcomes = import_skills_impl(&root.0, &items, mode);
+    // Lands-enabled, best-effort per item: a failed clear degrades with a
+    // warn (the import itself landed).
+    for outcome in &outcomes {
+        if let ImportOutcome::Imported(entry) = outcome {
+            if let Err(e) = live.set_skill_enabled(&entry.name, true) {
+                log::warn!(
+                    "imported skill `{}` but failed to clear a stale disabled entry \
+                     (flip the switch in the Skills pane): {e}",
+                    entry.name
+                );
+            }
+        }
+    }
+    outcomes
 }
 
 /// Build the candidate source list for discovery (issue #367). The two

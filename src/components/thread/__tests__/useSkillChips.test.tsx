@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 
 import { mergeChipNames, useSkillChips } from "../useSkillChips";
 import { listActivatedSkills, unmountSkill } from "../../../api";
+import { sessionKeys } from "../../../session/queryKeys";
 
 vi.mock("../../../api", () => ({
   listActivatedSkills: vi.fn(),
@@ -15,11 +16,14 @@ function renderChips(opts: Parameters<typeof useSkillChips>[0]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return renderHook(() => useSkillChips(opts), {
+  const rendered = renderHook(() => useSkillChips(opts), {
     wrapper: ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     ),
   });
+  // The hook-result holder (`rendered.result`, the `{ current }` object the
+  // tests read) plus the client, so tests can spy the cache surface.
+  return { result: rendered.result, queryClient };
 }
 
 describe("useSkillChips (issue #961 chips union + removal dispatch)", () => {
@@ -60,7 +64,7 @@ describe("useSkillChips (issue #961 chips union + removal dispatch)", () => {
   it("removing an activated chip withdraws the intent and unmounts", async () => {
     vi.mocked(listActivatedSkills).mockResolvedValue(["sql-coach"]);
     const onIntentRemove = vi.fn();
-    const { result } = renderChips({
+    const { result, queryClient } = renderChips({
       sessionId: "s1",
       intents: ["sql-coach"],
       onIntentRemove,
@@ -69,11 +73,25 @@ describe("useSkillChips (issue #961 chips union + removal dispatch)", () => {
     // names carrying the activated name is itself the proof the activated
     // cache resolved (the dispatch reads that cache).
     await waitFor(() => expect(result.current.names).toEqual(["sql-coach"]));
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     result.current.remove("sql-coach");
     expect(onIntentRemove).toHaveBeenCalledWith("sql-coach");
     await waitFor(() =>
       expect(unmountSkill).toHaveBeenCalledWith("s1", "sql-coach"),
     );
+    // The three caches the fold touches (issue #961): mounted + activated
+    // (the caches) and the thread (the Unmount lifecycle event lands on the
+    // server timeline) each invalidate after the resolve.
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledTimes(3));
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.mountedSkills("s1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.activatedSkills("s1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.thread("s1"),
+    });
   });
 
   it("removing an intent-only chip never calls the unmount IPC", async () => {

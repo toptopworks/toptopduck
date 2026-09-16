@@ -79,21 +79,6 @@ fn push_body_frame(out: &mut String, skill: &SkillPromptFragment) {
     out.push('\n');
 }
 
-/// Render the progressive-disclosure skill section shared by BOTH runtime
-/// surfaces (ADR-0110 Decisions 1-2, issues #700/#702): skills that are
-/// mounted but not activated land as a metadata index block (entries of
-/// `` `name` — description``, the discoverable-set surface, L1) and
-/// activated skills land their verbatim bodies (【激活技能】-framed, L2).
-/// The index block precedes the bodies (the L1 -> L2 reading order). An
-/// empty mounted set renders the empty string -- no empty block, so the
-/// pre-skill assembly shape is preserved.
-///
-/// The index header is the FINAL wording (locked in issue #700's brief,
-/// landed with the `activate_skill` meta-tool in #701): it names the channel
-/// and its two trigger rules, so the index entry and the tool are one
-/// discoverable surface. The built-in system prompt embeds it via
-/// [`build_tool_system_prompt`]; the external-runtime ACP path wraps it
-/// standalone via [`render_skill_block`] (issue #702 parity).
 /// The injection-time description clamp (issue #961, ADR-0118 Decision 3):
 /// an index row carries at most 360 chars of the spec description in total,
 /// a truncation ending in `…`. Counts CHARS, not bytes -- a CJK-heavy
@@ -110,6 +95,21 @@ fn clamp_description(description: &str) -> String {
     clamped
 }
 
+/// Render the progressive-disclosure skill section shared by BOTH runtime
+/// surfaces (ADR-0110 Decisions 1-2, issues #700/#702): skills that are
+/// mounted but not activated land as a metadata index block (entries of
+/// `` `name` — description``, the discoverable-set surface, L1) and
+/// activated skills land their verbatim bodies (【激活技能】-framed, L2).
+/// The index block precedes the bodies (the L1 -> L2 reading order). An
+/// empty mounted set renders the empty string -- no empty block, so the
+/// pre-skill assembly shape is preserved.
+///
+/// The index header is the FINAL wording (locked in issue #700's brief,
+/// landed with the `activate_skill` meta-tool in #701): it names the channel
+/// and its two trigger rules, so the index entry and the tool are one
+/// discoverable surface. The built-in system prompt embeds it via
+/// [`build_tool_system_prompt`]; the external-runtime ACP path wraps it
+/// standalone via [`render_skill_block`] (issue #702 parity).
 fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String]) -> String {
     let mut out = String::new();
     let index: Vec<&SkillPromptFragment> = skills
@@ -1047,6 +1047,24 @@ mod tests {
         let skills = [fragment("pdf-tools", "Read PDFs.", "Body.\n")];
         let prompt = render_skill_disclosure(&skills, &[]);
         assert!(prompt.contains("- `pdf-tools` — Read PDFs.\n"));
+    }
+
+    #[test]
+    fn descriptions_under_the_char_cap_render_verbatim_even_when_bytes_exceed_it() {
+        // The chars-not-bytes half (issue #961, ADR-0118 Decision 3): 350
+        // CJK chars are UNDER the 360-CHAR cap (must render verbatim) while
+        // their byte length (1050) is far over it -- a byte-counting clamp
+        // would wrongly truncate this row.
+        let cjk = "长".repeat(350);
+        let skills = [fragment("sql-coach", &cjk, "Body.\n")];
+        let prompt = render_skill_disclosure(&skills, &[]);
+        assert!(prompt.contains(&format!("- `sql-coach` — {cjk}\n")));
+        // The exact-cap boundary: exactly 360 chars renders verbatim, no
+        // ellipsis (the cap is `<=`, not `<`).
+        let edge = "a".repeat(360);
+        let skills = [fragment("pdf-tools", &edge, "Body.\n")];
+        let prompt = render_skill_disclosure(&skills, &[]);
+        assert!(prompt.contains(&format!("- `pdf-tools` — {edge}\n")));
     }
 
     #[test]

@@ -405,7 +405,10 @@ pub struct AppConfig {
     /// servers' default-on axis. Dangling entries (a name whose directory is
     /// gone) are kept -- the seed and listing consumers intersect with the
     /// registry scan, so a stale name is inert by construction (the
-    /// `last_model_postures` dangling-kept precedent). Forward-compat: a
+    /// `last_model_postures` dangling-kept precedent) -- EXCEPT on a
+    /// same-name rebirth: the create / import / rename / delete composites
+    /// in `LiveProviderConfig` keep the set honest there (a reborn skill
+    /// lands enabled, a renamed skill carries its disablement). Forward-compat: a
     /// pre-#961 file has no key, so serde(default) fills an empty set.
     #[serde(default)]
     pub disabled_skills: BTreeSet<String>,

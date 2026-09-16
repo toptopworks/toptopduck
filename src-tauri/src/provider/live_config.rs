@@ -775,6 +775,112 @@ impl LiveProviderConfig {
         self.store_inner(cfg)
     }
 
+    /// Carry one skill's disablement across a rename (issue #961): a
+    /// disabled name that renames keeps its dormant state (the entry moves
+    /// `from` -> `to`); an enabled rename is a no-op -- the disable-polarity
+    /// mirror of [`Self::rename_agent_enabled`].
+    pub fn rename_skill_disabled(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<AppConfig, app_config::WriteError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("app-config write_lock poisoned");
+        let mut cfg = self.load_for_write()?;
+        if cfg.disabled_skills.remove(from) {
+            cfg.disabled_skills.insert(to.to_string());
+        }
+        self.store_inner(cfg)
+    }
+
+    /// Mint + lands-enabled as one composite (issue #961, ADR-0118 Decision
+    /// 2): enablement is the default polarity, and the mint also clears any
+    /// STALE same-name disabled entry an earlier delete may have left --
+    /// without the clear, a dangling disabled name would silently shadow the
+    /// rebirth, violating "newly created skills are enabled with zero
+    /// bookkeeping". The clear degrades with a warn (the mint landed); the
+    /// returned entry's enablement reflects the set as it stands.
+    pub fn create_skill(
+        &self,
+        skills_root: &std::path::Path,
+        name: &str,
+        description: &str,
+        body: &str,
+    ) -> Result<crate::skills::SkillEntry, crate::skills::SkillError> {
+        let entry = crate::skills::registry::create_skill(skills_root, name, description, body)?;
+        match self.set_skill_enabled(name, true) {
+            Ok(_) => Ok(entry),
+            Err(e) => {
+                log::warn!(
+                    "created skill `{name}` but failed to clear a stale disabled entry \
+                     (flip the switch in the Skills pane): {e}"
+                );
+                let cfg = self.load();
+                Ok(crate::skills::SkillEntry {
+                    enabled: !cfg.disabled_skills.contains(name),
+                    ..entry
+                })
+            }
+        }
+    }
+
+    /// Rewrite + disablement carry as one composite (issue #961): a rename
+    /// moves a disabled entry to the new name (without the carry the disable
+    /// veto would silently evaporate under the new name, and the old entry
+    /// would linger dangling); an enabled rename is a no-op. The carry
+    /// degrades with a warn; the returned entry's enablement reflects the
+    /// post-carry set.
+    pub fn update_skill(
+        &self,
+        skills_root: &std::path::Path,
+        name: &str,
+        update: crate::skills::SkillUpdate,
+    ) -> Result<crate::skills::SkillEntry, crate::skills::SkillError> {
+        let mark = crate::skills::BuiltinSkillMark::from_config(&self.load());
+        let mut updated = crate::skills::registry::update_skill(skills_root, &mark, name, update)?;
+        if updated.name != name {
+            match self.rename_skill_disabled(name, &updated.name) {
+                Ok(cfg) => {
+                    updated.enabled = !cfg.disabled_skills.contains(&updated.name);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "renamed skill `{name}` -> `{}` but failed to carry its disabled \
+                         entry (flip the switch in the Skills pane): {e}",
+                        updated.name
+                    );
+                    let cfg = self.load();
+                    updated.enabled = !cfg.disabled_skills.contains(&updated.name);
+                }
+            }
+        }
+        Ok(updated)
+    }
+
+    /// Delete + stale-entry drop as one composite (issue #961): the
+    /// directory removal IS the operation; the disabled-entry drop keeps the
+    /// set honest for a future same-name rebirth (a dangling disabled name
+    /// would otherwise shadow it), but a leftover entry is inert until that
+    /// rebirth, so a cleanup failure degrades with a warn and the delete
+    /// never reports failure for an operation that landed.
+    pub fn delete_skill(
+        &self,
+        skills_root: &std::path::Path,
+        name: &str,
+    ) -> Result<(), crate::skills::SkillError> {
+        let mark = crate::skills::BuiltinSkillMark::from_config(&self.load());
+        crate::skills::registry::delete_skill(skills_root, &mark, name)?;
+        if let Err(e) = self.set_skill_enabled(name, true) {
+            log::warn!(
+                "deleted skill `{name}` but failed to drop its disabled entry (the stale \
+                 name is inert until a same-name rebirth): {e}"
+            );
+        }
+        Ok(())
+    }
+
     /// Carry one agent definition's enablement across a rename (issue #932):
     /// an enabled definition that renames keeps its enabled state (the entry
     /// moves `from` -> `to` in the name set); a disabled rename is a no-op --
@@ -2509,6 +2615,84 @@ mod tests {
             matches!(err, app_config::WriteError::Validation(_)),
             "validation refusal, got {err:?}"
         );
+    }
+
+    /// Write one spec-valid SKILL.md directory for the composite tests.
+    fn put_skill(root: &std::path::Path, name: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Does things.\n---\nBody.\n"),
+        )
+        .expect("SKILL.md");
+    }
+
+    fn skill_update(name: &str) -> crate::skills::SkillUpdate {
+        crate::skills::SkillUpdate {
+            name: name.to_string(),
+            description: "Does things.".to_string(),
+            license: None,
+            compatibility: None,
+            body: "Body.\n".to_string(),
+        }
+    }
+
+    #[test]
+    fn create_skill_clears_a_stale_disabled_entry_so_a_rebirth_lands_enabled() {
+        // The create composite (issue #961, ADR-0118 Decision 2): a disabled
+        // skill deleted earlier left its name in the set (dangling); the
+        // same-name rebirth lands ENABLED -- the mint clears the stale
+        // entry instead of letting it shadow the new skill.
+        let (_dir, live) = live();
+        let root = tempfile::tempdir().expect("skills root");
+        live.set_skill_enabled("pdf-tools", false).expect("disable");
+        let entry = live
+            .create_skill(root.path(), "pdf-tools", "Does things.", "Body.\n")
+            .expect("create");
+        assert!(entry.enabled, "the rebirth lands enabled");
+        assert!(!live.load().disabled_skills.contains("pdf-tools"));
+    }
+
+    #[test]
+    fn update_skill_carries_a_disablement_across_a_rename() {
+        // The carry (issue #961): a disabled skill that renames keeps its
+        // dormant state under the new name (the entry moves `from` -> `to`);
+        // an enabled rename adds no entry (the no-op half).
+        let (_dir, live) = live();
+        let root = tempfile::tempdir().expect("skills root");
+        put_skill(root.path(), "pdf-tools");
+        live.set_skill_enabled("pdf-tools", false).expect("disable");
+        let renamed = live
+            .update_skill(root.path(), "pdf-tools", skill_update("pdf-suite"))
+            .expect("rename");
+        assert!(!renamed.enabled, "the disablement carries");
+        let cfg = live.load();
+        assert!(!cfg.disabled_skills.contains("pdf-tools"));
+        assert!(cfg.disabled_skills.contains("pdf-suite"));
+        // The enabled half: renaming an ENABLED skill (a fresh one -- the
+        // carried entry above still owns pdf-suite) adds no entry.
+        put_skill(root.path(), "sql-coach");
+        let renamed = live
+            .update_skill(root.path(), "sql-coach", skill_update("sql-guide"))
+            .expect("rename enabled");
+        assert!(renamed.enabled);
+        let cfg = live.load();
+        assert!(!cfg.disabled_skills.contains("sql-guide"));
+        assert_eq!(cfg.disabled_skills.len(), 1, "only the carried entry");
+    }
+
+    #[test]
+    fn delete_skill_drops_the_disabled_entry() {
+        // The stale-entry drop (issue #961): the delete keeps the set
+        // honest for a future same-name rebirth -- without the drop, the
+        // rebirth would land disabled (the dangling shadow).
+        let (_dir, live) = live();
+        let root = tempfile::tempdir().expect("skills root");
+        put_skill(root.path(), "pdf-tools");
+        live.set_skill_enabled("pdf-tools", false).expect("disable");
+        live.delete_skill(root.path(), "pdf-tools").expect("delete");
+        assert!(!live.load().disabled_skills.contains("pdf-tools"));
     }
 
     #[test]

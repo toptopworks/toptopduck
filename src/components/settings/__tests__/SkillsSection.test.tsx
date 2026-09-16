@@ -16,6 +16,7 @@ import {
   updateSkill,
 } from "../../../api";
 import type { SkillEntry } from "../../../types/skills";
+import type { AppConfig } from "../../../types/app-config";
 
 // The pane drives everything through IPC + the opener plugin; mock both so the
 // test never touches Tauri. revealItemInDir is the "open source location" call
@@ -58,6 +59,44 @@ const linkedSkill: SkillEntry = {
   enabled: true,
 };
 
+// A complete AppConfig for the sync-contract mock (the full-field shape, no
+// `as`-escape: a future required field breaks here instead of silently
+// compiling past a stale mock; the disabled_skills entry is the post-flip
+// truth of the test below).
+function syncedAppConfig(): AppConfig {
+  return {
+    format_version: 2,
+    theme: "system",
+    locale: "system",
+    engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
+    privacy: { send_samples: true },
+    provider: {
+      profiles: [
+        {
+          id: "default",
+          display_name: "Anthropic",
+          protocol: "anthropic",
+          base_url: "https://api.anthropic.com",
+          model: "claude-sonnet-4-6",
+        },
+      ],
+      active_profile: "default",
+    },
+    export: { last_dir: null, default_format: "csv" },
+    tunables: { window_turns: 6, far_window: 12 },
+    shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
+    cli_tools: { tools: [] },
+    mcp_servers: { servers: [] },
+    sessions_dir: null,
+    default_runtime: { kind: "built_in" },
+    builtin_skill_baselines: {},
+    last_model_postures: {},
+    enabled_agents: [],
+    materialized_builtin_agents: [],
+    disabled_skills: ["pdf-tools"],
+  };
+}
+
 // Empty-catalog English IntlProvider: FormattedMessage falls back to
 // defaultMessage (the canonical English source, ADR-0052), so assertions anchor
 // on stable English strings. A per-test QueryClient (retry: false) keeps
@@ -85,27 +124,49 @@ describe("SkillsSection (issue #362)", () => {
   it("flips a row's enablement through setSkillEnabled and syncs the config", async () => {
     // The enablement axis row Switch (issue #961): unchecking rides the
     // setSkillEnabled IPC and syncs the returned full app-config wholesale
-    // (the restore command's state-only-sync contract).
+    // (the restore command's state-only-sync contract). Two interaction
+    // halves ride the same test: the switch click must NOT bubble into the
+    // row's open-edit drawer, and the listing must refetch so the row's
+    // enabled follows the flipped axis (the command returns the config
+    // alone -- without the refetch the switch would visually snap back).
     const onAppConfigSync = vi.fn();
-    const synced = {} as Awaited<ReturnType<typeof setSkillEnabled>>;
+    const synced = syncedAppConfig();
     vi.mocked(setSkillEnabled).mockResolvedValue(synced);
-    vi.mocked(listSkills).mockResolvedValue({
-      skills: [localSkill],
-      ignored: [],
-      root_error: null,
-    });
+    vi.mocked(listSkills)
+      .mockResolvedValueOnce({
+        skills: [localSkill],
+        ignored: [],
+        root_error: null,
+      })
+      .mockResolvedValue({
+        skills: [{ ...localSkill, enabled: false }],
+        ignored: [],
+        root_error: null,
+      });
     renderWithProviders(
       <SkillsSection
         builtinSkillBaselines={{}}
         onAppConfigSync={onAppConfigSync}
       />,
     );
-    await screen.findByText("pdf-tools");
+    const row = await screen.findByTestId("skill-row");
+    expect(row).not.toHaveAttribute("data-disabled");
     fireEvent.click(screen.getByRole("switch", { name: "Enable skill pdf-tools" }));
     await waitFor(() =>
       expect(setSkillEnabled).toHaveBeenCalledWith("pdf-tools", false),
     );
     await waitFor(() => expect(onAppConfigSync).toHaveBeenCalledWith(synced));
+    // The bubble guard: the row is one big open-edit button; the switch
+    // click must not ride the row's onClick up into the drawer.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // The refetch half: the listing is queried again and the row grays.
+    await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("skill-row")).toHaveAttribute(
+        "data-disabled",
+        "true",
+      ),
+    );
   });
 
   it("marks a disabled row grayed out while its switch stays operable", async () => {

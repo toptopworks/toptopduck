@@ -59,8 +59,12 @@ pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 /// registration keeps its skill out of the seed, the pre-existing
 /// semantics verbatim). The seed only FILLS the folded mount set's INITIAL
 /// state (no Mount event, nothing persisted); it is computed at session
-/// creation only -- resume never re-seeds (the timeline fold is the
-/// authority).
+/// creation only -- resume re-seeds BUILTIN-ONLY (ADR-0118 Decision 7),
+/// never this general seed (the timeline fold is the authority). A registry
+/// root that fails to read seeds an EMPTY set: the listing degrades with
+/// `root_error` (surfaced by the settings pane's root banner), and the
+/// session is created silently skill-less rather than refused -- the
+/// degradation is visible in settings, not in the session.
 pub fn seed_skill_names(
     cli: &[crate::cli_tools::config::CliToolConfig],
     mark: &BuiltinSkillMark,
@@ -68,11 +72,9 @@ pub fn seed_skill_names(
     skills_root: &std::path::Path,
 ) -> Vec<String> {
     // The builtin's CLI-axis gate (issue #677), unchanged: the materialized
-    // builtins whose companion CLI entries are detected + enabled.
-    let auto_builtin: std::collections::BTreeSet<String> =
-        builtin::auto_included_names(cli, mark, skills_root)
-            .into_iter()
-            .collect();
+    // builtins whose companion CLI entries are detected + enabled (a Vec:
+    // the shipped builtin set is three members, a set adds ceremony).
+    let auto_builtin = builtin::auto_included_names(cli, mark, skills_root);
     registry::list_skills(skills_root, mark)
         .skills
         .into_iter()
@@ -94,6 +96,38 @@ pub fn apply_enablement(
         skill.enabled = !disabled.contains(&skill.name);
     }
     listing
+}
+
+/// Config-bound seed assembly (issue #961): the mark and the enablement
+/// axis read off ONE config snapshot, so a torn read cannot mix two eras
+/// and the command's glue is a single argument -- the wiring this replaces
+/// (separately-threaded config reads at the command boundary) was an
+/// unobserved seam; this form is testable end to end.
+pub fn seed_from_config(
+    cfg: &crate::app_config::AppConfig,
+    cli: &[crate::cli_tools::config::CliToolConfig],
+    skills_root: &std::path::Path,
+) -> Vec<String> {
+    seed_skill_names(
+        cli,
+        &BuiltinSkillMark::from_config(cfg),
+        &cfg.disabled_skills,
+        skills_root,
+    )
+}
+
+/// Config-bound listing assembly (issue #961): the mark and the enablement
+/// overlay read off ONE config snapshot -- the command-boundary form of the
+/// registry scan + overlay, testable end to end.
+pub fn list_with_enablement(
+    cfg: &crate::app_config::AppConfig,
+    skills_root: &std::path::Path,
+) -> SkillListing {
+    let mark = BuiltinSkillMark::from_config(cfg);
+    apply_enablement(
+        registry::list_skills(skills_root, &mark),
+        &cfg.disabled_skills,
+    )
 }
 
 #[cfg(test)]
@@ -207,5 +241,70 @@ mod tests {
         let overlaid = apply_enablement(listing, &disabled(&["sql-coach"]));
         assert!(overlaid.skills[0].enabled, "absent name: enabled");
         assert!(!overlaid.skills[1].enabled, "disabled name: dormant");
+    }
+
+    #[test]
+    fn seed_rides_the_user_arm_for_a_reverse_conflict_file() {
+        // The reverse-conflict window (issue #677): the user's same-named
+        // file owns the directory, the baselines side table has no record,
+        // so `acquired` reads `local` and the file seeds through the USER
+        // arm (ADR-0118 Decision 1: user skills join with zero bookkeeping)
+        // -- the mark gate excludes it from the BUILTIN arm only.
+        let root = tempfile::tempdir().expect("root");
+        put_skill(root.path(), "pandoc");
+        let cli = vec![builtin_cli("pandoc", true)];
+        let names = seed_skill_names(
+            &cli,
+            &BuiltinSkillMark::default(),
+            &disabled(&[]),
+            root.path(),
+        );
+        assert_eq!(names, vec!["pandoc".to_string()]);
+    }
+
+    #[test]
+    fn seed_from_config_reads_the_mark_and_the_axis_off_one_snapshot() {
+        // The config-bound wiring pin (issue #961): the mark (off the
+        // baselines side table) and the disabled-name axis both read off
+        // the ONE config -- a dropped-axis or stale-mark revert at the
+        // command boundary dies here.
+        let root = tempfile::tempdir().expect("root");
+        put_skill(root.path(), "pandoc");
+        put_skill(root.path(), "pdf-tools");
+        put_skill(root.path(), "sql-coach");
+        let mut cfg = crate::app_config::AppConfig::defaults();
+        cfg.builtin_skill_baselines.insert(
+            "pandoc".to_string(),
+            BuiltinSkillBaseline {
+                hash: "h".to_string(),
+                locale: "en-US".to_string(),
+            },
+        );
+        cfg.disabled_skills.insert("sql-coach".to_string());
+        let cli = vec![builtin_cli("pandoc", true)];
+        let names = seed_from_config(&cfg, &cli, root.path());
+        assert_eq!(names, vec!["pandoc".to_string(), "pdf-tools".to_string()]);
+    }
+
+    #[test]
+    fn list_with_enablement_overlays_the_axis_at_the_boundary() {
+        // The config-bound listing pin (issue #961): the disabled-name axis
+        // reaches the wire rows through the single-snapshot assembly -- a
+        // dropped overlay at the command boundary dies here.
+        let root = tempfile::tempdir().expect("root");
+        put_skill(root.path(), "pdf-tools");
+        put_skill(root.path(), "sql-coach");
+        let mut cfg = crate::app_config::AppConfig::defaults();
+        cfg.disabled_skills.insert("sql-coach".to_string());
+        let listing = list_with_enablement(&cfg, root.path());
+        let by_name = |n: &str| {
+            listing
+                .skills
+                .iter()
+                .find(|s| s.name == n)
+                .unwrap_or_else(|| panic!("missing {n}"))
+        };
+        assert!(by_name("pdf-tools").enabled);
+        assert!(!by_name("sql-coach").enabled);
     }
 }
