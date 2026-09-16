@@ -221,6 +221,10 @@ describe("SourceFold", () => {
     // not nested in the toggle.
     const checkbox = screen.getByRole("checkbox", { name: "Claude Desktop" });
     expect(checkbox).not.toBeDisabled();
+    // The truncated path keeps a hover title (the MCP-side posture the
+    // unification adopted).
+    const pathSpan = screen.getByText("/home/user/.claude/mcp.json");
+    expect(pathSpan).toHaveAttribute("title", "/home/user/.claude/mcp.json");
     // Collapsed keeps the panel unmounted.
     expect(screen.queryByText("server checkboxes")).toBeNull();
   });

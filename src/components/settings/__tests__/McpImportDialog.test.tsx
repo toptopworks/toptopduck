@@ -128,6 +128,15 @@ describe("McpImportDialog (issue #390)", () => {
       expect(screen.getByText("Claude Desktop")).toBeInTheDocument();
     });
 
+    // The config path and the discovered-count badge ride the collapsed
+    // header (this consumer's wiring into the shared fold).
+    expect(
+      screen.getByText(
+        "/home/user/.config/Claude/claude_desktop_config.json",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1")).toBeInTheDocument();
+
     // Codex has no servers — its source row is hidden.
     expect(screen.queryByText("Codex")).not.toBeInTheDocument();
 

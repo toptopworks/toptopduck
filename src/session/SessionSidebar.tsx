@@ -153,8 +153,8 @@ export function SessionSidebar({
   );
 
   // One read feeds both the gear's aria-label and its tooltip -- the last
-  // remaining descriptor double-write in the tree collapses to a single
-  // variable (issue #960).
+  // remaining aria-and-tooltip descriptor double-write in the tree collapses
+  // to a single variable (issue #960).
   const settingsLabel = intl.formatMessage({
     id: "header.settings",
     defaultMessage: "Settings",

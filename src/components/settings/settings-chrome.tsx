@@ -415,7 +415,9 @@ export function FoldHead({
  *  config path, the discovered-count badge, and the trailing chevron. The
  *  expand/collapse verb rides the toggle's aria-label so the path / badge text
  *  never leaks into the accessible name; `children` renders the expanded
- *  panel below the hairline divider. */
+ *  panel below the hairline divider. The toggle handler is a plain toggler,
+ *  unlike FoldHead's `onExpandedChange(next)`: the dialogs' callers only flip
+ *  Set membership, with no expand-time side-effect hook to feed. */
 export function SourceFold({
   label,
   path,
