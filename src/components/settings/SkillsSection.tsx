@@ -23,7 +23,6 @@ import {
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
 import { fmtError } from "../../lib/error-presentation";
 import { skillKeys } from "../../session/queryKeys";
-import { cn } from "../../lib/utils";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -53,11 +52,11 @@ import {
   SelectValue,
 } from "../ui/select";
 import { Textarea } from "../ui/textarea";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
+  HeaderActionButton,
   NameBadge,
+  RowActionButton,
   PaneHeader,
-  SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
 } from "./settings-chrome";
 
@@ -321,78 +320,37 @@ export function SkillsSection({
         )}
         action={(
           <div className="flex items-center gap-1.5">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  aria-label={intl.formatMessage({
-                    id: "settings.skills.new",
-                    defaultMessage: "New",
-                  })}
-                  onClick={() => {
-                    setError(null);
-                    setDrawer({ mode: "create" });
-                  }}
-                >
-                  <Plus className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage id="settings.skills.new" defaultMessage="New" />
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  aria-label={intl.formatMessage({
-                    id: "common.import",
-                    defaultMessage: "Import",
-                  })}
-                  onClick={() => {
-                    setError(null);
-                    setImportOpen(true);
-                  }}
-                >
-                  <Download className="size-4" aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage id="common.import" defaultMessage="Import" />
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground size-7"
-                  onClick={() => void refetch()}
-                  aria-label={intl.formatMessage({
-                    id: "common.refresh",
-                    defaultMessage: "Refresh",
-                  })}
-                >
-                  <RefreshCw
-                    className={cn("size-4", isFetching && "animate-spin")}
-                    aria-hidden
-                  />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                <FormattedMessage
-                  id="common.refresh"
-                  defaultMessage="Refresh"
-                />
-              </TooltipContent>
-            </Tooltip>
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "settings.skills.new",
+                defaultMessage: "New",
+              })}
+              icon={Plus}
+              onClick={() => {
+                setError(null);
+                setDrawer({ mode: "create" });
+              }}
+            />
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "common.import",
+                defaultMessage: "Import",
+              })}
+              icon={Download}
+              onClick={() => {
+                setError(null);
+                setImportOpen(true);
+              }}
+            />
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "common.refresh",
+                defaultMessage: "Refresh",
+              })}
+              icon={RefreshCw}
+              spinning={isFetching}
+              onClick={() => void refetch()}
+            />
           </div>
         )}
       />
@@ -686,46 +644,37 @@ function SkillRow({ skill, edited, onOpen, onDelete, onRestore }: SkillRowProps)
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
         {onRestore && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-foreground shrink-0"
-            aria-label={intl.formatMessage(
+          <RowActionButton
+            label={intl.formatMessage(
               {
                 id: "settings.skills.restoreLabel",
                 defaultMessage: "Restore built-in definition for skill {name}",
               },
               { name: skill.name },
             )}
+            icon={RotateCcw}
             onClick={(e) => {
               e.stopPropagation();
               onRestore();
             }}
-          >
-            <RotateCcw className="size-4" aria-hidden />
-          </Button>
+          />
         )}
         {onDelete && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-muted-foreground hover:text-destructive shrink-0"
-            aria-label={intl.formatMessage(
+          <RowActionButton
+            destructive
+            label={intl.formatMessage(
               {
                 id: "settings.skills.deleteLabel",
                 defaultMessage: "Delete skill {name}",
               },
               { name: skill.name },
             )}
+            icon={Trash2}
             onClick={(e) => {
               e.stopPropagation();
               onDelete();
             }}
-          >
-            <Trash2 className="size-4" aria-hidden />
-          </Button>
+          />
         )}
       </div>
     </div>

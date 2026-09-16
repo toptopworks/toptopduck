@@ -35,10 +35,9 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import {
+  HeaderActionButton,
   PaneHeader,
-  SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
@@ -595,27 +594,16 @@ export function ProfilesSection({
   // The shared header-action posture: icon-only ghost with the tooltip skin,
   // aria-label sourced from the same key as the tooltip.
   const refreshButton = (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="text-muted-foreground hover:text-foreground size-7"
-          onClick={handleRefreshKeys}
-          disabled={keysLoading}
-          aria-label={intl.formatMessage({
-            id: "common.refresh",
-            defaultMessage: "Refresh",
-          })}
-        >
-          <RefreshCw className={cn("size-4", keysLoading && "animate-spin")} aria-hidden />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-        <FormattedMessage id="common.refresh" defaultMessage="Refresh" />
-      </TooltipContent>
-    </Tooltip>
+    <HeaderActionButton
+      label={intl.formatMessage({
+        id: "common.refresh",
+        defaultMessage: "Refresh",
+      })}
+      icon={RefreshCw}
+      spinning={keysLoading}
+      disabled={keysLoading}
+      onClick={handleRefreshKeys}
+    />
   );
 
   return (

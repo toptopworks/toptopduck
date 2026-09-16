@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, Info, Plus, RefreshCw, X } from "lucide-react";
+import { ChevronRight, Plus, RefreshCw, X } from "lucide-react";
 
 import type {
   DiscoveredSkill,
@@ -16,8 +16,7 @@ import { skillKeys } from "../../session/queryKeys";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
-import { SETTINGS_TOOLTIP_CLASS } from "./settings-chrome";
+import { FieldHint } from "./settings-chrome";
 import {
   Select,
   SelectContent,
@@ -333,39 +332,28 @@ export function ImportSkillsDialog({ onClose }: Props) {
               </SelectItem>
             </SelectContent>
           </Select>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                className="text-muted-foreground shrink-0"
-                aria-label={intl.formatMessage({
-                  id: "settings.skills.importModeHintAria",
-                  defaultMessage: "Import mode explanation",
-                })}
-              >
-                <Info className="size-4" aria-hidden />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent
-              side="top"
-              align="start"
-              sideOffset={3}
-              className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
-            >
-              <div className="space-y-1">
-                <p className="text-sm font-medium">
-                  <FormattedMessage id="settings.skills.importModeHintTitle" defaultMessage="Import mode" />
-                </p>
-                <p className="text-muted-foreground text-sm">
-                  {mode === "link" ? (
-                    <FormattedMessage id="settings.skills.importModeLinkHint" defaultMessage="Uses the skill in its original folder. Changes there apply automatically, but the skill stops working if the folder moves or is deleted." />
-                  ) : (
-                    <FormattedMessage id="settings.skills.importModeCopyHint" defaultMessage="Copies the skill into the app. Later changes in the original folder won't apply." />
-                  )}
-                </p>
-              </div>
-            </TooltipContent>
-          </Tooltip>
+          <FieldHint
+            label={intl.formatMessage({
+              id: "settings.skills.importModeHintAria",
+              defaultMessage: "Import mode explanation",
+            })}
+            title={intl.formatMessage({
+              id: "settings.skills.importModeHintTitle",
+              defaultMessage: "Import mode",
+            })}
+          >
+            {mode === "link" ? (
+              <FormattedMessage
+                id="settings.skills.importModeLinkHint"
+                defaultMessage="Uses the skill in its original folder. Changes there apply automatically, but the skill stops working if the folder moves or is deleted."
+              />
+            ) : (
+              <FormattedMessage
+                id="settings.skills.importModeCopyHint"
+                defaultMessage="Copies the skill into the app. Later changes in the original folder won't apply."
+              />
+            )}
+          </FieldHint>
           <Button
             type="button"
             variant="ghost"
