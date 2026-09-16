@@ -337,12 +337,10 @@ export function ImportSkillsDialog({ onClose }: Props) {
               id: "settings.skills.importModeHintAria",
               defaultMessage: "Import mode explanation",
             })}
-            title={(
-              <FormattedMessage
-                id="settings.skills.importModeHintTitle"
-                defaultMessage="Import mode"
-              />
-            )}
+            title={intl.formatMessage({
+              id: "settings.skills.importModeHintTitle",
+              defaultMessage: "Import mode",
+            })}
           >
             {mode === "link" ? (
               <FormattedMessage

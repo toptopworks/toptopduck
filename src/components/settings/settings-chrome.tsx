@@ -30,16 +30,17 @@ export const SETTINGS_TOOLTIP_CLASS =
 /** A field or section hint: an info icon + tooltip anchored after the
  *  label or section title (the ImportSkillsDialog import-mode posture, now
  *  itself a consumer). `label` is the trigger's accessible name; `children`
- *  render as the muted body. An optional `title` promotes the body to the
- *  titled block posture: a medium-weight heading line in the popover
- *  surface foreground, then the muted body below (issue #958). */
+ *  render as the muted body. An optional `title` -- a plain string,
+ *  resolved via formatMessage and symmetric with `label` -- promotes the
+ *  body to the titled block posture: a medium-weight heading line in the
+ *  popover surface foreground, then the muted body below (issue #958). */
 export function FieldHint({
   label,
   title,
   children,
 }: {
   label: string;
-  title?: ReactNode;
+  title?: string;
   children: ReactNode;
 }) {
   return (
@@ -73,7 +74,8 @@ export function FieldHint({
  *  sites resolve the message descriptor (including conditionals like
  *  Scanning…/Rescan) once and the component writes it to both, ending the
  *  aria + tooltip double-write. `spinning` adds the in-flight rotate to the
- *  icon (issue #958). */
+ *  icon; `onClick` is zero-arg -- pane-header actions never sit inside a
+ *  clickable row, so the event is not part of the contract (issue #958). */
 export function HeaderActionButton({
   label,
   icon: Icon,
@@ -154,10 +156,12 @@ export function RowActionButton({
 }
 
 /** A row-end icon action inside an editor: the destructive-hover icon button
- *  that removes a field row (the remove-parameter / remove-env /
- *  remove-header buttons), no tooltip. Sibling of RowActionButton -- the
- *  editor rows run tighter than the list rows, so the hit box shrinks to
- *  size-7 with the size-3.5 glyph (issue #958). */
+ *  that removes a field row (the CLI remove-parameter / remove-env and the
+ *  MCP remove-variable / remove-header buttons), no tooltip. Sibling of
+ *  RowActionButton -- the editor rows run tighter than the list rows, so the
+ *  hit box shrinks to size-7 with the size-3.5 glyph. Like the header
+ *  posture, `onClick` is zero-arg: editor field rows sit outside clickable
+ *  rows, so the event is not part of the contract (issue #958). */
 export function RowRemoveButton({
   label,
   icon: Icon,
@@ -306,10 +310,10 @@ export function PaneHeader({
  *  (issue #958). Drift adjudications folded in:
  *  - The fold button always carries `aria-expanded` (the KvEditor copy had
  *    none; both states of the SectionFold copy did -- the SectionFold wins).
- *  - The collapsed button is not full-width: the hint rides beside the
- *    button (a button cannot nest the hint's button), so a `w-full` hit
- *    area would push the hint off the row (the KvEditor copy's full-width
- *    hit area is retired along with its missing hint).
+ *  - The collapsed button keeps the KvEditor copy's full-width hit area
+ *    when no hint rides beside it; with a hint the button stays
+ *    content-width -- a button cannot nest the hint's button, and a
+ *    `w-full` hit area would push the hint off the row.
  *  - The `px-4 py-2.5` wrapper lives here, not at the call sites.
  *
  *  `onExpandedChange` is the single expansion signal; call sites hang their
@@ -322,7 +326,6 @@ export function FoldHead({
   onExpandedChange,
   action,
   children,
-  ...props
 }: {
   title: ReactNode;
   /** The field hint (the info-icon tooltip) anchored after the title. */
@@ -332,17 +335,19 @@ export function FoldHead({
   /** The right-hand affordance (the Add button); rendered only expanded. */
   action?: ReactNode;
   children: ReactNode;
-  // The fold title is the ReactNode slot above, not the div's native hover
-  // tooltip -- Omit keeps the two from crossing into `ReactNode & string`.
-} & Omit<ComponentProps<"div">, "title">) {
+}) {
   // One trigger serves both states: only the chevron rotation, the
-  // aria-expanded value, and the toggle direction change with the state.
-  const trigger = (
+  // aria-expanded value, the toggle direction, and the collapsed full-width
+  // hit area (absent when a hint rides beside the button) change.
+  const renderTrigger = (fullWidth: boolean) => (
     <button
       type="button"
       aria-expanded={expanded}
       onClick={() => onExpandedChange(!expanded)}
-      className="flex items-center gap-1.5 text-left"
+      className={cn(
+        "flex items-center gap-1.5 text-left",
+        fullWidth && "w-full",
+      )}
     >
       <ChevronRight
         className={cn(
@@ -355,17 +360,17 @@ export function FoldHead({
     </button>
   );
   return (
-    <div className="px-4 py-2.5" {...props}>
+    <div className="px-4 py-2.5">
       {!expanded ? (
         <div className="flex items-center gap-1.5">
-          {trigger}
+          {renderTrigger(!hint)}
           {hint}
         </div>
       ) : (
         <>
           <div className="mb-2 flex items-center justify-between">
-            <span className="flex items-center gap-1">
-              {trigger}
+            <span className="flex items-center gap-1.5">
+              {renderTrigger(false)}
               {hint}
             </span>
             {action}

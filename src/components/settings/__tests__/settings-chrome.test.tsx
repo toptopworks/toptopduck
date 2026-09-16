@@ -62,6 +62,8 @@ describe("RowActionButton", () => {
     expect(button).toHaveClass("text-muted-foreground", "hover:text-foreground");
     fireEvent.click(button);
     expect(onClick).toHaveBeenCalledTimes(1);
+    // The handler receives the event so row seats can stopPropagation.
+    expect(onClick.mock.calls[0]?.[0]).toBeDefined();
   });
 
   it("hovers destructive, disables, and swaps in the spinner in flight", () => {
@@ -79,6 +81,7 @@ describe("RowActionButton", () => {
     expect(button).toBeDisabled();
     // In flight the icon is a rotating Loader2, not the resting Zap.
     expect(button.querySelector("svg")).toHaveClass("animate-spin");
+    expect(button.querySelector("svg")).toHaveClass("lucide-loader-circle");
   });
 });
 
@@ -117,6 +120,8 @@ describe("FoldHead", () => {
     );
     const head = screen.getByRole("button", { name: "Environment variables" });
     expect(head).toHaveAttribute("aria-expanded", "false");
+    // Beside a hint the head stays content-width.
+    expect(head).not.toHaveClass("w-full");
     // The fold keeps the field rows unmounted while collapsed.
     expect(screen.queryByText("row editor")).toBeNull();
     expect(screen.getByText("hint")).toBeInTheDocument();
@@ -129,6 +134,7 @@ describe("FoldHead", () => {
     renderSettings(
       <FoldHead
         title="Environment variables"
+        hint={<span>hint</span>}
         expanded
         onExpandedChange={onExpandedChange}
         action={<button type="button">Add variable</button>}
@@ -139,9 +145,25 @@ describe("FoldHead", () => {
     const head = screen.getByRole("button", { name: "Environment variables" });
     expect(head).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("row editor")).toBeInTheDocument();
+    // The hint stays beside the title in the expanded state too.
+    expect(screen.getByText("hint")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
     fireEvent.click(head);
     expect(onExpandedChange).toHaveBeenCalledWith(false);
+  });
+
+  it("fills the collapsed row when no hint rides beside", () => {
+    renderSettings(
+      <FoldHead
+        title="Environment variables"
+        expanded={false}
+        onExpandedChange={() => {}}
+      >
+        <p>row editor</p>
+      </FoldHead>,
+    );
+    const head = screen.getByRole("button", { name: "Environment variables" });
+    expect(head).toHaveClass("w-full");
   });
 });
 
