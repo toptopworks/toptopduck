@@ -38,7 +38,7 @@ vi.mock("../../../lib/log", () => ({
   },
 }));
 
-function makeTool(overrides: Partial<Parameters<typeof upsertCliTool>[0]> = {}) {
+function makeTool(overrides: Partial<CliToolConfig> = {}): CliToolConfig {
   return {
     ...blankCliTool(),
     name: "pandoc",

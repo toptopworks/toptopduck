@@ -15,9 +15,9 @@ import type { AppErrorKind, SessionFlowKind } from "../types/error";
 // fail here under en-US.
 const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
 
-// A typed SessionError::Engine reject (issue #119): fmtError resolves the
+// A SessionError::Engine reject (issue #119): fmtError resolves the
 // Engine locale message ("Internal error"); errorDetail surfaces Engine.data.
-const engineReject = { kind: "Engine", data: "close-wait timed out" } as never;
+const engineReject = { kind: "Engine", data: "close-wait timed out" };
 
 // The six SessionFlowKind values + their en-US catalog verb (issue #139). Kept
 // in one place so the verb-prefix and refreshFailed-prefix tables stay aligned.
