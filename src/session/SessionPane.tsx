@@ -369,7 +369,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // Skill registry keyed by spec name (ADR-0086, issue #366): the thread rail's
   // Skill lifecycle markers look up their name here to flag a name the
   // registry no longer carries (resume drift). The
-  // query reuses the ComposerContextPanel cache (skillKeys.all()) -- the
+  // query reuses the shared skillKeys.all() cache -- the
   // registry is process-global (not per-session), so every pane shares one
   // IPC round-trip. A failed / loading read leaves data undefined, so
   // skillIndex stays undefined and the markers render the verb + name from
@@ -385,7 +385,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   }, [skillListing.data?.skills]);
   // Observable honest-degrade: listSkills never rejects in practice, but a
   // transport failure would otherwise leave the rail silently enriched-less
-  // with no signal. ComposerSkillsSection / SkillsSection surface their query
+  // with no signal. The settings SkillsSection surfaces its query
   // errors in the UI; the rail trades UI surfacing for readability, so the
   // log is the only trace (ADR-0029).
   useEffect(() => {

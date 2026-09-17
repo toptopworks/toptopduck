@@ -888,10 +888,11 @@ describe("App multi-session shell (issue #81 ACs)", () => {
 
   it("cold-start bar renders the full composer control row — no degraded controls (ADR-0092 D6, #500)", async () => {
     // The centered bar carries the same control row as the session bar:
-    // the Skills trigger chip, the "+" file button, the auth-mode chip,
-    // and the runtime picker. None of them disappear or degrade on cold
-    // start, and none of them mints a session by rendering. (The MCP trigger
-    // chip is retired, ADR-0106 -- its assertion flipped to absence.)
+    // the "+" file button, the auth-mode chip, and the runtime picker. None
+    // of them disappear or degrade on cold start, and none of them mints a
+    // session by rendering. (The MCP trigger chip is retired, ADR-0106, and
+    // the Skills trigger chip retired with the mount popover, #962 -- both
+    // assertions flipped to absence.)
     vi.mocked(getAppConfig).mockResolvedValue(
       baseAppConfig({ sidebar_collapsed: false }),
     );
@@ -900,9 +901,11 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
       const bar = document.querySelector(".question-bar") as HTMLElement;
       expect(bar).not.toBeNull();
-      // Skills trigger chip (draft mode: empty mount set); no MCP chip.
-      const skills = await screen.findByRole("button", { name: /技能 \(0\/0\)/ });
-      expect(bar.contains(skills)).toBe(true);
+      // Skills trigger chip (retired with the mount popover, #962); no MCP
+      // chip.
+      expect(
+        screen.queryByRole("button", { name: /技能/ }),
+      ).not.toBeInTheDocument();
       expect(
         screen.queryByRole("button", { name: /MCP/ }),
       ).not.toBeInTheDocument();
@@ -926,10 +929,10 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   it("cold-start draft selections all apply to the minted session on first submit (#500)", async () => {
     // The draft-mode contract: a skill pick, a queued file, and an auth-mode
     // switch made on the centered bar (no session) all land on the session
-    // the first submit mints — skill mount + auth-mode write via
-    // mintAndRegister, the file through the ingest pipeline BEFORE the first
-    // turn fires. (The MCP draft pick retired with the per-session mount
-    // chain, ADR-0106; config enablement replaced it.)
+    // the first submit mints — skill mount + activation + auth-mode write
+    // via mintAndRegister, the file through the ingest pipeline BEFORE the
+    // first turn fires. (The MCP draft pick retired with the per-session
+    // mount chain, ADR-0106; config enablement replaced it.)
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
       cli_tools: { tools: [] },
@@ -950,11 +953,12 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       render(<App />);
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
 
-      // Skills draft: pick charting in the popover (draft toggle, no IPC).
-      fireEvent.click(await screen.findByRole("button", { name: /技能/ }));
-      fireEvent.click(
-        await screen.findByRole("checkbox", { name: "挂载技能 charting" }),
-      );
+      // Skills draft: pick charting through the "/" picker (the sole
+      // explicit activation channel; nothing fires before the mint).
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "/", selectionStart: 1 } });
+      await screen.findByRole("option");
+      fireEvent.keyDown(screen.getByLabelText("提问"), { key: "Enter" });
+      await screen.findByText("charting");
       expect(mountSkill).not.toHaveBeenCalled();
 
       // Files draft: the "+" pick queues into the pending list — the chip
@@ -2505,11 +2509,11 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/b.csv"));
   });
 
-  it("the skills trigger chip renders even with configured MCP servers; no MCP chip (ADR-0106)", async () => {
+  it("no trigger chips render with configured MCP servers (ADR-0106, #962)", async () => {
     // ADR-0106: the composer MCP mount chip is retired (config-level
-    // enablement replaced per-session mounting). With servers configured the
-    // skills chip still renders above the QuestionBar and opens its popover,
-    // but no MCP trigger chip exists anywhere in the bar.
+    // enablement replaced per-session mounting). #962: the Skills trigger
+    // chip retired with the mount popover. With servers configured neither
+    // trigger chip exists anywhere in the bar.
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
       cli_tools: { tools: [] },
@@ -2518,7 +2522,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     render(<App />);
     await openSession();
 
-    expect(await screen.findByRole("button", { name: /技能/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /技能/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /MCP/ })).not.toBeInTheDocument();
   });
 
@@ -2709,8 +2713,8 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     const bar = await screen.findByLabelText("提问");
 
     // Cold start: the trigger char opens the picker; Enter picks charting.
-    // The pick lands the chip (activation intent) AND the pending mount pick
-    // (composite) -- nothing fires yet (预激活, not activation).
+    // The pick lands the chip (the mount + activate composite, materialized
+    // only at submit) -- nothing fires yet (预激活, not activation).
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");
     fireEvent.keyDown(bar, { key: "Enter" });
@@ -2759,32 +2763,23 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     );
   });
 
-  it("cold-start pick syncs the mount facet; Backspace withdrawal mirrors it out", async () => {
+  it("cold-start pick lands a chip; Backspace withdraws it before submit", async () => {
     render(<App />);
     const bar = await screen.findByLabelText("提问");
-    // The trigger chip counts the cold-start pending mount picks against
-    // the one-skill registry: nothing staged yet.
-    expect(
-      screen.getByRole("button", { name: "技能 (0/1)" }),
-    ).toBeInTheDocument();
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");
     fireEvent.keyDown(bar, { key: "Enter" });
+    // The landed chip renders as an inline token in the input area; nothing
+    // fires before the minting submit.
     await screen.findByText("charting");
-    // The composite's mount half synced the checkbox authority: the
-    // trigger's pending count rose with the chip.
-    expect(
-      screen.getByRole("button", { name: "技能 (1/1)" }),
-    ).toBeInTheDocument();
-    // Backspace at the draft start withdraws the chip AND mirrors the mount
-    // half out of pendingSkills -- add and removal stay in sync.
+    expect(mountSkill).not.toHaveBeenCalled();
+    expect(activateSkill).not.toHaveBeenCalled();
+    // Backspace at the draft start withdraws the chip -- the intent list is
+    // the only surface.
     fireEvent.keyDown(bar, { key: "Backspace" });
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "技能 (0/1)" }),
-      ).toBeInTheDocument(),
+      expect(screen.queryByText("charting")).not.toBeInTheDocument(),
     );
-    expect(screen.queryByText("charting")).not.toBeInTheDocument();
   });
 
   it("in-session pick lands a view chip; Backspace withdraws it before submit", async () => {
@@ -2852,8 +2847,8 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     });
     render(<App />);
     const bar = await screen.findByLabelText("提问");
-    // Pick charting, then charting AGAIN: the composite is a set -- the
-    // duplicate is a no-op (one chip, one pending mount pick).
+    // Pick charting, then charting AGAIN: the intent set dedupes -- the
+    // duplicate is a no-op (one chip, one intent).
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findAllByRole("option");
     fireEvent.keyDown(bar, { key: "Enter" });
@@ -2861,22 +2856,20 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findAllByRole("option");
     fireEvent.keyDown(bar, { key: "Enter" });
-    expect(screen.getByRole("button", { name: "技能 (1/2)" })).toBeInTheDocument();
-    // A different name joins: two chips, two pending picks.
+    expect(screen.getAllByText("charting")).toHaveLength(1);
+    // A different name joins: two chips, two intents.
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findAllByRole("option");
     fireEvent.keyDown(bar, { key: "ArrowDown" });
     fireEvent.keyDown(bar, { key: "Enter" });
     await screen.findByText("data-cleaning");
-    expect(screen.getByRole("button", { name: "技能 (2/2)" })).toBeInTheDocument();
     // Backspace withdraws the MOST RECENT pick only (data-cleaning); the
-    // charting chip and its mount half stay.
+    // charting chip stays.
     fireEvent.keyDown(bar, { key: "Backspace" });
     await waitFor(() =>
       expect(screen.queryByText("data-cleaning")).not.toBeInTheDocument(),
     );
     expect(screen.getByText("charting")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "技能 (1/2)" })).toBeInTheDocument();
   });
 });
 

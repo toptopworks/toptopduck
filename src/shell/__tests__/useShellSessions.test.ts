@@ -122,7 +122,6 @@ const DEFAULT_POSTURE: PendingComposerPosture = {
   runtime: null,
   modelPosture: null,
   authMode: AUTH_MODE_DEFAULT,
-  skills: [],
   activations: [],
 };
 
@@ -218,7 +217,6 @@ describe("useShellSessions", () => {
         runtime: { kind: "external", data: "gemini" },
         modelPosture: null,
         authMode: "no_confirmation",
-        skills: [],
         activations: [],
       }, []);
     });
@@ -253,7 +251,6 @@ describe("useShellSessions", () => {
           runtime: { kind: "external", data: "qwen-code" },
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
-          skills: [],
           activations: [],
         },
         [],
@@ -279,7 +276,6 @@ describe("useShellSessions", () => {
           runtime: { kind: "external", data: "qwen-code" },
           modelPosture: { model: "fake-sonnet", thought_level: null },
           authMode: AUTH_MODE_DEFAULT,
-          skills: [],
           activations: [],
         },
         [],
@@ -307,7 +303,6 @@ describe("useShellSessions", () => {
           runtime: { kind: "external", data: "qwen-code" },
           modelPosture: { model: "fake-sonnet", thought_level: "high" },
           authMode: AUTH_MODE_DEFAULT,
-          skills: [],
           activations: [],
         },
         [],
@@ -336,7 +331,6 @@ describe("useShellSessions", () => {
           runtime: { kind: "built_in" },
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
-          skills: [],
           activations: [],
         },
         [],
@@ -346,11 +340,12 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions).toHaveLength(1);
   });
 
-  it("createSessionWithQuestion mounts pending skills BEFORE registering (#500)", async () => {
-    // Draft-mode skill picks land as one mount IPC per entry, all of it
-    // before registerOpen so the pane mounts under the applied posture.
-    // (The pending-MCP enable step retired with the per-session mount chain,
-    // ADR-0106.)
+  it("createSessionWithQuestion mounts pre-activation picks BEFORE registering (#500)", async () => {
+    // Draft-mode pre-activation picks land as one mount IPC per entry, all
+    // of it before registerOpen so the pane mounts under the applied
+    // posture. (The pending-MCP enable step retired with the per-session
+    // mount chain, ADR-0106; the shell-held pending mount list retired with
+    // the mount popover, #962.)
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
     const { result } = renderSessions();
     let sessionsWhenFirstSkillApplied = -1;
@@ -364,8 +359,7 @@ describe("useShellSessions", () => {
           runtime: null,
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
-          skills: ["data-cleaning", "charting"],
-          activations: [],
+          activations: ["data-cleaning", "charting"],
         },
         [],
       );
@@ -377,7 +371,7 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions).toHaveLength(1);
   });
 
-  it("createSessionWithQuestion opens the session when a pending skill mount rejects (log + setShellError, keep going, #500)", async () => {
+  it("createSessionWithQuestion opens the session when a pre-activation mount rejects (log + setShellError, keep going, #500)", async () => {
     // A rejected posture write never fails the whole creation: the session
     // opens on the backend default for that facet, the error is surfaced, and
     // the remaining picks still apply.
@@ -392,8 +386,7 @@ describe("useShellSessions", () => {
           runtime: null,
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
-          skills: ["broken", "charting"],
-          activations: [],
+          activations: ["broken", "charting"],
         },
         [],
       );
@@ -406,9 +399,9 @@ describe("useShellSessions", () => {
     expect(log.warn).toHaveBeenCalled();
   });
 
-  it("createSessionWithQuestion tolerates the redundant mount of an auto-included skill (#677)", async () => {
-    // A cold-start pick that names an auto-included builtin skill is already
-    // in the session's folded initial set: the backend refuses the redundant
+  it("createSessionWithQuestion tolerates the redundant mount of a seeded skill (#677)", async () => {
+    // A pre-activation pick that names an enabled-catalog skill is already in
+    // the session's seeded initial set: the backend refuses the redundant
     // mount with the AlreadyMounted kind, and that refusal is the expected
     // outcome here -- no error banner, the session opens, the remaining
     // picks still land. The typed IPC shape (SessionError's SkillMount
@@ -425,8 +418,7 @@ describe("useShellSessions", () => {
           runtime: null,
           modelPosture: null,
           authMode: AUTH_MODE_DEFAULT,
-          skills: ["pandoc", "charting"],
-          activations: [],
+          activations: ["pandoc", "charting"],
         },
         [],
       );
@@ -1129,14 +1121,12 @@ describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)
         runtime: null,
         modelPosture: null,
         authMode: AUTH_MODE_DEFAULT,
-        skills: ["charting"],
         activations: ["charting", "cleaning"],
       }, []);
     });
-    // Union + strict phasing (ADR-0112 Decision 4): the mount loop takes the
-    // pending skills UNION the pre-activation names (an activation-only name
-    // like "cleaning" rides the same mount loop -- the union is structural,
-    // so the chain never depends on the caller staging the mount half), and
+    // Strict phasing (ADR-0112 Decision 4): the pre-activation names ride
+    // the mount loop themselves (a pick is the mount + activate composite,
+    // and a disabled skill outside the seeded set still needs its mount), so
     // every mount strictly precedes every activation.
     expect(calls).toEqual([
       "mount:charting",
@@ -1146,7 +1136,7 @@ describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)
     ]);
   });
 
-  it("absorbs the redundant mount of an auto-included pick and still activates it", async () => {
+  it("absorbs the redundant mount of a seeded pick and still activates it", async () => {
     vi.mocked(createSession).mockResolvedValue(reply("s1"));
     vi.mocked(mountSkill).mockRejectedValue(alreadyMounted("charting"));
     const { result, setShellError } = renderSessions();
@@ -1155,12 +1145,11 @@ describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)
         runtime: null,
         modelPosture: null,
         authMode: AUTH_MODE_DEFAULT,
-        skills: ["charting"],
         activations: ["charting"],
       }, []);
     });
     expect(activateSkill).toHaveBeenCalledWith("s1", "charting");
-    // The folded-initial-set collision is the expected outcome, not an
+    // The seeded-initial-set collision is the expected outcome, not an
     // error -- nothing surfaces.
     expect(setShellError).not.toHaveBeenCalled();
   });

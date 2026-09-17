@@ -23,7 +23,6 @@ import type { ComposerSessionFields } from "./session/useComposerState";
 import { QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
-import { ComposerSkillsTrigger } from "./components/thread/ComposerSkillsTrigger";
 import { SkillChips } from "./components/thread/SkillChips";
 import {
   ComposerProviderPicker,
@@ -429,17 +428,14 @@ export default function App() {
   );
   const [pendingAuthMode, setPendingAuthMode] =
     useState<AuthMode>(AUTH_MODE_DEFAULT);
-  const [pendingSkills, setPendingSkills] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
   // Pre-activation intents (ADR-0112, issue #716), two facets with different
-  // lifecycles: the cold-start list lives in shell memory beside
-  // pendingSkills (it survives a session peek and dies only on the minting
-  // submit); the session list is view-scoped -- it dies on any active-session
-  // switch / close so unsubmitted intents never leak across sessions. A
-  // picker selection is the mount + activate composite: at cold start it also
-  // lands in pendingSkills (the checkbox authority); in session mode the
-  // checkbox reads the mounted set UNION this list. Both materialize at
-  // submit -- the ONLY materialization moment (Decision 4).
+  // lifecycles: the cold-start list lives in shell memory (it survives a
+  // session peek and dies only on the minting submit); the session list is
+  // view-scoped -- it dies on any active-session switch / close so
+  // unsubmitted intents never leak across sessions. A picker selection is a
+  // mount + activate composite; both halves materialize at submit -- the
+  // ONLY materialization moment (Decision 4).
   const [coldActivations, setColdActivations] = useState<string[]>([]);
   // Session-scope pre-activations carry their owning view id: a switch /
   // close (or the null->session mint) stops the ids matching, so the derived
@@ -571,19 +567,17 @@ export default function App() {
           ? effectivePendingRuntime.data
           : null;
       const authMode = pendingAuthMode;
-      const skills = pendingSkills;
       const activations = coldActivations;
       const files = pendingFiles;
       void createSessionWithQuestion(
         question,
-        { runtime, modelPosture, authMode, skills, activations },
+        { runtime, modelPosture, authMode, activations },
         files,
       ).then((created) => {
         if (created) {
           setPendingRuntime(null);
           setPendingModelPosture(null);
           setPendingAuthMode(AUTH_MODE_DEFAULT);
-          setPendingSkills([]);
           setColdActivations([]);
           setPendingFiles([]);
           // The mint-time set IPCs landed the explicit pair in the startup
@@ -611,7 +605,6 @@ export default function App() {
       pendingRuntime,
       pendingModelPosture,
       pendingAuthMode,
-      pendingSkills,
       pendingFiles,
       builtInGateOpen,
       profileKeys.activeProfileId,
@@ -632,15 +625,10 @@ export default function App() {
 
   // ADR-0112 (issue #716): a picker selection reports here. The pick is a
   // single uniform state -- it never consults the mounted / activated caches
-  // (display data only);
-  // it always lands a chip, and at cold start also the pending mount pick
-  // (the composite's mount half, syncing the checkbox authority).
+  // (display data only); it always lands a chip.
   const handleSkillPick = useCallback(
     (name: string) => {
       if (activeSessionId === null) {
-        setPendingSkills((prev) =>
-          prev.includes(name) ? prev : [...prev, name],
-        );
         setColdActivations((prev) =>
           prev.includes(name) ? prev : [...prev, name],
         );
@@ -660,16 +648,13 @@ export default function App() {
     [activeSessionId],
   );
 
-  // Withdrawing an activation intent (ADR-0112 Decision 3): the composer's
-  // Backspace at the draft start is the user surface (the chips carry no
-  // visible removal affordance). The cold-start pick synced the mount half
-  // into pendingSkills (the composite's two surfaces stay in sync), so the
-  // withdrawal mirrors it out; a session pick never touched the pending
-  // mount list, so its withdrawal does not either.
+  // Withdrawing an activation intent (ADR-0112 Decision 3): the chip's
+  // removal button (#961) and the composer's Backspace at the draft start
+  // are the two user surfaces. Cold start and session picks withdraw the
+  // same way -- the intent list is the only surface.
   const handleRemoveActivation = useCallback(
     (name: string) => {
       if (activeSessionId === null) {
-        setPendingSkills((prev) => prev.filter((n) => n !== name));
         setColdActivations((prev) => prev.filter((n) => n !== name));
         return;
       }
@@ -1228,32 +1213,6 @@ export default function App() {
                             onBackspace: handleChipBackspace,
                           },
                         }}
-                        header={(
-                          // ADR-0092 Decision 6 (#500): the Skills trigger
-                          // renders in BOTH postures — session-active and
-                          // cold start (draft mode) — same component, no
-                          // degradation. (An MCP trigger used to render here
-                          // too; it is retired — enablement is a config-level
-                          // flag, ADR-0106.)
-                          <ComposerSkillsTrigger
-                            sessionId={activeSessionId}
-                            loading={composer.loading}
-                            onOpenSettingsSkills={() =>
-                              openSettings({ section: "skills" })}
-                            pendingSkills={pendingSkills}
-                            onPendingSkillsChange={setPendingSkills}
-                            activationIntents={pendingActivations}
-                            onActivationIntentsChange={
-                              activeSessionId === null
-                                ? setColdActivations
-                                : (next) =>
-                                    setViewActivations({
-                                      sid: activeSessionId,
-                                      names: next,
-                                    })
-                            }
-                          />
-                        )}
                         trailing={
                           providerPicker ? (
                             <ComposerProviderPicker
