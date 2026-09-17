@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+// Cross-module on purpose (issue #978): the Decision 5 contract spans the
+// picker and the settings mount list, so the agreement pin imports both
+// sides.
+import { matchesSearch } from "../../settings/settings-filters";
+
 import {
   clampHighlight,
   detectTrigger,
@@ -117,5 +122,41 @@ describe("filterSkills (name or description substring, case-insensitive)", () =>
 
   it("returns nothing on a miss", () => {
     expect(filterSkills(skills, "zzz")).toEqual([]);
+  });
+});
+
+// The two-surface half of Decision 5 (issue #978): the picker's filter and
+// the mount list's search box must select the same rows for any reachable
+// query -- readPickerQuery keeps the picker query single-line, and a
+// single-line needle can never straddle the "\n" seam of the mount list's
+// haystack. That side is modeled exactly as SkillsSection applies it:
+// matchesSearch over `name + "\n" + description`. One shared matcher backs
+// both; this battery turns any future divergence on either side red.
+describe("filterSkills agrees with the mount-list search (ADR-0112 Decision 5)", () => {
+  const skills = [
+    { name: "Charting", description: "Draw charts" },
+    { name: "data-cleaning", description: "Tidy messy tables" },
+  ];
+
+  const viaMountList = (query: string): string[] =>
+    skills
+      .filter((s) => matchesSearch(`${s.name}\n${s.description}`, query))
+      .map((s) => s.name);
+
+  it.each([
+    "", // empty query passes everything through
+    "   ", // whitespace-only query, ditto
+    "chart", // name substring
+    "CHART", // case-folded on both sides
+    "  chart  ", // trimmed before matching
+    "draw", // description substring
+    "tidy", // description-only hit on the other row
+    "-clean", // punctuation inside a name
+    "zzz", // no hit anywhere
+    "g d", // only a space-joined haystack could hit -- the seam holds
+  ])("selects the same rows for query %j", (query) => {
+    expect(filterSkills(skills, query).map((s) => s.name)).toEqual(
+      viaMountList(query),
+    );
   });
 });
