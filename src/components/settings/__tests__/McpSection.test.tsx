@@ -8,6 +8,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 
 import { McpSection } from "../McpSection";
 import { upsertMirror } from "../mcp-mirror";
+import { chooseOption, openSelect } from "./helpers";
 import { clearMcpServerHeaderSecret, clearMcpServerSecret, discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type {
@@ -140,6 +141,68 @@ describe("McpSection (issue #387)", () => {
     expect(screen.getByText("GitHub MCP")).toBeInTheDocument();
     // Transport type + command on the second line, separated by "·".
     expect(screen.getByText(/stdio.*\/bin\/mcp-server/)).toBeInTheDocument();
+  });
+
+  it("filters servers through the status select", () => {
+    renderWithProviders(
+      <McpSection
+        appConfig={makeAppConfig([
+          makeServer({ id: "srv-1", display_name: "On Server", enabled: true }),
+          makeServer({ id: "srv-2", display_name: "Off Server", enabled: false }),
+        ])}
+        onCommit={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("On Server")).toBeInTheDocument();
+    expect(screen.getByText("Off Server")).toBeInTheDocument();
+    // Radix Select opens on a pointer sequence and commits on an option
+    // click (the skills / agents filter posture).
+    openSelect(screen.getByLabelText("Filter by status"));
+    chooseOption("Enabled");
+    expect(screen.getByText("On Server")).toBeInTheDocument();
+    expect(screen.queryByText("Off Server")).toBeNull();
+  });
+
+  it("shows the cause-neutral no-results copy on a filter-only miss", () => {
+    renderWithProviders(
+      <McpSection
+        appConfig={makeAppConfig([
+          makeServer({ id: "srv-1", display_name: "On Server", enabled: true }),
+        ])}
+        onCommit={vi.fn()}
+      />,
+    );
+    openSelect(screen.getByLabelText("Filter by status"));
+    chooseOption("Disabled");
+    // Cause-neutral: an empty search must not take the blame for a
+    // filter-only miss (no empty-query interpolation).
+    expect(
+      screen.getByText("No servers match the current search and filter."),
+    ).toBeInTheDocument();
+  });
+
+  it("composes the search with the status filter", () => {
+    renderWithProviders(
+      <McpSection
+        appConfig={makeAppConfig([
+          makeServer({ id: "srv-1", display_name: "On Server", enabled: true }),
+          makeServer({ id: "srv-2", display_name: "Off Server", enabled: false }),
+        ])}
+        onCommit={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByPlaceholderText("Search servers…"), {
+      target: { value: "server" },
+    });
+    openSelect(screen.getByLabelText("Filter by status"));
+    chooseOption("Enabled");
+    // The predicates compose: both rows match the search, only the
+    // enabled one survives the filter.
+    expect(screen.getByText("On Server")).toBeInTheDocument();
+    expect(screen.queryByText("Off Server")).toBeNull();
+    expect(
+      screen.queryByText("No servers match the current search and filter."),
+    ).toBeNull();
   });
 
   it("shows the untested hint in expanded row before testing", () => {
@@ -377,8 +440,14 @@ describe("McpSection (issue #387)", () => {
     // Enter the form.
     fireEvent.click(screen.getByRole("button", { name: /New/ }));
     expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+    // The list header's action buttons are list-only: neither the New nor
+    // the Import button renders on the form page.
+    expect(screen.queryByRole("button", { name: "New" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Import" })).toBeNull();
 
     // Go back.
+    // The form page keeps the section's navigation name above it.
+    expect(screen.getByText("MCP Servers")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Back to MCP list"));
 
     expect(screen.queryByTestId("mcp-server-form")).not.toBeInTheDocument();

@@ -24,21 +24,21 @@ export function DisclosureBanner() {
         <p>
           <FormattedMessage
             id="disclosure.privacy.payload"
-            defaultMessage="The full dataset never leaves this machine. <bold>When you ask</bold>, the default payload sent = schema (column names + data types) + the first 3 sample rows frozen at load time (see the preview below), to the LLM endpoint you configured in Settings (Anthropic direct by default; configurable to your own Anthropic-protocol-compatible gateway — if you use a gateway, the payload passes through it, and its retention/training policy is yours to evaluate). <bold>Loading</bold> the data itself sends nothing. In each dataset's Privacy Controls you can <bold>turn off sample sending per dataset</bold> (no value from that dataset is ever sent), or <bold>mark a column as type-only</bold> (neither the column's values nor its name are sent, only its type) — you stay in full control."
+            defaultMessage="<bold>When you ask a question</bold>, part of your data is sent to the AI endpoint you configured in Settings — never the full dataset. What is sent: the table schema (column names and types) plus the first 3 sample rows captured at load time. <bold>Loading a file</bold> sends nothing at all. The endpoint is Anthropic by default, or your own compatible gateway — if you use a gateway, requests pass through it, and its retention and training policies are yours to check. You stay in control: in each dataset's privacy controls you can <bold>turn off sample sending</bold> for that dataset (nothing from it is ever sent), or <bold>mark a column as type-only</bold> (only the type is sent — not the name, not the values)."
             values={boldValues}
           />
         </p>
         <p>
           <FormattedMessage
             id="disclosure.privacy.apiKey"
-            defaultMessage="<bold>API key isolation:</bold> your Anthropic API key lives only in this machine's OS keychain, read by the app's Rust core to make the endpoint call; the frontend and page never hold the key and have no arbitrary network egress. Aside from the LLM endpoint you configured, the app sends data to no server."
+            defaultMessage="<bold>API key isolation:</bold> your API key is stored only in this computer's keychain and is used solely to call the endpoint you configured — the app's interface never holds the key. The app never sends your data to any other server."
             values={boldValues}
           />
         </p>
         <p>
           <FormattedMessage
             id="disclosure.privacy.loading"
-            defaultMessage="<bold>Loading semantics:</bold> each dataset is a read-only snapshot taken at load time (ADR-0012). An Excel workbook loads each sheet as a separate dataset; hidden sheets are skipped; formula cells take their cached value at load time (not recomputed), so later edits to the original file require a reload to show. Excel sheets are auto-rectified where possible — leading title rows skipped, merged cells un-merged (forward-filled) — to produce a single-header table; when auto-rectify can't pin down the header, you pick the header row and the rows to skip (your choice is recorded as that dataset's rectify params). .xls is not supported — save as .xlsx before loading."
+            defaultMessage="<bold>Loading:</bold> each dataset is a read-only snapshot taken when the file loads — if you edit the original file afterwards, reload to see the changes. Excel: each sheet becomes its own dataset, hidden sheets are skipped, and formula cells keep their saved values. Sheets are auto-tidied into a single header table where possible; when the header is unclear, you pick it yourself. .xls is not supported — save as .xlsx first."
             values={boldValues}
           />
         </p>

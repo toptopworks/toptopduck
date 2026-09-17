@@ -1,6 +1,5 @@
 import {
   type ComponentProps,
-  type MouseEventHandler,
   type ReactNode,
 } from "react";
 import { type LucideIcon, ArrowLeft, ChevronDown, ChevronRight, Info, Loader2 } from "lucide-react";
@@ -163,7 +162,7 @@ export function PaneBackLink({
   return (
     <button
       type="button"
-      className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
+      className="text-muted-foreground hover:text-foreground mb-4 flex items-center gap-1.5 text-sm"
       onClick={onClick}
       disabled={disabled}
     >
@@ -177,8 +176,12 @@ export function PaneBackLink({
  *  the in-row counterpart of the pane-header posture -- Edit / Test /
  *  Restore hover to the foreground, Delete to destructive (issue #958).
  *  `spinning` swaps the icon for a rotating Loader2 (the in-flight Test
- *  button); `onClick` receives the event so row-embedded buttons can
- *  stopPropagation against their clickable row. */
+ *  button); `onClick` is the plain zero-arg action handler -- the settings
+ *  rows are not whole-row click targets, so no stopPropagation duty rides
+ *  on it (the #958 zero-arg contract). A DISABLED action restores
+ *  hit-testing to show the not-allowed cursor: the base's
+ *  pointer-events-none would strip that hint and leave a dead-looking
+ *  control (a disabled control fires no click either way). */
 export function RowActionButton({
   label,
   icon: Icon,
@@ -193,7 +196,7 @@ export function RowActionButton({
   destructive?: boolean;
   spinning?: boolean;
   disabled?: boolean;
-  onClick?: MouseEventHandler<HTMLButtonElement>;
+  onClick?: () => void;
 }) {
   return (
     <Button
@@ -202,6 +205,7 @@ export function RowActionButton({
       variant="ghost"
       className={cn(
         "text-muted-foreground shrink-0",
+        "disabled:pointer-events-auto disabled:cursor-not-allowed",
         destructive ? "hover:text-destructive" : "hover:text-foreground",
       )}
       aria-label={label}
@@ -369,26 +373,45 @@ export function SettingsRow({
 /** The hero header at the top of each settings pane: a large title, a one-line
  *  muted description, and an optional top-right action (the per-pane refresh
  *  button on Profiles). Replaces the retired single settings header + the old
- *  per-pane <h3> (ADR-0075: titles promoted to pane heroes). */
+ *  per-pane <h3> (ADR-0075: titles promoted to pane heroes). Typography rides
+ *  the DESIGN.md tokens: `size="section"` (default) is `{typography.headline-lg}`
+ *  (20px/600/-0.2px -- the designated settings-section header); `size="form"`
+ *  is `{typography.headline-md}` (18px/600, no tracking) with the tighter
+ *  mb-3 rhythm folded in, for a create/edit form's own heading one step
+ *  down the scale from its section's hero. */
 export function PaneHeader({
   title,
   description,
   action,
   className,
+  size = "section",
 }: {
   title: ReactNode;
   description?: ReactNode;
   /** Top-right slot (e.g. the Profiles refresh button). */
   action?: ReactNode;
   className?: string;
+  size?: "section" | "form";
 }) {
   return (
     <div
       data-slot="pane-header"
-      className={cn("mb-6 flex items-start justify-between gap-4", className)}
+      className={cn(
+        size === "form" ? "mb-3" : "mb-6",
+        "flex items-start justify-between gap-4",
+        className,
+      )}
     >
-      <div className="min-w-0 space-y-1">
-        <h3 className="text-lg font-semibold tracking-tight">{title}</h3>
+      <div className="min-w-0 space-y-6">
+        <h3
+          className={
+            size === "form"
+              ? "text-lg font-semibold"
+              : "text-xl font-semibold tracking-[-0.2px]"
+          }
+        >
+          {title}
+        </h3>
         {description && (
           <p className="text-muted-foreground text-sm">{description}</p>
         )}

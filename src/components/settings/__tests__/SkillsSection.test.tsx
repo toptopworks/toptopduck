@@ -122,8 +122,8 @@ describe("SkillsSection (issue #362)", () => {
         expect.objectContaining({ disabled_skills: ["pdf-tools"] }),
       ),
     );
-    // The bubble guard: the row is one big open-edit button; the switch
-    // click must not ride the row's onClick up into the drawer.
+    // The switch sits outside the row's open-edit target (the text block):
+    // toggling it must not open the drawer.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     // The refetch half: the listing is queried again and the row grays.
     await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
@@ -137,10 +137,9 @@ describe("SkillsSection (issue #362)", () => {
 
   it("marks a disabled row grayed out while its switch stays operable", async () => {
     // Dormant-on-disable (issue #961): a disabled skill renders as a grayed
-    // row (data-disabled carries the state for tests + styling hooks), the
-    // switch reads unchecked, and the row itself stays clickable (the
-    // edit drawer still opens -- disabling hides from discovery, not from
-    // management).
+    // row (data-disabled carries the state for tests + styling hooks) and
+    // the switch reads unchecked; the text block keeps opening the edit
+    // drawer (disabling hides from discovery, not from management).
     vi.mocked(listSkills).mockResolvedValue({
       skills: [{ ...localSkill, enabled: false }],
       ignored: [],
@@ -157,6 +156,27 @@ describe("SkillsSection (issue #362)", () => {
     expect(
       screen.getByRole("switch", { name: "Enable skill pdf-tools" }),
     ).not.toBeChecked();
+  });
+
+  it("opens the edit drawer from the keyboard on the text block", async () => {
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill],
+      ignored: [],
+      root_error: null,
+    });
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={() => {}}
+      />,
+    );
+    await screen.findByTestId("skill-row");
+    // The open-edit target is the row's text block: Enter activates it
+    // like a click (Space shares the same handler).
+    fireEvent.keyDown(screen.getByRole("button", { name: /^pdf-tools/ }), {
+      key: "Enter",
+    });
+    expect(await screen.findByLabelText("Name")).toBeVisible();
   });
 
   it("lists the skills returned by listSkills", async () => {

@@ -8,6 +8,7 @@ import {
   FoldHead,
   HeaderActionButton,
   PaneBackLink,
+  PaneHeader,
   RowActionButton,
   RowRemoveButton,
   SourceFold,
@@ -76,6 +77,27 @@ describe("DialogHeaderButton", () => {
   });
 });
 
+describe("PaneHeader", () => {
+  it("renders the section posture by default and the form posture on request", () => {
+    const { unmount } = renderSettings(<PaneHeader title="Section title" />);
+    const sectionHeading = screen.getByRole("heading", { name: "Section title" });
+    // The section posture is headline-lg; the form posture headline-md with
+    // the tighter mb-3 rhythm folded into the size resolution.
+    expect(sectionHeading).toHaveClass(
+      "text-xl",
+      "font-semibold",
+      "tracking-[-0.2px]",
+    );
+    expect(sectionHeading.closest("[data-slot=\"pane-header\"]")).toHaveClass("mb-6");
+    unmount();
+
+    renderSettings(<PaneHeader size="form" title="Form title" />);
+    const formHeading = screen.getByRole("heading", { name: "Form title" });
+    expect(formHeading).toHaveClass("text-lg", "font-semibold");
+    expect(formHeading.closest("[data-slot=\"pane-header\"]")).toHaveClass("mb-3");
+  });
+});
+
 describe("RowActionButton", () => {
   it("renders the in-row ghost posture with the foreground hover", () => {
     const onClick = vi.fn();
@@ -90,8 +112,6 @@ describe("RowActionButton", () => {
     expect(button).toHaveClass("text-muted-foreground", "hover:text-foreground");
     fireEvent.click(button);
     expect(onClick).toHaveBeenCalledTimes(1);
-    // The handler receives the event so row seats can stopPropagation.
-    expect(onClick.mock.calls[0]?.[0]).toBeDefined();
   });
 
   it("hovers destructive, disables, and swaps in the spinner in flight", () => {
@@ -107,6 +127,12 @@ describe("RowActionButton", () => {
     const button = screen.getByRole("button", { name: "Test server demo" });
     expect(button).toHaveClass("hover:text-destructive");
     expect(button).toBeDisabled();
+    // The disabled posture keeps hit-testing so the not-allowed cursor can
+    // show (jsdom cannot exercise pointer events; the classes are the pin).
+    expect(button).toHaveClass(
+      "disabled:pointer-events-auto",
+      "disabled:cursor-not-allowed",
+    );
     // In flight the icon is a rotating Loader2, not the resting Zap.
     expect(button.querySelector("svg")).toHaveClass("animate-spin");
     expect(button.querySelector("svg")).toHaveClass("lucide-loader-circle");
@@ -309,7 +335,7 @@ describe("PaneBackLink", () => {
     expect(link).toHaveClass(
       "text-muted-foreground",
       "hover:text-foreground",
-      "mb-2",
+      "mb-4",
       "flex",
       "items-center",
       "gap-1.5",

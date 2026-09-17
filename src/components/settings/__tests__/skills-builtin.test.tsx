@@ -10,8 +10,9 @@ import { listSkills, restoreBuiltinSkill } from "../../../api";
 import { baseAppConfig, skillEntry } from "../../../test-fixtures";
 
 // The builtin-skill surface of the settings pane (issue #677): the built-in
-// badge + no delete entry, the Edited derivation off the baseline side table,
-// the restore confirmation lane, and the locked name in the edit drawer.
+// badge + the disabled delete entry, the Edited derivation off the baseline
+// side table, the restore confirmation lane, and the locked name in the edit
+// drawer.
 vi.mock("../../../api", () => ({
   listSkills: vi.fn(),
   createSkill: vi.fn(),
@@ -67,12 +68,26 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     });
   });
 
-  it("shows the system badge and no delete entry on a builtin row", async () => {
+  it("shows the system badge and a disabled delete button on a builtin row", async () => {
     renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
     const row = await screen.findByTestId("skill-row");
     expect(row).toHaveTextContent("system");
-    // Undeletable: the trash button does not render on a builtin row.
-    expect(row.querySelector("button[aria-label='Delete skill pandoc']")).toBeNull();
+    // Undeletable (issue #677): the trash renders disabled so the row action
+    // column stays aligned with deletable rows.
+    expect(
+      screen.getByRole("button", { name: "Delete skill pandoc" }),
+    ).toBeDisabled();
+  });
+
+  it("keeps a click on the builtin row's disabled delete from opening the edit drawer", async () => {
+    renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
+    await screen.findByTestId("skill-row");
+    // The delete (disabled or not) sits outside the row's open-edit target
+    // -- clicking it must never open the drawer.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete skill pandoc" }),
+    );
+    expect(screen.queryByLabelText("Name")).toBeNull();
   });
 
   it("shows no Edited badge on a row agreeing with its recorded baseline", async () => {
@@ -87,12 +102,19 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     });
     const row = await screen.findByTestId("skill-row");
     expect(row).toHaveTextContent("Edited");
+    // The restore takes the row-end action slot: no delete beside it.
+    expect(
+      screen.queryByRole("button", { name: "Delete skill pandoc" }),
+    ).toBeNull();
     vi.mocked(restoreBuiltinSkill).mockResolvedValue(restoredConfig);
     fireEvent.click(
       screen.getByRole("button", {
         name: "Restore built-in definition for skill pandoc",
       }),
     );
+    // Like the switch and the disabled delete, the restore sits outside
+    // the open-edit target: clicking it must not open the drawer.
+    expect(screen.queryByLabelText("Name")).toBeNull();
     // The confirm-dialog gate: the IPC fires only after the action.
     expect(restoreBuiltinSkill).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
@@ -106,7 +128,7 @@ describe("SkillsSection builtin rows (issue #677)", () => {
 
   it("locks the name input when editing a builtin skill", async () => {
     renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
-    fireEvent.click(await screen.findByTestId("skill-row"));
+    fireEvent.click(await screen.findByText("pandoc"));
     const nameInput = await screen.findByLabelText("Name");
     expect(nameInput).toBeDisabled();
     expect(screen.getByText("Built-in skill names are locked")).toBeInTheDocument();
