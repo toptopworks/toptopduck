@@ -20,9 +20,9 @@ import {
 // the SkillPickerPanel from the returned snapshot. Owns the trigger state
 // (which char opened the panel, where it sits in the draft), the query text,
 // the highlight index, and the two reads the panel needs -- the registry
-// listing (shared skillKeys.all() cache with the Skills trigger + section)
-// and, session mode only, the activated set behind the display-only Active
-// badges. The pure algebra lives in skillPickerLogic.ts.
+// listing (the shared skillKeys.all() cache) and, session mode only, the
+// activated set behind the display-only Active badges. The pure algebra
+// lives in skillPickerLogic.ts.
 
 export interface UseSkillPickerOpts {
   /** The session whose activation truth the Active badges read. null on the
@@ -74,12 +74,12 @@ export function useSkillPicker({
   const [highlight, setHighlight] = useState(0);
 
   // Registry rows for the panel. The key is the shared skillKeys.all() cache
-  // the Skills trigger + mount list already ride, so opening the picker adds
-  // no extra IPC round-trip once any of them has loaded. The error channel
-  // is exposed alongside the data: a rejected listing must surface as an
-  // error row, not collapse into the "No skills" empty face (the mount list
-  // riding the same cache surfaces its error -- the picker must not be the
-  // one surface that hides it).
+  // the settings SkillsSection and the thread rail already ride, so opening
+  // the picker adds no extra IPC round-trip once any of them has loaded. The
+  // error channel is exposed alongside the data: a rejected listing must
+  // surface as an error row, not collapse into the "No skills" empty face
+  // (the settings SkillsSection surfaces its query errors -- the picker must
+  // not be the one surface that hides it).
   const { data: listing, error: listingError } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,

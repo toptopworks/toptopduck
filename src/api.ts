@@ -798,17 +798,6 @@ export async function importSkills(
 // honors (issue #365 AC #5). Rejects ride SessionError.SkillMount (typed
 // AlreadyMounted / NotMounted / NotMountedForActivation).
 
-// The session's currently-mounted skill names, in first-mount insertion order
-// (issue #363). Read-only; the composer "+" panel + the badge both derive the
-// active set from this. Lock-light server-side -- safe to call while a turn is
-// in flight. A reject (e.g. session closed mid-flight) propagates to the
-// caller; the skills section renders the cached / undefined read as an empty
-// set for numeric coherence (badge count + checkbox state) and surfaces the
-// reject through its alert slot.
-export async function listMountedSkills(sessionId: string): Promise<string[]> {
-  return invoke<string[]>("list_mounted_skills", { sessionId });
-}
-
 // Mount a skill into the session's active set (issue #365). Appends a Mount
 // lifecycle event + persists the recipe; refuses a redundant mount
 // (AlreadyMounted) and rejects during resume / an in-flight turn.
@@ -834,8 +823,8 @@ export async function activateSkill(sessionId: string, name: string): Promise<vo
 }
 
 // The session's currently-activated skill names, in first-activation
-// insertion order (issue #698). Read-only mirror of listMountedSkills; always
-// a subset of the mounted set. Lock-light server-side.
+// insertion order (issue #698). Read-only; always a subset of the mounted
+// set. Lock-light server-side.
 export async function listActivatedSkills(sessionId: string): Promise<string[]> {
   return invoke<string[]>("list_activated_skills", { sessionId });
 }

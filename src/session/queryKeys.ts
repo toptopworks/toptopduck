@@ -38,17 +38,12 @@ export const sessionKeys = {
    *  (ADR-0102 Decision 3) so the switch's invalidate lands the seeded pair. */
   modelConfig: (sessionId: string) =>
     ["session", sessionId, "modelConfig"] as const,
-  /** Per-session mounted-skill names (issue #365, ADR-0086) -- the composer "+"
-   *  panel's mount-set read + the trigger badge count source. Folded from the
-   *  SkillLifecycleEvent timeline (Mount in / Unmount out); mount / unmount
-   *  invalidate this key so the badge re-reads without a remount. Lives under
-   *  the session prefix so a close's removeQueries drops it with the rest. */
-  mountedSkills: (sessionId: string) => ["session", sessionId, "mountedSkills"] as const,
-  /** Per-session activated-skill names (issue #699, ADR-0110) -- the composer
-   *  skills section's activation-state read (the Active badge source).
-   *  Session-prefixed like `mountedSkills` so a close's removeQueries drops
-   *  it with the rest; the activate mutation and unmount's cascade write it
-   *  via setQueryData in the same ritual as the mount delta. */
+  /** Per-session activated-skill names (issue #699, ADR-0110) -- the
+   *  activation-state read behind the picker's Active badges and the chips'
+   *  display union. Session-prefixed like `runtime` so a close's
+   *  removeQueries drops it with the rest; the activate mutation and
+   *  unmount's cascade write it via setQueryData in the same ritual as the
+   *  mount delta. */
   activatedSkills: (sessionId: string) =>
     ["session", sessionId, "activatedSkills"] as const,
   /** Cold-start placeholder (ADR-0092): the shell-level bar has no session id

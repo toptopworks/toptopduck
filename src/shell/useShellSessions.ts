@@ -66,7 +66,8 @@ import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
  *  existed (ADR-0092 Decision 6, issue #500). The shell applies it to a
  *  freshly minted session BEFORE registering it open, so the SessionPane's
  *  pendingQuestion / pendingIngestPaths consumption on mount runs under the
- *  chosen runtime + authorization mode with the picked skills mounted (MCP
+ *  chosen runtime + authorization mode with the pre-activated skills
+ *  activated (MCP
  *  servers are config-level enablement since ADR-0106 -- nothing to apply
  *  per session). authMode defaults to the backend default and a field
  *  still at that default skips its IPC (nothing to apply); runtime's unset
@@ -77,8 +78,7 @@ import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
  *  same null-sentinel shape (ADR-0099/0100, issue #574): null = untouched
  *  (the backend's create_session startup backfill applies); a non-null pair
  *  is EXPLICIT -- null fields are real clears -- and lands via the two model
- *  set IPCs. The skills list is empty by default; each entry lands one mount
- *  IPC. */
+ *  set IPCs. */
 export interface PendingComposerPosture {
   runtime: SessionRuntimeChoice | null;
   authMode: AuthMode;
@@ -86,9 +86,6 @@ export interface PendingComposerPosture {
    *  issue #574): applied to the minted session AFTER the runtime write so
    *  the pair lands on the chosen external adapter. */
   modelPosture: ModelPosture | null;
-  /** Skill spec names picked on the cold-start Skills trigger (draft mode,
-   *  #500): mounted onto the minted session one by one, in pick order. */
-  skills: string[];
   /** Pre-activation intents picked on the cold-start picker (ADR-0112, issue
    *  #716): activated onto the minted session AFTER the mount loop, in pick
    *  order -- every name is mounted first (the redundant-mount refusal
@@ -128,8 +125,8 @@ function isAlreadyMountedRefusal(
 }
 
 /** Absorb the expected redundant-mount refusal (issue #677): a cold-start
- *  pick or pre-activation that names an auto-included builtin skill is
- *  already in the session's folded initial set -- the backend's
+ *  pick or pre-activation that names an enabled-catalog skill is already in
+ *  the session's seeded initial set -- the backend's
  *  AlreadyMounted is the expected outcome, not an error. Anything else
  *  rethrows. Shared by the mint chain's mount loop and the in-session
  *  materializer (ADR-0112: the composite intent never checks the mounted
@@ -181,8 +178,7 @@ function isolatedPendingWrite(
  *  materializer so the ordering contract lives in one place. */
 async function applyPendingSkillWrites(
   sid: string,
-  mountNames: readonly string[],
-  activateNames: readonly string[],
+  names: readonly string[],
   applyWrite: (
     write: () => Promise<unknown>,
     facet: string,
@@ -190,7 +186,7 @@ async function applyPendingSkillWrites(
   ) => Promise<boolean>,
 ): Promise<void> {
   const mounted = new Set<string>();
-  for (const name of mountNames) {
+  for (const name of names) {
     const ok = await applyWrite(
       () => mountSkill(sid, name).catch(absorbRedundantMount),
       "skill mount",
@@ -198,7 +194,7 @@ async function applyPendingSkillWrites(
     );
     if (ok) mounted.add(name);
   }
-  for (const name of activateNames) {
+  for (const name of names) {
     if (!mounted.has(name)) continue;
     await applyWrite(() => activateSkill(sid, name), "skill activation", name);
   }
@@ -260,8 +256,8 @@ export function useShellSessions({
   /** ADR-0092 (#500): create a session from a cold-start bar submit, carrying
    *  the question as pendingQuestion + the picked files as pendingIngestPaths
    *  for the new SessionPane to consume on mount (files ingest BEFORE the
-   *  question fires). The posture (runtime + auth mode + skills picked on the
-   *  centered bar's draft-mode controls) is applied before the
+   *  question fires). The posture (runtime + auth mode + pre-activations
+   *  picked on the centered bar's draft-mode controls) is applied before the
    *  pane mounts so the FIRST turn runs under it. `pendingFiles` may be empty
    *  (a bare question submit). Resolves true when the session was created (the
    *  shell resets its pending state); false when createSession rejected (the
@@ -523,7 +519,7 @@ export function useShellSessions({
   // registerOpen so the pane mounts (and consumes pendingIngestPaths /
   // pendingQuestion) only after the session carries the user's picks — the
   // first turn runs on the chosen runtime + auth mode with the picked skills
-  // mounted (MCP servers are config-level enablement since ADR-0106 -- no
+  // activated (MCP servers are config-level enablement since ADR-0106 -- no
   // per-session enable step). A rejected posture write is logged and skipped
   // (the session opens on
   // the backend default for that facet; the picker's keep-server-posture
@@ -630,18 +626,17 @@ export function useShellSessions({
               "auth mode",
             );
           }
-          // ADR-0112 Decision 4: the mounts (the pending skills UNION the
-          // pre-activation names -- the composite intent's mount half rides
-          // the same loop even if a future path stages an activation without
-          // the mount list) strictly precede the activations;
+          // ADR-0112 Decision 4: the pre-activation names ride the mount
+          // loop themselves (a pick is the mount + activate composite, and a
+          // disabled skill outside the seeded initial set still needs its
+          // mount), and every mount strictly precedes every activation;
           // applyPendingSkillWrites owns the ordering, absorbs the expected
           // redundant-mount refusal, and skips activation for names whose
           // mount failed with a genuine error. Activation is idempotent
-          // server-side, so a name the folded initial set already activated
-          // resolves as a silent no-op.
+          // server-side, so an already-active name resolves as a silent
+          // no-op.
           await applyPendingSkillWrites(
             sid,
-            [...new Set([...posture.skills, ...posture.activations])],
             posture.activations,
             applyPostureWrite,
           );
@@ -711,11 +706,8 @@ export function useShellSessions({
         setShellError,
         "the ask proceeds without it",
       );
-      await applyPendingSkillWrites(sid, names, names, applyWrite);
+      await applyPendingSkillWrites(sid, names, applyWrite);
       await Promise.allSettled([
-        queryClient.invalidateQueries({
-          queryKey: sessionKeys.mountedSkills(sid),
-        }),
         queryClient.invalidateQueries({
           queryKey: sessionKeys.activatedSkills(sid),
         }),

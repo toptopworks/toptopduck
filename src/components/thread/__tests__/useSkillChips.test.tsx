@@ -79,13 +79,10 @@ describe("useSkillChips (issue #961 chips union + removal dispatch)", () => {
     await waitFor(() =>
       expect(unmountSkill).toHaveBeenCalledWith("s1", "sql-coach"),
     );
-    // The three caches the fold touches (issue #961): mounted + activated
-    // (the caches) and the thread (the Unmount lifecycle event lands on the
-    // server timeline) each invalidate after the resolve.
-    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledTimes(3));
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: sessionKeys.mountedSkills("s1"),
-    });
+    // The two caches the fold touches (issue #961): activated and the thread
+    // (the Unmount lifecycle event lands on the server timeline) each
+    // invalidate after the resolve.
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledTimes(2));
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.activatedSkills("s1"),
     });

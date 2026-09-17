@@ -3,10 +3,11 @@ import { Plus, X } from "lucide-react";
 import { pickDataFiles } from "../dataset/pickDataFiles";
 
 // The composer "+" files button (ADR-0083, issue #351). A single action button
-// that opens the multi-select file dialog directly -- no popover shell. Skills
-// moved to a dedicated trigger chip above the QuestionBar
-// (ComposerSkillsTrigger); the MCP trigger chip is retired (ADR-0106 -- config
-// enablement replaced per-session mounting).
+// that opens the multi-select file dialog directly -- no popover shell. The
+// MCP trigger chip is retired (ADR-0106 -- config enablement replaced
+// per-session mounting), and the Skills trigger chip retired with the mount
+// popover (#962 -- the "/" and "$" pickers stay the only explicit skill
+// channels).
 //
 // The retired standalone source entry (the workspace-hero FileDropzone button)
 // moved here; window-level drag-and-drop stays untouched (App's single

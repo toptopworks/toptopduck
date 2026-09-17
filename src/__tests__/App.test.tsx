@@ -96,11 +96,10 @@ vi.mock("../api", async (importOriginal) => {
     // per_call default read + no-op write keep jsdom off the real invoke.
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
     setAuthorizationMode: vi.fn(async () => {}),
-    // The composer "+" panel reads the skill registry + the session's mount set
-    // on mount (issue #365); no App.test flow exercises a toggle, so empty
-    // reads + no-op writes keep jsdom off the real invoke.
+    // The skill picker reads the registry (issue #365); no App.test flow
+    // exercises a skill write, so empty reads + no-op writes keep jsdom off
+    // the real invoke.
     listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
-    listMountedSkills: vi.fn(async () => []),
     mountSkill: vi.fn(async () => {}),
     unmountSkill: vi.fn(async () => {}),
     readRows: vi.fn(),

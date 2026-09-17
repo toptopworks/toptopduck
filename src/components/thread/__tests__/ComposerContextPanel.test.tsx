@@ -5,9 +5,9 @@ import { IntlProvider } from "react-intl";
 
 import { ComposerContextPanel } from "../ComposerContextPanel";
 
-// ComposerContextPanel is now the Files-only button (Skills and MCP moved to
-// dedicated trigger chips above the QuestionBar). The button opens the file
-// dialog directly -- no popover shell. Mocked dialog plugin so the view never
+// ComposerContextPanel is now the Files-only button (the Skills trigger chip
+// retired with the mount popover, #962; the MCP chip, ADR-0106). The button
+// opens the file dialog directly -- no popover shell. Mocked dialog plugin so the view never
 // hits Tauri (ADR-0029).
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 

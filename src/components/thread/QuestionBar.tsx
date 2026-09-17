@@ -20,10 +20,6 @@ type QuestionBarProps = {
    *  (the listener clears it on outcome, incl. Cancelled). Optional so call
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
-  /** Top-row controls rendered inside the unified container above the
-   *  textarea (the Skills / MCP trigger chips threaded from the shell,
-   *  ADR-0092). */
-  header?: ReactNode;
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */
   children?: ReactNode;
@@ -77,20 +73,19 @@ type QuestionBarProps = {
 // (placeholder, aria-label, button labels, phase feedback) ships through the
 // react-intl catalog (ADR-0052); see the questionBar.* keys.
 //
-// Unified composer container: a rounded border + shadow box. An optional
-// header row (the Skills / MCP trigger chips) rides the top; the input area
-// below it flows the pre-activation chips inline with the textarea (the
-// caret seats right after the last chip); a toolbar row at the bottom
-// carries the composer slot controls (passed as children) on the left and
-// the phase + submit/stop button on the right. Enter submits (Shift+Enter
-// inserts a newline).
+// Unified composer container: a rounded border + shadow box. The input area
+// flows the pre-activation chips inline with the textarea (the caret seats
+// right after the last chip); a toolbar row at the bottom carries the
+// composer slot controls (passed as children) on the left and the phase +
+// submit/stop button on the right. Enter submits (Shift+Enter inserts a
+// newline).
 
 // The skill picker panel's DOM id (ADR-0112): the textarea's aria-controls
 // points at it while the panel is open, and the panel derives its option ids
 // from it for the aria-activedescendant hand-off (focus never leaves the
 // textarea).
 const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, header, children, trailing, skillPicker }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
   const value = draft ?? localDraft;
@@ -133,11 +128,6 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
         submit();
       }}
     >
-      {header && (
-        <div className="flex items-center gap-1 px-2 pt-2">
-          {header}
-        </div>
-      )}
       {/* Input area: pre-activation chips flow inline with the draft -- they
           wrap as flex items and the textarea takes the remainder of the last
           row, so the caret seats right after the last chip. With no chips

@@ -21,7 +21,7 @@ export function mergeChipNames(
 // The chips display union + removal dispatch (issue #961, ADR-0118 Decision
 // 4): the composer's chips show the pre-activation intents UNION the
 // session's activated truth (the queries ride the shared sessionKeys caches,
-// so the mount list / picker / badges all agree), and one removal dispatches
+// so the picker and badges all agree), and one removal dispatches
 // BOTH halves -- the intent withdrawal (the caller-held ADR-0112 state) and,
 // when the skill is mounted, the unmount IPC whose event fold cascades the
 // deactivation. A disabled-but-mounted chip needs no special case here: the
@@ -73,12 +73,8 @@ export function useSkillChips({
       if (!activatedNow.includes(name)) return;
       void unmountSkill(sessionId, name)
         .then(() => {
-          // The three caches the fold touches: mounted + activated (the
-          // caches) and the thread (the Unmount lifecycle event lands on the
-          // server timeline).
-          void queryClient.invalidateQueries({
-            queryKey: sessionKeys.mountedSkills(sessionId),
-          });
+          // The two caches the fold touches: activated and the thread (the
+          // Unmount lifecycle event lands on the server timeline).
           void queryClient.invalidateQueries({
             queryKey: sessionKeys.activatedSkills(sessionId),
           });
