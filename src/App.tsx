@@ -379,6 +379,9 @@ export default function App() {
     activeSessionId,
     activeSessionFields ?? IDLE_SESSION_FIELDS,
   );
+  // Destructured so handleShellSubmit's dep array holds the useCallback-stable
+  // setter itself (the composer object rebuilds every render, issue #229 idiom).
+  const { setDraft: setComposerDraft } = composer;
   // The active pane's fold mirrored onto the shell-level layout (.main-area
   // class + the bar slot's ws-collapsed). Defaults to COLLAPSED while the
   // pane has not reported its fields yet (the activation -> mount-report
@@ -512,13 +515,19 @@ export default function App() {
   // not reported its fields yet (activation -> mount-report window), the
   // submit is a no-op — NEVER mint a second session for an active id. When
   // null, run the honest gate, then create a session carrying the question.
-  // The draft is deliberately NOT cleared on submit (the pre-ADR-0092 bar
-  // kept the text; a failed creation must never lose the question).
+  // Draft lifecycle: an in-session submit clears the session draft at the
+  // ask (the optimistic Turn append already carries the question into the
+  // thread, so the bar's copy must not resurface on the next turn); the
+  // cold-start draft clears ONLY on a minted session (a failed creation
+  // must never lose the question).
   const handleShellSubmit = useCallback(
     (question: string) => {
       if (activeSessionId !== null) {
         const fields = composerFieldsMap[activeSessionId];
         if (!fields) return;
+        // The ask leaves the composer: one clear up front covers all three
+        // fire sites below, and the no-op window above never reaches it.
+        setComposerDraft("");
         const intents = sessionActivations;
         if (intents.length === 0) {
           fireShellAsk(fields, question);
@@ -575,6 +584,11 @@ export default function App() {
         files,
       ).then((created) => {
         if (created) {
+          // The question rode the pendingQuestion channel into the new
+          // session's pane, so the cold-start draft's copy clears. The
+          // closure's setter is still the null-keyed one: it writes the
+          // cold-start slot even after activeSessionId flips to the mint.
+          setComposerDraft("");
           setPendingRuntime(null);
           setPendingModelPosture(null);
           setPendingAuthMode(AUTH_MODE_DEFAULT);
@@ -596,6 +610,7 @@ export default function App() {
     [
       activeSessionId,
       composerFieldsMap,
+      setComposerDraft,
       createSessionWithQuestion,
       materializeActivations,
       sessionActivations,
