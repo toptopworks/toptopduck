@@ -278,7 +278,12 @@ pub fn create_session(
         // disabled (ADR-0118 Decision 1).
         let cfg = live.load();
         let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
-        s.seed_initial_skills(seed);
+        // ADR-0119 Decision 3 (issue #983): the same enabled-set computation
+        // materializes the discovery snapshot explicitly (immutable within
+        // the session) alongside the legacy mount-fold seed -- both consume
+        // this one seed, so they can never disagree at birth.
+        s.seed_initial_skills(seed.clone());
+        s.set_discovery_snapshot(seed);
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
@@ -747,6 +752,10 @@ pub fn remove_active_source(
 /// ADR-0055: if the session was closed while this turn was in flight, the
 /// outcome is discarded
 /// inside `Session::ask` (no thread append, no recipe persist).
+// Tauri command wiring keeps the per-command states + the IPC params flat;
+// the 8th param is the optional invocation list (ADR-0119). Same posture as
+// the dispatch core's `#[allow(clippy::too_many_arguments)]`.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn ask(
     app: tauri::AppHandle,
@@ -756,6 +765,10 @@ pub async fn ask(
     agents_root: State<'_, crate::agents::AgentsRoot>,
     session_id: String,
     question: String,
+    // The user's staged skill names (ADR-0112 picker channel, calibrated by
+    // ADR-0119: submit-time invocation materialization). Optional -- absent
+    // is the pre-invocation shape, so older IPC peers stay unchanged.
+    skill_invocations: Option<Vec<String>>,
 ) -> Result<TurnOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
@@ -819,7 +832,13 @@ pub async fn ask(
         // session sets under this held lock (neither can change between the
         // read and the turn) and wires `TurnInputs` in one seam -- see
         // [`assemble_turn_inputs`].
-        let assembled = assemble_turn_inputs(&s, &skills_root, &agents_root, &live);
+        let assembled = assemble_turn_inputs(
+            &s,
+            &skills_root,
+            &agents_root,
+            &live,
+            skill_invocations.as_deref().unwrap_or(&[]),
+        );
         let inputs = assembled.turn_inputs(&mcp_servers);
         let outcome = s.ask_with_phase(
             &question,
@@ -875,7 +894,13 @@ pub async fn ask(
 /// assembly time) so the projection carries no source-config re-passes.
 struct AssembledTurnInputs<'a> {
     skills: Vec<SkillPromptFragment>,
-    activated: Vec<String>,
+    /// The user's submit-time invocations (ADR-0119, issue #983), resolved
+    /// under the held session lock so the bodies + hashes pin the submit-time
+    /// bytes.
+    user_invocations: Vec<crate::model::SkillInvocation>,
+    /// The machine-level disabled skill names (ADR-0118 enable axis): the
+    /// `invoke_skill` gate reads them mid-turn.
+    disabled_skills: Vec<String>,
     /// The registry root borrow (ADR-0111, issue #714): the turn's read
     /// surface resolves skill names against it live, mid-turn.
     skills_root: &'a Path,
@@ -908,15 +933,24 @@ fn assemble_turn_inputs<'a>(
     skills_root: &'a Path,
     agents_root: &'a Path,
     live: &'a LiveProviderConfig,
+    user_invocation_names: &[String],
 ) -> AssembledTurnInputs<'a> {
-    let mounted = session.mounted_skills();
-    let activated = session.activated_skills();
-    let skills = resolve_prompt_fragments(skills_root, &mounted);
+    // ADR-0119 Decision 3 (issue #983): the assembly's skill set is the
+    // discovery SNAPSHOT, not the legacy mount fold -- the index lists the
+    // creation-time enabled set wholesale, every turn.
+    let snapshot = session.discovery_snapshot();
+    let skills = resolve_prompt_fragments(skills_root, &snapshot);
+    let disabled_skills: Vec<String> = live.load().disabled_skills.iter().cloned().collect();
+    // The enable axis gates BOTH invocation actors (ADR-0119 Decision 3), so
+    // the user channel filters disabled names at materialization time.
+    let user_invocations =
+        session.materialize_user_invocations(user_invocation_names, skills_root, &disabled_skills);
     let cli_tools = live.enabled_cli_tools();
     let delegations = live.delegation_specs(agents_root, skills_root);
     AssembledTurnInputs {
         skills,
-        activated,
+        user_invocations,
+        disabled_skills,
         skills_root,
         cli_tools,
         delegations,
@@ -932,7 +966,8 @@ impl AssembledTurnInputs<'_> {
             mcp_servers,
             keychain: self.keychain,
             skills: &self.skills,
-            activated: &self.activated,
+            user_invocations: &self.user_invocations,
+            disabled_skills: &self.disabled_skills,
             skills_root: self.skills_root,
             cli_tools: &self.cli_tools,
             delegations: &self.delegations,
@@ -5441,22 +5476,30 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), content).unwrap();
     }
 
-    /// The wiring pin issue #707 adds: the seam reads the session's two sets
-    /// and wires `TurnInputs`'s fields correctly. The black-box tests
-    /// hand-assemble their inputs (mirroring the pre-#707 command body), so a
-    /// wrong-set field (e.g. `activated: &mounted`) or `&[]` survived every
-    /// test before this pin.
+    /// The wiring pin issue #707 adds (calibrated by ADR-0119, issue #983):
+    /// the seam reads the session's discovery snapshot and wires
+    /// `TurnInputs`'s fields correctly. The black-box tests hand-assemble
+    /// their inputs, so a wrong-set field (e.g. resolving the legacy mount
+    /// fold instead of the snapshot) or `&[]` survived every test before
+    /// this pin.
     #[test]
-    fn assemble_turn_inputs_pins_the_activated_subset_and_field_wiring() {
+    fn assemble_turn_inputs_pins_the_snapshot_and_field_wiring() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         put_skill(&root, "alpha", "Alpha description.", "Alpha body.\n");
         put_skill(&root, "beta", "Beta description.", "Beta body.\n");
+        put_skill(&root, "gamma", "Gamma description.", "Gamma body.\n");
 
         let mut session =
             Session::with_provider(Box::new(crate::UnwiredProvider)).expect("session");
+        // The snapshot is the assembly source (ADR-0119 Decision 3):
+        // materialized at creation, immutable -- here it names two of the
+        // three registry skills, and the legacy mount fold carries a THIRD
+        // set (gamma mounted, alpha activated) so a wrong-set wiring (mount
+        // fold or activation subset) fails the pin.
+        session.set_discovery_snapshot(vec!["alpha".to_string(), "beta".to_string()]);
+        session.mount_skill("gamma").expect("mount gamma");
         session.mount_skill("alpha").expect("mount alpha");
-        session.mount_skill("beta").expect("mount beta");
         session
             .activate_skill("alpha", crate::model::SkillLifecycleActor::User)
             .expect("activate alpha");
@@ -5478,15 +5521,21 @@ mod tests {
         // absent registry as the legitimate never-created state and lists
         // nothing, pinning the empty-family projection here too.
         let agents_tmp = tempfile::tempdir().unwrap();
-        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live);
+        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &[]);
         let inputs = assembled.turn_inputs(&[]);
 
-        // The sort key is the activated subset, NOT the mounted set -- the
-        // mirror-drift this pin exists for fails here.
+        // The assembly's skill set is the discovery SNAPSHOT, wholesale --
+        // neither the legacy mount fold (gamma absent) nor the activation
+        // subset (beta absent).
+        let names: Vec<&str> = inputs.skills.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
-            inputs.activated,
-            &["alpha".to_string()],
-            "activated carries the activated subset, not the mounted set"
+            names,
+            vec!["alpha", "beta"],
+            "skills resolve from the discovery snapshot, not the mount fold or activation subset"
+        );
+        assert_eq!(
+            inputs.skills[0].description, "Alpha description.",
+            "the snapshot's rows carry the frontmatter description"
         );
         // The empty agents registry projects the empty delegation family
         // (issue #933): a never-created registry is the legitimate state.
@@ -5512,7 +5561,7 @@ You are a focused analyst.
         .expect("write agent definition");
         live.set_agent_enabled("analyst", true)
             .expect("enable analyst");
-        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live);
+        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &[]);
         let inputs = assembled.turn_inputs(&[]);
         assert_eq!(inputs.delegations.len(), 1, "the enabled entry projects");
         assert_eq!(inputs.delegations[0].name, "analyst");

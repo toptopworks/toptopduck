@@ -85,6 +85,7 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
             3 => transforms::v3_to_v4(current)?,
             4 => transforms::v4_to_v5(current)?,
             5 => transforms::v5_to_v6(current)?,
+            6 => transforms::v6_to_v7(current)?,
             other => {
                 return Err(MigrationError::NoTransform {
                     from: other,
@@ -448,6 +449,61 @@ mod transforms {
     pub(super) fn v5_to_v6(value: Value) -> Result<Value, MigrationError> {
         Ok(value)
     }
+
+    /// v6 -> v7 (ADR-0119 Decision 6, issue #983): the invocation-semantics
+    /// breakpoint. Three moves, all header-level -- skill lifecycle events
+    /// PASS THROUGH (the v7 struct still deserializes them; the legacy
+    /// channels keep writing through the coexistence period), the Mount/
+    /// Unmount fold MATERIALIZES as the explicit `discovery_snapshot` (the
+    /// nearest honest value for a pre-snapshot file: the session's visible
+    /// skill set), and the activated set RETIRES silently (its bodies never
+    /// entered persisted history -- there is nothing to migrate, and the
+    /// names stay visible through the snapshot). Turn entries are untouched:
+    /// `invocations` deserializes as empty (serde default) for every
+    /// pre-v7 turn -- the honest pre-invocation posture.
+    pub(super) fn v6_to_v7(value: Value) -> Result<Value, MigrationError> {
+        let mut value = value;
+        if value.get("discovery_snapshot").is_none() {
+            let snapshot = fold_mount_fold(&value)?;
+            let obj = value
+                .as_object_mut()
+                .ok_or_else(|| MigrationError::Field("recipe root is not an object".into()))?;
+            obj.insert("discovery_snapshot".to_string(), Value::from(snapshot));
+        }
+        Ok(value)
+    }
+}
+
+/// Fold the recipe history's Mount/Unmount skill events into the
+/// materialized discovery snapshot (the v6->v7 step's one computation;
+/// mirrors `Recipe::mounted_skills` over raw JSON). Malformed shapes are
+/// honest errors -- a history that is not an array, or a skill entry whose
+/// `data` is not an object, is a corrupt file, not a migration input.
+fn fold_mount_fold(value: &Value) -> Result<Vec<String>, MigrationError> {
+    let mut mounted: Vec<String> = Vec::new();
+    let Some(history) = value.get("history").and_then(Value::as_array) else {
+        return Err(MigrationError::Field("history is not an array".into()));
+    };
+    for entry in history {
+        let Some(data) = entry.get("data") else {
+            continue;
+        };
+        let kind = entry.get("entry").and_then(Value::as_str);
+        if kind != Some("Skill") {
+            continue;
+        }
+        let Some(name) = data.get("name").and_then(Value::as_str) else {
+            return Err(MigrationError::Field(
+                "skill event without a string name".into(),
+            ));
+        };
+        match data.get("kind").and_then(Value::as_str) {
+            Some("Mount") => crate::util::push_unique(&mut mounted, &name.to_string()),
+            Some("Unmount") => mounted.retain(|n| n != name),
+            _ => {}
+        }
+    }
+    Ok(mounted)
 }
 
 #[cfg(test)]
@@ -680,6 +736,85 @@ mod tests {
             recipe.activated_skills().is_empty(),
             "a pre-activation recipe folds to the honest empty activated set",
         );
+    }
+
+    #[test]
+    fn v6_to_v7_materializes_the_mount_fold_as_the_discovery_snapshot() {
+        // ADR-0119 (issue #983): the v6 -> v7 step passes the skill events
+        // through, materializes the Mount/Unmount fold as the explicit
+        // `discovery_snapshot`, and retires the activated set silently (its
+        // bodies never entered persisted history -- nothing to migrate; the
+        // names stay visible through the snapshot). Turn entries are
+        // untouched: `invocations` deserializes empty for every pre-v7 turn.
+        let v6 = serde_json::json!({
+            "format_version": 6,
+            "session_name": "coexistence",
+            "sources": [],
+            "history": [
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "pdf-tools" } },
+                { "entry": "Skill", "data": { "kind": "Activate", "name": "sql-coach", "actor": "Agent" } },
+                { "entry": "Skill", "data": { "kind": "Unmount", "name": "pdf-tools" } },
+            ],
+            "active": null,
+        });
+        let migrated = migrate_to_current(v6, 6).expect("migrate");
+        assert_eq!(
+            migrated["discovery_snapshot"],
+            serde_json::json!(["sql-coach"]),
+            "the mount fold (Mount in / Unmount out) materializes as the snapshot; \
+             the Activate neither joins nor leaves it"
+        );
+        // The events pass through untouched -- the v7 struct still reads them
+        // (legacy channels keep writing through the coexistence period).
+        assert_eq!(migrated["history"].as_array().unwrap().len(), 4);
+        let recipe: crate::persistence::recipe::Recipe =
+            serde_json::from_value(migrated).expect("v7 shape parses");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        assert_eq!(recipe.discovery_snapshot, vec!["sql-coach".to_string()]);
+        assert_eq!(recipe.mounted_skills(), vec!["sql-coach".to_string()]);
+        // The activated set still folds (the legacy read stays live), and the
+        // invoked set starts empty -- no pre-v7 turn carries invocations.
+        assert_eq!(recipe.activated_skills(), vec!["sql-coach".to_string()]);
+        assert!(recipe.invoked_skills().is_empty());
+    }
+
+    #[test]
+    fn v6_to_v7_preserves_an_explicit_snapshot() {
+        // A defensive idempotence shape: a file that already carries a
+        // `discovery_snapshot` (a v7-native file mislabeled v6, or a re-run
+        // migration) keeps it -- the fold never overwrites an explicit value.
+        let v6 = serde_json::json!({
+            "format_version": 6,
+            "session_name": "explicit",
+            "sources": [],
+            "history": [
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+            ],
+            "active": null,
+            "discovery_snapshot": ["pdf-tools"],
+        });
+        let migrated = migrate_to_current(v6, 6).expect("migrate");
+        assert_eq!(
+            migrated["discovery_snapshot"],
+            serde_json::json!(["pdf-tools"]),
+            "the explicit snapshot wins over the fold"
+        );
+    }
+
+    #[test]
+    fn v6_to_v7_rejects_a_non_array_history() {
+        // Honest error, never a guess: a corrupt root surfaces as the typed
+        // migration failure (ADR-0036).
+        let bad = serde_json::json!({
+            "format_version": 6,
+            "session_name": "corrupt",
+            "sources": [],
+            "history": { "not": "an array" },
+            "active": null,
+        });
+        let err = migrate_to_current(bad, 6).unwrap_err();
+        assert!(matches!(err, MigrationError::Field(_)));
     }
 
     #[test]

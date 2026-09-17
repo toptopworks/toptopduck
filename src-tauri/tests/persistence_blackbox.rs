@@ -385,6 +385,115 @@ fn resume_rebuilds_mounted_skills_from_timeline_fold() {
 }
 
 #[test]
+fn resume_restores_invocation_semantics_state() {
+    // ADR-0119 (issue #983): the v7 open path restores the discovery
+    // snapshot from the header (explicit, never re-folded) and re-folds the
+    // invoked set from the turn invocation records; each turn's records
+    // round-trip verbatim so the window replays their bodies ahead of the
+    // questions on the next ask.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("invoked.duck");
+    let v7 = json!({
+        "format_version": 7,
+        "session_name": "invoked",
+        "sources": [],
+        "history": [{
+            "entry": "Turn",
+            "data": {
+                "question": "q",
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {"text_kind": "Agent", "body": "a", "assumption": null},
+                },
+                "invocations": [
+                    {"name": "sql-coach", "body": "Coach the SQL.\n", "actor": "User", "content_hash": "h1"},
+                    {"name": "pdf-tools", "body": "Extract first.\n", "actor": "Agent", "content_hash": "h2"},
+                ],
+            },
+        }],
+        "active": null,
+        "discovery_snapshot": ["sql-coach", "pdf-tools"],
+    });
+    fs::write(&duck, serde_json::to_string(&v7).unwrap()).unwrap();
+
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+
+    // The snapshot restores from the header, exactly as persisted.
+    assert_eq!(
+        resumed.discovery_snapshot(),
+        vec!["sql-coach".to_string(), "pdf-tools".to_string()],
+        "the discovery snapshot restores from the recipe header",
+    );
+    // The invoked set re-folds from the turn records -- monotonic, in
+    // first-invocation order.
+    assert_eq!(
+        resumed.invoked_skills(),
+        vec!["sql-coach".to_string(), "pdf-tools".to_string()],
+        "the invoked set re-folds from the turn invocation records",
+    );
+    // The turn's records round-trip verbatim -- both actors, bodies + hashes
+    // pinned, ready for the window's ahead-of-question replay.
+    match resumed.conversation().last() {
+        Some(ThreadEntry::Turn(record)) => {
+            assert_eq!(record.invocations.len(), 2);
+            assert_eq!(record.invocations[0].name, "sql-coach");
+            assert_eq!(record.invocations[0].body, "Coach the SQL.\n");
+            assert_eq!(record.invocations[0].actor, SkillLifecycleActor::User);
+            assert_eq!(record.invocations[0].content_hash, "h1");
+            assert_eq!(record.invocations[1].name, "pdf-tools");
+            assert_eq!(record.invocations[1].actor, SkillLifecycleActor::Agent);
+        }
+        other => panic!("expected a turn entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn open_duck_migrates_a_v6_file_to_v7_invocation_semantics() {
+    // ADR-0119 Decision 6 (issue #983): the v6 -> v7 breakpoint rides the
+    // registered migration chain -- a pre-v7 file OPENS (the chain's
+    // any-historical-file-opens property), its skill events pass through,
+    // the Mount/Unmount fold materializes as the discovery snapshot, and the
+    // activated set retires (no v6 turn carries invocation records, so the
+    // invoked fold starts empty).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("v6.duck");
+    let v6 = json!({
+        "format_version": 6,
+        "session_name": "coexistence era",
+        "sources": [],
+        "history": [
+            { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+            { "entry": "Skill", "data": { "kind": "Mount", "name": "pdf-tools" } },
+            { "entry": "Skill", "data": { "kind": "Activate", "name": "sql-coach", "actor": "Agent" } },
+            { "entry": "Skill", "data": { "kind": "Unmount", "name": "pdf-tools" } },
+        ],
+        "active": null,
+    });
+    fs::write(&duck, serde_json::to_string(&v6).unwrap()).unwrap();
+
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
+
+    // The mount fold materialized as the snapshot (pdf-tools unmounted out).
+    assert_eq!(
+        resumed.discovery_snapshot(),
+        vec!["sql-coach".to_string()],
+        "the v6 mount fold materialized as the v7 discovery snapshot",
+    );
+    // The activated set retired silently -- the bodies never entered
+    // persisted history, and the invoked fold starts empty.
+    assert!(
+        resumed.invoked_skills().is_empty(),
+        "no pre-v7 turn carries invocation records",
+    );
+    // The skill events passed through: the legacy folds still read (the
+    // coexistence-period channels keep writing them).
+    assert_eq!(resumed.mounted_skills(), vec!["sql-coach".to_string()]);
+    assert_eq!(resumed.activated_skills(), vec!["sql-coach".to_string()]);
+}
+
+#[test]
 fn resume_rebuilds_activated_skills_from_timeline_fold() {
     // AC#5 (ADR-0110, issue #698): the live `Session.activated_skills` cache
     // re-seeds from `Recipe::activated_skills()` -- the fold over the same

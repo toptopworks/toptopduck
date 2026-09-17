@@ -37,6 +37,7 @@ pub mod activation;
 pub mod builtin;
 pub mod frontmatter;
 pub mod import;
+pub mod invocation;
 pub mod model;
 pub mod prompt;
 pub mod read;

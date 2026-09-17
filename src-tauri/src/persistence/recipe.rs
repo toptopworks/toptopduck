@@ -97,7 +97,20 @@ use crate::model::{
 /// shape (written before the reason existed) deserializes as `None` via
 /// serde's missing-newtype-content path, so every existing file loads
 /// unchanged, and a resumed watchdog kill still presents the timeout.
-pub const RECIPE_FORMAT_VERSION: u32 = 6;
+///
+/// v7 (ADR-0119, issue #983) retires persistent skill activation for
+/// turn-scoped invocation: [`RecipeTurn`] gains `invocations` (the turn's
+/// invocation records -- name + body + actor + `content_hash`, turn input
+/// isomorphic to the question), the header gains the explicit
+/// `discovery_snapshot` (the creation-time enabled set, immutable within the
+/// session), and the new semantics stop WRITING skill lifecycle events (the
+/// legacy channels keep writing through the coexistence period; the fold
+/// readers stay). The v6->v7 migration passes the events through,
+/// materializes the Mount/Unmount fold as the snapshot, and retires the
+/// activated set silently (its bodies never entered persisted history).
+/// Older clients reading a v7 file hit the higher-version honest-refuse
+/// path (ADR-0036).
+pub const RECIPE_FORMAT_VERSION: u32 = 7;
 
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
@@ -425,6 +438,16 @@ pub struct RecipeTurn {
     /// rule as [`Self::asked_at`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
+    /// The turn's skill invocation records (ADR-0119, issue #983): each
+    /// skill invoked this turn -- by the user (submit-time materialization)
+    /// or by the agent (the `invoke_skill` meta-tool) -- with the body
+    /// pinned at invocation time. Turn input, isomorphic to the question:
+    /// the window replays the bodies ahead of the question and a summary
+    /// (far-window) turn wears them away with the same expiry semantics.
+    /// Empty for turns that invoked no skill and for pre-v7 turns
+    /// (serde default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invocations: Vec<crate::model::SkillInvocation>,
 }
 
 impl RecipeTurn {
@@ -442,6 +465,7 @@ impl RecipeTurn {
             provenance: TurnProvenance::default(),
             asked_at: None,
             settled_at: None,
+            invocations: Vec::new(),
         }
     }
 
@@ -466,6 +490,7 @@ impl RecipeTurn {
             provenance,
             asked_at: timestamps.asked_at,
             settled_at: timestamps.settled_at,
+            invocations: Vec::new(),
         }
     }
 }
@@ -630,6 +655,14 @@ pub struct Recipe {
     /// the fields above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_runtime: Option<LastRuntime>,
+    /// The session's discovery snapshot (ADR-0119 Decision 3, issue #983):
+    /// the enabled set at session creation, immutable within the session.
+    /// The metadata index lists it wholesale every turn; skills enabled
+    /// after creation are reachable through the user invocation channel but
+    /// carry no index row (a new session sees them). Empty for a pre-v7
+    /// recipe migrated with an empty mount fold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovery_snapshot: Vec<String>,
 }
 
 /// Why [`Recipe::build`] rejected a proposed recipe.
@@ -770,6 +803,7 @@ impl Recipe {
         }
         Ok(Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name,
             sources,
             history,
@@ -801,6 +835,16 @@ impl Recipe {
         self.thought_level = thought_level;
         self.cached_discovered = cached_discovered;
         self.last_runtime = last_runtime;
+        self
+    }
+
+    /// Layer the session's discovery snapshot onto the recipe header
+    /// (ADR-0119 Decision 3, issue #983). The same layering posture as
+    /// [`Self::with_session_runtime_facts`]: `Recipe::build` produces the
+    /// replay projection, then the persister layers the session-level fact
+    /// so the persisted file carries it.
+    pub fn with_discovery_snapshot(mut self, names: Vec<String>) -> Recipe {
+        self.discovery_snapshot = names;
         self
     }
 
@@ -938,6 +982,24 @@ impl Recipe {
         activated.retain(|n| mounted.iter().any(|m| m == n));
         activated
     }
+
+    /// The session-invoked skill names, folded from the timeline's turn
+    /// invocation records (ADR-0119 Decision 4, issue #983): a derived view
+    /// that only ever grows -- invocation is a turn-input fact, nothing can
+    /// un-invoke a past turn. First-invocation insertion order; the
+    /// `read_skill_file` gate and the invoked-set-conditional tool mounts
+    /// read through this fold (a live session memoizes it).
+    pub fn invoked_skills(&self) -> Vec<String> {
+        let mut invoked: Vec<String> = Vec::new();
+        for entry in &self.history {
+            if let RecipeEntry::Turn(turn) = entry {
+                for invocation in &turn.invocations {
+                    crate::util::push_unique(&mut invoked, &invocation.name);
+                }
+            }
+        }
+        invoked
+    }
 }
 
 #[cfg(test)]
@@ -964,6 +1026,7 @@ mod tests {
         // bullet's black-box test drives.
         Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "分析 A".to_string(),
             sources: vec![csv_source("people", "fp-people")],
             history: vec![
@@ -1015,12 +1078,14 @@ mod tests {
     }
 
     #[test]
-    fn recipe_format_version_is_six() {
-        // ADR-0110 (issue #698): v6 carries format_version = 6 (the Activate
-        // skill lifecycle variant + the event actor mark). Pin the constant so
-        // the open-path version check stays in sync with what save writes.
-        assert_eq!(RECIPE_FORMAT_VERSION, 6);
-        assert_eq!(build_recipe().format_version, 6);
+    fn recipe_format_version_is_seven() {
+        // ADR-0119 (issue #983): v7 carries format_version = 7 (the turn
+        // invocation records + the explicit discovery snapshot; the v6->v7
+        // migration materializes the mount fold into the snapshot). Pin the
+        // constant so the open-path version check stays in sync with what
+        // save writes.
+        assert_eq!(RECIPE_FORMAT_VERSION, 7);
+        assert_eq!(build_recipe().format_version, 7);
     }
 
     #[test]
@@ -1065,6 +1130,7 @@ mod tests {
         // FROM the first's result_N (chained derivation, ADR-0003).
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "s".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
@@ -1140,6 +1206,7 @@ mod tests {
         // empty history is a valid recipe.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "空".into(),
             sources: Vec::new(),
             history: Vec::new(),
@@ -1185,6 +1252,7 @@ mod tests {
         // stale Materialized turn, productive_chain returns only the live one.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "stale-chain".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
@@ -1316,6 +1384,7 @@ mod tests {
     fn productive_chain_keeps_interleaved_live_stale_live_in_order() {
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "interleaved".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![
@@ -1647,6 +1716,7 @@ mod tests {
             provenance: TurnProvenance::default(),
             asked_at: None,
             settled_at: None,
+            invocations: Vec::new(),
         };
         let json = serde_json::to_string(&turn).expect("serialize");
         assert!(json.contains("\"trace\""), "trace key present");
@@ -1766,6 +1836,7 @@ mod tests {
         // after reopen.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "skills".into(),
             sources: Vec::new(),
             history: vec![
@@ -1798,6 +1869,7 @@ mod tests {
         // mount -> unmount -> remount sequence yields the remounted name only.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "fold".into(),
             sources: Vec::new(),
             history: vec![
@@ -1836,6 +1908,7 @@ mod tests {
         // unmount of the first, so the assembly sequence reads deterministically.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "order".into(),
             sources: Vec::new(),
             history: vec![
@@ -1870,6 +1943,7 @@ mod tests {
         // default posture -- no skills mounted).
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "none".into(),
             sources: Vec::new(),
             history: Vec::new(),
@@ -1890,6 +1964,7 @@ mod tests {
         // (the sole exit); a mount alone never activates.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "activate-fold".into(),
             sources: Vec::new(),
             history: vec![
@@ -1928,6 +2003,7 @@ mod tests {
         // cascading unmount of the first.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "activate-order".into(),
             sources: Vec::new(),
             history: vec![
@@ -2004,6 +2080,7 @@ mod tests {
         // convention).
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "activate-rt".into(),
             sources: Vec::new(),
             history: vec![
@@ -2057,6 +2134,7 @@ mod tests {
         // clear (unmount refuses NotMounted, no deactivate exists).
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "dangling-activate".into(),
             sources: Vec::new(),
             history: vec![
@@ -2126,6 +2204,7 @@ mod tests {
         // event interleaved with a result turn does not pollute the chain.
         let recipe = Recipe {
             format_version: RECIPE_FORMAT_VERSION,
+            discovery_snapshot: Vec::new(),
             session_name: "skip-skill".into(),
             sources: vec![csv_source("people", "fp")],
             history: vec![

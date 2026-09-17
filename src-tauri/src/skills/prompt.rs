@@ -59,16 +59,6 @@ pub struct SkillPromptFragment {
     pub content_hash: String,
 }
 
-/// The single L1/L2 membership predicate (ADR-0110, issue #707): whether
-/// `name` sits in the activated list. The disclosure rendering's index/body
-/// split and the turn provenance's activated-subset filter both sort through
-/// this one predicate -- a hand-rolled `contains` at either consumer could
-/// drift and silently drop provenance for a skill whose body the model
-/// actually read.
-pub(crate) fn is_activated(name: &str, activated: &[String]) -> bool {
-    activated.iter().any(|n| n == name)
-}
-
 /// Resolve the mounted-skill names into prompt fragments for both the system
 /// prompt injection and the turn's skill provenance (issue #364). `mounted` is
 /// the session's mounted set in first-mount insertion order; the returned
@@ -93,7 +83,7 @@ pub fn resolve_prompt_fragments(root: &Path, mounted: &[String]) -> Vec<SkillPro
 /// fragment on any failure (honest degrade). Kept separate so the per-skill
 /// failure mode is explicit and the `?` operator stays out of the map closure
 /// (a single unreadable skill never fails the whole turn).
-fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
+pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     // Defense in depth: the mount API does not validate names, so a non-spec
     // name could reach here via direct IPC. Refuse to join it onto the root --
     // `is_valid_skill_name` is the directory-name rule (kebab-case), which

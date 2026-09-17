@@ -218,9 +218,16 @@ export async function setDatasetPrivacy(
 }
 
 // Ask one question (PRD #1) against the named session: run one turn and return
-// its ADR-0028 outcome (result / textual / failed / cancelled).
-export async function askQuestion(sessionId: string, question: string): Promise<TurnOutcome> {
-  return invoke<TurnOutcome>("ask", { sessionId, question });
+// its ADR-0028 outcome (result / textual / failed / cancelled). The optional
+// staged skill names (ADR-0112 picker channel, calibrated by ADR-0119) are
+// materialized at submit as the turn's user invocations; absent keeps the
+// pre-invocation shape, so callers that never staged stay unchanged.
+export async function askQuestion(
+  sessionId: string,
+  question: string,
+  skillInvocations?: string[],
+): Promise<TurnOutcome> {
+  return invoke<TurnOutcome>("ask", { sessionId, question, skillInvocations });
 }
 
 // Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT

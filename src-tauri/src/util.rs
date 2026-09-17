@@ -35,3 +35,15 @@ pub(crate) fn truncate_chars_with_ellipsis(s: &str, max: usize) -> String {
         format!("{head}…")
     }
 }
+
+/// The order-preserving linear-dedupe push shared by the skill-set folds
+/// (ADR-0119, issue #983): first-insertion order everywhere a set
+/// accumulates -- the discovery snapshot, the invoked-set fold, the
+/// provenance name set, and the migration's mount fold. One helper so a
+/// hand-rolled `contains` at any consumer cannot drift (the discipline the
+/// retired `is_activated` used to carry).
+pub(crate) fn push_unique<T: PartialEq + Clone>(items: &mut Vec<T>, item: &T) {
+    if !items.contains(item) {
+        items.push(item.clone());
+    }
+}

@@ -205,6 +205,7 @@ pub(crate) fn dispatch_gated_call(
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
     skills: &mut SkillActivationCtx<'_>,
+    invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
     read: &crate::skills::read::SkillReadGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
@@ -226,6 +227,7 @@ pub(crate) fn dispatch_gated_call(
             mcp,
             cli,
             skills,
+            invocations,
             read,
             gate,
             on_phase,
@@ -246,6 +248,7 @@ fn dispatch_gated_call_inner(
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
     skills: &mut SkillActivationCtx<'_>,
+    invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
     read: &crate::skills::read::SkillReadGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
@@ -296,6 +299,28 @@ fn dispatch_gated_call_inner(
                     (result, Some(entry), None)
                 }
                 activation::SkillActivationOutcome::Refused(message) => {
+                    (meta_failure(call, &message), None, None)
+                }
+            },
+        );
+    }
+
+    // The skill-invocation meta-tool (ADR-0119 Decision 4, issue #983):
+    // intercepted beside the activation arm, equally ahead of any
+    // classification / gate -- invocation is approval-free by design (the
+    // gate is the machine-level enable axis). The resolver appends the
+    // agent-actor record to the turn's pending invocations (persistence
+    // rides `record_turn`, never a session transition); the body rides the
+    // tool result back into the turn's own context -- the record is for
+    // provenance, not injection.
+    if call.name == crate::skills::invocation::INVOKE_SKILL {
+        return Ok(
+            match crate::skills::invocation::resolve_skill_invocation(call, invocations) {
+                crate::skills::invocation::SkillInvocationOutcome::Local { summary, payload } => {
+                    let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+                    (result, Some(entry), None)
+                }
+                crate::skills::invocation::SkillInvocationOutcome::Refused(message) => {
                     (meta_failure(call, &message), None, None)
                 }
             },
@@ -1211,6 +1236,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, _) = dispatch_gated_call(
             &failing,
             &mut d,
@@ -1218,6 +1244,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -1260,6 +1287,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (_, entry, promotion) = dispatch_gated_call(
             &landing,
             &mut d,
@@ -1267,6 +1295,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -1340,6 +1369,7 @@ mod tests {
         };
         let shared = Arc::clone(&phases);
         let mut forward = move |p: TurnPhase| shared.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, promotion) = dispatch_gated_call(
             &call,
             &mut d,
@@ -1347,6 +1377,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut forward,
@@ -1426,6 +1457,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, promotion) = dispatch_gated_call(
             &call,
             &mut d,
@@ -1433,6 +1465,7 @@ mod tests {
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -1542,6 +1575,7 @@ mod tests {
             sink: &*sink,
             cancel: &cancel,
         };
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, _) = dispatch_gated_call(
             &call,
             &mut d,
@@ -1549,6 +1583,7 @@ mod tests {
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -1625,6 +1660,7 @@ mod tests {
         };
         let shared = Arc::clone(&phases);
         let mut forward = move |p: TurnPhase| shared.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (_, entry, _) = dispatch_gated_call(
             &call,
             &mut d,
@@ -1632,6 +1668,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut forward,
@@ -1712,6 +1749,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, promotion) = dispatch_gated_call(
             &call,
             &mut d,
@@ -1719,6 +1757,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -1841,6 +1880,7 @@ mod tests {
             cancel: &cancel,
         };
         let mut materializer = GhostThenPanicMaterializer;
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let abort = dispatch_gated_call(
             &call,
             &mut d,
@@ -1848,6 +1888,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut |_| {},
@@ -2088,6 +2129,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, promotion) = dispatch_gated_call(
             &call,
             &mut d,
@@ -2095,6 +2137,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -2155,6 +2198,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, promotion) = dispatch_gated_call(
             &call,
             &mut d,
@@ -2162,6 +2206,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut fx.ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -2227,6 +2272,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, promotion) = dispatch_gated_call(
             &call,
             &mut d,
@@ -2234,6 +2280,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut fx.ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,
@@ -2289,6 +2336,7 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let (result, entry, promotion) = dispatch_gated_call(
             &call,
             &mut d,
@@ -2296,6 +2344,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::session::skills::SkillActivationFixture::new(Vec::new()).ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
             &gate,
             &mut on_phase,

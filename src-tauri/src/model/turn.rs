@@ -323,18 +323,34 @@ pub enum TurnRuntime {
     },
 }
 
-/// Per-turn provenance crossing IPC (issue #381, ADR-0101): the ACTIVATED
-/// skills at the turn's assembly time -- the activated subset for every
-/// runtime (ADR-0110; both injection surfaces render disclosure), so mounting
-/// alone leaves `skills` empty -- each with its
-/// [`SkillProvenance::content_hash`] so the frontend drift-compares against
-/// the registry and surfaces a "modified" badge for a skill whose content
-/// changed after this turn, plus the turn's executing [`TurnRuntime`]. Empty
-/// `skills` for turns that injected no skill body and for v3->v4 migrated
-/// turns (no baseline); absent `runtime` for
-/// turns recorded before attribution crossed the wire (an optimistic append
-/// or a pre-extension IPC peer -- shown without a badge, distinct from the
-/// recorded-but-unattributed `External` form).
+/// One skill invocation attached to a turn (ADR-0119, issue #983): the body
+/// expanded once at the call site, pinned at invocation-time bytes. The unit
+/// of "which skills shaped this turn" -- unlike a skill lifecycle event it is
+/// a turn's input record (isomorphic to the question), never a standalone
+/// timeline slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillInvocation {
+    /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
+    pub name: String,
+    /// The Markdown body after the frontmatter, pinned at invocation time
+    /// (the `content_hash` honestly records which bytes were seen). Empty
+    /// when the `SKILL.md` was unreadable at invocation (honest degrade --
+    /// the record still lands so the name stays visible).
+    pub body: String,
+    /// Who initiated the invocation: the user (composer picker
+    /// materialization, ADR-0112 channel) or the agent (the `invoke_skill`
+    /// meta-tool).
+    pub actor: crate::model::SkillLifecycleActor,
+    /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at
+    /// invocation time. Empty string when no baseline exists (unreadable at
+    /// invocation).
+    pub content_hash: String,
+}
+
+/// Per-turn provenance crossing IPC (issue #381, ADR-0101; calibrated by
+/// ADR-0119): the skills INVOKED this turn -- the turn's invocation records'
+/// name set (the drift badge tracks the bodies the model actually saw). Empty
+/// for turns that invoked no skill and for turns recorded before v7.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TurnProvenance {
     pub skills: Vec<SkillProvenance>,
@@ -367,14 +383,24 @@ pub struct TurnRecord {
     pub question: String,
     pub outcome: TurnOutcome,
     pub trace: Vec<TraceRound>,
-    /// The turn's skill provenance (issue #381; semantics per issues
-    /// #700/#702, ADR-0110): each skill whose body was injected into the
-    /// turn's prompt, with its `content_hash` for drift comparison against
-    /// the registry. The activated subset for every runtime (mounting
-    /// injects metadata only; both injection surfaces render disclosure).
-    /// Empty for turns that injected no skill body and for v3->v4 migrated
-    /// turns.
+    /// The turn's skill provenance (issue #381; semantics per ADR-0119,
+    /// issue #983): the name set of the turn's [`SkillInvocation`] records --
+    /// the skills that shaped this turn -- each with its `content_hash` for
+    /// drift comparison against the registry. Derived from
+    /// [`Self::invocations`] at record time; empty for turns that invoked no
+    /// skill and for turns recorded before v7.
     pub provenance: TurnProvenance,
+    /// The turn's skill invocation records (ADR-0119, issue #983): each
+    /// skill invoked this turn -- by the user (submit-time materialization,
+    /// ADR-0112 channel) or by the agent (the `invoke_skill` meta-tool) --
+    /// with the body pinned at invocation time. Turn input, isomorphic to
+    /// the question: rides the LLM window and persists on the recipe; the
+    /// window renders the bodies ahead of the question, and a far-window
+    /// (summary) turn wears them away with the same expiry semantics as the
+    /// question itself. Empty for turns that invoked no skill and for turns
+    /// recorded before v7.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invocations: Vec<SkillInvocation>,
     /// When the user submitted the question (Unix epoch ms, ADR-0103).
     /// `None` for turns recorded before v5 -- the frontend renders no
     /// timestamp rather than a synthetic one (honest degrade).

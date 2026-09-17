@@ -86,6 +86,68 @@ impl super::Session {
         self.activated_skills.clone()
     }
 
+    /// The session's discovery snapshot (ADR-0119 Decision 3, issue #983):
+    /// the enabled set at session creation, immutable within the session.
+    /// Cloned so the command layer can serialize the vec without holding
+    /// the session lock.
+    pub fn discovery_snapshot(&self) -> Vec<String> {
+        self.discovery_snapshot.clone()
+    }
+
+    /// Materialize the discovery snapshot at session creation (ADR-0119
+    /// Decision 3): called once, alongside the legacy mount-fold seed -- the
+    /// snapshot captures the same enabled-set computation explicitly. No
+    /// other writer exists; immutability is by construction.
+    pub fn set_discovery_snapshot(&mut self, names: Vec<String>) {
+        // Dedupe defensively in order (the seed computation is already
+        // unique; this only guards a hypothetical future duplicate).
+        let mut seen = Vec::new();
+        for name in &names {
+            crate::util::push_unique(&mut seen, name);
+        }
+        self.discovery_snapshot = seen;
+    }
+
+    /// The session-INVOKED skill names (ADR-0119 Decision 4, issue #983), in
+    /// first-invocation insertion order -- a monotonic fold of the timeline's
+    /// turn invocation records. Cloned for the lock-free command layer.
+    pub fn invoked_skills(&self) -> Vec<String> {
+        self.invoked_skills.clone()
+    }
+
+    /// Materialize the user's submit-time skill invocations (ADR-0119
+    /// Decision 1; the ADR-0112 picker channel's calibrated continuation):
+    /// resolve each staged name against the registry NOW so the body +
+    /// content_hash pin the invocation-time bytes. The records ride the turn
+    /// -- the window renders the bodies ahead of the question and the turn
+    /// persists them. A name the registry cannot serve degrades to an
+    /// empty-body record (the invocation still happened; honest degrade),
+    /// never a refusal. A DISABLED name (ADR-0119 Decision 3: the invocation
+    /// eligibility gate is the enable axis, both actors) lands no record at
+    /// all -- the normal picker never offers disabled names, so reaching
+    /// this filter means a stale view or a direct IPC, and silence is the
+    /// honest posture for a name that has no right to invoke.
+    pub fn materialize_user_invocations(
+        &self,
+        names: &[String],
+        root: &std::path::Path,
+        disabled: &[String],
+    ) -> Vec<crate::model::SkillInvocation> {
+        names
+            .iter()
+            .filter(|name| !disabled.iter().any(|d| d == *name))
+            .map(|name| {
+                let fragment = crate::skills::prompt::resolve_one(root, name);
+                crate::model::SkillInvocation {
+                    name: name.clone(),
+                    body: fragment.body,
+                    actor: SkillLifecycleActor::User,
+                    content_hash: fragment.content_hash,
+                }
+            })
+            .collect()
+    }
+
     /// Mount a skill into the session's active set (ADR-0086, issue #363).
     /// Appends a `Mount` event to the timeline, mutates the live mounted-skills
     /// cache, and persists the recipe atomically. Refuses a redundant mount
@@ -295,6 +357,11 @@ pub(crate) struct SkillActivationCtx<'a> {
     timeline: &'a mut Vec<super::TimelineEntry>,
     persister: &'a mut super::recipe_persister::RecipePersister,
     runtime_facts: &'a super::SessionRuntimeFacts,
+    /// The session's immutable discovery snapshot (ADR-0119): rides the ctx
+    /// only so the legacy channel's immediate persist can stamp the recipe
+    /// header (the coexistence-period write path takes the same header as
+    /// the new one).
+    snapshot: &'a [String],
 }
 
 impl<'a> SkillActivationCtx<'a> {
@@ -307,6 +374,7 @@ impl<'a> SkillActivationCtx<'a> {
         timeline: &'a mut Vec<super::TimelineEntry>,
         persister: &'a mut super::recipe_persister::RecipePersister,
         runtime_facts: &'a super::SessionRuntimeFacts,
+        snapshot: &'a [String],
     ) -> Self {
         Self {
             fragments,
@@ -314,6 +382,7 @@ impl<'a> SkillActivationCtx<'a> {
             timeline,
             persister,
             runtime_facts,
+            snapshot,
         }
     }
 
@@ -346,6 +415,7 @@ impl<'a> SkillActivationCtx<'a> {
             temp_path,
             self.timeline,
             self.runtime_facts,
+            self.snapshot,
         );
     }
 }
@@ -362,6 +432,7 @@ pub(crate) struct SkillActivationFixture {
     pub timeline: Vec<super::TimelineEntry>,
     pub(super) persister: super::recipe_persister::RecipePersister,
     pub facts: super::SessionRuntimeFacts,
+    pub snapshot: Vec<String>,
 }
 
 #[cfg(test)]
@@ -373,6 +444,7 @@ impl SkillActivationFixture {
             timeline: Vec::new(),
             persister: super::recipe_persister::RecipePersister::new(),
             facts: super::SessionRuntimeFacts::default(),
+            snapshot: Vec::new(),
         }
     }
 
@@ -386,6 +458,7 @@ impl SkillActivationFixture {
             timeline: &mut self.timeline,
             persister: &mut self.persister,
             runtime_facts: &self.facts,
+            snapshot: &self.snapshot,
         }
     }
 

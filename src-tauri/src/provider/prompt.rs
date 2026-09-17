@@ -25,7 +25,6 @@
 
 use super::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::model::TextKind;
-use crate::skills::prompt::is_activated;
 use crate::skills::SkillPromptFragment;
 
 /// The resolved response locale (ADR-0052 layer 3). Two-state -- the third
@@ -65,18 +64,51 @@ pub fn response_locale_directive(locale: ResponseLocale) -> &'static str {
     }
 }
 
-/// Append one activated skill's framed body: the `【激活技能】技能 \`<name>\`：`
-/// header plus the body verbatim (trailing whitespace trimmed for clean
-/// section separation -- ADR-0086: injected as-is, never summarized or
-/// templated). A skill whose body is empty (unreadable at turn time, honest
-/// degrade) still lands its framed header + name so the model knows the
-/// skill is present even when its prose is unavailable.
-fn push_body_frame(out: &mut String, skill: &SkillPromptFragment) {
-    out.push_str("\n\n【激活技能】技能 `");
-    out.push_str(&skill.name);
-    out.push_str("`：\n");
-    out.push_str(skill.body.trim_end());
-    out.push('\n');
+/// The invocation frame marker (ADR-0119, issue #983): the leading marker of
+/// every invocation-preamble block. Shared by the renderer and the
+/// FakeProvider's script keying (which strips a frame-led preamble), so a
+/// wording change to the frame cannot silently drift between them.
+pub(crate) const INVOCATION_FRAME_MARKER: &str = "【技能调用】";
+
+/// Render a turn's invocation records as the turn-input prose (ADR-0119
+/// Decision 1, issue #983): one `【技能调用】技能 \`<name>\`：` frame per
+/// invocation, body verbatim (trailing whitespace trimmed for clean section
+/// separation -- the ADR-0086 framing discipline, now attached to the turn
+/// input instead of a standing disclosure). An empty-body record still lands
+/// its framed header + name so the model knows the skill is present even
+/// when its prose is unavailable. Blocks separated by one blank line; the
+/// whole carries no leading/trailing decoration -- the caller positions it.
+pub fn render_invocation_preamble(invocations: &[crate::model::SkillInvocation]) -> String {
+    let mut out = String::new();
+    for (i, invocation) in invocations.iter().enumerate() {
+        if i > 0 {
+            // One separator newline: with the prior block's trailing '\n'
+            // this renders one blank line between blocks.
+            out.push('\n');
+        }
+        out.push_str(INVOCATION_FRAME_MARKER);
+        out.push_str("技能 `");
+        out.push_str(&invocation.name);
+        out.push_str("`：\n");
+        out.push_str(invocation.body.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// A turn's window input: the invocation preamble (if any) + the verbatim
+/// question. User invocations precede the question (ADR-0119 Decision 1);
+/// historical turns replay their invocations the same way through the same
+/// function, and a far-window summary turn wears them away with the
+/// question itself (the shared expiry semantics). Empty invocations render
+/// the bare question -- the pre-invocation shape, byte-identical.
+pub fn render_turn_input(question: &str, invocations: &[crate::model::SkillInvocation]) -> String {
+    let preamble = render_invocation_preamble(invocations);
+    if preamble.is_empty() {
+        question.to_string()
+    } else {
+        format!("{preamble}\n{question}")
+    }
 }
 
 /// The injection-time description clamp (issue #961, ADR-0118 Decision 3):
@@ -95,67 +127,62 @@ fn clamp_description(description: &str) -> String {
     clamped
 }
 
-/// Render the progressive-disclosure skill section shared by BOTH runtime
-/// surfaces (ADR-0110 Decisions 1-2, issues #700/#702): skills that are
-/// mounted but not activated land as a metadata index block (entries of
-/// `` `name` — description``, the discoverable-set surface, L1) and
-/// activated skills land their verbatim bodies (【激活技能】-framed, L2).
-/// The index block precedes the bodies (the L1 -> L2 reading order). An
-/// empty mounted set renders the empty string -- no empty block, so the
-/// pre-skill assembly shape is preserved.
+/// Render the metadata-index skill section shared by BOTH runtime surfaces
+/// (ADR-0110 Decision 1 calibrated by ADR-0119 Decision 3, issue #983): the
+/// discovery snapshot's skills land as a metadata index block -- entries of
+/// `` `name` — description``, the discoverable-set surface -- listed
+/// WHOLESALE. The retired activated-exclusion rule is gone: every snapshot
+/// skill carries its index row every turn, and bodies never ride the
+/// standing disclosure (each invocation expands once, at its call site,
+/// into the turn input -- see [`render_invocation_preamble`]). An empty
+/// snapshot renders the empty string -- no empty block, so the pre-skill
+/// assembly shape is preserved.
 ///
-/// The index header is the FINAL wording (locked in issue #700's brief,
-/// landed with the `activate_skill` meta-tool in #701): it names the channel
-/// and its two trigger rules, so the index entry and the tool are one
-/// discoverable surface. The built-in system prompt embeds it via
-/// [`build_tool_system_prompt`]; the external-runtime ACP path wraps it
-/// standalone via [`render_skill_block`] (issue #702 parity).
-fn render_skill_disclosure(skills: &[SkillPromptFragment], activated: &[String]) -> String {
-    let mut out = String::new();
-    let index: Vec<&SkillPromptFragment> = skills
-        .iter()
-        .filter(|f| !is_activated(&f.name, activated))
-        .collect();
-    if !index.is_empty() {
-        out.push_str(
-            "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，\
-             调用 activate_skill 工具加载其完整说明：\n",
-        );
-        // Description clamped at injection (issue #961, ADR-0118 Decision 3
-        // -- the formerly deferred ADR-0110 index-cap item): at most 360
-        // chars total, a truncation ending in `…`. The clamp is a guardrail,
-        // not the norm -- discovery quality stays a curation responsibility
-        // (ADR-0110 Decision 7), and every local consumer (settings pane,
-        // registry storage) keeps the full text. A degraded empty
-        // description renders as an empty tail -- the entry stays, so a
-        // skill never silently disappears from the discoverable set.
-        for f in index {
-            out.push_str(&format!(
-                "- `{}` — {}\n",
-                f.name,
-                clamp_description(&f.description)
-            ));
-        }
+/// The index header names the channel and its two trigger rules, so the
+/// index entry and the `invoke_skill` tool are one discoverable surface.
+/// The built-in system prompt embeds it via [`build_tool_system_prompt`];
+/// the external-runtime ACP path wraps it standalone via
+/// [`render_skill_block`] (issue #702 parity).
+fn render_skill_disclosure(skills: &[SkillPromptFragment]) -> String {
+    if skills.is_empty() {
+        return String::new();
     }
-    for f in skills.iter().filter(|f| is_activated(&f.name, activated)) {
-        push_body_frame(&mut out, f);
+    let mut out = String::new();
+    out.push_str(
+        "\n\n【可用技能】\n以下技能可用。任务与某技能的描述匹配、或用户点名某技能时，\
+         调用 invoke_skill 工具展开其完整说明：\n",
+    );
+    // Description clamped at injection (issue #961, ADR-0118 Decision 3
+    // -- the formerly deferred ADR-0110 index-cap item): at most 360
+    // chars total, a truncation ending in `…`. The clamp is a guardrail,
+    // not the norm -- discovery quality stays a curation responsibility
+    // (ADR-0110 Decision 7), and every local consumer (settings pane,
+    // registry storage) keeps the full text. A degraded empty
+    // description renders as an empty tail -- the entry stays, so a
+    // skill never silently disappears from the discoverable set.
+    for f in skills {
+        out.push_str(&format!(
+            "- `{}` — {}\n",
+            f.name,
+            clamp_description(&f.description)
+        ));
     }
     out
 }
 
-/// Render the progressive-disclosure skill section as a standalone text
-/// block for the external-runtime ACP path (ADR-0086, issue #368; disclosure
-/// parity per ADR-0110 Decision 8, issue #702): the SAME sorted rendering as
-/// the built-in system prompt's skill section ([`render_skill_disclosure`] --
-/// index entries + activated bodies), trimmed of the leading newlines the
-/// system-prompt embedding adds for separation. The block lands as a single
-/// separate [`ContentBlock`] before the user's question, NOT inside a system
-/// prompt -- the external CLI brings its own persona and does not receive our
-/// capability boundary prompt.
-pub fn render_skill_block(skills: &[SkillPromptFragment], activated: &[String]) -> String {
-    render_skill_disclosure(skills, activated)
-        .trim_start()
-        .to_string()
+/// Render the metadata-index skill section as a standalone text block for
+/// the external-runtime ACP path (ADR-0086, issue #368; disclosure parity
+/// per ADR-0110 Decision 8, issue #702): the SAME rendering as the built-in
+/// system prompt's skill section ([`render_skill_disclosure`] -- index
+/// entries, no bodies), trimmed of the leading newlines the system-prompt
+/// embedding adds for separation. The block lands as a single separate
+/// [`ContentBlock`] before the user's question, NOT inside a system prompt
+/// -- the external CLI brings its own persona and does not receive our
+/// capability boundary prompt. Per ADR-0119 the block carries ONLY the
+/// index: bodies ride the turn input (invocation preamble) and never
+/// resend each turn.
+pub fn render_skill_block(skills: &[SkillPromptFragment]) -> String {
+    render_skill_disclosure(skills).trim_start().to_string()
 }
 
 /// The leading context block for an external-runtime ACP turn (ADR-0086,
@@ -265,10 +292,9 @@ pub fn build_tool_system_prompt(
     request: &ProviderRequest,
     locale: ResponseLocale,
     skills: &[SkillPromptFragment],
-    activated: &[String],
 ) -> String {
     let mut out = String::from(TOOL_CALLING_PROMPT);
-    let disclosure = render_skill_disclosure(skills, activated);
+    let disclosure = render_skill_disclosure(skills);
     out.push_str(&disclosure);
     out.push_str(response_locale_directive(locale));
     out.push_str(&render_schema_context(request));
@@ -740,7 +766,7 @@ mod tests {
         // ADR-0052: the locale directive is inserted between the boundary and
         // the schema context, mirroring the retired single-SQL order.
         let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
-        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[], &[]);
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[]);
         let boundary_pos = prompt.find("绝不冒充").unwrap();
         let directive_pos = prompt.find("【回复语言】").unwrap();
         let schema_pos = prompt.find("【数据上下文】").unwrap();
@@ -799,34 +825,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn disclosure_trims_trailing_whitespace_only() {
-        // The body is byte-verbatim except for trailing whitespace trimming
-        // (clean section separation). Internal content is untouched.
-        let skills = [fragment("a", "A.", "Line one.\n\n\n")];
-        let section = render_skill_disclosure(&skills, &["a".to_string()]);
-        // No triple trailing newline (trimmed to one), but internal lines stand.
-        assert!(!section.contains("Line one.\n\n\n"));
-        assert!(section.contains("Line one."));
+    /// Build an invocation record for the preamble / turn-input tests.
+    fn invocation(name: &str, body: &str) -> crate::model::SkillInvocation {
+        crate::model::SkillInvocation {
+            name: name.into(),
+            body: body.into(),
+            actor: crate::model::SkillLifecycleActor::Agent,
+            content_hash: "deadbeef".into(),
+        }
     }
 
     #[test]
-    fn disclosure_mounted_only_renders_index_entries_word_for_word() {
-        // ADR-0110 L1: mounted-but-not-activated skills render as metadata
-        // index entries ONLY -- no body anywhere. The block wording is the
-        // locked terminal contract from issue #700's brief (word-for-word,
-        // including the em dash and the trailing-newline shape).
+    fn disclosure_lists_every_snapshot_skill_word_for_word() {
+        // ADR-0119 Decision 3 (issue #983): the metadata index lists the
+        // discovery snapshot WHOLESALE -- every skill carries its row every
+        // turn, no exclusion rule, no body anywhere. The block wording names
+        // the invocation channel.
         let skills = [
             fragment("alpha", "Alpha skill.", "Alpha body.\n"),
             fragment("beta", "Beta skill.", "Beta body.\n"),
         ];
-        let section = render_skill_disclosure(&skills, &[]);
+        let section = render_skill_disclosure(&skills);
         assert_eq!(
             section,
-            "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，调用 activate_skill 工具加载其完整说明：\n\
+            "\n\n【可用技能】\n以下技能可用。任务与某技能的描述匹配、或用户点名某技能时，调用 invoke_skill 工具展开其完整说明：\n\
              - `alpha` — Alpha skill.\n\
              - `beta` — Beta skill.\n",
-            "index block must match the locked terminal wording verbatim"
+            "index block must match the wording verbatim, wholesale"
         );
     }
 
@@ -835,92 +860,103 @@ mod tests {
         // The degrade ladder: an empty (degraded) description keeps the entry
         // renderable -- the skill never silently leaves the discoverable set.
         let skills = [fragment("ghost", "", "Ghost body.\n")];
-        let section = render_skill_disclosure(&skills, &[]);
+        let section = render_skill_disclosure(&skills);
         assert_eq!(
             section,
-            "\n\n【可用技能】\n以下技能已挂载。任务与某技能的描述匹配、或用户点名某技能时，调用 activate_skill 工具加载其完整说明：\n- `ghost` — \n"
+            "\n\n【可用技能】\n以下技能可用。任务与某技能的描述匹配、或用户点名某技能时，调用 invoke_skill 工具展开其完整说明：\n- `ghost` — \n"
         );
     }
 
     #[test]
-    fn disclosure_activated_only_renders_bodies() {
-        // ADR-0110 L2: an activated skill's body injects verbatim in the
-        // 【激活技能】 frame (the ADR-0086 framing, frame word swapped). No
-        // index block appears when every mounted skill is activated.
-        let skills = [fragment("alpha", "Alpha skill.", "Alpha body.\n")];
-        let activated = vec!["alpha".to_string()];
-        let section = render_skill_disclosure(&skills, &activated);
-        assert_eq!(section, "\n\n【激活技能】技能 `alpha`：\nAlpha body.\n");
-        assert!(
-            !section.contains("【可用技能】"),
-            "no index block when nothing is mounted-but-inactive"
-        );
-    }
-
-    #[test]
-    fn disclosure_orders_index_block_before_activated_bodies() {
-        // The four-shape pin (issue #700): both sets present -> the index
-        // block precedes the bodies (the L1 -> L2 reading order).
-        let skills = [
-            fragment("alpha", "Alpha skill.", "Alpha body.\n"),
-            fragment("beta", "Beta skill.", "Beta body.\n"),
-        ];
-        let activated = vec!["beta".to_string()];
-        let section = render_skill_disclosure(&skills, &activated);
-        let index_pos = section.find("【可用技能】").unwrap();
-        let body_pos = section.find("【激活技能】技能 `beta`").unwrap();
-        assert!(
-            index_pos < body_pos,
-            "index block precedes activated bodies"
-        );
-        // The inactive skill contributes an index entry, never a body.
+    fn disclosure_carries_no_bodies() {
+        // ADR-0119: bodies NEVER ride the standing disclosure -- invocation
+        // expands once, at its call site, into the turn input (see the
+        // preamble tests). No invocation state exists that could exempt a
+        // skill from (or add a body to) the index.
+        let skills = [fragment("alpha", "Alpha skill.", "Alpha body.\n\n\n")];
+        let section = render_skill_disclosure(&skills);
         assert!(section.contains("- `alpha` — Alpha skill.\n"));
         assert!(
             !section.contains("Alpha body."),
-            "inactive skill body absent"
+            "no body in the standing disclosure"
         );
-        // The activated skill contributes a body, never an index entry.
-        assert!(!section.contains("- `beta`"), "activated skill not indexed");
-        assert!(section.contains("Beta body."));
+        assert!(
+            !section.contains("【激活技能】"),
+            "the body frame is retired"
+        );
     }
 
     #[test]
-    fn disclosure_empty_mounted_set_renders_nothing() {
-        // The empty-mount shape: no empty block, byte-identical to the
-        // pre-skill assembly (issue #700 AC).
-        assert_eq!(render_skill_disclosure(&[], &[]), "");
-        // An activated name with no mounted fragment has nothing to render
-        // either (the live path always sorts the mounted set; a dangling
-        // activation cannot exist because activation is clamped to mounts).
-        let section = render_skill_disclosure(&[], &["ghost".to_string()]);
+    fn disclosure_empty_snapshot_renders_nothing() {
+        // The empty-snapshot shape: no empty block, byte-identical to the
+        // pre-skill assembly (issue #700 AC carried over).
+        let section = render_skill_disclosure(&[]);
         assert_eq!(section, "");
     }
 
     #[test]
-    fn build_tool_system_prompt_with_skills_orders_base_index_bodies_locale_schema() {
-        // ADR-0086 / ADR-0110 (issue #700): the disclosure section (index
-        // block + activated bodies) injects AFTER the base prompt and BEFORE
-        // the locale directive + schema context. The five-part order is pinned
-        // so a call site cannot silently drop the skill section or mis-order
-        // it relative to the index/bodies split or the locale.
+    fn invocation_preamble_frames_bodies_with_blank_line_separation() {
+        // ADR-0119 Decision 1: each invocation lands one 【技能调用】 frame,
+        // body verbatim except trailing-whitespace trimming; frames separate
+        // by one blank line; no leading decoration (the caller positions it).
+        let invocations = [
+            invocation("alpha", "Line one.\n\n\n"),
+            invocation("beta", "Beta body.\n"),
+        ];
+        let preamble = render_invocation_preamble(&invocations);
+        assert_eq!(
+            preamble,
+            "【技能调用】技能 `alpha`：\nLine one.\n\n【技能调用】技能 `beta`：\nBeta body.\n"
+        );
+    }
+
+    #[test]
+    fn invocation_preamble_keeps_the_header_on_an_empty_body() {
+        // Honest degrade: an unreadable SKILL.md still lands its framed
+        // header + name so the model knows the skill was invoked.
+        let preamble = render_invocation_preamble(&[invocation("ghost", "")]);
+        assert_eq!(preamble, "【技能调用】技能 `ghost`：\n\n");
+    }
+
+    #[test]
+    fn render_turn_input_bare_question_without_invocations() {
+        // The pre-invocation shape, byte-identical.
+        assert_eq!(render_turn_input("多少人", &[]), "多少人");
+    }
+
+    #[test]
+    fn render_turn_input_preamble_precedes_the_question() {
+        // ADR-0119 Decision 1: the user invocation bodies precede the
+        // question, separated by one blank line.
+        let input = render_turn_input("多少人", &[invocation("sql-coach", "Name it.\n")]);
+        assert_eq!(input, "【技能调用】技能 `sql-coach`：\nName it.\n\n多少人");
+    }
+
+    #[test]
+    fn build_tool_system_prompt_with_skills_orders_base_index_locale_schema() {
+        // ADR-0086 / ADR-0119 (issue #983): the metadata index injects AFTER
+        // the base prompt and BEFORE the locale directive + schema context.
+        // The four-part order is pinned so a call site cannot silently drop
+        // the skill section or mis-order it relative to the locale.
         let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
         let skills = [
             fragment("sql-lite", "Coach SQL lightly.", "Unused body.\n"),
             fragment("sql-coach", "Coach SQL.", "Name the method.\n"),
         ];
-        let activated = vec!["sql-coach".to_string()];
-        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &skills, &activated);
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &skills);
         let base_pos = prompt.find("绝不冒充").unwrap();
         let index_pos = prompt.find("【可用技能】").unwrap();
-        let body_pos = prompt.find("【激活技能】技能 `sql-coach`").unwrap();
         let directive_pos = prompt.find("【回复语言】").unwrap();
         let schema_pos = prompt.find("【数据上下文】").unwrap();
         assert!(base_pos < index_pos, "base prompt before the index block");
-        assert!(index_pos < body_pos, "index block before activated bodies");
-        assert!(body_pos < directive_pos, "bodies before locale");
+        assert!(index_pos < directive_pos, "index block before locale");
         assert!(directive_pos < schema_pos, "locale before schema context");
-        // The activated body landed verbatim; the inactive one did not.
-        assert!(prompt.contains("Name the method."));
+        // Every snapshot skill is indexed; no body anywhere in the standing
+        // prompt (ADR-0119: bodies ride the turn input, never the system
+        // prompt).
+        assert!(prompt.contains("- `sql-coach` — Coach SQL.\n"));
+        assert!(prompt.contains("- `sql-lite` — Coach SQL lightly.\n"));
+        assert!(!prompt.contains("Name the method."));
         assert!(!prompt.contains("Unused body."));
     }
 
@@ -932,7 +968,7 @@ mod tests {
         // prompt's tool-selection section is always present (it is part of the
         // prompt text, not the injected skill section).
         let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
-        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[], &[]);
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[]);
         assert!(
             !prompt.contains("【可用技能】"),
             "no index block when the mount set is empty"
@@ -956,7 +992,7 @@ mod tests {
     #[test]
     fn tool_selection_prompt_top_k_matches_search_top_k() {
         let req = request(vec![ds("people", r#""people".data"#)], Some("people"));
-        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[], &[]);
+        let prompt = build_tool_system_prompt(&req, ResponseLocale::ZhCN, &[]);
         assert!(
             prompt.contains(&format!(
                 "最多返回 {} 张卡片",
@@ -1028,7 +1064,7 @@ mod tests {
         // ceiling stands).
         let long = "长".repeat(400);
         let skills = [fragment("sql-coach", &long, "Body.\n")];
-        let prompt = render_skill_disclosure(&skills, &[]);
+        let prompt = render_skill_disclosure(&skills);
         let expected_row = format!("- `sql-coach` — {}…\n", "长".repeat(359));
         assert!(
             prompt.contains(&expected_row),
@@ -1045,7 +1081,7 @@ mod tests {
         // The guardrail, not the norm: a curated description under the cap
         // renders byte-identically -- the clamp only ever trims.
         let skills = [fragment("pdf-tools", "Read PDFs.", "Body.\n")];
-        let prompt = render_skill_disclosure(&skills, &[]);
+        let prompt = render_skill_disclosure(&skills);
         assert!(prompt.contains("- `pdf-tools` — Read PDFs.\n"));
     }
 
@@ -1057,60 +1093,49 @@ mod tests {
         // would wrongly truncate this row.
         let cjk = "长".repeat(350);
         let skills = [fragment("sql-coach", &cjk, "Body.\n")];
-        let prompt = render_skill_disclosure(&skills, &[]);
+        let prompt = render_skill_disclosure(&skills);
         assert!(prompt.contains(&format!("- `sql-coach` — {cjk}\n")));
         // The exact-cap boundary: exactly 360 chars renders verbatim, no
         // ellipsis (the cap is `<=`, not `<`).
         let edge = "a".repeat(360);
         let skills = [fragment("pdf-tools", &edge, "Body.\n")];
-        let prompt = render_skill_disclosure(&skills, &[]);
+        let prompt = render_skill_disclosure(&skills);
         assert!(prompt.contains(&format!("- `pdf-tools` — {edge}\n")));
     }
 
     #[test]
     fn render_skill_block_trims_leading_whitespace() {
         // The standalone skill block must not start with the \n\n that the
-        // system-prompt embedding adds for separation -- whichever disclosure
-        // section leads: the index header, or the body frame when everything
-        // mounted is activated.
+        // system-prompt embedding adds for separation -- it starts with the
+        // index header, the only section the ADR-0119 block carries.
         let skills = [fragment("sql-coach", "Coach SQL.", "Name the method.\n")];
-        let index_led = render_skill_block(&skills, &[]);
+        let index_led = render_skill_block(&skills);
         assert!(
             index_led.starts_with("【可用技能】"),
             "index-led block starts with the header, not whitespace"
-        );
-        let body_led = render_skill_block(&skills, &["sql-coach".to_string()]);
-        assert!(
-            body_led.starts_with("【激活技能】"),
-            "body-led block starts with the frame, not whitespace"
         );
     }
 
     #[test]
     fn render_skill_block_is_disclosure_verbatim_standalone() {
-        // #702 parity: the standalone ACP block IS the disclosure rendering
-        // (index entries + activated bodies, index first) with only the
-        // leading separation newlines trimmed -- byte-identical to what the
-        // built-in system prompt embeds. The wrapper-equality pin keeps the
-        // two surfaces from drifting apart.
+        // #702 parity + ADR-0119: the standalone ACP block IS the index
+        // rendering with only the leading separation newlines trimmed --
+        // byte-identical to what the built-in system prompt embeds, and it
+        // carries NO body (bodies ride the turn input; the block never
+        // resends them each turn).
         let skills = [
             fragment("pdf-tools", "Read PDFs.", "Extract tables first.\n"),
             fragment("sql-coach", "Coach SQL.", "Name the method.\n"),
         ];
-        let activated = vec!["sql-coach".to_string()];
-        let block = render_skill_block(&skills, &activated);
-        assert_eq!(
-            block,
-            render_skill_disclosure(&skills, &activated).trim_start(),
-            "the ACP block is the disclosure rendering, standalone"
-        );
-        // The single-block topology: index section, then the body section.
+        let block = render_skill_block(&skills);
+        assert_eq!(block, render_skill_disclosure(&skills).trim_start());
         assert!(block.contains("- `pdf-tools` — Read PDFs.\n"));
-        assert!(block.contains("【激活技能】技能 `sql-coach`：\nName the method.\n"));
-        let index_pos = block.find("【可用技能】").unwrap();
-        let body_pos = block.find("【激活技能】").unwrap();
-        assert!(index_pos < body_pos, "index section precedes the bodies");
-        // The retired full-text shape: no mounted-skill frame anywhere.
+        assert!(block.contains("- `sql-coach` — Coach SQL.\n"));
+        // No body anywhere in the ACP block (ADR-0119 Decision 8 calibrated:
+        // the outbound disclosure carries the index only).
+        assert!(!block.contains("Name the method."));
+        assert!(!block.contains("Extract tables first."));
+        assert!(!block.contains("【激活技能】"));
         assert!(!block.contains("【挂载技能】"));
     }
 
@@ -1277,41 +1302,21 @@ mod tests {
     /// only exercise mount orders whose single-pass rendering coincides with
     /// the two-block contract.
     #[test]
-    fn disclosure_renders_index_before_bodies_in_mount_order() {
+    fn disclosure_lists_the_whole_snapshot_in_order() {
+        // ADR-0119: there is no invocation-order sorting of the disclosure
+        // any more -- the index lists every snapshot skill in snapshot order,
+        // full stop.
         let skills = [
             fragment("alpha", "alpha desc.", "alpha body.\n"),
             fragment("beta", "beta desc.", "beta body.\n"),
             fragment("gamma", "gamma desc.", "gamma body.\n"),
         ];
-        let activated = ["gamma".to_string(), "alpha".to_string()];
-        let out = render_skill_disclosure(&skills, &activated);
-
-        let index_pos = out.find("【可用技能】").expect("index block present");
-        let alpha_body = out
-            .find("【激活技能】技能 `alpha`")
-            .expect("alpha body frame present");
-        let gamma_body = out
-            .find("【激活技能】技能 `gamma`")
-            .expect("gamma body frame present");
-        assert!(
-            index_pos < alpha_body && index_pos < gamma_body,
-            "the index block strictly precedes every body frame"
-        );
-        assert!(
-            alpha_body < gamma_body,
-            "bodies render in mount order, not activated order"
-        );
-        // The index lists only the inactive skill; both activated bodies are
-        // verbatim.
-        assert!(
-            out.contains("- `beta` — beta desc.\n"),
-            "the index lists only the inactive skill"
-        );
-        assert!(
-            !out.contains("- `alpha` —") && !out.contains("- `gamma` —"),
-            "activated skills are not indexed"
-        );
-        assert!(out.contains("alpha body."), "alpha body verbatim");
-        assert!(out.contains("gamma body."), "gamma body verbatim");
+        let out = render_skill_disclosure(&skills);
+        assert!(out.find("【可用技能】").is_some(), "index block present");
+        let a = out.find("- `alpha` —").expect("alpha row");
+        let b = out.find("- `beta` —").expect("beta row");
+        let g = out.find("- `gamma` —").expect("gamma row");
+        assert!(a < b && b < g, "rows keep snapshot order");
+        assert!(!out.contains("body."), "no body anywhere in the disclosure");
     }
 }

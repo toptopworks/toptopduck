@@ -202,11 +202,18 @@ export interface TurnRecord {
   outcome: TurnOutcome;
   trace: TraceRound[];
   // Issue #381: the turn's skill provenance for drift comparison against the
-  // registry (the activated set, either runtime -- see TurnProvenance
-  // above). Empty `skills` for turns
-  // that injected no skill body and for v3->v4 migrated turns (no baseline --
+  // registry (the turn's invocation name set since ADR-0119 -- see
+  // TurnProvenance above). Empty `skills` for turns
+  // that invoked no skill and for turns recorded before v7 (no baseline --
   // never trips the drift check).
   provenance: TurnProvenance;
+  // The turn's skill invocation records (ADR-0119, #983): each skill invoked
+  // this turn -- by the user (submit-time picker materialization) or the
+  // agent (the invoke_skill meta-tool) -- with the body pinned at invocation
+  // time. Turn input, isomorphic to the question. Absent for turns that
+  // invoked no skill and for turns recorded before v7 (the backend skips
+  // the field when empty). Consumption rides #984.
+  invocations?: SkillInvocation[];
   // When the user submitted the question, Unix epoch ms (ADR-0103). Absent
   // for turns recorded before v5 -- rendered without a timestamp, never a
   // synthetic one (honest degrade). The optimistic append stamps the client
@@ -217,6 +224,16 @@ export interface TurnRecord {
   // When the turn settled, Unix epoch ms (ADR-0103). Same honest-degrade
   // rule as asked_at.
   settled_at?: number;
+}
+
+// One skill invocation attached to a turn (ADR-0119, #983): the body expanded
+// once at the call site, pinned at invocation-time bytes. Mirrors the Rust
+// model::SkillInvocation. Consumption rides #984.
+export interface SkillInvocation {
+  name: string;
+  body: string;
+  actor: "User" | "Agent";
+  content_hash: string;
 }
 
 // One entry of the unified conversation timeline (ADR-0040/0086): a Turn

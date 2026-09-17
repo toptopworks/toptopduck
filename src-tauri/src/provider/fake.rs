@@ -253,6 +253,31 @@ fn asking_question(request: &ToolTurnRequest) -> String {
         .unwrap_or_default()
 }
 
+impl FakeProvider {
+    /// Resolve the script for the asking turn's user message (ADR-0119,
+    /// issue #983): the message may carry the invocation preamble AHEAD of
+    /// the question (the renderer joins them with one blank line), while the
+    /// script key stays the verbatim question. Exact match first; then a
+    /// preamble-stripped suffix match, admitted only when the content starts
+    /// with the invocation frame marker (a longer question that merely ends
+    /// with a scripted key never matches -- the preamble is frame-led by
+    /// construction).
+    fn script_for(&self, content: &str) -> Option<&Script> {
+        if let Some(script) = self.tool_scripts.get(content) {
+            return Some(script);
+        }
+        if !content.starts_with(super::prompt::INVOCATION_FRAME_MARKER) {
+            return None;
+        }
+        self.tool_scripts
+            .iter()
+            .find(|(question, _)| {
+                content.len() > question.len() && content.ends_with(question.as_str())
+            })
+            .map(|(_, script)| script)
+    }
+}
+
 impl Provider for FakeProvider {
     fn generate_tool_turn(
         &self,
@@ -270,8 +295,7 @@ impl Provider for FakeProvider {
         // sees the cancel flag and lands the turn as Cancelled.
         let question = asking_question(request);
         self.block_if_requested(question.as_str());
-        self.tool_scripts
-            .get(question.as_str())
+        self.script_for(question.as_str())
             .ok_or(ProviderError::NotWired)?
             .draw()
     }
