@@ -55,6 +55,12 @@ import {
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
 } from "./settings-chrome";
+import {
+  type EnabledFilter,
+  FILTER_OPTIONS,
+  matchesFilter,
+  matchesSearch,
+} from "./settings-filters";
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
 import { upsertMirror, withMcpServers } from "./mcp-mirror";
@@ -65,23 +71,6 @@ import { upsertMirror, withMcpServers } from "./mcp-mirror";
 const NAV_TITLE = (
   <FormattedMessage id="settings.nav.mcp" defaultMessage="MCP Servers" />
 );
-
-type EnabledFilter = "all" | "enabled" | "disabled";
-
-const FILTER_OPTIONS: ReadonlyArray<EnabledFilter> = [
-  "all",
-  "enabled",
-  "disabled",
-];
-
-function matchesSearch(server: McpServerConfig, query: string): boolean {
-  if (query.trim() === "") return true;
-  return server.display_name.toLowerCase().includes(query.trim().toLowerCase());
-}
-
-function matchesFilter(server: McpServerConfig, filter: EnabledFilter): boolean {
-  return filter === "all" || (filter === "enabled") === server.enabled;
-}
 
 // MCP servers settings pane (issue #387 + #388). Two sub-views managed by local
 // state: "list" shows every configured server with a connection status dot,
@@ -151,7 +140,9 @@ export function McpSection({
   const filteredServers = useMemo(
     () =>
       servers.filter(
-        (s) => matchesSearch(s, searchQuery) && matchesFilter(s, filter),
+        (s) =>
+          matchesSearch(s.display_name, searchQuery) &&
+          matchesFilter(s, filter),
       ),
     [servers, searchQuery, filter],
   );

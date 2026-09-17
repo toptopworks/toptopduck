@@ -58,6 +58,12 @@ import {
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
+import {
+  type EnabledFilter,
+  FILTER_OPTIONS,
+  matchesFilter,
+  matchesSearch,
+} from "./settings-filters";
 
 // The pane's navigation name: the list header and the create/edit form share
 // it -- the form keeps the name for section context, without the list-only
@@ -82,20 +88,6 @@ const NAV_TITLE = (
 const AGENT_NAME_MAX = 64;
 const AGENT_DESCRIPTION_MAX = 1024;
 const AGENT_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-
-type EnabledFilter = "all" | "enabled" | "disabled";
-
-const FILTER_OPTIONS: ReadonlyArray<EnabledFilter> = ["all", "enabled", "disabled"];
-
-function matchesFilter(agent: AgentEntry, filter: EnabledFilter): boolean {
-  return filter === "all" || (filter === "enabled") === agent.enabled;
-}
-
-function matchesSearch(agent: AgentEntry, query: string): boolean {
-  if (query.trim() === "") return true;
-  const haystack = `${agent.name}\n${agent.description}`.toLowerCase();
-  return haystack.includes(query.trim().toLowerCase());
-}
 
 type FormState =
   | { mode: "closed" }
@@ -181,7 +173,12 @@ export function AgentsSection({
 
   const agents = useMemo(() => listing?.agents ?? [], [listing]);
   const visible = useMemo(
-    () => agents.filter((a) => matchesSearch(a, search) && matchesFilter(a, filter)),
+    () =>
+      agents.filter(
+        (a) =>
+          matchesSearch(`${a.name}\n${a.description}`, search) &&
+          matchesFilter(a, filter),
+      ),
     [agents, search, filter],
   );
   const ignoredFiles = useMemo(() => listing?.ignored ?? [], [listing]);

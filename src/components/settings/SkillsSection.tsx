@@ -61,6 +61,7 @@ import {
   PaneHeader,
   SettingsCard,
 } from "./settings-chrome";
+import { matchesSearch } from "./settings-filters";
 
 // Skills settings pane (issue #362, ADR-0086). The registry is a directory
 // scan (no app-config entry), so this pane reads list_skills + drives
@@ -113,12 +114,6 @@ const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
 // The row is list chrome (hover highlight + layout); the open-edit
 // affordance is scoped to the row's text block -- never the action cluster.
 const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
-
-function matchesSearch(skill: SkillEntry, query: string): boolean {
-  if (query.trim() === "") return true;
-  const haystack = `${skill.name}\n${skill.description}`.toLowerCase();
-  return haystack.includes(query.trim().toLowerCase());
-}
 
 function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
   return filter === "all" || skill.acquired === filter;
@@ -261,7 +256,9 @@ export function SkillsSection({
   const visible = useMemo(
     () =>
       allSkills.filter(
-        (s) => matchesSearch(s, search) && matchesFilter(s, filter),
+        (s) =>
+          matchesSearch(`${s.name}\n${s.description}`, search) &&
+          matchesFilter(s, filter),
       ),
     [allSkills, search, filter],
   );
