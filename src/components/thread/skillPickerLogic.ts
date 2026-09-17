@@ -4,7 +4,10 @@
 // The functions here are the whole keyboard contract minus the DOM: the
 // QuestionBar feeds them the textarea's value + selection and owns no trigger
 // logic of its own, so the contract pins in unit tests without any component
-// render.
+// render. The query match itself is shared with the settings search boxes
+// (lib/searchMatcher, issue #978).
+
+import { searchMatcher } from "../../lib/searchMatcher";
 
 /** Which panel a trigger character opens (ADR-0112 Decision 1). "/" is the
  *  global panel (group header + list; future item types join it as new
@@ -80,20 +83,16 @@ export function clampHighlight(
   return Math.min(count - 1, Math.max(0, index + delta));
 }
 
-/** The name-or-description substring, case-insensitive filter -- the same
- *  match the mount list's search box applies, so the two surfaces agree on
- *  what a query selects (ADR-0112 Decision 5). */
+/** The name-or-description filter: the per-field OR over `name` and
+ *  `description` stays here, while the match itself is the shared search
+ *  matcher the mount list's search box also rides -- the two surfaces agree
+ *  on what a query selects by construction (ADR-0112 Decision 5). */
 export function filterSkills<T extends { name: string; description: string }>(
   skills: readonly T[],
   query: string,
 ): T[] {
-  const q = query.trim().toLowerCase();
-  if (q === "") return [...skills];
-  return skills.filter(
-    (s) =>
-      s.name.toLowerCase().includes(q) ||
-      s.description.toLowerCase().includes(q),
-  );
+  const matches = searchMatcher(query);
+  return skills.filter((s) => matches(s.name) || matches(s.description));
 }
 
 function charFor(mode: SkillPickerMode): string {

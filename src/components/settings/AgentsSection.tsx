@@ -63,6 +63,7 @@ import {
   FILTER_OPTIONS,
   matchesFilter,
   matchesSearch,
+  searchableText,
 } from "./settings-filters";
 
 // The pane's navigation name: the list header and the create/edit form share
@@ -176,7 +177,7 @@ export function AgentsSection({
     () =>
       agents.filter(
         (a) =>
-          matchesSearch(`${a.name}\n${a.description}`, search) &&
+          matchesSearch(searchableText(a.name, a.description), search) &&
           matchesFilter(a, filter),
       ),
     [agents, search, filter],
