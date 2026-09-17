@@ -155,7 +155,7 @@ export function SkillPickerPanel({
             <span className="text-muted-foreground shrink-0 text-xs">
               {skill.acquired === "builtin" ? (
                 <FormattedMessage
-                  id="composer.contextPanel.builtinSkillBadge"
+                  id="composer.skillPicker.builtinBadge"
                   defaultMessage="System"
                 />
               ) : (
@@ -177,7 +177,7 @@ export function SkillPickerPanel({
       {empty && !displayError && (
         <div className={NOTE_CLASS}>
           <FormattedMessage
-            id="composer.contextPanel.skillsEmpty"
+            id="composer.skillPicker.empty"
             defaultMessage="No skills"
           />
         </div>
@@ -185,7 +185,7 @@ export function SkillPickerPanel({
       {noMatches && (
         <div className={NOTE_CLASS}>
           <FormattedMessage
-            id="composer.contextPanel.skillsNoMatches"
+            id="composer.skillPicker.noMatches"
             defaultMessage="No skills match your search."
           />
         </div>

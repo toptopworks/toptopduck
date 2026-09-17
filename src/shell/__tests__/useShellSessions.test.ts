@@ -117,7 +117,10 @@ const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
 // The backend-default composer posture. Passing it to the cold-start mint
 // paths exercises the no-op posture branch (no runtime / auth-mode IPC):
 // runtime null = the user never picked (the backend's own startup
-// resolution already applies, issue #572).
+// resolution already applies, issue #572). Tests that differ only in
+// activations spread this and override `activations`: a future posture
+// field inherits its default here, while the explicit-pick contrast tests
+// below stay inline so a new field forces a per-site review.
 const DEFAULT_POSTURE: PendingComposerPosture = {
   runtime: null,
   modelPosture: null,
@@ -355,12 +358,7 @@ describe("useShellSessions", () => {
     await act(async () => {
       await result.current.createSessionWithQuestion(
         "q",
-        {
-          runtime: null,
-          modelPosture: null,
-          authMode: AUTH_MODE_DEFAULT,
-          activations: ["data-cleaning", "charting"],
-        },
+        { ...DEFAULT_POSTURE, activations: ["data-cleaning", "charting"] },
         [],
       );
     });
@@ -382,12 +380,7 @@ describe("useShellSessions", () => {
     await act(async () => {
       created = await result.current.createSessionWithQuestion(
         "q",
-        {
-          runtime: null,
-          modelPosture: null,
-          authMode: AUTH_MODE_DEFAULT,
-          activations: ["broken", "charting"],
-        },
+        { ...DEFAULT_POSTURE, activations: ["broken", "charting"] },
         [],
       );
     });
@@ -414,12 +407,7 @@ describe("useShellSessions", () => {
     await act(async () => {
       created = await result.current.createSessionWithQuestion(
         "q",
-        {
-          runtime: null,
-          modelPosture: null,
-          authMode: AUTH_MODE_DEFAULT,
-          activations: ["pandoc", "charting"],
-        },
+        { ...DEFAULT_POSTURE, activations: ["pandoc", "charting"] },
         [],
       );
     });
@@ -1118,9 +1106,7 @@ describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)
     const { result } = renderSessions();
     await act(async () => {
       await result.current.createSessionWithQuestion("q", {
-        runtime: null,
-        modelPosture: null,
-        authMode: AUTH_MODE_DEFAULT,
+        ...DEFAULT_POSTURE,
         activations: ["charting", "cleaning"],
       }, []);
     });
@@ -1142,9 +1128,7 @@ describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)
     const { result, setShellError } = renderSessions();
     await act(async () => {
       await result.current.createSessionWithQuestion("q", {
-        runtime: null,
-        modelPosture: null,
-        authMode: AUTH_MODE_DEFAULT,
+        ...DEFAULT_POSTURE,
         activations: ["charting"],
       }, []);
     });

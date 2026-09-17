@@ -9,7 +9,7 @@ export function SkillActiveBadge() {
   return (
     <span className="bg-primary text-primary-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
       <FormattedMessage
-        id="composer.contextPanel.skillActiveBadge"
+        id="composer.skillPicker.activeBadge"
         defaultMessage="Active"
       />
     </span>
