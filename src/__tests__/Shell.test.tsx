@@ -173,7 +173,7 @@ import {
 } from "../api";
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig } from "../types/mcp";
-import type { SkillEntry } from "../types/skills";
+import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import { log } from "../lib/log";
 
@@ -1528,53 +1528,10 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
 function baseAppConfig(
   shell: Pick<AppConfig["shell"], "sidebar_collapsed">,
 ): AppConfig {
-  return {
+  return sharedBaseAppConfig({
     format_version: 1,
-    theme: "system",
-    locale: "system",
-    engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
-    privacy: { send_samples: true },
-    provider: {
-      profiles: [
-        {
-          id: "default",
-          display_name: "Anthropic",
-          protocol: "anthropic",
-          base_url: "https://api.anthropic.com",
-          model: "claude-sonnet-4-6",
-        },
-      ],
-      active_profile: "default",
-    },
-    export: { last_dir: null, default_format: "csv" },
-    tunables: { window_turns: 6, far_window: 12 },
     shell: { ...shell, sidebar_grouping: "flat" },
-    cli_tools: { tools: [] },
-    mcp_servers: { servers: [] },
-    sessions_dir: null,
-    default_runtime: { kind: "built_in" },
-    builtin_skill_baselines: {},
-    last_model_postures: {},
-    enabled_agents: [],
-    materialized_builtin_agents: [],
-    disabled_skills: [],
-  };
-}
-
-// A minimal registry skill (#500 cold-start Skills draft tests) -- every
-// required wire field present, only the name varies.
-function skillEntry(name: string): SkillEntry {
-  return {
-    name,
-    description: `${name} skill`,
-    acquired: "local",
-    license: null,
-    compatibility: null,
-    body: "",
-    link_target: null,
-    content_hash: "ab".repeat(32),
-    enabled: true,
-  };
+  });
 }
 
 // A minimal configured MCP server (issue #301 wire shape) so a composer "+"

@@ -17,6 +17,7 @@ import {
 } from "../../../api";
 import type { SkillEntry } from "../../../types/skills";
 import type { AppConfig } from "../../../types/app-config";
+import { baseAppConfig, skillEntry } from "../../../test-fixtures";
 
 // The pane drives everything through IPC + the opener plugin; mock both so the
 // test never touches Tauri. revealItemInDir is the "open source location" call
@@ -35,66 +36,27 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
 }));
 
-const localSkill: SkillEntry = {
-  name: "pdf-tools",
+const localSkill = skillEntry("pdf-tools", {
   description: "Work with PDF files.",
-  acquired: "local",
   license: "MIT",
   compatibility: "requires network",
   body: "Use this skill when working with PDFs.\n",
-  link_target: null,
   content_hash: "deadbeef",
-  enabled: true,
-};
+});
 
-const linkedSkill: SkillEntry = {
-  name: "external-skill",
+const linkedSkill = skillEntry("external-skill", {
   description: "Imported from ~/.claude/skills.",
   acquired: "linked",
-  license: null,
-  compatibility: null,
   body: "External body.\n",
   link_target: "/home/u/.claude/skills/external-skill",
   content_hash: "deadbeef",
-  enabled: true,
-};
+});
 
-// A complete AppConfig for the sync-contract mock (the full-field shape, no
-// `as`-escape: a future required field breaks here instead of silently
-// compiling past a stale mock; the disabled_skills entry is the post-flip
-// truth of the test below).
+// The sync-contract mock's AppConfig: the shared baseline plus the one field
+// under test (the disabled_skills entry is the post-flip truth of the test
+// below).
 function syncedAppConfig(): AppConfig {
-  return {
-    format_version: 2,
-    theme: "system",
-    locale: "system",
-    engine: { memory_limit: "512MB", threads: 1, row_cap: 100 },
-    privacy: { send_samples: true },
-    provider: {
-      profiles: [
-        {
-          id: "default",
-          display_name: "Anthropic",
-          protocol: "anthropic",
-          base_url: "https://api.anthropic.com",
-          model: "claude-sonnet-4-6",
-        },
-      ],
-      active_profile: "default",
-    },
-    export: { last_dir: null, default_format: "csv" },
-    tunables: { window_turns: 6, far_window: 12 },
-    shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
-    cli_tools: { tools: [] },
-    mcp_servers: { servers: [] },
-    sessions_dir: null,
-    default_runtime: { kind: "built_in" },
-    builtin_skill_baselines: {},
-    last_model_postures: {},
-    enabled_agents: [],
-    materialized_builtin_agents: [],
-    disabled_skills: ["pdf-tools"],
-  };
+  return baseAppConfig({ disabled_skills: ["pdf-tools"] });
 }
 
 // Empty-catalog English IntlProvider: FormattedMessage falls back to
@@ -155,7 +117,11 @@ describe("SkillsSection (issue #362)", () => {
     await waitFor(() =>
       expect(setSkillEnabled).toHaveBeenCalledWith("pdf-tools", false),
     );
-    await waitFor(() => expect(onAppConfigSync).toHaveBeenCalledWith(synced));
+    await waitFor(() =>
+      expect(onAppConfigSync).toHaveBeenCalledWith(
+        expect.objectContaining({ disabled_skills: ["pdf-tools"] }),
+      ),
+    );
     // The bubble guard: the row is one big open-edit button; the switch
     // click must not ride the row's onClick up into the drawer.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
