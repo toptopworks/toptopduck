@@ -62,6 +62,8 @@ describe("SkillPickerPanel hit highlighting", () => {
 
   it("renders plain row text for an empty query -- no hit spans", () => {
     const { container } = renderPanel(makePanel("   "));
+    expect(screen.getByText("Charting")).toBeInTheDocument();
+    expect(screen.getByText("Draw charts")).toBeInTheDocument();
     expect(container.querySelectorAll(".text-foreground")).toHaveLength(0);
   });
 });

@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 // Cross-module on purpose (issue #978): the Decision 5 contract spans the
 // picker and the settings mount list, so the agreement pin imports both
 // sides.
-import { matchesSearch } from "../../settings/settings-filters";
+import {
+  matchesSearch,
+  searchableText,
+} from "../../settings/settings-filters";
 
 import {
   clampHighlight,
@@ -129,9 +132,10 @@ describe("filterSkills (name or description substring, case-insensitive)", () =>
 // the mount list's search box must select the same rows for any reachable
 // query -- readPickerQuery keeps the picker query single-line, and a
 // single-line needle can never straddle the "\n" seam of the mount list's
-// haystack. That side is modeled exactly as SkillsSection applies it:
-// matchesSearch over `name + "\n" + description`. One shared matcher backs
-// both; this battery turns any future divergence on either side red.
+// haystack. That side is the mount list's own assembly -- the same
+// searchableText the skills and agents panes pass to matchesSearch, one
+// definition rather than a model of it. One shared matcher backs both;
+// this battery turns any future divergence on either side red.
 describe("filterSkills agrees with the mount-list search (ADR-0112 Decision 5)", () => {
   const skills = [
     { name: "Charting", description: "Draw charts" },
@@ -140,7 +144,7 @@ describe("filterSkills agrees with the mount-list search (ADR-0112 Decision 5)",
 
   const viaMountList = (query: string): string[] =>
     skills
-      .filter((s) => matchesSearch(`${s.name}\n${s.description}`, query))
+      .filter((s) => matchesSearch(searchableText(s.name, s.description), query))
       .map((s) => s.name);
 
   it.each([

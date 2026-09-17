@@ -66,4 +66,25 @@ describe("findQueryMatches", () => {
   it("returns an empty array on a miss", () => {
     expect(findQueryMatches("Draw charts", "zzz")).toEqual([]);
   });
+
+  it("returns no hits for a null needle (the match-all query)", () => {
+    expect(findQueryMatches("Draw charts", null)).toEqual([]);
+  });
+
+  it("returns no hits for an empty needle rather than hanging", () => {
+    expect(findQueryMatches("Draw charts", "")).toEqual([]);
+  });
+
+  it("advances past the whole hit, so overlapping occurrences do not double-render", () => {
+    expect(findQueryMatches("aaa", "aa")).toEqual([0]);
+  });
+
+  it("degrades to no hits when lower-casing changes the haystack's length", () => {
+    // U+0130 (the Turkish dotted capital I) lower-cases to two code units,
+    // shifting every hit index after the fold point -- those indices would
+    // point into the wrong characters, so the hit face yields none.
+    expect(findQueryMatches("İ charts", "charts")).toEqual([]);
+    // The boolean face is unaffected: the match itself is still found.
+    expect(searchMatcher("charts")("İ charts")).toBe(true);
+  });
 });

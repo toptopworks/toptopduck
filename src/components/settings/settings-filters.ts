@@ -37,3 +37,12 @@ export function matchesFilter(
 export function matchesSearch(haystack: string, query: string): boolean {
   return searchMatcher(query)(haystack);
 }
+
+/** The searchable text for a two-field row: the fields joined by a newline,
+ *  so a name tail can never concatenate with a description head into a
+ *  false match. One definition shared by the skills and agents panes and
+ *  the Decision 5 contract battery -- the expression cannot drift between
+ *  the surfaces that must agree. */
+export function searchableText(name: string, description: string): string {
+  return `${name}\n${description}`;
+}

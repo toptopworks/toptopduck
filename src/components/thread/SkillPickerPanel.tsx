@@ -86,7 +86,7 @@ export function SkillPickerPanel({
   const intl = useIntl();
   const empty = totalSkills === 0;
   const noMatches = !empty && skills.length === 0;
-  const filtering = query.trim() !== "";
+  const filtering = normalizeSearchQuery(query) !== null;
   // A failed listing is a fault, not an empty registry -- the error row
   // replaces the empty face rather than riding beside it.
   const displayError =

@@ -61,7 +61,7 @@ import {
   PaneHeader,
   SettingsCard,
 } from "./settings-chrome";
-import { matchesSearch } from "./settings-filters";
+import { matchesSearch, searchableText } from "./settings-filters";
 
 // Skills settings pane (issue #362, ADR-0086). The registry is a directory
 // scan (no app-config entry), so this pane reads list_skills + drives
@@ -257,7 +257,7 @@ export function SkillsSection({
     () =>
       allSkills.filter(
         (s) =>
-          matchesSearch(`${s.name}\n${s.description}`, search) &&
+          matchesSearch(searchableText(s.name, s.description), search) &&
           matchesFilter(s, filter),
       ),
     [allSkills, search, filter],
