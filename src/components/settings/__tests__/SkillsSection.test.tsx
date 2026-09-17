@@ -219,6 +219,30 @@ describe("SkillsSection (issue #362)", () => {
 
     expect(screen.getByText("pdf-tools")).toBeInTheDocument();
     expect(screen.queryByText("external-skill")).not.toBeInTheDocument();
+
+    // The description half of the haystack and the field seam: "files"
+    // matches no name (only pdf-tools' description carries it), while the
+    // seam-spanning queries must stay misses -- the fields join on a
+    // newline, so neither an empty join ("toolsw") nor a space join
+    // ("tools work") may match across the boundary.
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "files" },
+    });
+
+    expect(screen.getByText("pdf-tools")).toBeInTheDocument();
+    expect(screen.queryByText("external-skill")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "tools work" },
+    });
+
+    expect(screen.queryByText("pdf-tools")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "toolsw" },
+    });
+
+    expect(screen.queryByText("pdf-tools")).not.toBeInTheDocument();
   });
 
   it("creates a skill via the New drawer", async () => {
