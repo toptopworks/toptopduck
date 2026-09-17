@@ -14,6 +14,10 @@ describe("DisclosureBanner", () => {
     expect(screen.getByText(/前 3 行示例/)).toBeInTheDocument();
     // The schema segment is brand-neutral: "data types", never the engine (#739).
     expect(container).toHaveTextContent(/列名和类型/);
+    // The key-isolation guarantee: keychain-only storage, and the app's own
+    // interface never holds the key.
+    expect(container).toHaveTextContent(/只保存在这台电脑的钥匙串里/);
+    expect(container).toHaveTextContent(/应用界面本身从不持有密钥/);
   });
 
   it("discloses Excel formula cells use cached snapshot values (issue #7 AC4)", () => {

@@ -685,7 +685,6 @@ function AgentForm({
         />
       </PaneBackLink>
       <PaneHeader
-        className="mb-3"
         size="form"
         title={editing ? (
           <FormattedMessage

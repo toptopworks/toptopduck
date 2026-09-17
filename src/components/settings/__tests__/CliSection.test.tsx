@@ -232,8 +232,10 @@ describe("CliSection", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "New" }));
     expect(screen.getByText("Register CLI tool")).toBeInTheDocument();
-    // The form page keeps the section's navigation name above it.
+    // The form page keeps the section's navigation name above it; the list
+    // header's New button does not follow (list-only).
     expect(screen.getByText("CLI Tools")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to CLI list" }));
     expect(
       screen.getByText("No CLI tools registered yet. Click New to register one."),
@@ -651,7 +653,7 @@ describe("CliSection baseline lifecycle (issue #676)", () => {
   it("gates the row actions by source and baseline", () => {
     // A builtin row's delete renders disabled while it follows the baseline
     // (undeletable -- disabling is the single shutdown axis) and no restore
-    // shows; a user row keeps the enabled delete.
+    // shows; a user row keeps its delete rendered.
     const builtin = makeTool({
       name: "pandoc",
       source: "builtin",

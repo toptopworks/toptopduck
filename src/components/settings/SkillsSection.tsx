@@ -112,7 +112,7 @@ const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
 
 // The row is list chrome (hover highlight + layout); the open-edit
 // affordance is scoped to the row's text block -- never the action cluster.
-const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3 outline-none";
+const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
 
 function matchesSearch(skill: SkillEntry, query: string): boolean {
   if (query.trim() === "") return true;
@@ -612,7 +612,8 @@ type SkillRowProps = {
   skill: SkillEntry;
   /** The Edited derivation (builtin rows only, issue #677). */
   edited: boolean;
-  /** The enablement switch is mid-flight (any row): gate every row's switch. */
+  /** The enablement switch is mid-flight on this row: gate this row's
+   *  switch (the per-row gate, the AgentsSection #932 precedent). */
   busy?: boolean;
   /** Flip the row's enablement axis (issue #961). */
   onToggleEnabled: (enabled: boolean) => void;
@@ -638,9 +639,10 @@ function SkillRow({
   return (
     <div
       data-testid="skill-row"
-      // Dormant-on-disable gray-out (issue #961): the disabled row reads
-      // faded (the switch + actions keep full contrast -- management stays
-      // first-class) and carries data-disabled as the test/styling hook.
+      // Dormant-on-disable gray-out (issue #961): the whole row reads
+      // faded, switch and actions dimmed with it (management stays
+      // operable -- disabling hides from discovery, not from management)
+      // and carries data-disabled as the test/styling hook.
       className={`${ROW_CLASS} ${skill.enabled ? "" : "opacity-60"}`}
       data-disabled={skill.enabled ? undefined : "true"}
     >

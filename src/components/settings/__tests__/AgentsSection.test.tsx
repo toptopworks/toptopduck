@@ -100,7 +100,7 @@ describe("AgentsSection (issue #932)", () => {
     expect(screen.getByText("Built-in")).toBeVisible();
     // A builtin row's delete affordance renders disabled (disabling is the
     // single shutdown axis; the button keeps every row's columns aligned);
-    // a user row's is enabled.
+    // a user row's delete stays visible.
     expect(
       screen.getByRole("button", { name: "Delete agent general-purpose" }),
     ).toBeDisabled();
@@ -266,8 +266,10 @@ describe("AgentsSection (issue #932)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "New agent" }));
     expect(await screen.findByLabelText("Name")).toBeVisible();
-    // The form page keeps the section's navigation name above it.
+    // The form page keeps the section's navigation name above it; the list
+    // header's New button does not follow (list-only).
     expect(screen.getByText("Subagents")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New agent" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to agent list" }));
     expect(await screen.findByText("No agent definitions yet. Click New to create one.")).toBeVisible();
     expect(screen.queryByLabelText("Name")).toBeNull();

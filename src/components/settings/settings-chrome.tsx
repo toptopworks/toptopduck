@@ -1,6 +1,5 @@
 import {
   type ComponentProps,
-  type MouseEventHandler,
   type ReactNode,
 } from "react";
 import { type LucideIcon, ArrowLeft, ChevronDown, ChevronRight, Info, Loader2 } from "lucide-react";
@@ -177,13 +176,12 @@ export function PaneBackLink({
  *  the in-row counterpart of the pane-header posture -- Edit / Test /
  *  Restore hover to the foreground, Delete to destructive (issue #958).
  *  `spinning` swaps the icon for a rotating Loader2 (the in-flight Test
- *  button); `onClick` is the plain action handler -- the settings rows are
- *  not whole-row click targets, so no stopPropagation duty rides on it. A
- *  DISABLED action restores
+ *  button); `onClick` is the plain zero-arg action handler -- the settings
+ *  rows are not whole-row click targets, so no stopPropagation duty rides
+ *  on it (the #958 zero-arg contract). A DISABLED action restores
  *  hit-testing to show the not-allowed cursor: the base's
- *  pointer-events-none would let the clickable row's hand cursor bleed
- *  through, promising an action the button won't take (a disabled control
- *  fires no click, so the row stays quiet). */
+ *  pointer-events-none would strip that hint and leave a dead-looking
+ *  control (a disabled control fires no click either way). */
 export function RowActionButton({
   label,
   icon: Icon,
@@ -198,7 +196,7 @@ export function RowActionButton({
   destructive?: boolean;
   spinning?: boolean;
   disabled?: boolean;
-  onClick?: MouseEventHandler<HTMLButtonElement>;
+  onClick?: () => void;
 }) {
   return (
     <Button
@@ -378,8 +376,9 @@ export function SettingsRow({
  *  per-pane <h3> (ADR-0075: titles promoted to pane heroes). Typography rides
  *  the DESIGN.md tokens: `size="section"` (default) is `{typography.headline-lg}`
  *  (20px/600/-0.2px -- the designated settings-section header); `size="form"`
- *  is `{typography.headline-md}` (18px/600, no tracking) for a create/edit
- *  form's own heading, one step down the scale from its section's hero. */
+ *  is `{typography.headline-md}` (18px/600, no tracking) with the tighter
+ *  mb-3 rhythm folded in, for a create/edit form's own heading one step
+ *  down the scale from its section's hero. */
 export function PaneHeader({
   title,
   description,
@@ -397,7 +396,11 @@ export function PaneHeader({
   return (
     <div
       data-slot="pane-header"
-      className={cn("mb-6 flex items-start justify-between gap-4", className)}
+      className={cn(
+        size === "form" ? "mb-3" : "mb-6",
+        "flex items-start justify-between gap-4",
+        className,
+      )}
     >
       <div className="min-w-0 space-y-6">
         <h3

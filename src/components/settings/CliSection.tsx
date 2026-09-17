@@ -528,8 +528,8 @@ function CliToolRow({
   onToggleEnabled: (enabled: boolean) => void;
   onEdit: () => void;
   /** Undefined on builtin rows: the entry is undeletable (ADR-0109
-   *  Decision 2) -- disabling is the single shutdown axis, so no delete
-   *  entry point renders. */
+   *  Decision 2) -- disabling is the single shutdown axis; the delete
+   *  button then renders disabled, keeping the row's action slot aligned. */
   onDelete?: () => void;
   /** Present only on an EDITED builtin row: the explicit restore action
    *  (ADR-0109 Decision 2) -- the only way back onto the baseline. */

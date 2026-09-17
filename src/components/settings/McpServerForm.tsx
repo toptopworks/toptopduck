@@ -711,7 +711,6 @@ export function McpServerForm({
       </PaneBackLink>
 
       <PaneHeader
-        className="mb-3"
         size="form"
         title={title}
         description={(

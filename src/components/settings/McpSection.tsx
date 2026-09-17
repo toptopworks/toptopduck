@@ -506,7 +506,7 @@ export function McpSection({
           <div className="text-muted-foreground px-4 py-8 text-center text-sm">
             <FormattedMessage
               id="settings.mcp.noResults"
-              defaultMessage="No servers match your search."
+              defaultMessage="No servers match the current search and filter."
             />
           </div>
         ) : (

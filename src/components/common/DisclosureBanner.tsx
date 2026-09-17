@@ -31,7 +31,7 @@ export function DisclosureBanner() {
         <p>
           <FormattedMessage
             id="disclosure.privacy.apiKey"
-            defaultMessage="<bold>API key isolation:</bold> your API key is stored only in this computer's keychain and is used solely to call the endpoint you configured. The app never sends your data to any other server."
+            defaultMessage="<bold>API key isolation:</bold> your API key is stored only in this computer's keychain and is used solely to call the endpoint you configured — the app's interface never holds the key. The app never sends your data to any other server."
             values={boldValues}
           />
         </p>

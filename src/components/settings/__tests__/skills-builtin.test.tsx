@@ -112,6 +112,9 @@ describe("SkillsSection builtin rows (issue #677)", () => {
         name: "Restore built-in definition for skill pandoc",
       }),
     );
+    // Like the switch and the disabled delete, the restore sits outside
+    // the open-edit target: clicking it must not open the drawer.
+    expect(screen.queryByLabelText("Name")).toBeNull();
     // The confirm-dialog gate: the IPC fires only after the action.
     expect(restoreBuiltinSkill).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
