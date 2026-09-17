@@ -15,6 +15,7 @@ import type {
   McpServerConfig,
   McpProbeResult,
 } from "../../../types/mcp";
+import { baseAppConfig } from "../../../test-fixtures";
 
 // The pane drives everything through IPC; mock the API so the test never
 // touches Tauri.
@@ -27,6 +28,10 @@ vi.mock("../../../api", () => ({
   setMcpServerSecret: vi.fn(),
   setMcpServerHeaderSecret: vi.fn(),
 }));
+
+// The component's onCommit prop shape: it receives a config mutator and
+// resolves to the write outcome (null on success, the failure message).
+type CommitMutation = (mutate: (cfg: AppConfig) => AppConfig) => Promise<string | null>;
 
 function makeServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
   return {
@@ -47,15 +52,7 @@ function makeProbeResult(overrides: Partial<McpProbeResult> = {}): McpProbeResul
 }
 
 function makeAppConfig(servers: McpServerConfig[]): AppConfig {
-  return {
-    provider: {
-      profiles: [],
-      active_profile_id: "",
-    },
-    mcp_servers: { servers },
-    // The section only reads mcp_servers, but AppConfig requires all fields.
-    // Using a minimal spread so any additional fields don't break.
-  } as unknown as AppConfig;
+  return baseAppConfig({ mcp_servers: { servers } });
 }
 
 // Empty-catalog English IntlProvider + QueryClient (retry: false) +
@@ -263,7 +260,7 @@ describe("McpSection (issue #387)", () => {
     vi.mocked(clearMcpServerSecret).mockResolvedValue(undefined);
     vi.mocked(clearMcpServerHeaderSecret).mockResolvedValue(undefined);
 
-    const onCommit = vi.fn().mockResolvedValue(null);
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue(null);
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([server])} onCommit={onCommit} />,
     );
@@ -298,7 +295,7 @@ describe("McpSection (issue #387)", () => {
       keychain_env_keys: ["API_KEY"],
     });
 
-    const onCommit = vi.fn().mockResolvedValue("disk write failed");
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue("disk write failed");
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([server])} onCommit={onCommit} />,
     );
@@ -327,7 +324,7 @@ describe("McpSection (issue #387)", () => {
     });
     vi.mocked(clearMcpServerSecret).mockRejectedValue(new Error("keychain locked"));
 
-    const onCommit = vi.fn().mockResolvedValue(null);
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue(null);
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([server])} onCommit={onCommit} />,
     );
@@ -408,7 +405,7 @@ describe("McpSection (issue #387)", () => {
     vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
     vi.mocked(probeMcpServer).mockResolvedValue(probeResult);
 
-    const onCommit = vi.fn().mockResolvedValue(null);
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue(null);
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
     );
@@ -437,7 +434,7 @@ describe("McpSection (issue #387)", () => {
 
   it("row enable switch writes via upsert and syncs the mirror (ADR-0106)", async () => {
     const server = makeServer();
-    const onCommit = vi.fn().mockResolvedValue(null);
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue(null);
     vi.mocked(upsertMcpServer).mockResolvedValue({ ...server, enabled: false });
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([server])} onCommit={onCommit} />,
@@ -531,7 +528,7 @@ describe("McpSection (issue #387)", () => {
     vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
     vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
 
-    const onCommit = vi.fn().mockResolvedValue("disk write error");
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue("disk write error");
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([])} onCommit={onCommit} />,
     );
@@ -565,7 +562,7 @@ describe("McpSection (issue #387)", () => {
     vi.mocked(upsertMcpServer).mockResolvedValue(finalized);
     vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
 
-    const onCommit = vi.fn().mockResolvedValue(null);
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue(null);
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([a, b, c])} onCommit={onCommit} />,
     );
@@ -578,7 +575,7 @@ describe("McpSection (issue #387)", () => {
     fireEvent.click(screen.getByText("Save"));
 
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
-    const mutateFn = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    const mutateFn = onCommit.mock.calls[0][0];
     const mutated = mutateFn(makeAppConfig([a, b, c]));
     expect(mutated.mcp_servers.servers.map((s) => s.id)).toEqual([
       "srv-a",
@@ -650,7 +647,7 @@ describe("McpSection (issue #387)", () => {
       .mockResolvedValueOnce(makeServer({ id: "srv-new", display_name: "Brand New" }));
     vi.mocked(probeMcpServer).mockResolvedValue(makeProbeResult());
 
-    const onCommit = vi.fn().mockResolvedValue(null);
+    const onCommit = vi.fn<CommitMutation>().mockResolvedValue(null);
     renderWithProviders(
       <McpSection appConfig={makeAppConfig([a, b, c])} onCommit={onCommit} />,
     );
@@ -664,7 +661,7 @@ describe("McpSection (issue #387)", () => {
     fireEvent.click(screen.getByTestId("import-action"));
 
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
-    const mutateFn = onCommit.mock.calls[0][0] as (cfg: AppConfig) => AppConfig;
+    const mutateFn = onCommit.mock.calls[0][0];
     const mutated = mutateFn(makeAppConfig([a, b, c]));
     expect(mutated.mcp_servers.servers.map((s) => s.id)).toEqual([
       "srv-a",

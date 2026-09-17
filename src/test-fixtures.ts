@@ -5,8 +5,7 @@
 // enabled + disabled_skills #966). Per-test variants go through the
 // `overrides` parameter (spread AFTER the baseline). The two vi.mock-hoisted
 // config literals (App.i18n / App.theme) cannot import this module and stay
-// hand-rolled there; the CliSection / McpSection cast partials also remain,
-// tracked as follow-up.
+// hand-rolled there.
 import type { AppConfig } from "./types/app-config";
 import type { SkillEntry } from "./types/skills";
 
