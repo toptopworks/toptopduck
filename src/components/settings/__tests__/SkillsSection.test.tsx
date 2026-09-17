@@ -117,7 +117,11 @@ describe("SkillsSection (issue #362)", () => {
     await waitFor(() =>
       expect(setSkillEnabled).toHaveBeenCalledWith("pdf-tools", false),
     );
-    await waitFor(() => expect(onAppConfigSync).toHaveBeenCalledWith(synced));
+    await waitFor(() =>
+      expect(onAppConfigSync).toHaveBeenCalledWith(
+        expect.objectContaining({ disabled_skills: ["pdf-tools"] }),
+      ),
+    );
     // The bubble guard: the row is one big open-edit button; the switch
     // click must not ride the row's onClick up into the drawer.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

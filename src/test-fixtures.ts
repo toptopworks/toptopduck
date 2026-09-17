@@ -1,11 +1,12 @@
-// Shared test fixtures for the IPC wire types (issue #967). Every required
-// SkillEntry / AppConfig field is constructed HERE and only here: the next
-// schema field lands as one factory edit instead of another sweep of
-// hand-rolled literals across the test tree (the tax already paid for
-// content_hash #381, enabled_agents #932, enabled + disabled_skills #966).
-// Per-test variants go through the `overrides` parameter (spread AFTER the
-// baseline). The two vi.mock-hoisted config literals (App.i18n / App.theme)
-// cannot import this module and stay hand-rolled there.
+// Shared test fixtures for the IPC wire types (issue #967). Every hand-rolled
+// full literal was migrated here: the next schema field lands as one factory
+// edit for every typed call site instead of another sweep across the test
+// tree (the tax already paid for content_hash #381, enabled_agents #932,
+// enabled + disabled_skills #966). Per-test variants go through the
+// `overrides` parameter (spread AFTER the baseline). The two vi.mock-hoisted
+// config literals (App.i18n / App.theme) cannot import this module and stay
+// hand-rolled there; the CliSection / McpSection cast partials also remain,
+// tracked as follow-up.
 import type { AppConfig } from "./types/app-config";
 import type { SkillEntry } from "./types/skills";
 

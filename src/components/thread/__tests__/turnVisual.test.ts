@@ -233,7 +233,7 @@ const skillNamed = (
   data: { kind, name, actor: null },
 });
 // The fold inputs only ever read has()/get() here, so the registry rows come
-// straight from the shared factory (no per-file literals or casts).
+// straight from the shared factory.
 const registry = (...names: string[]): ReadonlyMap<string, SkillEntry> =>
   new Map(names.map((n) => [n, skillEntry(n)]));
 

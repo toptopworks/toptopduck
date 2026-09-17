@@ -39,8 +39,9 @@ import { baseAppConfig as sharedBaseAppConfig } from "../../test-fixtures";
 
 function baseAppConfig(shell: Pick<AppConfig["shell"], "sidebar_collapsed">): AppConfig {
   // The wrapper fills `sidebar_grouping: "flat"` (the serde default) so callers
-  // stay focused on the collapse prefs they actually exercise. Grouping-specific
-  // tests spread the wrapper and override `shell` with the mode under test.
+  // stay focused on the collapse prefs they actually exercise. The
+  // persisted-grouping restore test overrides `shell` with the mode under
+  // test; the switch tests start from this flat baseline.
   return sharedBaseAppConfig({
     format_version: 1,
     shell: { ...shell, sidebar_grouping: "flat" },
