@@ -4,6 +4,10 @@ import { cn } from "@/lib/utils";
 import { useEffect, useRef } from "react";
 
 import { fmtError } from "../../lib/error-presentation";
+import {
+  findQueryMatches,
+  normalizeSearchQuery,
+} from "../../lib/searchMatcher";
 import type { ReactNode } from "react";
 import type { SkillEntry } from "../../types/skills";
 import { skillPickerOptionId, type SkillPickerMode } from "./skillPickerLogic";
@@ -196,15 +200,15 @@ export function SkillPickerPanel({
 
 /** Split `text` around every case-insensitive occurrence of the trimmed
  *  query, wrapping each hit in a foreground span. An empty query returns the
- *  plain string -- no spans, no dimming. */
+ *  plain string -- no spans, no dimming. The needle and the haystack-side
+ *  case folding are the shared search core's, so highlighting moves with
+ *  matching if the core ever changes. */
 function highlightMatches(text: string, query: string): ReactNode {
-  const q = query.trim().toLowerCase();
-  if (q === "") return text;
-  const lower = text.toLowerCase();
+  const q = normalizeSearchQuery(query);
+  if (q === null) return text;
   const parts: ReactNode[] = [];
   let cursor = 0;
-  let at = lower.indexOf(q);
-  while (at !== -1) {
+  for (const at of findQueryMatches(text, q)) {
     if (at > cursor) parts.push(text.slice(cursor, at));
     parts.push(
       <span key={at} className="text-foreground">
@@ -212,7 +216,6 @@ function highlightMatches(text: string, query: string): ReactNode {
       </span>,
     );
     cursor = at + q.length;
-    at = lower.indexOf(q, cursor);
   }
   parts.push(text.slice(cursor));
   return parts;

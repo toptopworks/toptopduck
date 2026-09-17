@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { searchMatcher } from "../searchMatcher";
+import {
+  findQueryMatches,
+  normalizeSearchQuery,
+  searchMatcher,
+} from "../searchMatcher";
 
 // The shared search-match core (issue #978): one trimmed, case-insensitive
 // substring matcher behind the settings search boxes and the composer skill
@@ -32,5 +36,34 @@ describe("searchMatcher", () => {
 
   it("returns false on a miss", () => {
     expect(searchMatcher("zzz")("Draw charts")).toBe(false);
+  });
+});
+
+// The position face of the core (issue #978): the picker's hit highlighting
+// rides the same needle and the same haystack-side case folding as the
+// boolean matcher, so a future core change lands for matching and
+// highlighting together.
+
+describe("normalizeSearchQuery", () => {
+  it("returns null for an empty query", () => {
+    expect(normalizeSearchQuery("")).toBeNull();
+  });
+
+  it("returns null for a whitespace-only query", () => {
+    expect(normalizeSearchQuery("   ")).toBeNull();
+  });
+
+  it("trims and lower-cases the raw query", () => {
+    expect(normalizeSearchQuery("  CHART  ")).toBe("chart");
+  });
+});
+
+describe("findQueryMatches", () => {
+  it("finds every occurrence in order", () => {
+    expect(findQueryMatches("Draw charts", "a")).toEqual([2, 7]);
+  });
+
+  it("returns an empty array on a miss", () => {
+    expect(findQueryMatches("Draw charts", "zzz")).toEqual([]);
   });
 });
