@@ -13,8 +13,9 @@ import {
 } from "../../../api";
 import { log } from "../../../lib/log";
 import { blankCliTool } from "../../../types/cli-tool";
-import type { BuiltinScanEntry, BuiltinScanResult } from "../../../types/cli-tool";
+import type { BuiltinScanEntry, BuiltinScanResult, CliToolConfig } from "../../../types/cli-tool";
 import type { AppConfig } from "../../../types/app-config";
+import { baseAppConfig } from "../../../test-fixtures";
 
 // The section drives everything through IPC; mock the API so the test never
 // touches Tauri (the McpServerForm.test harness pattern).
@@ -56,31 +57,8 @@ function makeTool(overrides: Partial<Parameters<typeof upsertCliTool>[0]> = {}) 
   };
 }
 
-function makeAppConfig(tools: ReturnType<typeof makeTool>[]): AppConfig {
-  return {
-    format_version: 2,
-    theme: "system",
-    locale: "system",
-    engine: {
-      memory_limit: "1GB",
-      threads: 1,
-      row_cap: 1000,
-    },
-    privacy: { send_samples: true },
-    provider: {
-      profiles: [],
-      active_profile: null,
-    },
-    export: { include_samples: true },
-    tunables: { window_turns: 6 },
-    shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
-    mcp_servers: { servers: [] },
-    cli_tools: { tools },
-    sessions_dir: null,
-    default_runtime: "built_in",
-    builtin_skill_baselines: {},
-    last_model_postures: {},
-  } as unknown as AppConfig;
+function makeAppConfig(tools: CliToolConfig[]): AppConfig {
+  return baseAppConfig({ cli_tools: { tools } });
 }
 
 // Empty-catalog English IntlProvider: FormattedMessage falls back to

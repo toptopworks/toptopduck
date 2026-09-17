@@ -15,6 +15,7 @@ import type {
   McpServerConfig,
   McpProbeResult,
 } from "../../../types/mcp";
+import { baseAppConfig } from "../../../test-fixtures";
 
 // The pane drives everything through IPC; mock the API so the test never
 // touches Tauri.
@@ -47,15 +48,7 @@ function makeProbeResult(overrides: Partial<McpProbeResult> = {}): McpProbeResul
 }
 
 function makeAppConfig(servers: McpServerConfig[]): AppConfig {
-  return {
-    provider: {
-      profiles: [],
-      active_profile_id: "",
-    },
-    mcp_servers: { servers },
-    // The section only reads mcp_servers, but AppConfig requires all fields.
-    // Using a minimal spread so any additional fields don't break.
-  } as unknown as AppConfig;
+  return baseAppConfig({ mcp_servers: { servers } });
 }
 
 // Empty-catalog English IntlProvider + QueryClient (retry: false) +

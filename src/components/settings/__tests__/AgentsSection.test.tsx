@@ -13,6 +13,8 @@ import {
   updateAgent,
 } from "../../../api";
 import type { AgentEntry, AgentListing } from "../../../types/agents";
+import type { AppConfig } from "../../../types/app-config";
+import { baseAppConfig } from "../../../test-fixtures";
 
 // The pane drives everything through IPC; mock the API so the test never
 // touches Tauri (the McpSection test posture).
@@ -21,8 +23,8 @@ vi.mock("../../../api", () => ({
   getAgentsDir: vi.fn(),
   createAgent: vi.fn(),
   updateAgent: vi.fn(),
-  deleteAgent: vi.fn(),
-  setAgentEnabled: vi.fn(),
+  deleteAgent: vi.fn(async () => baseAppConfig()),
+  setAgentEnabled: vi.fn(async () => baseAppConfig()),
 }));
 
 // The opener plugin is Tauri-gated; the reveal pin lives here.
@@ -409,7 +411,7 @@ describe("AgentsSection (issue #932)", () => {
 
   it("flips enablement and syncs the returned config", async () => {
     const sync = vi.fn();
-    const cfg = { enabled_agents: [] } as never;
+    const cfg = baseAppConfig({ enabled_agents: [] });
     mockedSetEnabled.mockResolvedValue(cfg);
     mockedList.mockResolvedValue(makeListing([makeEntry({ enabled: false })]));
     renderWithSync(sync);
@@ -421,7 +423,7 @@ describe("AgentsSection (issue #932)", () => {
 
   it("deletes a user definition after confirmation and syncs the config", async () => {
     const sync = vi.fn();
-    mockedDelete.mockResolvedValue({ enabled_agents: [] } as never);
+    mockedDelete.mockResolvedValue(baseAppConfig({ enabled_agents: [] }));
     mockedList.mockResolvedValue(makeListing([makeEntry()]));
     renderWithSync(sync);
     await screen.findByText("data-cleaner");
@@ -452,6 +454,6 @@ describe("AgentsSection (issue #932)", () => {
 
 // A small render variant that captures the sync callback (the describe's
 // enablement/delete cases need to assert on it).
-function renderWithSync(sync: (cfg: unknown) => void) {
-  renderSettings(<AgentsSection onAppConfigSync={sync as never} />);
+function renderWithSync(sync: (cfg: AppConfig) => void) {
+  renderSettings(<AgentsSection onAppConfigSync={sync} />);
 }
