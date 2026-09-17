@@ -163,7 +163,7 @@ export function PaneBackLink({
   return (
     <button
       type="button"
-      className="text-muted-foreground hover:text-foreground mb-2 flex items-center gap-1.5 text-sm"
+      className="text-muted-foreground hover:text-foreground mb-4 flex items-center gap-1.5 text-sm"
       onClick={onClick}
       disabled={disabled}
     >
@@ -177,8 +177,13 @@ export function PaneBackLink({
  *  the in-row counterpart of the pane-header posture -- Edit / Test /
  *  Restore hover to the foreground, Delete to destructive (issue #958).
  *  `spinning` swaps the icon for a rotating Loader2 (the in-flight Test
- *  button); `onClick` receives the event so row-embedded buttons can
- *  stopPropagation against their clickable row. */
+ *  button); `onClick` is the plain action handler -- the settings rows are
+ *  not whole-row click targets, so no stopPropagation duty rides on it. A
+ *  DISABLED action restores
+ *  hit-testing to show the not-allowed cursor: the base's
+ *  pointer-events-none would let the clickable row's hand cursor bleed
+ *  through, promising an action the button won't take (a disabled control
+ *  fires no click, so the row stays quiet). */
 export function RowActionButton({
   label,
   icon: Icon,
@@ -202,6 +207,7 @@ export function RowActionButton({
       variant="ghost"
       className={cn(
         "text-muted-foreground shrink-0",
+        "disabled:pointer-events-auto disabled:cursor-not-allowed",
         destructive ? "hover:text-destructive" : "hover:text-foreground",
       )}
       aria-label={label}
@@ -369,26 +375,40 @@ export function SettingsRow({
 /** The hero header at the top of each settings pane: a large title, a one-line
  *  muted description, and an optional top-right action (the per-pane refresh
  *  button on Profiles). Replaces the retired single settings header + the old
- *  per-pane <h3> (ADR-0075: titles promoted to pane heroes). */
+ *  per-pane <h3> (ADR-0075: titles promoted to pane heroes). Typography rides
+ *  the DESIGN.md tokens: `size="section"` (default) is `{typography.headline-lg}`
+ *  (20px/600/-0.2px -- the designated settings-section header); `size="form"`
+ *  is `{typography.headline-md}` (18px/600, no tracking) for a create/edit
+ *  form's own heading, one step down the scale from its section's hero. */
 export function PaneHeader({
   title,
   description,
   action,
   className,
+  size = "section",
 }: {
   title: ReactNode;
   description?: ReactNode;
   /** Top-right slot (e.g. the Profiles refresh button). */
   action?: ReactNode;
   className?: string;
+  size?: "section" | "form";
 }) {
   return (
     <div
       data-slot="pane-header"
       className={cn("mb-6 flex items-start justify-between gap-4", className)}
     >
-      <div className="min-w-0 space-y-1">
-        <h3 className="text-lg font-semibold tracking-tight">{title}</h3>
+      <div className="min-w-0 space-y-6">
+        <h3
+          className={
+            size === "form"
+              ? "text-lg font-semibold"
+              : "text-xl font-semibold tracking-[-0.2px]"
+          }
+        >
+          {title}
+        </h3>
         {description && (
           <p className="text-muted-foreground text-sm">{description}</p>
         )}

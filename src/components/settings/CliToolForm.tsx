@@ -186,11 +186,12 @@ export function CliToolForm({
 
       <PaneHeader
         className="mb-3"
+        size="form"
         title={title}
         description={(
           <FormattedMessage
             id="settings.cli.form.description"
-            defaultMessage="A registered tool runs as a direct command line (never a shell): the executable plus fixed arguments, with '{'param'}' placeholders filled from the parameter table."
+            defaultMessage="Enter the program to run and its arguments. Use '{'param'}' placeholders to fill values from the parameter table."
           />
         )}
       />

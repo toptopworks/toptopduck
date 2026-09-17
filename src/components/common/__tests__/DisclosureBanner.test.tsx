@@ -10,26 +10,26 @@ import { renderI18n } from "./helpers";
 describe("DisclosureBanner", () => {
   it("discloses the default-to-send payload and local-only guarantee", () => {
     const { container } = renderI18n(<DisclosureBanner />);
-    expect(screen.getByText(/完整数据集永不离开本机/)).toBeInTheDocument();
-    expect(screen.getByText(/首 3 行样本/)).toBeInTheDocument();
+    expect(screen.getByText(/绝不会发送完整数据集/)).toBeInTheDocument();
+    expect(screen.getByText(/前 3 行示例/)).toBeInTheDocument();
     // The schema segment is brand-neutral: "data types", never the engine (#739).
-    expect(container).toHaveTextContent(/列名 \+ 数据类型/);
+    expect(container).toHaveTextContent(/列名和类型/);
   });
 
   it("discloses Excel formula cells use cached snapshot values (issue #7 AC4)", () => {
     const { container } = renderI18n(<DisclosureBanner />);
-    expect(container).toHaveTextContent(/Excel 工作簿按 sheet 分别加载为独立/);
-    expect(container).toHaveTextContent(/隐藏的工作表会被跳过/);
-    expect(container).toHaveTextContent(/公式单元格取加载时的缓存值（不重算）/);
+    expect(container).toHaveTextContent(/每个工作表加载为独立数据集/);
+    expect(container).toHaveTextContent(/隐藏的工作表会跳过/);
+    expect(container).toHaveTextContent(/公式单元格使用保存时的值/);
     // issue #10: disclose auto-tidy + guided fallback + .xls rejection.
-    expect(container).toHaveTextContent(/自动规整/);
-    expect(container).toHaveTextContent(/请另存为 .xlsx/);
+    expect(container).toHaveTextContent(/自动整理/);
+    expect(container).toHaveTextContent(/另存为 .xlsx/);
   });
 
   it("discloses the per-dataset / per-column privacy control surface (issue #9)", () => {
     const { container } = renderI18n(<DisclosureBanner />);
-    expect(container).toHaveTextContent(/按数据集关闭样本发送/);
-    expect(container).toHaveTextContent(/按列标记「仅类型」/);
+    expect(container).toHaveTextContent(/关闭该数据集的示例发送/);
+    expect(container).toHaveTextContent(/将列标记为仅类型/);
   });
 
   it("renders as a static note Alert (ADR-0050, issue #108)", () => {

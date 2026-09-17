@@ -59,6 +59,13 @@ import {
   SettingsRow,
 } from "./settings-chrome";
 
+// The pane's navigation name: the list header and the create/edit form share
+// it -- the form keeps the name for section context, without the list-only
+// action buttons.
+const NAV_TITLE = (
+  <FormattedMessage id="settings.agents.title" defaultMessage="Subagents" />
+);
+
 // Agents settings pane (issue #932, ADR-0117). The registry is a directory
 // scan (no app-config entity -- the definitions are files), so this pane
 // reads list_agents + drives create / update / delete through TanStack
@@ -66,7 +73,7 @@ import {
 // machine-level axis in app-config: the row Switch flips it through
 // set_agent_enabled, whose updated FULL config syncs the caller's snapshot
 // (the ADR-0109 Decision 9 contract, same channel as the Skills pane).
-// Built-in rows keep their name locked and expose no delete entry point
+// Built-in rows keep their name locked and carry a disabled delete button
 // (disabling is the single shutdown axis); linked rows are read-only.
 
 // The backend name/description rules, mirrored client-side (the
@@ -219,35 +226,34 @@ export function AgentsSection({
   }
 
   // The create/edit form replaces the whole pane (the McpServerForm posture):
-  // a full-page form reads better than a modal over the list it edits.
+  // a full-page form reads better than a modal over the list it edits. The
+  // navigation name stays above the form (the section context); the list
+  // header's action buttons do not -- they are list-only.
   if (form.mode !== "closed") {
     return (
-      <AgentForm
-        key={form.mode === "edit" ? form.entry.name : "create"}
-        editing={form.mode === "edit" ? form.entry : null}
-        saving={createMutation.isPending || updateMutation.isPending}
-        error={error}
-        onCancel={() => setForm({ mode: "closed" })}
-        onCreate={(update) => createMutation.mutate(update)}
-        onSave={(name, update) => updateMutation.mutate({ name, update })}
-      />
+      <div>
+        <PaneHeader title={NAV_TITLE} />
+        <AgentForm
+          key={form.mode === "edit" ? form.entry.name : "create"}
+          editing={form.mode === "edit" ? form.entry : null}
+          saving={createMutation.isPending || updateMutation.isPending}
+          error={error}
+          onCancel={() => setForm({ mode: "closed" })}
+          onCreate={(update) => createMutation.mutate(update)}
+          onSave={(name, update) => updateMutation.mutate({ name, update })}
+        />
+      </div>
     );
   }
 
   return (
     <div className="space-y-4">
       <PaneHeader
-        title={intl.formatMessage({
-          id: "settings.agents.title",
-          defaultMessage: "Subagents",
-        })}
+        title={NAV_TITLE}
         description={(
           <FormattedMessage
             id="settings.agents.intro"
-            defaultMessage={
-              "Each definition becomes a named delegation tool for the built-in runtime. " +
-              "The body is the sub-agent's system prompt; wrap a skill name in backticks to bind it."
-            }
+            defaultMessage="Create helpers the main agent can hand work to. Each helper has its own name and instructions."
           />
         )}
         action={(
@@ -353,8 +359,8 @@ export function AgentsSection({
               onToggleEnabled={(enabled) =>
                 enableMutation.mutate({ name: agent.name, enabled })}
               onEdit={() => openEdit(agent)}
-              // A builtin definition is undeletable: no delete entry point
-              // renders (disabling is the single shutdown axis).
+              // A builtin definition is undeletable: its delete button
+              // renders disabled (disabling is the single shutdown axis).
               onDelete={
                 agent.source === "builtin" ? undefined : () => setConfirmDelete(agent.name)
               }
@@ -568,32 +574,41 @@ function AgentRow({
           {agent.description}
         </p>
       </div>
-      <Switch
-        checked={agent.enabled}
-        disabled={busy}
-        onCheckedChange={onToggleEnabled}
-        aria-label={intl.formatMessage(
-          {
-            id: "settings.agents.enabledLabel",
-            defaultMessage: "Enable agent {name}",
-          },
-          { name: agent.name },
-        )}
-      />
-      <RowActionButton
-        label={intl.formatMessage(
-          {
-            id: "settings.agents.editLabel",
-            defaultMessage: "Edit agent {name}",
-          },
-          { name: agent.name },
-        )}
-        icon={Pencil}
-        onClick={onEdit}
-      />
-      {onDelete && (
+      {/* The action cluster (the skills / CLI row posture): one tight
+          shrink-0 group hugging the row end, the switch set apart by a
+          breath before the gap-0.5 action pair. */}
+      <div className="flex shrink-0 items-center gap-0.5">
+        <Switch
+          className="mr-1.5"
+          checked={agent.enabled}
+          disabled={busy}
+          onCheckedChange={onToggleEnabled}
+          aria-label={intl.formatMessage(
+            {
+              id: "settings.agents.enabledLabel",
+              defaultMessage: "Enable agent {name}",
+            },
+            { name: agent.name },
+          )}
+        />
+        <RowActionButton
+          label={intl.formatMessage(
+            {
+              id: "settings.agents.editLabel",
+              defaultMessage: "Edit agent {name}",
+            },
+            { name: agent.name },
+          )}
+          icon={Pencil}
+          onClick={onEdit}
+        />
+        {/* The delete renders on EVERY row (disabled on a builtin
+            definition): a per-row absent button would shift the switch /
+            edit columns across rows. Disabling stays the single shutdown
+            axis for builtins. */}
         <RowActionButton
           destructive
+          disabled={!onDelete}
           label={intl.formatMessage(
             {
               id: "settings.agents.deleteLabel",
@@ -604,7 +619,7 @@ function AgentRow({
           icon={Trash2}
           onClick={onDelete}
         />
-      )}
+      </div>
     </div>
   );
 }
@@ -670,6 +685,8 @@ function AgentForm({
         />
       </PaneBackLink>
       <PaneHeader
+        className="mb-3"
+        size="form"
         title={editing ? (
           <FormattedMessage
             id="settings.agents.editTitle"

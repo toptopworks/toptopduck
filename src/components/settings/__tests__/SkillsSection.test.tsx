@@ -122,8 +122,8 @@ describe("SkillsSection (issue #362)", () => {
         expect.objectContaining({ disabled_skills: ["pdf-tools"] }),
       ),
     );
-    // The bubble guard: the row is one big open-edit button; the switch
-    // click must not ride the row's onClick up into the drawer.
+    // The switch sits outside the row's open-edit target (the text block):
+    // toggling it must not open the drawer.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     // The refetch half: the listing is queried again and the row grays.
     await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));

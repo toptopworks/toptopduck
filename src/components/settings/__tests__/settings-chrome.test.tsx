@@ -309,7 +309,7 @@ describe("PaneBackLink", () => {
     expect(link).toHaveClass(
       "text-muted-foreground",
       "hover:text-foreground",
-      "mb-2",
+      "mb-4",
       "flex",
       "items-center",
       "gap-1.5",

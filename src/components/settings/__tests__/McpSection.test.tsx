@@ -8,6 +8,7 @@ import { TooltipProvider } from "../../ui/tooltip";
 
 import { McpSection } from "../McpSection";
 import { upsertMirror } from "../mcp-mirror";
+import { chooseOption, openSelect } from "./helpers";
 import { clearMcpServerHeaderSecret, clearMcpServerSecret, discoverMcpServers, probeMcpServer, upsertMcpServer } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type {
@@ -140,6 +141,26 @@ describe("McpSection (issue #387)", () => {
     expect(screen.getByText("GitHub MCP")).toBeInTheDocument();
     // Transport type + command on the second line, separated by "·".
     expect(screen.getByText(/stdio.*\/bin\/mcp-server/)).toBeInTheDocument();
+  });
+
+  it("filters servers through the status select", () => {
+    renderWithProviders(
+      <McpSection
+        appConfig={makeAppConfig([
+          makeServer({ id: "srv-1", display_name: "On Server", enabled: true }),
+          makeServer({ id: "srv-2", display_name: "Off Server", enabled: false }),
+        ])}
+        onCommit={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("On Server")).toBeInTheDocument();
+    expect(screen.getByText("Off Server")).toBeInTheDocument();
+    // Radix Select opens on a pointer sequence and commits on an option
+    // click (the skills / agents filter posture).
+    openSelect(screen.getByLabelText("Filter by status"));
+    chooseOption("Enabled");
+    expect(screen.getByText("On Server")).toBeInTheDocument();
+    expect(screen.queryByText("Off Server")).toBeNull();
   });
 
   it("shows the untested hint in expanded row before testing", () => {
@@ -379,6 +400,8 @@ describe("McpSection (issue #387)", () => {
     expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
 
     // Go back.
+    // The form page keeps the section's navigation name above it.
+    expect(screen.getByText("MCP Servers")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Back to MCP list"));
 
     expect(screen.queryByTestId("mcp-server-form")).not.toBeInTheDocument();

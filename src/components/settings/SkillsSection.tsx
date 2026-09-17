@@ -110,8 +110,9 @@ const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
   "builtin",
 ];
 
-const ROW_CLASS =
-  "hover:bg-accent focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 flex cursor-pointer items-center gap-3 px-4 py-3 outline-none";
+// The row is list chrome (hover highlight + layout); the open-edit
+// affordance is scoped to the row's text block -- never the action cluster.
+const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3 outline-none";
 
 function matchesSearch(skill: SkillEntry, query: string): boolean {
   if (query.trim() === "") return true;
@@ -460,16 +461,17 @@ export function SkillsSection({
               onToggleEnabled={(enabled) =>
                 toggleEnabledMutation.mutate({ name: skill.name, enabled })}
               onOpen={() => openEdit(skill)}
-              // A builtin skill is undeletable (issue #677): no delete entry
-              // point renders -- disabling the companion CLI tool is the
-              // single shutdown axis.
+              // A builtin skill is undeletable (issue #677): its delete
+              // button renders disabled -- disabling the companion CLI tool
+              // is the single shutdown axis.
               onDelete={
                 skill.acquired === "builtin"
                   ? undefined
                   : () => setConfirmDelete(skill.name)
               }
-              // The restore shows only on an EDITED builtin row -- an
-              // unedited row already agrees with the shipped baseline.
+              // The restore shows only on an EDITED builtin row, taking the
+              // row-end slot in place of the delete -- an unedited row already
+              // agrees with the shipped baseline.
               onRestore={
                 skill.acquired === "builtin" && isEditedBuiltin(skill)
                   ? () => setConfirmRestore(skill.name)
@@ -615,9 +617,11 @@ type SkillRowProps = {
   /** Flip the row's enablement axis (issue #961). */
   onToggleEnabled: (enabled: boolean) => void;
   onOpen: () => void;
-  /** Undefined on builtin rows: undeletable (issue #677). */
+  /** Undefined on builtin rows (issue #677): the delete button then renders
+   *  disabled, keeping every row's action column aligned. */
   onDelete?: () => void;
-  /** Present only on an EDITED builtin row: the explicit restore (issue #677). */
+  /** Present only on an EDITED builtin row (issue #677): the explicit
+   *  restore, taking the row-end action slot in place of the delete. */
   onRestore?: () => void;
 };
 
@@ -633,16 +637,7 @@ function SkillRow({
   const intl = useIntl();
   return (
     <div
-      role="button"
-      tabIndex={0}
       data-testid="skill-row"
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
       // Dormant-on-disable gray-out (issue #961): the disabled row reads
       // faded (the switch + actions keep full contrast -- management stays
       // first-class) and carries data-disabled as the test/styling hook.
@@ -650,7 +645,21 @@ function SkillRow({
       data-disabled={skill.enabled ? undefined : "true"}
     >
       <Puzzle className="text-muted-foreground size-4 shrink-0" aria-hidden />
-      <div className="min-w-0 flex-1">
+      {/* The open-edit target is the text block alone: the row's clickable
+          area stops before the action cluster instead of spanning the whole
+          row. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        }}
+        className="min-w-0 flex-1 cursor-pointer outline-none focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2"
+      >
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.name}</span>
           <NameBadge>
@@ -686,6 +695,7 @@ function SkillRow({
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
         <Switch
+          className="mr-1.5"
           checked={skill.enabled}
           disabled={busy}
           onCheckedChange={onToggleEnabled}
@@ -696,11 +706,13 @@ function SkillRow({
             },
             { name: skill.name },
           )}
-          // The row is one big open-edit button: the switch click must not
-          // ride the row's onClick up into the drawer.
-          onClick={(e) => e.stopPropagation()}
         />
-        {onRestore && (
+        {/* The row-end slot is exactly ONE button wide in every state --
+            restore on an EDITED builtin (it takes the delete's place), else
+            the delete (disabled on builtin, issue #677) -- so the switch
+            column never shifts across rows. Clicks are the action cluster's
+            business (see the container above), never the row's. */}
+        {onRestore ? (
           <RowActionButton
             label={intl.formatMessage(
               {
@@ -710,15 +722,12 @@ function SkillRow({
               { name: skill.name },
             )}
             icon={RotateCcw}
-            onClick={(e) => {
-              e.stopPropagation();
-              onRestore();
-            }}
+            onClick={onRestore}
           />
-        )}
-        {onDelete && (
+        ) : (
           <RowActionButton
             destructive
+            disabled={!onDelete}
             label={intl.formatMessage(
               {
                 id: "settings.skills.deleteLabel",
@@ -727,10 +736,7 @@ function SkillRow({
               { name: skill.name },
             )}
             icon={Trash2}
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
+            onClick={onDelete}
           />
         )}
       </div>

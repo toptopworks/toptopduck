@@ -7,7 +7,6 @@ import {
   MinusCircle,
   Pencil,
   Plus,
-  Search,
   Trash2,
   Zap,
 } from "lucide-react";
@@ -37,6 +36,15 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Switch } from "../ui/switch";
 import {
   HeaderActionButton,
@@ -50,6 +58,30 @@ import {
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
 import { upsertMirror, withMcpServers } from "./mcp-mirror";
+
+// The pane's navigation name: the list header and the create/edit form share
+// it -- the form keeps the name for section context, without the list-only
+// action buttons.
+const NAV_TITLE = (
+  <FormattedMessage id="settings.nav.mcp" defaultMessage="MCP Servers" />
+);
+
+type EnabledFilter = "all" | "enabled" | "disabled";
+
+const FILTER_OPTIONS: ReadonlyArray<EnabledFilter> = [
+  "all",
+  "enabled",
+  "disabled",
+];
+
+function matchesSearch(server: McpServerConfig, query: string): boolean {
+  if (query.trim() === "") return true;
+  return server.display_name.toLowerCase().includes(query.trim().toLowerCase());
+}
+
+function matchesFilter(server: McpServerConfig, filter: EnabledFilter): boolean {
+  return filter === "all" || (filter === "enabled") === server.enabled;
+}
 
 // MCP servers settings pane (issue #387 + #388). Two sub-views managed by local
 // state: "list" shows every configured server with a connection status dot,
@@ -106,6 +138,7 @@ export function McpSection({
   const [importEpoch, setImportEpoch] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [filter, setFilter] = useState<EnabledFilter>("all");
   // The server whose enable toggle write is in flight (gates just that row's
   // switch so a slow write does not freeze the whole list).
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -115,11 +148,13 @@ export function McpSection({
     () => new Set(servers.map((s) => s.display_name)),
     [servers],
   );
-  const filteredServers = searchQuery.trim()
-    ? servers.filter((s) =>
-        s.display_name.toLowerCase().includes(searchQuery.trim().toLowerCase()),
-      )
-    : servers;
+  const filteredServers = useMemo(
+    () =>
+      servers.filter(
+        (s) => matchesSearch(s, searchQuery) && matchesFilter(s, filter),
+      ),
+    [servers, searchQuery, filter],
+  );
 
   /** Shared error half of every write here (#659): run one async write unit
    *  and surface a resolve-to-error or rejection through setError — the catch
@@ -347,14 +382,19 @@ export function McpSection({
   // --- Form view ----------------------------------------------------------
   if (formTarget) {
     return (
-      <McpServerForm
-        key={formTarget.server.id || "new"}
-        initialServer={formTarget.server}
-        isEdit={formTarget.isEdit}
-        onSaved={(finalized, probeResult) =>
-          void handleFormSaved(finalized, probeResult)}
-        onCancel={() => setFormTarget(null)}
-      />
+      <div>
+        {/* The navigation name stays above the form (the section context);
+            the list header's action buttons do not -- they are list-only. */}
+        <PaneHeader title={NAV_TITLE} />
+        <McpServerForm
+          key={formTarget.server.id || "new"}
+          initialServer={formTarget.server}
+          isEdit={formTarget.isEdit}
+          onSaved={(finalized, probeResult) =>
+            void handleFormSaved(finalized, probeResult)}
+          onCancel={() => setFormTarget(null)}
+        />
+      </div>
     );
   }
 
@@ -362,16 +402,11 @@ export function McpSection({
   return (
     <div>
       <PaneHeader
-        title={(
-          <FormattedMessage
-            id="settings.nav.mcp"
-            defaultMessage="MCP Servers"
-          />
-        )}
+        title={NAV_TITLE}
         description={(
           <FormattedMessage
             id="settings.mcp.description"
-            defaultMessage="External Model Context Protocol servers add tools the agent can call. Test a server to verify connectivity and list its tools."
+            defaultMessage="Add external tool servers the agent can use. Test a server to see the tools it provides."
           />
         )}
         action={(
@@ -399,24 +434,50 @@ export function McpSection({
         )}
       />
 
-      {servers.length > 0 && (
-        <div className="mb-3 flex items-center gap-2">
-          <Search
-            className="text-muted-foreground size-4 shrink-0"
-            aria-hidden
+      {/* The search + status filter ride the shared list posture (the
+          skills / agents pane row). */}
+      <div className="mb-3 flex items-center gap-2">
+        <Input
+          type="search"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder={intl.formatMessage({
+            id: "settings.mcp.searchPlaceholder",
+            defaultMessage: "Search servers…",
+          })}
+          className="max-w-xs"
+        />
+        <Label htmlFor="mcp-status-filter" className="sr-only">
+          <FormattedMessage
+            id="settings.mcp.filterLabel"
+            defaultMessage="Filter by status"
           />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={intl.formatMessage({
-              id: "settings.mcp.searchPlaceholder",
-              defaultMessage: "Search servers…",
+        </Label>
+        <Select value={filter} onValueChange={(v) => setFilter(v as EnabledFilter)}>
+          <SelectTrigger
+            id="mcp-status-filter"
+            aria-label={intl.formatMessage({
+              id: "settings.mcp.filterLabel",
+              defaultMessage: "Filter by status",
             })}
-            className="text-muted-foreground placeholder:text-muted-foreground/70 focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 h-8 flex-1 rounded-md border-0 bg-transparent text-sm outline-none"
-          />
-        </div>
-      )}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {FILTER_OPTIONS.map((opt) => (
+              <SelectItem key={opt} value={opt}>
+                {opt === "all" ? (
+                  <FormattedMessage id="settings.mcp.filterAll" defaultMessage="All" />
+                ) : opt === "enabled" ? (
+                  <FormattedMessage id="settings.mcp.filterEnabled" defaultMessage="Enabled" />
+                ) : (
+                  <FormattedMessage id="settings.mcp.filterDisabled" defaultMessage="Disabled" />
+                )}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
 
       {servers.length > 0 && (
         <p className="mb-2 text-sm">
@@ -445,8 +506,7 @@ export function McpSection({
           <div className="text-muted-foreground px-4 py-8 text-center text-sm">
             <FormattedMessage
               id="settings.mcp.noResults"
-              defaultMessage='No servers match "{query}".'
-              values={{ query: searchQuery.trim() }}
+              defaultMessage="No servers match your search."
             />
           </div>
         ) : (

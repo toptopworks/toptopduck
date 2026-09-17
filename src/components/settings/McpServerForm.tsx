@@ -712,11 +712,12 @@ export function McpServerForm({
 
       <PaneHeader
         className="mb-3"
+        size="form"
         title={title}
         description={(
           <FormattedMessage
             id="settings.mcp.form.description"
-            defaultMessage="Configure how this MCP server connects. Secret values are stored in the OS keychain and never appear in the config file."
+            defaultMessage="Set how this server connects. Secrets are kept in your system keychain and never appear in the config file."
           />
         )}
         action={(

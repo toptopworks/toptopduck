@@ -34,6 +34,13 @@ import {
 import { blankCliTool } from "../../types/cli-tool";
 import { CliToolForm } from "./CliToolForm";
 
+// The pane's navigation name: the list header and the create/edit form share
+// it -- the form keeps the name for section context, without the list-only
+// action buttons.
+const NAV_TITLE = (
+  <FormattedMessage id="settings.nav.cliTools" defaultMessage="CLI Tools" />
+);
+
 // Registered CLI tools settings pane (issue #671, ADR-0108): the second
 // external tool source. Structured like the MCP pane -- "list" shows every
 // registered tool with a per-row enable toggle + Edit/Delete, "form" shows
@@ -205,13 +212,18 @@ export function CliSection({
   // --- Form view ----------------------------------------------------------
   if (formTarget) {
     return (
-      <CliToolForm
-        key={formTarget.tool.name || "new"}
-        initialTool={formTarget.tool}
-        isEdit={formTarget.isEdit}
-        onSaved={handleFormSaved}
-        onCancel={() => setFormTarget(null)}
-      />
+      <div>
+        {/* The navigation name stays above the form (the section context);
+            the list header's action buttons do not -- they are list-only. */}
+        <PaneHeader title={NAV_TITLE} />
+        <CliToolForm
+          key={formTarget.tool.name || "new"}
+          initialTool={formTarget.tool}
+          isEdit={formTarget.isEdit}
+          onSaved={handleFormSaved}
+          onCancel={() => setFormTarget(null)}
+        />
+      </div>
     );
   }
 
@@ -219,16 +231,11 @@ export function CliSection({
   return (
     <div>
       <PaneHeader
-        title={(
-          <FormattedMessage
-            id="settings.nav.cliTools"
-            defaultMessage="CLI Tools"
-          />
-        )}
+        title={NAV_TITLE}
         description={(
           <FormattedMessage
             id="settings.cli.description"
-            defaultMessage="Register non-interactive command-line tools the agent can call. Every call passes the same approval flow as MCP tools; the approval card shows the exact command that will run."
+            defaultMessage="Add command-line tools the agent can run. You confirm each run before it starts."
           />
         )}
         action={(
@@ -295,10 +302,10 @@ export function CliSection({
               }
               onToggleEnabled={(next) => void handleToggleEnabled(tool, next)}
               onEdit={() => setFormTarget({ tool, isEdit: true })}
-              // A builtin entry is undeletable (ADR-0109 Decision 2):
-              // no delete entry point, disabling is the single shutdown
-              // axis. The restore shows only on an EDITED builtin row --
-              // FOLLOWING rows already agree with the baseline.
+              // A builtin entry is undeletable (ADR-0109 Decision 2): its
+              // delete button renders disabled -- disabling is the single
+              // shutdown axis. The restore shows only on an EDITED builtin
+              // row, taking the row-end slot in place of the delete.
               onDelete={
                 tool.source === "builtin"
                   ? undefined
@@ -620,7 +627,11 @@ function CliToolRow({
           onClick={onEdit}
         />
 
-        {onRestore && (
+        {/* The row-end slot is exactly ONE action wide in every state --
+            restore on an EDITED builtin (it takes the delete's place), else
+            the delete (disabled on builtin, ADR-0109 Decision 2) -- so the
+            switch / edit columns never shift across rows. */}
+        {onRestore ? (
           <RowActionButton
             disabled={toggling}
             label={intl.formatMessage(
@@ -633,12 +644,10 @@ function CliToolRow({
             icon={RotateCcw}
             onClick={onRestore}
           />
-        )}
-
-        {onDelete && (
+        ) : (
           <RowActionButton
             destructive
-            disabled={toggling}
+            disabled={toggling || !onDelete}
             label={intl.formatMessage(
               {
                 id: "settings.cli.deleteLabel",
