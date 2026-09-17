@@ -1192,12 +1192,9 @@ describe("useShellSessions pre-activation materialization (ADR-0112, issue #716)
       "activate:auto",
       "activate:broken",
     ]);
-    // The three caches re-read before the materializer resolves (the
-    // ADR-0051 race guard) -- the mounted / activated / thread keys for THIS
+    // The two caches re-read before the materializer resolves (the
+    // ADR-0051 race guard) -- the activated / thread keys for THIS
     // session, awaited so the ask that follows starts from fresh cache.
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: sessionKeys.mountedSkills("s1"),
-    });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: sessionKeys.activatedSkills("s1"),
     });

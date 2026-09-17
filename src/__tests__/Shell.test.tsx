@@ -126,12 +126,10 @@ vi.mock("../api", async (importOriginal) => {
     rescanAdapters: vi.fn(async () => [] as const),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
-    // The composer "+" panel reads the skill registry + the session's mount set
-    // + drives mount / unmount (issue #365, ADR-0086). Defaults: empty registry
-    // + empty mount set + no-op writes; the panel stays in degraded mode and no
-    // Shell.test scenario drives a toggle, so the defaults keep the panel quiet.
+    // The skill picker reads the registry; the mint / ask chains drive the
+    // mount / unmount / activate writes (issue #365, ADR-0086). Defaults:
+    // empty registry + no-op writes keep the picker quiet.
     listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
-    listMountedSkills: vi.fn(async () => []),
     mountSkill: vi.fn(async () => {}),
     unmountSkill: vi.fn(async () => {}),
     // ADR-0112 picker pre-activation: the activated read feeds the picker's
@@ -158,7 +156,6 @@ import {
   ingestFile,
   listAdapters,
   listActivatedSkills,
-  listMountedSkills,
   listProviderProfiles,
   listSessions,
   listSkills,
@@ -953,8 +950,9 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       render(<App />);
       await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
 
-      // Skills draft: pick charting through the "/" picker (the sole
-      // explicit activation channel; nothing fires before the mint).
+      // Skills draft: pick charting through the "/" picker (the "/" and "$"
+      // pickers are the only explicit activation channels; nothing fires
+      // before the mint).
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "/", selectionStart: 1 } });
       await screen.findByRole("option");
       fireEvent.keyDown(screen.getByLabelText("提问"), { key: "Enter" });
@@ -2702,7 +2700,6 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
       ignored: [],
       root_error: null,
     });
-    vi.mocked(listMountedSkills).mockResolvedValue([]);
     vi.mocked(listActivatedSkills).mockResolvedValue([]);
     // Every turn rejects so each ask settles immediately (openSession pattern).
     vi.mocked(askQuestion).mockRejectedValue(new Error("discard turns"));
@@ -2780,6 +2777,35 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await waitFor(() =>
       expect(screen.queryByText("charting")).not.toBeInTheDocument(),
     );
+  });
+
+  it("consumed cold-start intents reset after the mint (no ghost chips on return)", async () => {
+    // The mint's .then clears the cold-activation list with the other draft
+    // facets: a pick consumed by the first submit must not re-render as a
+    // ghost chip when the shell falls back to the cold-start bar (close the
+    // only session through the header menu) -- nor re-apply on a later mint.
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"));
+    // The turn settles, then the header menu's close drops the only pane --
+    // the shell falls back to the cold-start bar.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "会话操作" }));
+    fireEvent.click(await screen.findByText("关闭"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "会话操作" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByText("charting")).not.toBeInTheDocument();
   });
 
   it("in-session pick lands a view chip; Backspace withdraws it before submit", async () => {
@@ -2929,7 +2955,6 @@ describe("shell submit fire-path defensive log (#825)", () => {
     vi.mocked(listAdapters).mockResolvedValue([]);
     vi.mocked(rescanAdapters).mockResolvedValue([]);
     vi.mocked(listSkills).mockResolvedValue({ skills: [skillEntry("charting")], ignored: [], root_error: null });
-    vi.mocked(listMountedSkills).mockResolvedValue([]);
     vi.mocked(listActivatedSkills).mockResolvedValue([]);
     vi.mocked(mountSkill).mockResolvedValue(undefined);
     vi.mocked(activateSkill).mockResolvedValue(undefined);

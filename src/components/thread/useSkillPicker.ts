@@ -78,8 +78,8 @@ export function useSkillPicker({
   // the picker adds no extra IPC round-trip once any of them has loaded. The
   // error channel is exposed alongside the data: a rejected listing must
   // surface as an error row, not collapse into the "No skills" empty face
-  // (the other surfaces riding the same cache surface their errors -- the
-  // picker must not be the one surface that hides it).
+  // (the settings SkillsSection surfaces its query errors -- the picker must
+  // not be the one surface that hides it).
   const { data: listing, error: listingError } = useQuery({
     queryKey: skillKeys.all(),
     queryFn: listSkills,

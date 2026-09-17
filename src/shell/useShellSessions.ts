@@ -125,8 +125,8 @@ function isAlreadyMountedRefusal(
 }
 
 /** Absorb the expected redundant-mount refusal (issue #677): a cold-start
- *  pick or pre-activation that names an auto-included builtin skill is
- *  already in the session's folded initial set -- the backend's
+ *  pick or pre-activation that names an enabled-catalog skill is already in
+ *  the session's seeded initial set -- the backend's
  *  AlreadyMounted is the expected outcome, not an error. Anything else
  *  rethrows. Shared by the mint chain's mount loop and the in-session
  *  materializer (ADR-0112: the composite intent never checks the mounted
@@ -633,8 +633,8 @@ export function useShellSessions({
           // applyPendingSkillWrites owns the ordering, absorbs the expected
           // redundant-mount refusal, and skips activation for names whose
           // mount failed with a genuine error. Activation is idempotent
-          // server-side, so a name the seeded initial set already activated
-          // resolves as a silent no-op.
+          // server-side, so an already-active name resolves as a silent
+          // no-op.
           await applyPendingSkillWrites(
             sid,
             posture.activations,
@@ -708,9 +708,6 @@ export function useShellSessions({
       );
       await applyPendingSkillWrites(sid, names, applyWrite);
       await Promise.allSettled([
-        queryClient.invalidateQueries({
-          queryKey: sessionKeys.mountedSkills(sid),
-        }),
         queryClient.invalidateQueries({
           queryKey: sessionKeys.activatedSkills(sid),
         }),

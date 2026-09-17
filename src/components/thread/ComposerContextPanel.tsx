@@ -6,7 +6,8 @@ import { pickDataFiles } from "../dataset/pickDataFiles";
 // that opens the multi-select file dialog directly -- no popover shell. The
 // MCP trigger chip is retired (ADR-0106 -- config enablement replaced
 // per-session mounting), and the Skills trigger chip retired with the mount
-// popover (#962 -- the "/" picker is the sole explicit skill channel).
+// popover (#962 -- the "/" and "$" pickers stay the only explicit skill
+// channels).
 //
 // The retired standalone source entry (the workspace-hero FileDropzone button)
 // moved here; window-level drag-and-drop stays untouched (App's single
