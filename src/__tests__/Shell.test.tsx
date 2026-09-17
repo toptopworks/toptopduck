@@ -2808,6 +2808,60 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     expect(screen.queryByText("charting")).not.toBeInTheDocument();
   });
 
+  it("a settled in-session submit clears the bar draft (no resurface on the next turn)", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Cold-start mint: the question rides the pendingQuestion channel, so
+    // the minted session's bar starts empty (the creation turn rejects via
+    // the queued one-shot and the session settles idle).
+    fireEvent.change(bar, { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "first"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // Type the second question IN the session, submit, and the draft clears
+    // at the ask instead of resurfacing when the next turn starts.
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard turns"),
+    );
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "second" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "second"));
+    expect(screen.getByLabelText("提问")).toHaveValue("");
+  });
+
+  it("a failed cold-start creation keeps the draft (the question must not be lost)", async () => {
+    vi.mocked(createSession).mockRejectedValueOnce(new Error("mint failed"));
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("提问"), { target: { value: "keep me" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    // The mint failed: the cold-start bar keeps the question for a retry.
+    expect(screen.getByLabelText("提问")).toHaveValue("keep me");
+  });
+
+  it("a minted cold-start submit clears the cold-start draft (empty bar on the return to cold start)", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "only question" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "only question"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // Close the only session: the shell falls back to the cold-start bar,
+    // whose draft must not resurrect the consumed question.
+    fireEvent.pointerDown(screen.getByRole("button", { name: "会话操作" }));
+    fireEvent.click(await screen.findByText("关闭"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "会话操作" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("提问")).toHaveValue("");
+  });
+
   it("in-session pick lands a view chip; Backspace withdraws it before submit", async () => {
     render(<App />);
     const bar = await screen.findByLabelText("提问");
