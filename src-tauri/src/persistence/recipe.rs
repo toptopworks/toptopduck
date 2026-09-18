@@ -177,11 +177,13 @@ pub enum RecipeEntry {
     Turn(RecipeTurn),
     Source(SourceLifecycleEvent),
     /// A skill lifecycle event (ADR-0086, issue #363; ADR-0110, issue
-    /// #698). Isomorphic to [`Self::Source`]: first-class timeline slot
-    /// (always visible), never a turn (never enters the LLM window, never
-    /// advances `result_N`). v7 files carry none (ADR-0119 Decision 2 --
-    /// invocation records ride the turn); the variant stays so a migrated
-    /// pre-v7 file opens and its events render from the timeline verbatim.
+    /// #698). Isomorphic to [`Self::Source`]: first-class timeline slot,
+    /// never a turn (never enters the LLM window, never advances
+    /// `result_N`). v7 files carry none (ADR-0119 Decision 2 -- invocation
+    /// records ride the turn); the variant stays so a migrated pre-v7 file
+    /// opens -- the legacy events persist in the timeline data verbatim,
+    /// and the frontend renders no row for them (ADR-0119 Decision 2: the
+    /// timeline's visual species are turns and source events only).
     Skill(SkillLifecycleEvent),
 }
 

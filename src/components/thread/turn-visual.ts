@@ -332,7 +332,6 @@ export const LIFECYCLE_FOLD_THRESHOLD = 3;
 // individual warning; the fold row carries the aggregate. No name list rides
 // the group: expanding renders it (ruled during implementation).
 export interface LifecycleFoldInfo {
-  readonly species: "Source";
   readonly kind: SourceLifecycleKind;
   readonly anchorIdx: number;
   readonly memberIdxs: readonly number[];
@@ -386,14 +385,9 @@ export function staleDerivativeCount(
   return staleCountsByKey?.get(staleKey(event.reference_name, event.kind)) ?? 0;
 }
 
-// A standalone marker's identity for segmentation: the kind. Turn and Skill
-// entries never reach this (the projector handles them first; the skill
-// species retired, ADR-0119 Decision 2).
-type MarkerIdentity = { kind: SourceLifecycleKind };
-
-function markerIdentity(entry: Extract<ThreadEntry, { entry: "Source" }>): MarkerIdentity {
-  return { kind: entry.data.kind };
-}
+// A standalone marker's segmentation identity is the kind alone (the
+// projector hands the fold only source entries; the skill species retired,
+// ADR-0119 Decision 2).
 
 // Aggregate a fold group's disclosure count. Kept next to the projector so
 // the "which member contributes what" rule lives with the segmentation it
@@ -415,7 +409,6 @@ function buildFoldGroup(
     }
   }
   return {
-    species: "Source",
     kind: seg.kind,
     anchorIdx: seg.idxs[0],
     memberIdxs: seg.idxs,
@@ -458,12 +451,11 @@ export function lifecycleVisualRows(
     if (entry.entry !== "Source") return;
     // A standalone marker: extend the open subsegment when the kind matches,
     // else close it and open a new one.
-    const id = markerIdentity(entry);
-    if (seg !== null && seg.kind === id.kind) {
+    if (seg !== null && seg.kind === entry.data.kind) {
       seg.idxs.push(i);
     } else {
       flush();
-      seg = { kind: id.kind, idxs: [i] };
+      seg = { kind: entry.data.kind, idxs: [i] };
     }
   });
   flush();

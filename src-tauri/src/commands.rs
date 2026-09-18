@@ -5306,8 +5306,8 @@ mod tests {
         // The field-wiring half the pin exists for (the #707 mirror-drift
         // class, restored -- review Important 1): both new fields are
         // observed, so a seam that wires either one to an empty slice
-        // reddens here, and the disabled filter's drop (review Important 2)
-        // reddens on gamma's absence from the records.
+        // reddens here, and the disabled stage's empty-body degrade
+        // (review Important 2, #991) reddens on gamma's record shape.
         assert_eq!(
             inputs.disabled_skills,
             &["gamma".to_string()],
@@ -5315,9 +5315,9 @@ mod tests {
         );
         assert_eq!(
             inputs.user_invocations.len(),
-            1,
-            "one enabled staged name materializes one record (duplicates collapse, \
-             disabled stages land nothing)"
+            2,
+            "one enabled staged name materializes one record (duplicates collapse) and \
+             the disabled stage lands the empty-body degrade (review Important 2, #991)"
         );
         assert_eq!(inputs.user_invocations[0].name, "beta");
         assert_eq!(
@@ -5327,6 +5327,16 @@ mod tests {
         assert!(
             !inputs.user_invocations[0].content_hash.is_empty(),
             "the record pins the invocation-time whole-file hash"
+        );
+        // The disabled stage's honest-degrade record: the name lands (the
+        // badge reads the attempt), the body and hash stay empty -- nothing
+        // enters the context, no drift anchor, no read surface.
+        assert_eq!(inputs.user_invocations[1].name, "gamma");
+        assert_eq!(inputs.user_invocations[1].body, "");
+        assert_eq!(inputs.user_invocations[1].content_hash, "");
+        assert_eq!(
+            inputs.user_invocations[1].actor,
+            crate::model::SkillLifecycleActor::User
         );
         // The empty agents registry projects the empty delegation family
         // (issue #933): a never-created registry is the legitimate state.

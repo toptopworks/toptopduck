@@ -73,10 +73,13 @@ pub enum SkillLifecycleKind {
     Activate,
 }
 
-/// Who initiated a lifecycle event (ADR-0110 Decision 4). Mount / unmount are
-/// user-only; activation may be initiated by the user (the mounted-list
-/// affordance) or by the agent (the `invoke_skill` gateway meta-tool).
-/// Issue #698 records only the user actor -- the agent channel rides #701.
+/// Who initiated a skill action (ADR-0110 Decision 4; dual-rolled by
+/// ADR-0119 as the invocation record's actor). Pre-v7 lifecycle events:
+/// mount / unmount are user-only; activation was user- or agent-initiated
+/// (issue #698 recorded only the user actor; the agent channel rode
+/// #701). v7 invocation records: the user actor is the submit-time picker
+/// materialization (ADR-0112 calibrated by ADR-0119), the agent actor is
+/// the `invoke_skill` gateway meta-tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillLifecycleActor {
     User,
@@ -110,8 +113,10 @@ pub struct SkillLifecycleEvent {
 
 /// One entry of the unified conversation timeline (ADR-0040 / ADR-0086): either
 /// a Turn (question + outcome, ADR-0028/0039), a source lifecycle event, or a
-/// skill lifecycle event. All three occupy a timeline slot and are always
-/// visible; only the Turn variant enters the LLM turn window. Adjacently-tagged
+/// skill lifecycle event. All three occupy a timeline slot in the data; only
+/// the Turn variant enters the LLM turn window, and the frontend renders rows
+/// for turns and source events only -- a legacy skill event from a migrated
+/// pre-v7 file persists in the data unseen (ADR-0119 Decision 2). Adjacently-tagged
 /// (`#[serde(tag = "entry", content = "data")]`) so the frontend narrows on
 /// `entry` uniformly. The conversation() command returns `Vec<ThreadEntry>`; the
 /// window assembler receives only the turns (filtered by the session before

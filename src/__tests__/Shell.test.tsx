@@ -2737,6 +2737,43 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     );
   });
 
+  it("submit clears the in-session staging; the next ask carries no stale pick (review I4, #991)", async () => {
+    // Mint bare (no cold-start pick), then pick IN SESSION: the view-side
+    // staging is the surface the submit boundary must clear -- the cold
+    // start's own reset is pinned separately below.
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "mint" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "mint"),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // In-session pick: the chip lands on the view's staging.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+    );
+    // The settle returns the submit face. NO re-pick: the view's staging was
+    // cleared at the submit boundary, so the next ask must be a bare
+    // two-argument call -- a stale charting silently riding every later
+    // turn is exactly the regression this pins (vitest matches call
+    // arguments exactly, so a third-argument call fails the assertion).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"));
+  });
+
   it("cold-start pick lands a chip; Backspace withdraws it before submit", async () => {
     render(<App />);
     const bar = await screen.findByLabelText("提问");
@@ -2852,7 +2889,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
-    // A second picker pick lands the in-session chip (the viewActivations
+    // A second picker pick lands the in-session chip (the viewInvocations
     // list is the whole intent -- this surface has no mount facet).
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");

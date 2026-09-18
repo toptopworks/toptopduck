@@ -3112,6 +3112,7 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), "---\nname: sql-coach\n---\nBody.\n").unwrap();
         crate::skills::read::SkillReadGate {
             invoked: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
+            disabled: &[],
             root: Box::leak(tmp.path().to_path_buf().into_boxed_path()),
         }
     }
@@ -3129,6 +3130,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         ctx.read = crate::skills::read::SkillReadGate {
             invoked: &[],
+            disabled: &[],
             root: Box::leak(tmp.path().to_path_buf().into_boxed_path()),
         };
         match handle_method(

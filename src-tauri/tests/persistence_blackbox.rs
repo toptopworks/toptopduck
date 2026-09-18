@@ -530,8 +530,9 @@ fn open_duck_migrates_a_v6_file_to_v7_invocation_semantics() {
         resumed.invoked_skills().is_empty(),
         "no pre-v7 turn carries invocation records",
     );
-    // The skill events passed through: the timeline still carries them
-    // verbatim (a migrated pre-v7 file renders its legacy events).
+    // The skill events passed through: the timeline data still carries
+    // them verbatim -- the frontend renders no row for a legacy skill
+    // event (ADR-0119 Decision 2); the pass-through is the data contract.
     let skill_events = resumed
         .conversation()
         .iter()

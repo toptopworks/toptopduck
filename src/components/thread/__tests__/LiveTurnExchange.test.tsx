@@ -80,3 +80,22 @@ describe("LiveTurnExchange trace round width cap (issue #826)", () => {
     expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
   });
 });
+
+// Review Important 3 (#991): the live exchange renders the client-known
+// staging as the badge face (ADR-0119 Decision 5) -- the same UserBubble
+// the settled card re-renders from the turn's own records at the swap.
+describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5, review I3, #991)", () => {
+  it("renders the staged names above the question", () => {
+    const { getByText, getByLabelText } = renderExchange({
+      ...liveTurnWith(undefined),
+      invocationNames: ["sql-coach"],
+    });
+    expect(getByText("sql-coach")).toBeInTheDocument();
+    expect(getByLabelText("随此消息调用的技能")).toBeInTheDocument();
+  });
+
+  it("renders no badge list with an empty staging", () => {
+    const { queryByLabelText } = renderExchange(liveTurnWith(undefined));
+    expect(queryByLabelText("随此消息调用的技能")).not.toBeInTheDocument();
+  });
+});

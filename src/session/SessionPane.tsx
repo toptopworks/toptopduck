@@ -82,6 +82,10 @@ interface SessionPaneProps {
    *  draft and stays visible + submittable once the guidance / error is
    *  resolved — a failed ingest must never lose the question. */
   onSeedDraft: (sessionId: string, value: string) => void;
+  /** Review Important 1 (#991): the ingest-abort branch's invocations
+   *  re-seed -- the staged names go back into the session's composer
+   *  staging, so a resubmit carries the pick + question pair whole. */
+  onSeedInvocations: (sessionId: string, names: string[]) => void;
   /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
    *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
    *  Called via useEffect whenever the fields change. */
@@ -136,7 +140,7 @@ const NO_APPROVALS: ApprovalEntry[] = [];
 const WORKSPACE_TABS = ["result", "workingSet"] as const;
 type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -261,6 +265,13 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
         const allLoaded = await s.handleIngestMany(paths);
         if (!allLoaded) {
           if (question !== null) onSeedDraft(sessionId, question);
+          // Review Important 1 (#991): the staged invocations ride the
+          // abort path back too -- the pick + the question are one atomic
+          // intent, so a resubmit carries both (the question to the draft,
+          // the names to the staging), never the question alone.
+          if (invocations.length > 0) {
+            onSeedInvocations(sessionId, invocations);
+          }
           return;
         }
       }
@@ -275,7 +286,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
-  }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft]);
+  }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.

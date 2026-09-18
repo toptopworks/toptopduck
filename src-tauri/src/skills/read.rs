@@ -68,15 +68,23 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// What one read classifies against: the turn-start session-INVOKED
 /// snapshot (read eligibility -- a mid-turn invocation joins the NEXT turn's
 /// snapshot, the no-competition-with-assembly posture of ADR-0111 Decision 3
-/// carried over by ADR-0119 Decision 4) and the registry root for the live
-/// name resolution (a mid-session registry delete is an honest error, never
-/// a stale turn-start snapshot).
+/// carried over by ADR-0119 Decision 4), the enable-axis disabled names
+/// (ADR-0119 Decision 3's eligibility gate crosses the read surface: a
+/// disabled name's invocation record still lands -- the honest-degrade
+/// shape -- but its files stay closed until the axis re-enables it), and
+/// the registry root for the live name resolution (a mid-session registry
+/// delete is an honest error, never a stale turn-start snapshot).
 pub(crate) struct SkillReadGate<'a> {
     /// The turn-start invoked names -- read eligibility. The session-level
     /// invoked set (a monotonic fold of the turn invocation records),
     /// snapshotted at the turn boundary so a mid-turn `invoke_skill` lands
     /// the read surface on the NEXT turn.
     pub(crate) invoked: &'a [String],
+    /// The machine-level disabled skill names (ADR-0118 enablement axis) --
+    /// the same list the submit-time materialization consults, so a name
+    /// disabled between pick and submit cannot open files through its
+    /// landed record.
+    pub(crate) disabled: &'a [String],
     /// The skills registry root, for the live entry lookup.
     pub(crate) root: &'a Path,
 }
@@ -89,6 +97,7 @@ impl SkillReadGate<'_> {
     pub(crate) fn inert() -> SkillReadGate<'static> {
         SkillReadGate {
             invoked: &[],
+            disabled: &[],
             root: Path::new(""),
         }
     }
@@ -147,10 +156,11 @@ pub(crate) fn read_skill_file_definition() -> ToolDefinition {
 }
 
 /// Classify one `read_skill_file` call against the gate (ADR-0111 Decisions
-/// 2-4, calibrated by ADR-0119 Decision 4): served / name not invoked this
-/// session (points at `invoke_skill` and lists the already-invoked names) /
-/// path missing, out of bounds, or a directory (lists the skill's readable
-/// files). Pure -- no state changes anywhere.
+/// 2-4, calibrated by ADR-0119 Decision 4): served / name disabled on the
+/// enable axis (its invocation record landed, its files stay closed) / name
+/// not invoked this session (points at `invoke_skill` and lists the
+/// already-invoked names) / path missing, out of bounds, or a directory
+/// (lists the skill's readable files). Pure -- no state changes anywhere.
 pub(crate) fn resolve_skill_read(call: &ToolUse, gate: &SkillReadGate<'_>) -> SkillReadOutcome {
     let Some(name) = str_param(&call.input, "name") else {
         return SkillReadOutcome::Refused(missing_param_failure("name"));
@@ -160,6 +170,9 @@ pub(crate) fn resolve_skill_read(call: &ToolUse, gate: &SkillReadGate<'_>) -> Sk
     };
     if !gate.invoked.iter().any(|a| a == name) {
         return SkillReadOutcome::Refused(not_invoked_failure(name, gate.invoked));
+    }
+    if gate.disabled.iter().any(|d| d == name) {
+        return SkillReadOutcome::Refused(disabled_failure(name));
     }
     if lexical_reject(path) {
         return SkillReadOutcome::Refused(lexical_failure(path));
@@ -251,6 +264,19 @@ fn not_invoked_failure(name: &str, invoked: &[String]) -> String {
             invoked.join(", ")
         )
     }
+}
+
+/// The enable-axis failure (ADR-0119 Decision 3's gate crossing the read
+/// surface): the name IS invoked -- its empty-body record landed, the badge
+/// shows the attempt -- but the skill is disabled, so its files stay closed
+/// until the axis re-enables it. Self-correcting in the same register as
+/// the not-invoked refusal: the fix names the operator action, not a
+/// different call.
+fn disabled_failure(name: &str) -> String {
+    format!(
+        "read_skill_file: `{name}` is invoked but disabled on the enable axis. \
+         Its files stay closed until the skill is re-enabled."
+    )
 }
 
 /// The registry-miss failure: the live lookup could not canonicalize
@@ -497,6 +523,17 @@ mod tests {
         fn gate<'a>(&'a self, invoked: &'a [String]) -> SkillReadGate<'a> {
             SkillReadGate {
                 invoked,
+                disabled: &[],
+                root: self.root.path(),
+            }
+        }
+
+        /// The enable-axis variant: the same gate shape carrying a disabled
+        /// list.
+        fn gated<'a>(&'a self, invoked: &'a [String], disabled: &'a [String]) -> SkillReadGate<'a> {
+            SkillReadGate {
+                invoked,
+                disabled,
                 root: self.root.path(),
             }
         }
@@ -936,6 +973,30 @@ mod tests {
         match read(&fx, "nope") {
             SkillReadOutcome::Refused(message) => {
                 assert!(message.contains("references/big.md"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    /// Review Important 2 (#991): a disabled name's landed record opens no
+    /// files. The invocation record still lands (the honest-degrade shape --
+    /// the badge reads the attempt), but the enable-axis cross keeps the
+    /// read surface closed: a name disabled between pick and submit cannot
+    /// read its own files through the record. Without the cross, this call
+    /// would serve the SKILL.md that is on disk.
+    #[test]
+    fn disabled_invoked_name_is_refused_on_the_enable_axis() {
+        let fx = Fixture::new();
+        fx.put_skill("sql-coach");
+        let disabled = activated(&["sql-coach"]);
+        let call = ToolUse {
+            id: "tu_r".to_string(),
+            name: READ_SKILL_FILE.to_string(),
+            input: json!({ "name": "sql-coach", "path": "SKILL.md" }),
+        };
+        match resolve_skill_read(&call, &fx.gated(&activated(&["sql-coach"]), &disabled)) {
+            SkillReadOutcome::Refused(message) => {
+                assert!(message.contains("disabled"), "{message}");
             }
             other => panic!("expected Refused, got {other:?}"),
         }

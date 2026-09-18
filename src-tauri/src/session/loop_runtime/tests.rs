@@ -340,6 +340,7 @@ impl Harness {
         let phase_hook = self.phase_hook.clone();
         let read = crate::skills::read::SkillReadGate {
             invoked: &self.read_invoked,
+            disabled: &[],
             root: &self.read_root,
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();

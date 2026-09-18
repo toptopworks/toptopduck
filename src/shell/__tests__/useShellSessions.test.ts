@@ -126,11 +126,6 @@ function reply(sid: string) {
   return { session_id: sid, duck_path: `/sessions/${sid}/session.duck` };
 }
 
-/** The typed wire shape of the redundant-mount refusal (issue #677):
- *  SessionError's SkillMount variant carrying SkillMountError::AlreadyMounted.
- *  The absorbing predicate verifies the outer kind + inner kind + name, so a
- *  lean `{ data: { kind: "AlreadyMounted" } }` no longer reads as the
- *  refusal -- only the full shape documents the contract. */
 // The #501 drop tests pin the composer bar's geometry via the shared
 // barRectStub (jsdom has no layout); jsdom's devicePixelRatio is 1, so CSS
 // px == the physical drop positions the tests fire.

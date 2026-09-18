@@ -133,9 +133,11 @@ export type SkillError =
 // bare variant string.
 export type SkillLifecycleKind = "Mount" | "Unmount" | "Activate";
 
-// Who initiated a lifecycle event (ADR-0110 Decision 4). Mount / unmount are
-// user-only; activation may be user- or agent-initiated. Mirrors the Rust
-// SkillLifecycleActor as a bare variant string.
+// Who initiated a skill action: pre-v7 lifecycle events (ADR-0110 Decision 4
+// -- mount / unmount user-only, activation either actor) and v7 invocation
+// records (the user actor is the submit-time picker materialization, the
+// agent actor is the invoke_skill meta-tool) share the one union. Mirrors
+// the Rust SkillLifecycleActor as a bare variant string.
 export type SkillLifecycleActor = "User" | "Agent";
 
 // A skill lifecycle event (ADR-0086, issue #363; ADR-0110, issue #698):

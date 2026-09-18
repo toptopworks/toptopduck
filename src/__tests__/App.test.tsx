@@ -97,10 +97,9 @@ vi.mock("../api", async (importOriginal) => {
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
     setAuthorizationMode: vi.fn(async () => {}),
     // The skill picker reads the registry (issue #365); no App.test flow
-    // exercises a skill write, so empty reads + no-op writes keep jsdom off
-    // the real invoke.
+    // exercises skills beyond the empty read, keeping jsdom off the real
+    // invoke.
     listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
-    mountSkill: vi.fn(async () => {}),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
@@ -197,6 +196,7 @@ function renderPane(
         pendingQuestion={null}
         onQuestionConsumed={() => {}}
         onSeedDraft={() => {}}
+        onSeedInvocations={() => {}}
         onComposerFields={(_sid, fields) => {
           capturedComposerFields = fields;
         }}
@@ -1461,6 +1461,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
   interface PendingPayload {
     pendingIngestPaths?: string[];
     pendingQuestion?: string | null;
+    pendingSkillInvocations?: string[];
     strictMode?: boolean;
   }
 
@@ -1468,6 +1469,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     onIngestConsumed: ReturnType<typeof vi.fn>;
     onQuestionConsumed: ReturnType<typeof vi.fn>;
     onSeedDraft: ReturnType<typeof vi.fn>;
+    onSeedInvocations: ReturnType<typeof vi.fn>;
     rerender: (payload: PendingPayload) => void;
   } {
     const queryClient = new QueryClient({
@@ -1476,6 +1478,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     const onIngestConsumed = vi.fn();
     const onQuestionConsumed = vi.fn();
     const onSeedDraft = vi.fn();
+    const onSeedInvocations = vi.fn();
     const approvalEvents: UseApprovalEvents = {
       approvalsBySession: new Map(),
       pendingApprovalSids: new Set(),
@@ -1487,11 +1490,12 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         sessionId="sess-1"
         isActive={true}
         pendingIngestPaths={payload.pendingIngestPaths ?? []}
-        pendingSkillInvocations={[]}
+        pendingSkillInvocations={payload.pendingSkillInvocations ?? []}
         onIngestConsumed={onIngestConsumed}
         pendingQuestion={payload.pendingQuestion ?? null}
         onQuestionConsumed={onQuestionConsumed}
         onSeedDraft={onSeedDraft}
+        onSeedInvocations={onSeedInvocations}
         onComposerFields={() => {}}
         onComposerFieldsUnmount={() => {}}
         sessionName="pending"
@@ -1520,11 +1524,12 @@ describe("SessionPane pending-payload consumption (#500)", () => {
           sessionId="sess-1"
           isActive={true}
           pendingIngestPaths={next.pendingIngestPaths ?? []}
-          pendingSkillInvocations={[]}
+          pendingSkillInvocations={next.pendingSkillInvocations ?? []}
           onIngestConsumed={onIngestConsumed}
           pendingQuestion={next.pendingQuestion ?? null}
           onQuestionConsumed={onQuestionConsumed}
           onSeedDraft={onSeedDraft}
+          onSeedInvocations={onSeedInvocations}
           onComposerFields={() => {}}
           onComposerFieldsUnmount={() => {}}
           sessionName="pending"
@@ -1548,7 +1553,13 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         next.strictMode ? <StrictMode>{nextTree}</StrictMode> : nextTree,
       );
     };
-    return { onIngestConsumed, onQuestionConsumed, onSeedDraft, rerender };
+    return {
+      onIngestConsumed,
+      onQuestionConsumed,
+      onSeedDraft,
+      onSeedInvocations,
+      rerender,
+    };
   }
 
   beforeEach(() => {
@@ -1677,6 +1688,29 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     await waitFor(() =>
       expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"),
     );
+    expect(askQuestion).not.toHaveBeenCalled();
+  });
+
+  it("re-seeds the staged invocations alongside the question when the first file errors (review I1, #991)", async () => {
+    vi.mocked(ingestFile).mockResolvedValue({
+      kind: "Error",
+      data: { kind: "Parse", data: { detail: "bad csv" } },
+    });
+    const { onSeedDraft, onSeedInvocations } = renderPaneWithPending({
+      pendingIngestPaths: ["/x/bad.csv"],
+      pendingQuestion: "how many rows?",
+      pendingSkillInvocations: ["charting", "sql-coach"],
+    });
+
+    await waitFor(() =>
+      expect(onSeedDraft).toHaveBeenCalledWith("sess-1", "how many rows?"),
+    );
+    // The pick + the question are one atomic intent: the abort path
+    // returns BOTH, never the question alone.
+    expect(onSeedInvocations).toHaveBeenCalledWith("sess-1", [
+      "charting",
+      "sql-coach",
+    ]);
     expect(askQuestion).not.toHaveBeenCalled();
   });
 

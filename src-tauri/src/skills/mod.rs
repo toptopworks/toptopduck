@@ -26,12 +26,18 @@
 //!   (issue #367) -- projects candidate source dirs onto importable skill
 //!   lists + commits each selected skill as `linked` (symlink / junction) or
 //!   `local` (recursive copy).
+//! - [`builtin`]: the built-in skill marks + baselines (issue #365) -- the
+//!   registry's seed pairs for skills whose bodies ride a companion CLI
+//!   registration.
+//! - [`invocation`]: the `invoke_skill` gateway meta-tool (ADR-0119
+//!   Decision 4) -- the mid-turn agent invocation channel + the turn's
+//!   accumulating invocation records.
 //! - [`prompt`]: per-turn skill resolution for prompt injection + provenance
-//!   (issue #364) -- resolves each mounted skill into its verbatim body + the
-//!   SHA-256 of the whole `SKILL.md`.
+//!   (issue #364) -- resolves each discovery-snapshot / invoked name into
+//!   its verbatim body + the SHA-256 of the whole `SKILL.md`.
 //! - [`read`]: the `read_skill_file` restricted attachment-read surface
 //!   (issue #714, ADR-0111) -- the gate trilogy + the gateway meta-tool
-//!   resolver over an ACTIVATED skill's tree.
+//!   resolver over an INVOKED skill's tree.
 
 pub mod builtin;
 pub mod frontmatter;
@@ -51,16 +57,17 @@ pub use model::{
 };
 pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 
-/// The new-session mount seed (issue #961, ADR-0118 Decision 1): the
+/// The new-session discovery-snapshot seed (issue #961, ADR-0118 Decision
+/// 1; carried as the discovery snapshot by ADR-0119 Decision 3): the
 /// registry scan intersected with the enablement axis -- every spec-valid
 /// skill except the disabled names, with a MATERIALIZED builtin additionally
 /// gated on its companion CLI registration (the #677 two-axis conjunction:
 /// skill enabled AND companion CLI entry enabled -- an undetected CLI
 /// registration keeps its skill out of the seed, the pre-existing
-/// semantics verbatim). The seed only FILLS the folded mount set's INITIAL
-/// state (no Mount event, nothing persisted); it is computed at session
-/// creation only -- resume re-seeds BUILTIN-ONLY (ADR-0118 Decision 7),
-/// never this general seed (the timeline fold is the authority). A registry
+/// semantics verbatim). The seed is computed at session creation and
+/// MATERIALIZES as the session's discovery snapshot -- persisted
+/// explicitly in the recipe header, immutable for the session's life;
+/// resume adopts it from the header, no re-seed. A registry
 /// root that fails to read seeds an EMPTY set: the listing degrades with
 /// `root_error` (surfaced by the settings pane's root banner), and the
 /// session is created silently skill-less rather than refused -- the

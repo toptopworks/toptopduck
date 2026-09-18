@@ -640,6 +640,48 @@ describe("useTurnFlow", () => {
       expect(typeof entry.data.settled_at).toBe("number");
       expect(entry.data.asked_at).toBeLessThanOrEqual(entry.data.settled_at!);
     });
+
+    it("stamps the optimistic record's User invocations and carries the staging on the live turn (review I3, #991)", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q", ["sql-coach", "charting"]);
+      });
+      // The live exchange's badge face renders the client-known staging
+      // immediately (ADR-0119 Decision 5).
+      expect(result.current.liveTurn?.invocationNames).toEqual([
+        "sql-coach",
+        "charting",
+      ]);
+      await act(async () => {
+        resolveAsk({ kind: "Cancelled", data: null });
+        await askDone;
+      });
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      const entry = thread?.[0];
+      if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
+      // The optimistic record stamps the staged names as User-actor
+      // invocation records (the badge's settled face) -- the body and hash
+      // are the backend's materialization and stay empty until the
+      // recorded row lands (the same optimistic degrade as runtime).
+      expect(entry.data.invocations).toEqual([
+        { name: "sql-coach", body: "", actor: "User", content_hash: "" },
+        { name: "charting", body: "", actor: "User", content_hash: "" },
+      ]);
+      // The wire carries the third argument only when staging exists.
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", [
+        "sql-coach",
+        "charting",
+      ]);
+    });
   });
 
   describe("mergeLiveTrace + buildLiveRounds + liveRoundsToTrace (pure helpers)", () => {

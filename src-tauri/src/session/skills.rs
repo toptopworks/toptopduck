@@ -75,15 +75,21 @@ impl super::Session {
     /// persists them. A name the registry cannot serve degrades to an
     /// empty-body record (the invocation still happened; honest degrade),
     /// never a refusal. A DISABLED name (ADR-0119 Decision 3: the invocation
-    /// eligibility gate is the enable axis, both actors) lands no record at
-    /// all -- the normal picker never offers disabled names, so reaching
-    /// this filter means a stale view or a direct IPC -- and the drop warns,
-    /// the same ladder every sibling degrade on this path logs (the agent
-    /// channel's identical case answers with a self-correcting refusal).
-    /// Staged names dedupe order-preservingly BEFORE the map (review
-    /// Important 3, issue #983): a duplicated stage is one invocation --
-    /// the byte-rendering consumer has no set semantics to absorb a
-    /// duplicate, so it collapses here, at the source.
+    /// eligibility gate is the enable axis, both actors) lands the same
+    /// empty-body record -- the picker filters at pick time and the axis is
+    /// read at submit, so a plain sequence reaches this arm: pick while
+    /// enabled, disable in settings, come back, submit. The name stays
+    /// visible (the badge reads the attempt, the turn's history keeps it)
+    /// while the empty body keeps the gate's meaning -- nothing enters the
+    /// context -- and the empty hash exempts the record from the drift
+    /// check; the read gate crosses the same axis, so the record never
+    /// opens the attachment surface. The drop-shaped degrade this arm
+    /// replaces was silent on the frontend (review Important 2, #991). The
+    /// agent channel's identical case answers with a self-correcting
+    /// refusal. Staged names dedupe order-preservingly BEFORE the map
+    /// (review Important 3, issue #983): a duplicated stage is one
+    /// invocation -- the byte-rendering consumer has no set semantics to
+    /// absorb a duplicate, so it collapses here, at the source.
     pub fn materialize_user_invocations(
         &self,
         names: &[String],
@@ -100,8 +106,17 @@ impl super::Session {
                 log::warn!(
                     target: "skills",
                     "staged skill `{name}` is disabled on the enable axis -- \
-                     the invocation lands no record",
+                     recording the name, serving no body",
                 );
+                // The unreadable-file degrade shape (resolve_one's ladder):
+                // name lands, body and hash stay empty. The read gate's
+                // disabled cross keeps the attempt from opening files.
+                records.push(crate::model::SkillInvocation {
+                    name: name.clone(),
+                    body: String::new(),
+                    actor: SkillLifecycleActor::User,
+                    content_hash: String::new(),
+                });
                 continue;
             }
             let fragment = crate::skills::prompt::resolve_one(root, name);
@@ -231,5 +246,29 @@ mod tests {
             content_hash: String::new(),
         });
         assert_eq!(pending.len(), 1, "the pending vec is the caller's own");
+    }
+
+    /// Review Important 2 (#991): a staged name disabled between pick and
+    /// submit lands the honest-degrade record -- the attempt stays visible
+    /// (the badge reads the name, the turn's history keeps it) while the
+    /// empty body keeps the enable-axis gate's meaning (nothing enters the
+    /// context) and the empty hash exempts the record from the drift check.
+    /// The pre-fix drop was silent on the frontend; this pin holds the
+    /// landed shape.
+    #[test]
+    fn disabled_staged_name_lands_an_empty_body_record() {
+        let session = super::super::Session::new().expect("session");
+        let tmp = tempfile::tempdir().unwrap();
+        let disabled = vec!["ghosted".to_string()];
+        let records =
+            session.materialize_user_invocations(&["ghosted".to_string()], tmp.path(), &disabled);
+        assert_eq!(records.len(), 1, "the attempt lands a record");
+        assert_eq!(records[0].name, "ghosted");
+        assert_eq!(records[0].body, "", "no body crosses the enable-axis gate");
+        assert_eq!(
+            records[0].content_hash, "",
+            "no drift anchor for the attempt"
+        );
+        assert_eq!(records[0].actor, crate::model::SkillLifecycleActor::User);
     }
 }

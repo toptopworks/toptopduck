@@ -2395,7 +2395,7 @@ describe("Thread", () => {
     });
 
     it("hides the drift badge when the skill is no longer in the registry", () => {
-      // A name the registry no longer carries is the SkillMarker's "no longer
+      // A name the registry no longer carries is the drift badge's "no longer
       // exists" case (#366), not a content drift -- the TurnCard omits it.
       const index = skillIndex();
       renderThread(

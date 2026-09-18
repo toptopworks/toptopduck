@@ -48,11 +48,9 @@ pub(crate) fn invoke_skill_definition() -> ToolDefinition {
     }
 }
 
-/// The resolver's outcome -- the same two-variant shape as
-/// [`crate::skills::activation::SkillActivationOutcome`], which is itself the
-/// owning pair of [`crate::mcp::meta_tools::MetaDispatch`]'s two servable
-/// arms: both dispatch faces keep their matches total with no panicking
-/// arms.
+/// The resolver's outcome -- the owning pair of
+/// [`crate::mcp::meta_tools::MetaDispatch`]'s two servable arms: both
+/// dispatch faces keep their matches total with no panicking arms.
 #[derive(Debug)]
 pub(crate) enum SkillInvocationOutcome {
     /// A served invocation: the skill name for the trace summary + the

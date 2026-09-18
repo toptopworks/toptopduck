@@ -1,18 +1,16 @@
 // The collapsed row for a run of consecutive same-kind lifecycle markers
 // (issue #737): batch operations materialize long same-kind stretches
-// (Mount×N then Activate×N at submit, Added×N on sequential ingest), which
-// bury the surrounding turns -- a stretch at/above LIFECYCLE_FOLD_THRESHOLD
-// (3, turn-visual.ts) renders as THIS one row instead. An accessible disclosure (button +
-// aria-expanded + rotating chevron, the FoldToggle language): expanding is
-// the one way to see the member names (no hover tooltip: the count label
-// never overflows, so a truncation-recovery tooltip would be dead chrome;
-// ruled during implementation). The kind glyph + tone mirror the scatter
-// rows exactly (SkillMarker/SourceMarker: Mount/Activate/Added=primary,
-// Replaced=accent-foreground, Unmount=muted, Deleted=destructive) so the
-// collapsed row reads as the same species at a glance. The aggregated
-// disclosure rides the row: the summed invalidation count reuses the scatter
-// suffix id, and a group holding a missing skill name (the registry drift
-// case, issue #366) carries a destructive count suffix -- the combined
+// (Added×N on sequential ingest), which bury the surrounding turns -- a
+// stretch at/above LIFECYCLE_FOLD_THRESHOLD (3, turn-visual.ts) renders as
+// THIS one row instead. An accessible disclosure (button + aria-expanded +
+// rotating chevron, the FoldToggle language): expanding is the one way to
+// see the member names (no hover tooltip: the count label never overflows,
+// so a truncation-recovery tooltip would be dead chrome; ruled during
+// implementation). The kind glyph + tone mirror the scatter rows exactly
+// (SourceMarker; the timeline's skill species retired with ADR-0119 --
+// only source events fold) so the collapsed row reads as the same species
+// at a glance. The aggregated disclosure rides the row: the summed
+// invalidation count reuses the scatter suffix id, and the combined
 // member row below keeps each name's individual warning.
 
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";

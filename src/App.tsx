@@ -438,24 +438,24 @@ export default function App() {
   // materializes as the turn's invocation records at submit -- the ONLY
   // materialization moment -- and clears with it: the chips show this
   // turn's staging only, never a persistent state.
-  const [coldActivations, setColdActivations] = useState<string[]>([]);
-  // Session-scope pre-activations carry their owning view id: a switch /
+  const [coldInvocations, setColdInvocations] = useState<string[]>([]);
+  // Session-scope staged invocations carry their owning view id: a switch /
   // close (or the null->session mint) stops the ids matching, so the derived
   // read below yields [] while another session is active -- unsubmitted
   // intents never leak across sessions, with no effect-driven reset. The
   // intents are scoped to their session, not destroyed by the switch:
   // switching back to the same session restores its unsubmitted intents
   // (resume mints a fresh sid, so the restore never sees stale truth).
-  const [viewActivations, setViewActivations] = useState<{
+  const [viewInvocations, setViewInvocations] = useState<{
     sid: string | null;
     names: string[];
   }>({ sid: null, names: [] });
-  const sessionActivations = useMemo(
+  const sessionInvocations = useMemo(
     () =>
-      activeSessionId !== null && viewActivations.sid === activeSessionId
-        ? viewActivations.names
+      activeSessionId !== null && viewInvocations.sid === activeSessionId
+        ? viewInvocations.names
         : [],
-    [activeSessionId, viewActivations],
+    [activeSessionId, viewInvocations],
   );
 
   // The startup resolution of the persisted default_runtime against the
@@ -530,8 +530,8 @@ export default function App() {
         // ADR-0119 Decision 1: the staging IS this turn's user invocation --
         // it rides the ask (the backend materializes the records at submit)
         // and the staging clears at the submit boundary.
-        const intents = sessionActivations;
-        setViewActivations({ sid: activeSessionId, names: [] });
+        const intents = sessionInvocations;
+        setViewInvocations({ sid: activeSessionId, names: [] });
         fireShellAsk(fields, question, intents);
         return;
       }
@@ -558,7 +558,7 @@ export default function App() {
           ? effectivePendingRuntime.data
           : null;
       const authMode = pendingAuthMode;
-      const invocations = coldActivations;
+      const invocations = coldInvocations;
       const files = pendingFiles;
       void createSessionWithQuestion(
         question,
@@ -575,7 +575,7 @@ export default function App() {
           setPendingRuntime(null);
           setPendingModelPosture(null);
           setPendingAuthMode(AUTH_MODE_DEFAULT);
-          setColdActivations([]);
+          setColdInvocations([]);
           setPendingFiles([]);
           // The mint-time set IPCs landed the explicit pair in the startup
           // backfill entry (record_last_model_posture, the single write
@@ -595,8 +595,8 @@ export default function App() {
       composerFieldsMap,
       setComposerDraft,
       createSessionWithQuestion,
-      sessionActivations,
-      coldActivations,
+      sessionInvocations,
+      coldInvocations,
       queryClient,
       effectivePendingRuntime,
       pendingRuntime,
@@ -624,12 +624,12 @@ export default function App() {
   const handleSkillPick = useCallback(
     (name: string) => {
       if (activeSessionId === null) {
-        setColdActivations((prev) =>
+        setColdInvocations((prev) =>
           prev.includes(name) ? prev : [...prev, name],
         );
         return;
       }
-      setViewActivations((prev) =>
+      setViewInvocations((prev) =>
         prev.sid === activeSessionId
           ? {
               sid: activeSessionId,
@@ -643,17 +643,40 @@ export default function App() {
     [activeSessionId],
   );
 
-  // Withdrawing an activation intent (ADR-0112 Decision 3): the chip's
+  // Review Important 1 (#991): the pane's ingest-abort branch re-seeds the
+  // question into the bar draft; the staged invocations get the same
+  // channel back into the session's staging. The pick + the question are
+  // one atomic intent -- a resubmit after an aborted ingest carries both,
+  // not just the question (merge-unique, matching the picker's own land).
+  const handleSeedInvocations = useCallback(
+    (sid: string, names: string[]) => {
+      if (names.length === 0) return;
+      setViewInvocations((prev) =>
+        prev.sid === sid
+          ? {
+              sid,
+              names: [
+                ...prev.names,
+                ...names.filter((n) => !prev.names.includes(n)),
+              ],
+            }
+          : { sid, names },
+      );
+    },
+    [],
+  );
+
+  // Withdrawing a staged invocation (ADR-0112 Decision 3): the chip's
   // removal button (#961) and the composer's Backspace at the draft start
   // are the two user surfaces. Cold start and session picks withdraw the
   // same way -- the intent list is the only surface.
-  const handleRemoveActivation = useCallback(
+  const handleRemoveInvocation = useCallback(
     (name: string) => {
       if (activeSessionId === null) {
-        setColdActivations((prev) => prev.filter((n) => n !== name));
+        setColdInvocations((prev) => prev.filter((n) => n !== name));
         return;
       }
-      setViewActivations((prev) =>
+      setViewInvocations((prev) =>
         prev.sid === activeSessionId
           ? {
               sid: activeSessionId,
@@ -667,16 +690,16 @@ export default function App() {
 
   // The bar's live chip facet: the cold-start shell memory in draft mode, the
   // session view's intents otherwise.
-  const pendingActivations =
-    activeSessionId === null ? coldActivations : sessionActivations;
+  const pendingInvocations =
+    activeSessionId === null ? coldInvocations : sessionInvocations;
 
   // Backspace at the draft's start withdraws the most recent intent: the
   // chips seat before the draft's first char, so the last chip deletes like
   // a text char (ADR-0112 Decision 3).
   const handleChipBackspace = useCallback(() => {
-    const last = pendingActivations[pendingActivations.length - 1];
-    if (last !== undefined) handleRemoveActivation(last);
-  }, [pendingActivations, handleRemoveActivation]);
+    const last = pendingInvocations[pendingInvocations.length - 1];
+    if (last !== undefined) handleRemoveInvocation(last);
+  }, [pendingInvocations, handleRemoveInvocation]);
 
   // ADR-0092 (#500): shell-level file ingest. When active, delegate to the
   // session's handleIngestMany. On cold start the picked files accumulate in
@@ -1053,6 +1076,7 @@ export default function App() {
                             onQuestionConsumed={() =>
                               clearPendingQuestion(s.sid)}
                             onSeedDraft={composer.seedDraft}
+                            onSeedInvocations={handleSeedInvocations}
                             onComposerFields={handleComposerFields}
                             onComposerFieldsUnmount={
                               handleComposerFieldsUnmount
@@ -1197,8 +1221,8 @@ export default function App() {
                               // #961 retired with its channel); the caret
                               // seats right after the last chip.
                               <ComposerSkillChips
-                                names={pendingActivations}
-                                onRemove={handleRemoveActivation}
+                                names={pendingInvocations}
+                                onRemove={handleRemoveInvocation}
                               />
                             ),
                             onBackspace: handleChipBackspace,

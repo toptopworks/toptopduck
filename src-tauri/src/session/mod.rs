@@ -1467,10 +1467,13 @@ impl Session {
                     // The attachment read gate (ADR-0111, calibrated by
                     // ADR-0119): pure classification (no transitions, no
                     // persist), so an immutable bundle -- the turn-start
-                    // session-INVOKED snapshot for eligibility and the
-                    // registry root for the live name resolution.
+                    // session-INVOKED snapshot for eligibility, the
+                    // enable-axis disabled names (a disabled name's landed
+                    // record opens no files), and the registry root for
+                    // the live name resolution.
                     let read_gate = crate::skills::read::SkillReadGate {
                         invoked: skill_state.start_invoked,
+                        disabled: inputs.disabled_skills,
                         root: inputs.skills_root,
                     };
                     // The mid-turn invocation channel (ADR-0119 Decision 4):
@@ -1788,9 +1791,12 @@ impl Session {
             // surfaces (ADR-0111 Decision 7). Eligibility is the turn-start
             // invoked snapshot, derived ONCE at the submit boundary and
             // passed in -- no per-branch refold of the pending vec's
-            // user-invocation names.
+            // user-invocation names. The disabled cross matches the
+            // built-in face's gate -- a disabled name's landed record
+            // opens no files on either runtime surface.
             let read_gate = crate::skills::read::SkillReadGate {
                 invoked: skill_state.start_invoked,
+                disabled: inputs.disabled_skills,
                 root: inputs.skills_root,
             };
             // The bridge face's invocation channel (ADR-0119 Decision 4):

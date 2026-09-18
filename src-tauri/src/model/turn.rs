@@ -340,7 +340,10 @@ pub struct SkillInvocation {
     /// The Markdown body after the frontmatter, pinned at invocation time
     /// (the `content_hash` honestly records which bytes were seen). Empty
     /// when the `SKILL.md` was unreadable at invocation (honest degrade --
-    /// the record still lands so the name stays visible).
+    /// the record still lands so the name stays visible), or when a
+    /// user-staged name was disabled on the enable axis at submit (the
+    /// attempt lands, nothing enters the context, and the read gate keeps
+    /// the files closed).
     pub body: String,
     /// Who initiated the invocation: the user (composer picker
     /// materialization, ADR-0112 channel) or the agent (the `invoke_skill`

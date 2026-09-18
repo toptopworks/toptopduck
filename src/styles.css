@@ -915,7 +915,7 @@
  * is scoped to stale-card <-> source-event lines (interleaved knotting);
  * these adjacent same-column run segments are outside that rejection. The
  * geometry is a contract with the component utilities
- * (SkillMarker/SourceMarker/LifecycleFold): node = h-4 w-4 (16px) at the
+ * (SourceMarker/LifecycleFold): node = h-4 w-4 (16px) at the
  * row's left edge,
  * row = py-0.5 (2px vertical padding) -- so the node's bottom edge sits
  * 18px below the li top (2px padding + 16px box) and the next node's top

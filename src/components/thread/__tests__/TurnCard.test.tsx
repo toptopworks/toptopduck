@@ -354,3 +354,46 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
     expect(container.querySelector(".assumption")).toHaveClass("mt-0.5");
   });
 });
+
+// Review Important 3 (#991): the settled card's badge face -- the turn's own
+// invocation records filtered to the USER actor (ADR-0119 Decision 5). The
+// agent's invocations read on their trace rows, never on the bubble; the
+// derivation itself is pinned in turnVisual.test.ts, this pins the render.
+describe("TurnCard user-invocation badges (ADR-0119 Decision 5, review I3, #991)", () => {
+  it("renders the User-actor names above the question, not the agent's", () => {
+    const record: TurnRecord = {
+      question: "问",
+      outcome: {
+        kind: "Textual",
+        data: { text_kind: "Agent", body: "答", assumption: null },
+      },
+      trace: [],
+      provenance: { skills: [] },
+      invocations: [
+        { name: "sql-coach", body: "", actor: "User", content_hash: "" },
+        { name: "pdf-tools", body: "", actor: "Agent", content_hash: "" },
+        { name: "charting", body: "", actor: "User", content_hash: "" },
+      ],
+    };
+    const { getByText, queryByText, getByLabelText } = renderCard(record);
+    expect(getByText("sql-coach")).toBeInTheDocument();
+    expect(getByText("charting")).toBeInTheDocument();
+    expect(queryByText("pdf-tools")).not.toBeInTheDocument();
+    // The badge list is decorative with one accessible group label.
+    expect(getByLabelText("随此消息调用的技能")).toBeInTheDocument();
+  });
+
+  it("renders no badge list for a turn without invocations", () => {
+    const record: TurnRecord = {
+      question: "问",
+      outcome: {
+        kind: "Textual",
+        data: { text_kind: "Agent", body: "答", assumption: null },
+      },
+      trace: [],
+      provenance: { skills: [] },
+    };
+    const { queryByLabelText } = renderCard(record);
+    expect(queryByLabelText("随此消息调用的技能")).not.toBeInTheDocument();
+  });
+});

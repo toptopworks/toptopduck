@@ -385,6 +385,25 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     expect(rows[0]).not.toHaveTextContent("ghosted");
   });
 
+  it("renders the empty face when the registry is non-empty but everything is disabled (review F, #991)", async () => {
+    // The enablement axis collapsing to zero enabled skills is the same
+    // boundary as an empty registry: totalSkills counts the enabled set,
+    // so the "No skills" empty face renders (never a bare panel, never
+    // the no-matches face -- nothing was filtered out by a query).
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [
+        { ...skillEntry("charting"), enabled: false },
+        { ...skillEntry("ghosted"), enabled: false },
+      ],
+      ignored: [],
+      root_error: null,
+    });
+    renderPicker(() => {});
+    type("/");
+    await screen.findByText("暂无技能");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+  });
+
   it("keeps rows whose description matches and highlights the hit", async () => {
     // Neither name contains "skill"; both descriptions do ("… skill"), so a
     // description-only query keeps both rows -- and the hit renders as its

@@ -13,8 +13,9 @@ import { bareButtonReset } from "../../lib/buttonReset";
 // button; permanent removal goes through the enablement axis in settings.
 
 export type ComposerSkillChipsProps = {
-  /** The display union (pre-activation intents, then unseen activated
-   * names), in order. Empty renders nothing. */
+  /** This turn's staged invocation names, in order (ADR-0119 Decision 5:
+   *  the composer shows the staging only -- cleared at the submit
+   *  boundary). Empty renders nothing. */
   names: string[];
   /** Per-chip removal dispatch (issue #961). Absent = pure display. */
   onRemove?: (name: string) => void;

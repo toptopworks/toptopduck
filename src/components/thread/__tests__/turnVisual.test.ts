@@ -5,8 +5,9 @@ import {
   lifecycleRunMarks,
   lifecycleVisualRows,
   runtimeMarkerName,
+  userInvocationNames,
 } from "../turn-visual";
-import type { ThreadEntry, TurnRuntime } from "../../../types/thread";
+import type { ThreadEntry, TurnRecord, TurnRuntime } from "../../../types/thread";
 
 // The issue #721 run-position contract, pinned at the pure-algebra seam. The
 // Thread.test.tsx data-run pins cover the DOM wiring, but Thread never reads
@@ -36,6 +37,45 @@ const turn: ThreadEntry = {
 // read exactly as they did in the per-entry era.
 const marksOf = (entries: ThreadEntry[]) =>
   lifecycleRunMarks(lifecycleVisualRows(entries));
+
+// ADR-0119 Decision 5 (review Important 3, #991): the question bubble's
+// badge names are the turn's own records filtered to the USER actor -- the
+// agent's invocations read on their trace rows, never on the bubble. Pinned
+// at the pure seam so both render faces (the settled TurnCard, the live
+// exchange) share one verified derivation.
+describe("userInvocationNames (ADR-0119 Decision 5 badge derivation)", () => {
+  const invocation = (name: string, actor: "User" | "Agent") => ({
+    name,
+    body: "",
+    actor,
+    content_hash: "",
+  });
+  const recordWith = (
+    invocations: ReturnType<typeof invocation>[] | undefined,
+  ): TurnRecord => ({
+    question: "问",
+    outcome: { kind: "Textual", data: { text_kind: "Clarify", body: "", assumption: null } },
+    trace: [],
+    provenance: { skills: [] },
+    ...(invocations === undefined ? {} : { invocations }),
+  });
+
+  it("returns only the User-actor names, in record order", () => {
+    expect(
+      userInvocationNames(
+        recordWith([
+          invocation("sql-coach", "User"),
+          invocation("pdf-tools", "Agent"),
+          invocation("charting", "User"),
+        ]),
+      ),
+    ).toEqual(["sql-coach", "charting"]);
+  });
+
+  it("treats a missing invocations field as none (a pre-badge turn)", () => {
+    expect(userInvocationNames(recordWith(undefined))).toEqual([]);
+  });
+});
 
 describe("lifecycleRunMarks (run-position contract)", () => {
   it("stamps first/mid/last across a run and null on every turn", () => {
@@ -132,7 +172,6 @@ describe("lifecycleVisualRows (fold segmentation, issue #737)", () => {
     const fold = rows[0];
     expect(fold.row).toBe("fold");
     if (fold.row !== "fold") return;
-    expect(fold.group.species).toBe("Source");
     expect(fold.group.kind).toBe("Added");
     // The FIRST member anchors the group (the expand-state key).
     expect(fold.group.anchorIdx).toBe(0);
@@ -151,10 +190,10 @@ describe("lifecycleVisualRows (fold segmentation, issue #737)", () => {
     // change cuts the segment.
     const rows = lifecycleVisualRows(entries);
     const shape = (r: (typeof rows)[number]) =>
-      r.row === "fold" ? { fold: [r.group.species, r.group.kind] } : r;
+      r.row === "fold" ? { fold: r.group.kind } : r;
     expect(rows.map(shape)).toEqual([
       { row: "marker", idx: 0 },
-      { fold: ["Source", "Replaced"] },
+      { fold: "Replaced" },
       { row: "marker", idx: 4 },
     ]);
   });
