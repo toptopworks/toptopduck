@@ -218,14 +218,15 @@ export async function setDatasetPrivacy(
 }
 
 // Ask one question (PRD #1) against the named session: run one turn and return
-// its ADR-0028 outcome (result / textual / failed / cancelled). The optional
-// staged skill names (ADR-0112 picker channel, calibrated by ADR-0119) are
-// materialized at submit as the turn's user invocations; absent keeps the
-// pre-invocation shape, so callers that never staged stay unchanged.
+// its ADR-0028 outcome (result / textual / failed / cancelled). The staged
+// skill names (ADR-0112 picker channel, calibrated by ADR-0119) are
+// materialized at submit as the turn's user invocations. Empty and absent are
+// equivalent -- the Rust command entry normalizes both through one Option
+// fold, the single rule; callers pass the array unconditionally (issue #992).
 export async function askQuestion(
   sessionId: string,
   question: string,
-  skillInvocations?: string[],
+  skillInvocations: string[],
 ): Promise<TurnOutcome> {
   return invoke<TurnOutcome>("ask", { sessionId, question, skillInvocations });
 }

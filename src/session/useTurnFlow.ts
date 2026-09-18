@@ -752,12 +752,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // initializer (which no-useless-assignment would flag as dead).
       let settledTrace: TraceRound[];
       try {
-        // An empty staging omits the optional IPC field entirely (the
-        // pre-invocation wire shape), so two-arg asks stay byte-compatible.
-        outcome =
-          stagedInvocations.length > 0
-            ? await askQuestion(sessionId, question, stagedInvocations)
-            : await askQuestion(sessionId, question);
+        // The staging rides the ask even when empty; the absent-equals-empty
+        // rule's authority lives on the askQuestion signature doc (#992).
+        outcome = await askQuestion(sessionId, question, stagedInvocations);
       } catch (e) {
         setError(toAppError(e, intl, "ask"));
         setTurnLoading(false);

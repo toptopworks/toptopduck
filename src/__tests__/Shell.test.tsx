@@ -2746,7 +2746,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     fireEvent.change(bar, { target: { value: "mint" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "mint"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "mint", []),
     );
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
@@ -2762,16 +2762,16 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
       expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
     );
     // The settle returns the submit face. NO re-pick: the view's staging was
-    // cleared at the submit boundary, so the next ask must be a bare
-    // two-argument call -- a stale charting silently riding every later
-    // turn is exactly the regression this pins (vitest matches call
-    // arguments exactly, so a third-argument call fails the assertion).
+    // cleared at the submit boundary, so the next ask must carry an empty
+    // staging array -- a stale charting silently riding every later turn is
+    // exactly the regression this pins (vitest matches call arguments
+    // exactly, so a non-empty third argument fails the assertion).
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
     fireEvent.change(bar, { target: { value: "q2" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", []));
   });
 
   it("cold-start pick lands a chip; Backspace withdraws it before submit", async () => {
@@ -2831,7 +2831,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     // the queued one-shot and the session settles idle).
     fireEvent.change(bar, { target: { value: "first" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "first"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "first", []));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
@@ -2842,7 +2842,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     );
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "second" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "second"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "second", []));
     expect(screen.getByLabelText("提问")).toHaveValue("");
   });
 
@@ -2861,7 +2861,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     const bar = await screen.findByLabelText("提问");
     fireEvent.change(bar, { target: { value: "only question" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "only question"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "only question", []));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
@@ -2884,7 +2884,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     fireEvent.change(bar, { target: { value: "q" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", []),
     );
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
@@ -2901,11 +2901,11 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await waitFor(() =>
       expect(screen.queryByText("charting")).not.toBeInTheDocument(),
     );
-    // ...so the next submit fires the ask with NO staged invocation (the
-    // optional IPC field stays absent on an empty staging).
+    // ...so the next submit fires the ask with an empty staging array (the
+    // Rust fold treats it the same as an absent field).
     fireEvent.change(bar, { target: { value: "q2" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", []));
   });
 
   it("session-scope intents never leak into another session and restore on switch-back (issue #718)", async () => {

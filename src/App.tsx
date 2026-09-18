@@ -110,7 +110,7 @@ function handleIntlError(err: Error): void {
 function fireShellAsk(
   fields: Pick<ComposerSessionFields, "handleAsk">,
   question: string,
-  invocations?: string[],
+  invocations: string[],
 ): void {
   void fields.handleAsk(question, invocations).catch((e: unknown) =>
     log.error("App", "shell submit handleAsk threw unexpectedly", e),
