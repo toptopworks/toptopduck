@@ -1,11 +1,12 @@
 // The chat projection's user side (ADR-0103, issue #609): one turn's question
 // rendered as a right-aligned bubble. The bubble carries ONLY user output and
-// conversation facts -- the verbatim question in full (pre-wrap; the ADR-0054
-// single-line + tooltip posture is retired), the asked_at stamp, the copy
-// affordance, and the stale strike-through when the turn's result died. Every
-// app annotation (active chip, skill drift, outcome, failures) lives on the
-// assistant side (TurnCard's stream) -- reading order is question, then
-// annotations, then reply.
+// conversation facts -- the invocation chips (ADR-0119 Decision 5), the
+// verbatim question in full (pre-wrap; the ADR-0054 single-line + tooltip
+// posture is retired), the asked_at stamp, the copy affordance, and the stale
+// strike-through when the turn's result died. Every app annotation (active
+// chip, skill drift, outcome, failures) lives on the assistant side
+// (TurnCard's stream) -- reading order is the invocation chips, then the
+// question, then the assistant-side annotations, then reply.
 //
 // The verbatim question is layer-4 content (ADR-0039) and passes through
 // untranslated; asked_at renders as the locale time (ADR-0052 chrome).
@@ -15,6 +16,11 @@ import { Puzzle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 import { HOVER_REVEAL_CLASS } from "./turn-visual";
+
+// The stale strike rides dotted (ADR-0041/0047), shared by both shapes: the
+// bare bubble carries it on the bubble element itself, the chips shape on the
+// question span.
+const STALE_STRIKE = "stale line-through decoration-dotted";
 
 export function UserBubble({
   question,
@@ -37,48 +43,66 @@ export function UserBubble({
   invokedSkills?: string[];
 }) {
   const intl = useIntl();
+  const hasSkills = invokedSkills.length > 0;
   return (
     <div className="user-bubble group flex flex-col items-end">
-      {/* ADR-0119 Decision 5: the user-invocation badges sit above the
-          question, right-aligned with the bubble -- the turn's shaping skills
-          read before the question does. badge-secondary tokens (muted
-          surface + muted text, md radius, 2px 8px padding per DESIGN.md)
-          with the composer chips' Puzzle glyph keep the "skill" concept one
-          visual language; decorative (no interaction), names untranslated. */}
-      {invokedSkills.length > 0 && (
-        <ul
-          className="invoked-skills m-0 mb-0.5 flex max-w-[85%] flex-wrap justify-end gap-1"
-          aria-label={intl.formatMessage({
-            id: "thread.userBubble.invokedSkillsAria",
-            defaultMessage: "Skills invoked with this message",
-          })}
-        >
-          {invokedSkills.map((name) => (
-            <li
-              key={name}
-              className="invoked-skill inline-flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
-            >
-              <Puzzle className="size-3 shrink-0" aria-hidden="true" />
-              <span className="truncate">{name}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      {/* ADR-0119 Decision 5: the invocation chips share the bubble's inline
+          flow (issue #993) -- they read ahead of the question inside the
+          bubble box and the question text wraps naturally after them, with no
+          pill surface: each chip keeps the composer chips' face -- accent
+          color riding the chip container (the glyph tints through
+          currentColor) over medium-weight text -- behind the same Puzzle
+          glyph, DESIGN.md's sole accent system. A <ul> is flow content and
+          may not nest in the <p>, so the list rides phrasing content with
+          list roles; decorative (no interaction), names untranslated. Chip
+          spacing rides the item margin; the literal space after the list is
+          the question's word gap and its wrap point. */}
       {/* The bubble box rides the question element itself (the .turn-question
           hook stays for selector / test stability): secondary surface + lg
           radius per the conversation-surface tokens, the top-right corner
           stepped down to sm so the bubble reads as pointing at the user's
           side. Full text wraps -- the identity handle (ADR-0039) is never
           clipped. A stale turn strikes the question through dotted
-          (ADR-0041/0047). */}
+          (ADR-0041/0047); in the chips shape the strike rides a dedicated
+          question span, scoping the decoration to the question text -- the
+          chips are atomic inline boxes (inline-flex) that text-decoration
+          does not propagate into, and the span pins that isolation even if
+          the chips' display ever changes. The bare (no-invocation) bubble
+          keeps the strike on the bubble element itself, exactly as before
+          the chips moved in. */}
       <p
         className={cn(
           "turn-question m-0 max-w-[85%] rounded-lg rounded-tr-sm bg-secondary px-3 py-2",
           "text-sm text-secondary-foreground whitespace-pre-wrap break-words",
-          isStale && "stale line-through decoration-dotted",
+          isStale && !hasSkills && STALE_STRIKE,
         )}
       >
-        {question}
+        {hasSkills ? (
+          <>
+            <span
+              role="list"
+              className="invoked-skills"
+              aria-label={intl.formatMessage({
+                id: "thread.userBubble.invokedSkillsAria",
+                defaultMessage: "Skills invoked with this message",
+              })}
+            >
+              {invokedSkills.map((name) => (
+                <span
+                  key={name}
+                  role="listitem"
+                  className="invoked-skill mr-1 inline-flex max-w-full items-center gap-1 align-baseline font-medium text-accent-foreground"
+                >
+                  <Puzzle className="size-3 shrink-0" aria-hidden="true" />
+                  <span className="truncate">{name}</span>
+                </span>
+              ))}
+            </span>{" "}
+            <span className={cn(isStale && STALE_STRIKE)}>{question}</span>
+          </>
+        ) : (
+          question
+        )}
       </p>
       {/* The conversation-fact meta row: the ask stamp + the copy affordance,
           hover-revealed (HOVER_REVEAL_CLASS rides the user-bubble group) so
