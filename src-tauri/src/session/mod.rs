@@ -58,7 +58,7 @@ use crate::session::loop_contract::{
     LoopOutcome, LoopRound, NoProgressDetail, Termination, TraceEntry,
 };
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
-use crate::session::skills::SkillActivationCtx;
+use crate::session::skills::{SkillActivationCtx, SkillTurnState};
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
 use crate::window;
@@ -748,9 +748,12 @@ impl TurnAudit {
 /// root, the CLI tool configs, and the delegation specs. All of these are
 /// "data passed in" rather than orchestration concerns -- the approval
 /// state / sink / phase callback are wiring, not data -- so they collapse
-/// into one struct. This keeps `run_external_turn` (currently 8 params,
-/// `#[allow]` retained) from growing further, and prevents `ask_with_phase`
-/// from exceeding the threshold as more data inputs are added.
+/// into one struct. The turn-scope skill pair (the pending invocation
+/// accumulation + the turn-start invoked snapshot) rides its own bundle,
+/// [`SkillTurnState`] (issue #989 D) -- a mutable turn channel the runtime
+/// faces write into, not submit data -- so neither `run_external_turn`
+/// (9 params, `#[allow]` retained) nor `ask_with_phase` grows as invocation
+/// semantics extend.
 pub struct TurnInputs<'a> {
     /// The effective MCP server configs for this turn (the config-level
     /// enabled slice, computed at the command boundary -- ADR-0106 single
@@ -1333,6 +1336,13 @@ impl Session {
         // an agent's mid-turn invoke_skill, which joins the NEXT turn's
         // snapshot -- the ADR-0111 no-competition posture, carried over).
         let turn_invoked = turn_start_invoked(&self.invoked_skills, inputs.user_invocations);
+        // The turn-scope skill bundle (issue #989 D): the pending records +
+        // the turn-start snapshot travel as one parameter through both
+        // runtime faces, and `record_turn` consumes it by value.
+        let mut skill_state = SkillTurnState {
+            pending: &mut pending_invocations,
+            start_invoked: &turn_invoked,
+        };
         // ADR-0103 (issue #608): the turn's asked-at timestamp, captured at
         // submit (before any round-trip starts) so the recorded value marks
         // the user's ask, not the first provider reply. Stamped onto the
@@ -1354,8 +1364,7 @@ impl Session {
                 approval,
                 sink,
                 on_phase,
-                &mut pending_invocations,
-                &turn_invoked,
+                &mut skill_state,
                 inputs,
             ),
             None => {
@@ -1464,7 +1473,7 @@ impl Session {
                     // nothing pays no standing tool cost. A mid-turn
                     // invocation joins the NEXT turn's snapshot (Decision 3's
                     // no-competition posture, carried over).
-                    if !turn_invoked.is_empty() {
+                    if !skill_state.start_invoked.is_empty() {
                         request
                             .tools
                             .push(crate::skills::read::read_skill_file_definition());
@@ -1504,7 +1513,7 @@ impl Session {
                     // session-INVOKED snapshot for eligibility and the
                     // registry root for the live name resolution.
                     let read_gate = crate::skills::read::SkillReadGate {
-                        invoked: &turn_invoked,
+                        invoked: skill_state.start_invoked,
                         root: inputs.skills_root,
                     };
                     // The mid-turn invocation channel (ADR-0119 Decision 4):
@@ -1516,7 +1525,7 @@ impl Session {
                     // SAME constructor, so the two faces cannot drift (#987).
                     let mut invocation_channel =
                         crate::skills::invocation::SkillInvocationCtx::from_session(
-                            &mut pending_invocations,
+                            &mut *skill_state.pending,
                             &self.discovery_snapshot,
                             inputs,
                         );
@@ -1612,7 +1621,7 @@ impl Session {
             question,
             outcome,
             trace,
-            pending_invocations,
+            skill_state.into_pending(),
             attribution,
             asked_at,
         )
@@ -1633,8 +1642,10 @@ impl Session {
     /// does so [`Self::ask_with_phase`]'s post-turn path is shared.
     // Cannot collapse further: question / history / locale / adapter are
     // external-runtime orchestration params with no natural grouping (unlike
-    // the three data inputs now in TurnInputs); approval / sink / on_phase
-    // are per-turn wiring callbacks (see TurnInputs doc), not data.
+    // the data inputs in TurnInputs); approval / sink / on_phase are per-turn
+    // wiring callbacks (see TurnInputs doc), not data; the turn-scope skill
+    // pair rides SkillTurnState (#989 D) -- one mutable channel and one read
+    // snapshot of the same turn, neither orchestration- nor TurnInputs-shaped.
     #[allow(clippy::too_many_arguments)]
     fn run_external_turn<O: FnMut(TurnPhase) + Send>(
         &mut self,
@@ -1645,8 +1656,7 @@ impl Session {
         approval: &ApprovalState,
         sink: &dyn ApprovalSink,
         on_phase: O,
-        pending_invocations: &mut Vec<crate::model::SkillInvocation>,
-        turn_invoked: &[String],
+        skill_state: &mut SkillTurnState<'_>,
         inputs: &TurnInputs<'_>,
     ) -> (TurnOutcome, Vec<LoopRound>) {
         // 1. Resolve the CLI binary. Not-on-PATH -> an external-runtime
@@ -1835,7 +1845,7 @@ impl Session {
             // passed in -- no per-branch refold of the pending vec's
             // user-invocation names.
             let read_gate = crate::skills::read::SkillReadGate {
-                invoked: turn_invoked,
+                invoked: skill_state.start_invoked,
                 root: inputs.skills_root,
             };
             // The bridge face's invocation channel (ADR-0119 Decision 4):
@@ -1844,7 +1854,7 @@ impl Session {
             // on the turn exactly like the built-in loop's, through the same
             // constructor the built-in branch wires (#987).
             let invocation_channel = crate::skills::invocation::SkillInvocationCtx::from_session(
-                pending_invocations,
+                &mut *skill_state.pending,
                 &self.discovery_snapshot,
                 inputs,
             );
@@ -1946,8 +1956,11 @@ impl Session {
         // session-invoked fold (Decision 4: monotonic by construction --
         // nothing can un-invoke a past turn).
         let skills = fold_skill_provenance(&invocations);
-        for invocation in &invocations {
-            crate::util::push_unique(&mut self.invoked_skills, &invocation.name);
+        // The session-invoked fold grows off the SAME per-name fold (one row
+        // per name, first-invocation order) -- no second pass over the
+        // records (issue #989 G).
+        for p in &skills {
+            crate::util::push_unique(&mut self.invoked_skills, &p.name);
         }
         // ADR-0102 Decision 1 (issue #589): stamp the turn's executing runtime
         // into the recipe-header facts, so the per-terminal-turn persist below
@@ -2879,14 +2892,6 @@ impl Drop for Session {
     }
 }
 
-/// The single recipe-save body behind [`Session::persist_if_bound`] and the
-/// mid-turn skill-activation channel's land-and-persist (ADR-0110 Decision 3,
-/// issue #701): migrate any staged derived sources to their portable
-/// location, then save the recipe atomically. Field-split (not a method)
-/// because the mid-turn caller holds the working set + temp path inside
-/// [`materializer::TurnDeps`] while the activation channel holds the
-/// timeline + persister -- disjoint session borrows that cannot re-widen to
-/// `&mut Session`.
 /// The turn-start invoked snapshot (ADR-0119 Decision 4, issue #983): the
 /// session's monotonic fold plus the turn's user invocations -- a user
 /// invocation is turn INPUT (assembled ahead of the question), so it reads
@@ -2926,6 +2931,14 @@ fn fold_skill_provenance(invocations: &[crate::model::SkillInvocation]) -> Vec<S
     skills
 }
 
+/// The single recipe-save body behind [`Session::persist_if_bound`] and the
+/// mid-turn skill-activation channel's land-and-persist (ADR-0110 Decision 3,
+/// issue #701): migrate any staged derived sources to their portable
+/// location, then save the recipe atomically. Field-split (not a method)
+/// because the mid-turn caller holds the working set + temp path inside
+/// [`materializer::TurnDeps`] while the activation channel holds the
+/// timeline + persister -- disjoint session borrows that cannot re-widen to
+/// `&mut Session`.
 fn persist_snapshot(
     persister: &mut recipe_persister::RecipePersister,
     working_set: &mut WorkingSet,

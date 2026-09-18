@@ -589,6 +589,39 @@ fn open_duck_migrates_a_v6_file_to_v7_invocation_semantics() {
 }
 
 #[test]
+fn a_v6_skill_entry_without_data_fails_to_open() {
+    // H (#989): the v6->v7 fold deliberately SKIPS a data-less entry (any
+    // kind), and that skip is only safe because the downstream `history`
+    // deserialization REJECTS the same entry (the internal
+    // SkillLifecycleEvent shape requires its fields) -- the file never
+    // opens, so the skip can never become a silent loss (a skill vanishing
+    // from the mount fold while the file opens clean). This pin holds that
+    // backstop: a future serde shape change (a blanket `#[serde(default)]`
+    // or a tag representation switch) that would let the entry open must go
+    // red HERE first, not in the field.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("v6-no-data.duck");
+    let v6 = json!({
+        "format_version": 6,
+        "session_name": "corrupt era",
+        "sources": [],
+        "history": [
+            { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+            { "entry": "Skill" },
+        ],
+        "active": null,
+    });
+    fs::write(&duck, serde_json::to_string(&v6).unwrap()).unwrap();
+
+    let (_events, cb) = collect_events();
+    let outcome = resume_defaults(&duck, Arc::new(CancelToken::new()), cb);
+    assert!(
+        outcome.is_err(),
+        "a Skill entry without `data` must not open -- the migration fold's skip is not a loss",
+    );
+}
+
+#[test]
 fn resume_rebuilds_activated_skills_from_timeline_fold() {
     // AC#5 (ADR-0110, issue #698): the live `Session.activated_skills` cache
     // re-seeds from `Recipe::activated_skills()` -- the fold over the same

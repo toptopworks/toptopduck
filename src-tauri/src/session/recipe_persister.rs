@@ -131,6 +131,15 @@ impl RecipePersister {
         self.discovery_snapshot = names;
     }
 
+    /// The persister-held copy of the discovery snapshot, read by the
+    /// consistency debug-check in [`Session::discovery_snapshot`] (issue
+    /// #989 F): the session-side setter remains the only writer, so the two
+    /// copies agree unless a future session-construction path writes a
+    /// field directly.
+    pub(super) fn discovery_snapshot(&self) -> &[String] {
+        &self.discovery_snapshot
+    }
+
     // --- Projection --------------------------------------------------------
 
     /// Project the live working set + timeline into a persisted [`Recipe`]
