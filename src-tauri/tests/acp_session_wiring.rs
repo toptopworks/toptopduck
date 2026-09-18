@@ -196,7 +196,8 @@ fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
             keychain: &keychain,
             skills: &[],
             skills_root: std::path::Path::new(""),
-            activated: &[],
+            user_invocations: &[],
+            disabled_skills: &[],
             cli_tools: &[],
             delegations: &[],
         },
@@ -271,7 +272,8 @@ fn external_cli_tool_call_routes_through_the_gateway() {
         keychain: &keychain,
         skills: &[],
         skills_root: std::path::Path::new(""),
-        activated: &[],
+        user_invocations: &[],
+        disabled_skills: &[],
         cli_tools: std::slice::from_ref(&tool),
         delegations: &[],
     };
@@ -444,17 +446,19 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
 
 /// Issue #368 AC #2: an external-runtime turn with a mounted skill records
 /// `{name, content_hash}` in TurnProvenance.skills. The ask_with_phase facade
-/// computes provenance once before the built-in / external branch and passes it
-/// to record_turn after; this test pins the external branch so a future change
-/// cannot silently drop the skill provenance on the ACP path.
+/// passes the turn's accumulating invocation records to record_turn, which
+/// derives the provenance from them; this test pins the external branch so a
+/// future change cannot silently drop the skill provenance on the ACP path.
 ///
-/// ADR-0110 (issues #700/#702): since the ACP assembly renders disclosure,
-/// the external turn records the ACTIVATED subset -- the same set the
-/// built-in turn records. The activated list deliberately covers only one of
-/// the two mounts, so recording the full mounted set -- the pre-#702 fork --
-/// reddens this test with an extra pdf-tools entry.
+/// ADR-0110 (issues #700/#702), calibrated by ADR-0119 (issue #983): since
+/// the ACP assembly renders the metadata index, the external turn records
+/// the invocation records' name set -- the same rule the built-in turn
+/// follows (the disclosure-parity lineage). The invocation deliberately
+/// covers only one of the two snapshot skills, so recording the full
+/// snapshot -- the retired pre-#983 shape -- reddens this test with an
+/// extra pdf-tools entry.
 #[test]
-fn external_turn_records_activated_subset_provenance() {
+fn external_turn_records_invocation_set_provenance() {
     let skills_root = tempfile::tempdir().unwrap();
     let skills_root = skills_root.path().to_path_buf();
     let body = "Name the statistical method you use.\n";
@@ -474,18 +478,18 @@ fn external_turn_records_activated_subset_provenance() {
     let sql_coach_hash = sha256_hex(&sql_coach_bytes);
 
     let (mut session, old_path, _guard) = external_session("text_reply");
-    session.mount_skill("sql-coach").expect("mount");
-    session.mount_skill("pdf-tools").expect("mount");
-    let mounted = session.mounted_skills();
-    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
+    session.set_discovery_snapshot(vec!["sql-coach".to_string(), "pdf-tools".to_string()]);
+    let snapshot = session.discovery_snapshot();
+    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &snapshot);
     assert_eq!(fragments.len(), 2);
 
     let approval = ApprovalState::new();
     let sink = NullSink;
     let keychain = KeychainStore::new();
-    // Only one of the two mounts is activated -- the convergence's
+    // Only one of the two snapshot skills is invoked -- the convergence's
     // discriminating case (see the doc comment).
-    let activated = vec!["sql-coach".to_string()];
+    let user_invocations =
+        session.materialize_user_invocations(&["sql-coach".to_string()], &skills_root, &[]);
     let outcome = session.ask_with_phase(
         "what is the answer?",
         &approval,
@@ -496,7 +500,8 @@ fn external_turn_records_activated_subset_provenance() {
             keychain: &keychain,
             skills: &fragments,
             skills_root: &skills_root,
-            activated: &activated,
+            user_invocations: &user_invocations,
+            disabled_skills: &[],
             cli_tools: &[],
             delegations: &[],
         },
@@ -523,8 +528,10 @@ fn external_turn_records_activated_subset_provenance() {
             name: "sql-coach".into(),
             content_hash: sql_coach_hash,
         }],
-        "the external turn records the ACTIVATED subset, not the full mounted set"
+        "the external turn records the INVOCATION set, not the full snapshot"
     );
+    assert_eq!(last_turn.invocations.len(), 1);
+    assert_eq!(last_turn.invocations[0].name, "sql-coach");
     // ADR-0101: the turn-top snapshot must record the turn's real runtime --
     // the pre-#588 `TurnAudit::builtin` hardcoded BuiltIn here, mislabeling
     // every live external turn. The external turn names its driving adapter's
@@ -601,7 +608,6 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
     let fragments: Vec<SkillPromptFragment> =
         resolve_prompt_fragments(&skills_root, &resumed.mounted_skills());
     assert_eq!(fragments.len(), 2);
-    let activated = resumed.activated_skills();
     let outcome = resumed.ask_with_phase(
         "what is the answer?",
         &ApprovalState::new(),
@@ -612,7 +618,8 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
             keychain: &KeychainStore::new(),
             skills: &fragments,
             skills_root: &skills_root,
-            activated: &activated,
+            user_invocations: &[],
+            disabled_skills: &[],
             cli_tools: &[],
             delegations: &[],
         },
@@ -670,13 +677,14 @@ fn external_turn_prompt_carries_disclosure_not_full_text() {
     );
 
     let (mut session, old_path, _guard) = external_session("prompt_echo");
-    session.mount_skill("sql-coach").expect("mount");
-    session.mount_skill("pdf-tools").expect("mount");
-    let mounted = session.mounted_skills();
-    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &mounted);
+    session.set_discovery_snapshot(vec!["sql-coach".to_string(), "pdf-tools".to_string()]);
+    let snapshot = session.discovery_snapshot();
+    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &snapshot);
     assert_eq!(fragments.len(), 2);
 
-    let activated = vec!["sql-coach".to_string()];
+    // The user invokes one of the two snapshot skills.
+    let user_invocations =
+        session.materialize_user_invocations(&["sql-coach".to_string()], &skills_root, &[]);
     let keychain = KeychainStore::new();
     let outcome = session.ask_with_phase(
         "what is the answer?",
@@ -688,7 +696,8 @@ fn external_turn_prompt_carries_disclosure_not_full_text() {
             keychain: &keychain,
             skills: &fragments,
             skills_root: &skills_root,
-            activated: &activated,
+            user_invocations: &user_invocations,
+            disabled_skills: &[],
             cli_tools: &[],
             delegations: &[],
         },
@@ -696,26 +705,39 @@ fn external_turn_prompt_carries_disclosure_not_full_text() {
     std::env::set_var("PATH", old_path);
     match outcome {
         TurnOutcome::Textual { body, .. } => {
-            // The mounted-only skill rides as an index entry.
+            // The disclosure block is the wholesale index -- every snapshot
+            // skill carries its row, invoked or not (ADR-0119 Decision 3).
             assert!(
                 body.contains("【可用技能】"),
                 "index section rides the prompt"
             );
             assert!(
                 body.contains("- `pdf-tools` — Extract tables before querying.\n"),
-                "mounted-only skill indexed, not body-injected"
+                "the uninvoked snapshot skill is indexed"
             );
-            // The activated skill rides its framed verbatim body.
+            assert!(
+                body.contains("- `sql-coach` — Coach honest SQL reporting.\n"),
+                "the invoked snapshot skill keeps its index row too"
+            );
+            // The invoked skill's body rides the TURN INPUT (the asking
+            // block, framed + verbatim, ahead of the question) -- never the
+            // standing disclosure (ADR-0119 Decision 8 calibrated: the
+            // outbound block carries the index only).
             assert!(
                 body.contains(
-                    "【激活技能】技能 `sql-coach`：\nName the statistical method you use.\n"
+                    "【技能调用】技能 `sql-coach`：\nName the statistical method you use.\n"
                 ),
-                "activated body framed + verbatim"
+                "the invocation body rides the turn input, framed + verbatim"
             );
-            // The retired full-text shape leaks the mounted-only body.
+            // No body frame section anywhere (the retired shape).
+            assert!(
+                !body.contains("【激活技能】"),
+                "the persistent body frame is retired"
+            );
+            // The uninvoked skill's body never rides anywhere.
             assert!(
                 !body.contains("Extract the tables first."),
-                "the mounted-only skill's body must not ride the prompt"
+                "the uninvoked skill's body must not ride the prompt"
             );
         }
         other => panic!("prompt_echo must complete Textual, got {other:?}"),
@@ -828,7 +850,8 @@ fn external_cancel_unblocks_a_turn_parked_on_a_hung_mcp_call() {
         keychain: &keychain,
         skills: &[],
         skills_root: Path::new(""),
-        activated: &[],
+        user_invocations: &[],
+        disabled_skills: &[],
         cli_tools: &[],
         delegations: &[],
     };

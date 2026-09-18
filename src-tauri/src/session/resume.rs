@@ -556,6 +556,11 @@ impl<'a> Resumer<'a> {
                                     },
                                 }),
                             },
+                            // ADR-0119 (issue #983): the invocation records
+                            // round-trip verbatim -- the resume replays each
+                            // body into the window ahead of its turn's
+                            // question (the pinned bytes survive unchanged).
+                            invocations: turn.invocations.clone(),
                         },
                         // ADR-0078 (issue #319): the persisted audit round-trips
                         // verbatim from the recipe turn -- trace + provenance
@@ -822,6 +827,18 @@ impl super::Session {
             // refolds both caches over the auto-included initial set right
             // after the swap.
             session.activated_skills = recipe.activated_skills();
+            // ADR-0119 (issue #983): the discovery snapshot restores from
+            // the recipe header EXPLICITLY (Decision 3 -- persisted, not
+            // folded; immutable within the session, so a resume never
+            // re-seeds it). A v6 file migrated to v7 carries the
+            // materialized mount fold; a v7-native file carries the
+            // creation-time set. open_duck's post-swap `seed_initial_skills`
+            // touches the legacy MOUNT fold only, never this.
+            session.discovery_snapshot = recipe.discovery_snapshot.clone();
+            // ADR-0119 Decision 4: the invoked set re-folds from the turn
+            // invocation records -- monotonic by construction, so the fold
+            // is the identity of the whole timeline.
+            session.invoked_skills = recipe.invoked_skills();
         }
 
         // ADR-0095 Decision 6 (+ ADR-0102 Decision 1's `last_runtime`):

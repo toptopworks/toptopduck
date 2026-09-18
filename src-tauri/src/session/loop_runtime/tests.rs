@@ -204,8 +204,7 @@ struct Harness {
     temp: TempDir,
     phases: Arc<Mutex<Vec<TurnPhase>>>,
     skills: crate::session::skills::SkillActivationFixture,
-    read_fragments: Vec<crate::skills::SkillPromptFragment>,
-    read_activated: Vec<String>,
+    read_invoked: Vec<String>,
     read_root: std::path::PathBuf,
     phase_hook: Option<PhaseHook>,
     /// The turn's delegation specs (issue #933): defaults empty; the
@@ -224,8 +223,7 @@ impl Harness {
             temp: TempDir::new().unwrap(),
             phases: Arc::new(Mutex::new(Vec::new())),
             skills: crate::session::skills::SkillActivationFixture::new(Vec::new()),
-            read_fragments: Vec::new(),
-            read_activated: Vec::new(),
+            read_invoked: Vec::new(),
             read_root: std::path::PathBuf::new(),
             phase_hook: None,
             delegations: Vec::new(),
@@ -343,10 +341,10 @@ impl Harness {
         let phases = Arc::clone(&self.phases);
         let phase_hook = self.phase_hook.clone();
         let read = crate::skills::read::SkillReadGate {
-            fragments: &self.read_fragments,
-            activated: &self.read_activated,
+            invoked: &self.read_invoked,
             root: &self.read_root,
         };
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         runtime.run(
             request,
             &mut deps,
@@ -355,6 +353,7 @@ impl Harness {
             cli,
             &self.delegations,
             &mut self.skills.ctx(),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
             &read,
             approval,
             sink,

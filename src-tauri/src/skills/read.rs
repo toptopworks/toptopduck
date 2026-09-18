@@ -1,5 +1,6 @@
-//! The `read_skill_file` gateway meta-tool (ADR-0111, issue #714): the
-//! restricted read surface over an ACTIVATED skill's attachment tree.
+//! The `read_skill_file` gateway meta-tool (ADR-0111, issue #714; gate
+//! recalibrated by ADR-0119 Decision 4): the restricted read surface over
+//! an INVOKED skill's attachment tree.
 //!
 //! Progressive disclosure's third layer: a skill is more than its injected
 //! body, and the extra files (`references/`, `assets/`, `scripts/`, and
@@ -16,16 +17,17 @@
 //! and be a regular file -- an in-tree symlink pointing outside follows to
 //! its real target and is refused as out of bounds.
 //!
-//! Like [`crate::skills::activation`], this is a gateway-local meta call
+//! Like [`crate::skills::invocation`], this is a gateway-local meta call
 //! served BEFORE the approval gate on both dispatch faces: reading is the
-//! same risk class as the injected body (a prompt-injection surface), so
-//! mounting + activation are the only trust gates (Decision 5). The
-//! classification IS pure -- a read mutates nothing, so unlike activation
+//! same risk class as the invoked body (a prompt-injection surface), so
+//! the session-invoked set plus the lexical/canonical bounds above are the
+//! only trust gates (Decision 5, calibrated by ADR-0119 Decision 4). The
+//! classification IS pure -- a read mutates nothing, so unlike invocation
 //! there is no transition and no persist. Failure states carry
-//! self-correcting signals (ADR-0077): an unmounted name lists the mounted
-//! names, a mounted-but-inactive name points at `activate_skill`, and a bad
-//! path lists the skill's real readable files (Decision 4 -- discovery rides
-//! the injected body, never a directory advertisement).
+//! self-correcting signals (ADR-0077): a name nobody invoked this session
+//! points at `invoke_skill` (and lists the already-invoked names), and a
+//! bad path lists the skill's real readable files (Decision 4 -- discovery
+//! rides the invocation, never a directory advertisement).
 //!
 //! Execution is text relay (Decision 7): the description teaches that a
 //! script's text, once read, goes to a registered CLI tool's content
@@ -37,11 +39,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
-use crate::skills::SkillPromptFragment;
 
-/// The `read_skill_file` tool name. Mount-conditional (ADR-0111 Decision 1):
-/// only a turn whose ACTIVATED set is non-empty pays the standing tool cost
-/// -- mounted-but-inactive skills have no readable files by definition.
+/// The `read_skill_file` tool name. Invoked-conditional (ADR-0111 Decision 1
+/// calibrated by ADR-0119 Decision 4): only a turn whose session-INVOKED set
+/// is non-empty pays the standing tool cost -- skills never invoked this
+/// session have no readable files by definition.
 pub(crate) const READ_SKILL_FILE: &str = "read_skill_file";
 
 /// The byte cap for one served file (ADR-0111 Decision 6): what rides
@@ -63,31 +65,30 @@ const LISTING_ENTRY_CAP: usize = 50;
 /// not a guarantee, and there is no binary consumer to be exact for.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-/// What one read classifies against: the turn's mounted fragments (the
-/// unmounted-name failure signal), the turn-start ACTIVATED snapshot (read
-/// eligibility -- a mid-turn activation joins the NEXT turn's snapshot, the
-/// no-competition-with-assembly posture of ADR-0111 Decision 3), and the
-/// registry root for the live name resolution (a mid-session registry delete
-/// is an honest error, never a stale turn-start snapshot).
+/// What one read classifies against: the turn-start session-INVOKED
+/// snapshot (read eligibility -- a mid-turn invocation joins the NEXT turn's
+/// snapshot, the no-competition-with-assembly posture of ADR-0111 Decision 3
+/// carried over by ADR-0119 Decision 4) and the registry root for the live
+/// name resolution (a mid-session registry delete is an honest error, never
+/// a stale turn-start snapshot).
 pub(crate) struct SkillReadGate<'a> {
-    /// The turn's mounted-skill fragments, in mount order (the same slice the
-    /// activation channel and the prompt assembly consume).
-    pub(crate) fragments: &'a [SkillPromptFragment],
-    /// The turn-start activated names -- read eligibility.
-    pub(crate) activated: &'a [String],
+    /// The turn-start invoked names -- read eligibility. The session-level
+    /// invoked set (a monotonic fold of the turn invocation records),
+    /// snapshotted at the turn boundary so a mid-turn `invoke_skill` lands
+    /// the read surface on the NEXT turn.
+    pub(crate) invoked: &'a [String],
     /// The skills registry root, for the live entry lookup.
     pub(crate) root: &'a Path,
 }
 
 impl SkillReadGate<'_> {
     /// The all-empty gate for dispatch-level tests that never touch the read
-    /// surface: empty sets refuse everything (the unmounted-surface
-    /// posture), so a read call under it is inert by construction.
+    /// surface: an empty invoked set refuses everything, so a read call
+    /// under it is inert by construction.
     #[cfg(test)]
     pub(crate) fn inert() -> SkillReadGate<'static> {
         SkillReadGate {
-            fragments: &[],
-            activated: &[],
+            invoked: &[],
             root: Path::new(""),
         }
     }
@@ -108,15 +109,15 @@ pub(crate) enum SkillReadOutcome {
 }
 
 /// The tool definition as advertised on both tool surfaces (the built-in
-/// table and the gateway `tools/list`), attached only when the turn's
-/// activated set is non-empty. English by the two-surface language split.
+/// table and the gateway `tools/list`), attached only when the session's
+/// invoked set is non-empty. English by the two-surface language split.
 /// The description teaches the rules and carries the execution pointer
 /// (ADR-0111 Decision 7) but never enumerates files (Decision 4).
 pub(crate) fn read_skill_file_definition() -> ToolDefinition {
     ToolDefinition {
         name: READ_SKILL_FILE.to_string(),
         description: format!(
-            "Read one attachment file of an ACTIVATED skill -- any file in its directory \
+            "Read one attachment file of an INVOKED skill -- any file in its directory \
              tree (references/, assets/, scripts/, or SKILL.md itself; no subdirectory is \
              privileged). Paths are '/'-separated and relative to the skill's root; `..` \
              components, absolute paths, and Windows drive / UNC forms are refused. Only \
@@ -131,8 +132,8 @@ pub(crate) fn read_skill_file_definition() -> ToolDefinition {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The activated skill's name (kebab-case), as named in \
-                         the injected skill body."
+                    "description": "The invoked skill's name (kebab-case), as named in \
+                         the invoked skill body."
                 },
                 "path": {
                     "type": "string",
@@ -146,10 +147,10 @@ pub(crate) fn read_skill_file_definition() -> ToolDefinition {
 }
 
 /// Classify one `read_skill_file` call against the gate (ADR-0111 Decisions
-/// 2-4; issue #714's locked four cases): served / name unmounted (lists every
-/// mounted name) / name mounted but not activated (points at
-/// `activate_skill`) / path missing, out of bounds, or a directory (lists the
-/// skill's readable files). Pure -- no state changes anywhere.
+/// 2-4, calibrated by ADR-0119 Decision 4): served / name not invoked this
+/// session (points at `invoke_skill` and lists the already-invoked names) /
+/// path missing, out of bounds, or a directory (lists the skill's readable
+/// files). Pure -- no state changes anywhere.
 pub(crate) fn resolve_skill_read(call: &ToolUse, gate: &SkillReadGate<'_>) -> SkillReadOutcome {
     let Some(name) = str_param(&call.input, "name") else {
         return SkillReadOutcome::Refused(missing_param_failure("name"));
@@ -157,11 +158,8 @@ pub(crate) fn resolve_skill_read(call: &ToolUse, gate: &SkillReadGate<'_>) -> Sk
     let Some(path) = str_param(&call.input, "path") else {
         return SkillReadOutcome::Refused(missing_param_failure("path"));
     };
-    if !gate.fragments.iter().any(|f| f.name == name) {
-        return SkillReadOutcome::Refused(not_mounted_failure(name, gate.fragments));
-    }
-    if !gate.activated.iter().any(|a| a == name) {
-        return SkillReadOutcome::Refused(not_activated_failure(name));
+    if !gate.invoked.iter().any(|a| a == name) {
+        return SkillReadOutcome::Refused(not_invoked_failure(name, gate.invoked));
     }
     if lexical_reject(path) {
         return SkillReadOutcome::Refused(lexical_failure(path));
@@ -234,28 +232,25 @@ fn missing_param_failure(param: &str) -> String {
     format!("read_skill_file failed: parameter `{param}`: expected a non-empty string")
 }
 
-/// The unmounted-name failure (ADR-0111 Decision 4): mirror the
-/// `activate_skill` shape -- every mounted name in the error so the agent can
-/// retry with a real one in one hop.
-fn not_mounted_failure(name: &str, fragments: &[SkillPromptFragment]) -> String {
-    let mounted: Vec<&str> = fragments.iter().map(|f| f.name.as_str()).collect();
-    if mounted.is_empty() {
-        format!("read_skill_file: `{name}` is not mounted. No skills are mounted this turn.")
+/// The not-invoked failure (ADR-0111 Decision 4, calibrated by ADR-0119
+/// Decision 4): reading rides the session's invoked set, so the fix is one
+/// `invoke_skill` away -- and the error lists every already-invoked name so
+/// the agent can route to a readable skill in one hop.
+fn not_invoked_failure(name: &str, invoked: &[String]) -> String {
+    if invoked.is_empty() {
+        format!(
+            "read_skill_file: `{name}` has not been invoked. No skills are invoked yet \
+             this session; call `invoke_skill` first -- only an invoked skill's files \
+             are readable."
+        )
     } else {
         format!(
-            "read_skill_file: `{name}` is not mounted. Mounted skills this turn: {}.",
-            mounted.join(", ")
+            "read_skill_file: `{name}` has not been invoked. Invoked skills: {}. Call \
+             `invoke_skill` with this name first -- only an invoked skill's files are \
+             readable.",
+            invoked.join(", ")
         )
     }
-}
-
-/// The mounted-but-inactive failure (Decision 3): reading rides the same gate
-/// as body injection, so the fix is one `activate_skill` away.
-fn not_activated_failure(name: &str) -> String {
-    format!(
-        "read_skill_file: `{name}` is mounted but not activated. Call `activate_skill` \
-         with this name first -- only an activated skill's files are readable."
-    )
 }
 
 /// The registry-miss failure: the live lookup could not canonicalize
@@ -355,7 +350,7 @@ fn lexical_reject(raw: &str) -> bool {
 /// that IS the skill body. `None` when the name is not spec-shaped (defense
 /// in depth -- the mount API does not validate, mirroring
 /// [`crate::skills::prompt`]) or the entry no longer resolves on disk.
-fn canonical_anchor(root: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn canonical_anchor(root: &Path, name: &str) -> Option<PathBuf> {
     // Defense in depth for the `TurnInputs::empty` sentinel root: an empty
     // path joins into a RELATIVE name that canonicalize would resolve
     // against the process CWD. Refuse it as a registry miss rather than
@@ -468,7 +463,6 @@ fn push_relative(anchor: &Path, path: &Path, out: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::skills::SkillActivationFixture;
 
     /// The fixture every resolver test builds from: a temp registry root
     /// holding one spec-valid skill, the mounted fragments, and the activated
@@ -500,21 +494,12 @@ mod tests {
             std::fs::write(path, bytes).unwrap();
         }
 
-        fn gate<'a>(
-            &'a self,
-            fragments: &'a [SkillPromptFragment],
-            activated: &'a [String],
-        ) -> SkillReadGate<'a> {
+        fn gate<'a>(&'a self, invoked: &'a [String]) -> SkillReadGate<'a> {
             SkillReadGate {
-                fragments,
-                activated,
+                invoked,
                 root: self.root.path(),
             }
         }
-    }
-
-    fn frag(name: &str) -> SkillPromptFragment {
-        SkillActivationFixture::fragment(name, "body")
     }
 
     fn activated(names: &[&str]) -> Vec<String> {
@@ -528,9 +513,8 @@ mod tests {
             name: READ_SKILL_FILE.to_string(),
             input,
         };
-        let fragments = vec![frag("sql-coach")];
         let activated = activated(&["sql-coach"]);
-        resolve_skill_read(&call, &fx.gate(&fragments, &activated))
+        resolve_skill_read(&call, &fx.gate(&activated))
     }
 
     fn read(fx: &Fixture, path: &str) -> SkillReadOutcome {
@@ -590,7 +574,7 @@ mod tests {
     /// An unmounted name is refused with EVERY mounted name in the error --
     /// the one-hop self-correction signal, mirroring `activate_skill`.
     #[test]
-    fn unmounted_name_lists_every_mounted_name() {
+    fn not_invoked_name_lists_every_invoked_name() {
         let fx = Fixture::new();
         fx.put_skill("sql-coach");
         fx.put_skill("pdf-tools");
@@ -599,40 +583,46 @@ mod tests {
             name: READ_SKILL_FILE.to_string(),
             input: json!({"name": "ghost", "path": "SKILL.md"}),
         };
-        let fragments = vec![frag("sql-coach"), frag("pdf-tools")];
         let activated = activated(&["sql-coach"]);
-        match resolve_skill_read(&call, &fx.gate(&fragments, &activated)) {
+        match resolve_skill_read(&call, &fx.gate(&activated)) {
             SkillReadOutcome::Refused(message) => {
                 assert!(message.contains("ghost"), "{message}");
                 assert!(message.contains("sql-coach"), "{message}");
-                assert!(message.contains("pdf-tools"), "{message}");
+                // ADR-0119: the failure lists the INVOKED names (the one-hop
+                // routing signal) + the invoke_skill pointer -- not the
+                // registry contents.
+                assert!(message.contains("invoke_skill"), "{message}");
+                assert!(!message.contains("pdf-tools"), "{message}");
             }
             other => panic!("expected Refused, got {other:?}"),
         }
     }
 
-    /// An unmounted name on an EMPTY mounted surface names the empty surface.
+    /// A name on an EMPTY invoked surface names the empty surface + the fix.
     #[test]
-    fn unmounted_name_with_empty_mounted_set_names_the_empty_surface() {
+    fn not_invoked_with_empty_set_names_the_empty_surface() {
         let fx = Fixture::new();
         let call = ToolUse {
             id: "tu_r".to_string(),
             name: READ_SKILL_FILE.to_string(),
             input: json!({"name": "ghost", "path": "SKILL.md"}),
         };
-        match resolve_skill_read(&call, &fx.gate(&[], &[])) {
+        match resolve_skill_read(&call, &fx.gate(&[])) {
             SkillReadOutcome::Refused(message) => assert_eq!(
                 message,
-                "read_skill_file: `ghost` is not mounted. No skills are mounted this turn."
+                "read_skill_file: `ghost` has not been invoked. No skills are invoked yet \
+                 this session; call `invoke_skill` first -- only an invoked skill's files \
+                 are readable."
             ),
             other => panic!("expected Refused, got {other:?}"),
         }
     }
 
-    /// A mounted-but-not-activated name is refused with the pointer to
-    /// `activate_skill` (read rides the activation gate, Decision 3).
+    /// A registry-existing name nobody invoked this session is refused with
+    /// the pointer to `invoke_skill` (read rides the invoked gate, ADR-0119
+    /// Decision 4) -- existence on disk is not eligibility.
     #[test]
-    fn mounted_not_activated_points_to_activate_skill() {
+    fn not_invoked_registry_name_points_to_invoke_skill() {
         let fx = Fixture::new();
         fx.put_skill("sql-coach");
         let call = ToolUse {
@@ -640,12 +630,11 @@ mod tests {
             name: READ_SKILL_FILE.to_string(),
             input: json!({"name": "sql-coach", "path": "SKILL.md"}),
         };
-        let fragments = vec![frag("sql-coach")];
         let activated = activated(&["other-skill"]);
-        match resolve_skill_read(&call, &fx.gate(&fragments, &activated)) {
+        match resolve_skill_read(&call, &fx.gate(&activated)) {
             SkillReadOutcome::Refused(message) => {
                 assert!(message.contains("sql-coach"), "{message}");
-                assert!(message.contains("activate_skill"), "{message}");
+                assert!(message.contains("invoke_skill"), "{message}");
             }
             other => panic!("expected Refused, got {other:?}"),
         }
@@ -671,9 +660,8 @@ mod tests {
                 name: READ_SKILL_FILE.to_string(),
                 input,
             };
-            let fragments = vec![frag("sql-coach")];
             let activated = activated(&["sql-coach"]);
-            match resolve_skill_read(&call, &fx.gate(&fragments, &activated)) {
+            match resolve_skill_read(&call, &fx.gate(&activated)) {
                 SkillReadOutcome::Refused(message) => {
                     let param = if message.contains("`name`") {
                         "name"
@@ -1027,9 +1015,8 @@ mod tests {
             name: READ_SKILL_FILE.to_string(),
             input: json!({"name": "linked-skill", "path": "references/x.md"}),
         };
-        let fragments = vec![frag("linked-skill")];
         let activated = activated(&["linked-skill"]);
-        match resolve_skill_read(&call, &fx.gate(&fragments, &activated)) {
+        match resolve_skill_read(&call, &fx.gate(&activated)) {
             SkillReadOutcome::Local { payload, .. } => {
                 assert_eq!(payload, Value::String("through the link\n".to_string()));
             }

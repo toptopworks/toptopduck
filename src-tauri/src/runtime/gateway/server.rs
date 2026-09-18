@@ -96,9 +96,14 @@ pub struct GatewayCtx<'a> {
     /// gets -- the bridge face lands activations through the SAME session
     /// transition by construction.
     pub skills: SkillActivationCtx<'a>,
-    /// The attachment read gate (ADR-0111, issue #714): serves the
-    /// `read_skill_file` meta-tool's interception below -- the same
-    /// immutable bundle (turn-start fragments + activated snapshot +
+    /// The mid-turn skill-invocation channel (ADR-0119 Decision 4, issue
+    /// #983): serves the `invoke_skill` meta-tool's interception below --
+    /// the bridge face lands invocations on the SAME turn record by
+    /// construction.
+    pub invocations: crate::skills::invocation::SkillInvocationCtx<'a>,
+    /// The attachment read gate (ADR-0111, issue #714; calibrated by
+    /// ADR-0119): serves the `read_skill_file` meta-tool's interception
+    /// below -- the same immutable bundle (turn-start invoked snapshot +
     /// registry root) the built-in loop's dispatch server gets, so both
     /// runtime surfaces read with one semantics by construction.
     pub read: crate::skills::read::SkillReadGate<'a>,
@@ -632,18 +637,27 @@ fn handle_method(
             );
             tools.extend(ctx.mcp.meta_tool_definitions().iter().map(tool_to_mcp));
             // The skill-activation meta-tool (issue #701): mounted iff the
-            // turn's mounted set is non-empty -- the trio's conditional
-            // posture (ADR-0105 Decision 6).
+            // turn's discovery snapshot is non-empty -- the trio's conditional
+            // posture (ADR-0105 Decision 6). The LEGACY channel, live through
+            // the coexistence period (ADR-0119 Consequences -- the ADR-0086 calibration, issue #983).
             if !ctx.skills.fragments.is_empty() {
                 tools.push(tool_to_mcp(
                     &crate::skills::activation::activate_skill_definition(),
                 ));
             }
-            // The skill-attachment read surface (ADR-0111 Decision 1, issue
-            // #714): mounted iff the turn's ACTIVATED set is non-empty -- the
-            // bridge mirrors the built-in table's condition verbatim (one
-            // tool plane, two callers).
-            if !ctx.read.activated.is_empty() {
+            // The skill-invocation meta-tool (ADR-0119 Decision 4, issue
+            // #983): `invoke_skill` succeeds the activation channel,
+            // snapshot-conditional like its predecessor.
+            if !ctx.skills.fragments.is_empty() {
+                tools.push(tool_to_mcp(
+                    &crate::skills::invocation::invoke_skill_definition(),
+                ));
+            }
+            // The skill-attachment read surface (ADR-0111 Decision 1
+            // calibrated by ADR-0119 Decision 4): mounted iff the session-
+            // INVOKED set is non-empty -- the bridge mirrors the built-in
+            // table's condition verbatim (one tool plane, two callers).
+            if !ctx.read.invoked.is_empty() {
                 tools.push(tool_to_mcp(
                     &crate::skills::read::read_skill_file_definition(),
                 ));
@@ -742,6 +756,25 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 local_meta_result(call, &summary, payload, outcome)
             }
             crate::skills::activation::SkillActivationOutcome::Refused(message) => {
+                resolution_failure(message)
+            }
+        };
+    }
+    // The skill-invocation meta-tool (ADR-0119 Decision 4, issue #983):
+    // intercepted beside the activation arm, equally ahead of any
+    // classification / gate -- invocation is approval-free by design (the
+    // gate is the machine-level enable axis). The resolver appends the
+    // agent-actor record to the turn's pending invocations; this site maps
+    // its two variants exactly as the trio's (a Local call gets a trace
+    // row, a Refused call is the bare isError envelope with no trace
+    // entry).
+    if call.name == crate::skills::invocation::INVOKE_SKILL {
+        return match crate::skills::invocation::resolve_skill_invocation(call, &mut ctx.invocations)
+        {
+            crate::skills::invocation::SkillInvocationOutcome::Local { summary, payload } => {
+                local_meta_result(call, &summary, payload, outcome)
+            }
+            crate::skills::invocation::SkillInvocationOutcome::Refused(message) => {
                 resolution_failure(message)
             }
         };
@@ -1116,6 +1149,10 @@ mod tests {
         GatewayCtx {
             deps,
             skills: skills.ctx(),
+            // Inert by default (the invocation-surface tests overwrite this
+            // field with a seeded channel; the ctx is built `mut` for that
+            // purpose).
+            invocations: crate::skills::invocation::test_ctx(Box::leak(Box::new(Vec::new()))),
             // Inert by default; the read-surface tests overwrite this field
             // with a seeded gate (the ctx is built `mut` for that purpose).
             read: crate::skills::read::SkillReadGate::inert(),
@@ -3081,6 +3118,105 @@ mod tests {
         // level; this face's contract is the envelope + traceless mapping.
     }
 
+    /// The bridge face's `invoke_skill` arm (ADR-0119 Decision 4, issue
+    /// #983): the intercept maps the resolver's two variants exactly as
+    /// the built-in arm does -- a served invocation is a success envelope
+    /// carrying the body verbatim with one trace row under the tool name
+    /// and the agent-actor record on the pending vec; a refused name is
+    /// the bare isError envelope carrying the self-correcting snapshot
+    /// listing, with NO trace row and nothing landed. The mapping is
+    /// hand-duplicated from the built-in face, so this test is its only
+    /// pin on the bridge.
+    #[test]
+    fn handle_tools_call_invoke_skill_serves_and_refuses_on_the_bridge_face() {
+        let mut ctx = fresh_ctx();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("sql-coach");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: sql-coach\ndescription: Coach SQL.\n---\nCoach the SQL.\n",
+        )
+        .unwrap();
+        let pending: &'static mut Vec<crate::model::SkillInvocation> =
+            Box::leak(Box::new(Vec::new()));
+        ctx.invocations = crate::skills::invocation::SkillInvocationCtx {
+            pending,
+            snapshot: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
+            root: Box::leak(root.path().to_path_buf().into_boxed_path()),
+            disabled: &[],
+        };
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "invoke_skill", "arguments": {"name": "sql-coach"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "an invocation is a success");
+                assert_eq!(
+                    v["content"][0]["text"], "Coach the SQL.\n",
+                    "the body rides the result verbatim"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("invoke_skill must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("invoke_skill must return Result, got None"),
+        }
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "one served invocation -> one trace row"
+        );
+        assert_eq!(outcome.trace[0].name, "invoke_skill");
+        assert!(outcome.trace[0].success);
+        assert_eq!(
+            outcome.trace[0].summary, "sql-coach",
+            "summary is the skill name"
+        );
+        assert_eq!(ctx.invocations.pending.len(), 1, "the agent record lands");
+        assert_eq!(ctx.invocations.pending[0].name, "sql-coach");
+        assert_eq!(
+            ctx.invocations.pending[0].actor,
+            crate::model::SkillLifecycleActor::Agent
+        );
+
+        let bad = json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {"name": "invoke_skill", "arguments": {"name": "ghost"}}
+        });
+        match handle_tools_call(&bad, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "an unknown name is refused");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.contains("ghost"), "{text}");
+                assert!(
+                    text.contains("sql-coach"),
+                    "the refusal lists the snapshot names for self-correction: {text}"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("a refused invocation is still a Result, got error {code}: {m}")
+            }
+            Response::None => panic!("a refused invocation must return Result, got None"),
+        }
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "a refused invocation adds no trace row"
+        );
+        assert_eq!(
+            ctx.invocations.pending.len(),
+            1,
+            "a refused invocation lands nothing"
+        );
+    }
+
     /// The mount-conditional surface (issue #701, ADR-0105 Decision 6): an
     /// EMPTY mounted set lists no `activate_skill`; a non-empty set mounts
     /// it once, beside the trio's conditional attachment.
@@ -3147,35 +3283,27 @@ mod tests {
         std::fs::write(dir.join("references/notes.md"), b"Use CTEs.\n").unwrap();
         std::fs::write(dir.join("SKILL.md"), "---\nname: sql-coach\n---\nBody.\n").unwrap();
         crate::skills::read::SkillReadGate {
-            fragments: Box::leak(
-                vec![crate::session::skills::SkillActivationFixture::fragment(
-                    "sql-coach",
-                    "Coach the SQL.",
-                )]
-                .into_boxed_slice(),
-            ),
-            activated: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
+            invoked: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
             root: Box::leak(tmp.path().to_path_buf().into_boxed_path()),
         }
     }
 
-    /// The read surface's mount condition (issue #714, ADR-0111 Decision 1):
-    /// an EMPTY activated set lists no `read_skill_file` even with skills
-    /// mounted; a non-empty ACTIVATED set mounts it -- the bridge mirrors
-    /// the built-in table's condition.
+    /// The read surface's mount condition (issue #714, ADR-0111 Decision 1
+    /// calibrated by ADR-0119 Decision 4): an EMPTY invoked set lists no
+    /// `read_skill_file` even with skills in the snapshot; a non-empty
+    /// invoked set mounts it -- the bridge mirrors the built-in table's
+    /// condition.
     #[test]
-    fn tools_list_mounts_read_skill_file_only_with_a_nonempty_activated_set() {
-        // Mounted but NOT activated: the read surface stays off (reading
-        // rides the activation gate, not the mount gate).
+    fn tools_list_mounts_read_skill_file_only_with_a_nonempty_invoked_set() {
+        // Snapshot skills but nothing INVOKED yet: the read surface stays
+        // off (reading rides the invoked gate, not the snapshot).
         let mut ctx = skill_ctx(vec![
             crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach."),
         ]);
         let tmp = tempfile::tempdir().unwrap();
-        let gate = leaked_read_gate(&tmp);
         ctx.read = crate::skills::read::SkillReadGate {
-            fragments: gate.fragments,
-            activated: &[],
-            root: gate.root,
+            invoked: &[],
+            root: Box::leak(tmp.path().to_path_buf().into_boxed_path()),
         };
         match handle_method(
             "tools/list",
@@ -3192,7 +3320,7 @@ mod tests {
                     .collect();
                 assert!(
                     !names.contains(&"read_skill_file"),
-                    "a mounted-but-inactive turn pays no read cost"
+                    "a session that invoked nothing pays no read cost"
                 );
             }
             Response::Error(code, m) => {
@@ -3219,7 +3347,7 @@ mod tests {
                     .collect();
                 assert!(
                     names.contains(&"read_skill_file"),
-                    "a non-empty activated set mounts the read surface"
+                    "a non-empty invoked set mounts the read surface"
                 );
             }
             Response::Error(code, m) => {

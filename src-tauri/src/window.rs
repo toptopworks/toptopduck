@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use crate::model::{ColumnSchema, DatasetDescriptor, TurnOutcome, TurnRecord};
 use crate::provider::prompt::{
     build_acp_context_block, build_tool_system_prompt, render_history_messages, render_response,
-    render_skill_block, render_summary_turn_note, ResponseLocale,
+    render_skill_block, render_summary_turn_note, render_turn_input, ResponseLocale,
 };
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
 use crate::provider::{
@@ -39,14 +39,19 @@ const FAR_QUESTION_EXCERPT_CHARS: usize = 80;
 /// Assemble the provider request for one turn (ADR-0023/0026/0039/0011): the
 /// asking question, the windowed conversation history, and every working-set
 /// dataset pruned by window + privacy. Pure: reads the working set and thread,
-/// returns the payload the orchestrator hands the provider.
+/// returns the payload the orchestrator hands the provider. ADR-0119
+/// (issue #983): the asking question carries the user's submit-time
+/// invocation preamble (bodies ahead of the question, via
+/// [`render_turn_input`]); the verbatim question persists on the turn record
+/// untouched -- the preamble is a window-layer rendering, not a mutation.
 pub fn assemble(
     question: &str,
+    user_invocations: &[crate::model::SkillInvocation],
     working_set: &WorkingSet,
     history: &[TurnRecord],
 ) -> ProviderRequest {
     ProviderRequest {
-        question: question.to_string(),
+        question: render_turn_input(question, user_invocations),
         history: assemble_history(history),
         datasets: assemble_datasets(working_set, history),
         active: resolve_active(working_set, history),
@@ -55,19 +60,19 @@ pub fn assemble(
 
 /// Assemble the tool-calling request for one agent turn (ADR-0081, issue #318;
 /// ADR-0086, issue #364): the tool-use system prompt (capability boundary +
-/// mounted-skill fragments + locale directive + the windowed schema context),
-/// the windowed conversation as user/assistant message turns closed by the
-/// asking question, and the built-in tool table. Pure over the same state as
-/// [`assemble`] -- the single-SQL payload is built first and reused as the
-/// schema-context source, so the two paths can never disagree on which
-/// datasets / samples / privacy pruning the model sees.
+/// the skill metadata index + locale directive + the windowed schema
+/// context), the windowed conversation as user/assistant message turns
+/// closed by the asking question, and the built-in tool table. Pure over
+/// the same state as [`assemble`] -- the single-SQL payload is built first
+/// and reused as the schema-context source, so the two paths can never
+/// disagree on which datasets / samples / privacy pruning the model sees.
 ///
-/// `skills` is the session's resolved mounted-skill fragments (issue #364);
-/// `activated` is the session's activated-skill name list -- the L1/L2 sort
-/// key that splits the fragments into a metadata index (mounted, not
-/// activated) and verbatim bodies (activated) inside the system prompt
-/// (ADR-0110, issue #700). An empty mounted set adds nothing, preserving
-/// the pre-skill prompt shape.
+/// `skills` is the discovery snapshot's resolved fragments (ADR-0119
+/// Decision 3, issue #983): the system prompt's skill section is the
+/// wholesale metadata index -- no body anywhere (bodies ride the turn
+/// input through [`assemble`]'s invocation preamble, never the standing
+/// prompt). An empty snapshot adds nothing, preserving the pre-skill
+/// prompt shape.
 ///
 /// The agent loop owns the request for the whole turn: each round-trip re-sends
 /// this system + tool table with the conversation extended by the prior tool
@@ -78,11 +83,11 @@ pub fn assemble_tool_turn(
     history: &[TurnRecord],
     locale: ResponseLocale,
     skills: &[SkillPromptFragment],
-    activated: &[String],
+    user_invocations: &[crate::model::SkillInvocation],
 ) -> ToolTurnRequest {
-    let request = assemble(question, working_set, history);
+    let request = assemble(question, user_invocations, working_set, history);
     ToolTurnRequest {
-        system: build_tool_system_prompt(&request, locale, skills, activated),
+        system: build_tool_system_prompt(&request, locale, skills),
         messages: tool_turn_messages(&request),
         tools: crate::tools::builtin_table(),
         max_tokens: MAX_REPLY_TOKENS,
@@ -104,21 +109,21 @@ pub fn assemble_tool_turn(
 /// M-contract (`result_N` naming) rides the gateway tool descriptions, not
 /// this assembly.
 ///
-/// Mounted-skill fragments (issue #368) land as a SEPARATE text block right
-/// before the user's question: the progressive-disclosure rendering shared
-/// with the built-in system prompt ([`render_skill_block`] -- index entries
-/// for mounted-but-not-activated skills + verbatim bodies for the activated
-/// set, sorted by `activated`; ADR-0110 Decision 8, issue #702 parity). An
-/// empty mount set adds no block, so the pre-skill block order is preserved.
+/// Discovery-skill fragments (issue #368) land as a SEPARATE text block
+/// right before the user's question: the same metadata-index rendering the
+/// built-in system prompt embeds ([`render_skill_block`] -- every snapshot
+/// skill's index row, no bodies; ADR-0110 Decision 8 calibrated by
+/// ADR-0119, issue #702 parity). An empty snapshot adds no block, so the
+/// pre-skill block order is preserved.
 pub fn assemble_acp_turn(
     question: &str,
     working_set: &WorkingSet,
     history: &[TurnRecord],
     locale: ResponseLocale,
     skills: &[SkillPromptFragment],
-    activated: &[String],
+    user_invocations: &[crate::model::SkillInvocation],
 ) -> Vec<ContentBlock> {
-    let request = assemble(question, working_set, history);
+    let request = assemble(question, user_invocations, working_set, history);
     let mut blocks = Vec::with_capacity(request.history.len() * 2 + 3);
     // Leading context block (locale + schema only, ADR-0086).
     blocks.push(ContentBlock::text(build_acp_context_block(
@@ -142,11 +147,11 @@ pub fn assemble_acp_turn(
             }
         }
     }
-    // Mounted-skill disclosure as a separate block before the question
-    // (#368; #702: the same sorted rendering the built-in system prompt
-    // embeds -- index entries + activated bodies).
+    // Discovery-skill disclosure as a separate block before the question
+    // (#368; #702 parity; ADR-0119: the block carries ONLY the metadata
+    // index -- bodies ride the turn input and never resend each turn).
     if !skills.is_empty() {
-        blocks.push(ContentBlock::text(render_skill_block(skills, activated)));
+        blocks.push(ContentBlock::text(render_skill_block(skills)));
     }
     blocks.push(ContentBlock::text(request.question));
     blocks
@@ -232,6 +237,10 @@ fn assemble_history(history: &[TurnRecord]) -> Vec<TurnPayload> {
         .map(|(i, turn)| {
             if i < far_count {
                 TurnPayload::Summary {
+                    // The invocation preamble wears away with the question
+                    // (ADR-0119: a summary turn excerpts the verbatim question
+                    // only -- expired skill instructions share the question's
+                    // window fate).
                     question_excerpt: truncate_question(&turn.question),
                     // The far-window one-line summary names the turn's primary
                     // result (ADR-0084 chain tail); antecedent promotions ride
@@ -243,7 +252,12 @@ fn assemble_history(history: &[TurnRecord]) -> Vec<TurnPayload> {
                 }
             } else {
                 TurnPayload::Full {
-                    question: turn.question.clone(),
+                    // ADR-0119: the turn's invocation records replay ahead of
+                    // the question -- the same rendering the asking turn's
+                    // user invocations get (both actors' records ride here;
+                    // agent invocations rode their own tool result live, and
+                    // history replay restores them as turn input).
+                    question: render_turn_input(&turn.question, &turn.invocations),
                     response: ResponsePayload::from(&turn.outcome),
                 }
             }
@@ -470,6 +484,7 @@ mod tests {
             provenance: TurnProvenance::default(),
             asked_at: None,
             settled_at: None,
+            invocations: Vec::new(),
         }
     }
 
@@ -499,7 +514,7 @@ mod tests {
     fn under_window_every_turn_is_full() {
         // <= N=20 turns: no summaries -- the whole thread ships full.
         let (ws, history) = source_plus_turns(5);
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         assert_eq!(payload.history.len(), 5);
         assert!(payload
             .history
@@ -518,7 +533,7 @@ mod tests {
         // 21 turns: the oldest (turn 1 -> result_1) falls out of the N=20 window
         // and becomes a summary; the recent 20 stay full (ADR-0023).
         let (ws, history) = source_plus_turns(21);
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         assert_eq!(payload.history.len(), 21);
         let summaries = payload
             .history
@@ -636,8 +651,9 @@ mod tests {
             provenance: TurnProvenance::default(),
             asked_at: None,
             settled_at: None,
+            invocations: Vec::new(),
         }];
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         let full = format!("{:?}", payload.history);
         assert!(
             !full.contains(trace_failure_excerpt),
@@ -656,7 +672,7 @@ mod tests {
         // trace and falls out of the N=20 window into a Summary.
         let (ws2, mut history2) = source_plus_turns(21);
         history2[0].trace = poisoned_trace;
-        let payload2 = assemble("probe", &ws2, &history2);
+        let payload2 = assemble("probe", &[], &ws2, &history2);
         let summary = format!("{:?}", payload2.history);
         assert!(
             !summary.contains(trace_failure_excerpt),
@@ -679,7 +695,7 @@ mod tests {
         // ADR-0026: a result_N whose turn is beyond the window ships no sample;
         // in-window results and every source do.
         let (ws, history) = source_plus_turns(21);
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         let find = |name: &str| {
             payload
                 .datasets
@@ -729,8 +745,9 @@ mod tests {
             provenance: TurnProvenance::default(),
             asked_at: None,
             settled_at: None,
+            invocations: Vec::new(),
         }];
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         let find = |name: &str| {
             payload
                 .datasets
@@ -752,7 +769,7 @@ mod tests {
     fn source_schema_is_always_full() {
         // ADR-0023: every source ships its full schema regardless of window.
         let (ws, history) = source_plus_turns(21);
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         let people = payload
             .datasets
             .iter()
@@ -777,7 +794,7 @@ mod tests {
                 type_only_columns: vec![],
             },
         );
-        let payload = assemble("any", &ws, &[]);
+        let payload = assemble("any", &[], &ws, &[]);
         let people = payload
             .datasets
             .iter()
@@ -801,7 +818,7 @@ mod tests {
                 type_only_columns: vec!["name".into()],
             },
         );
-        let payload = assemble("any", &ws, &[]);
+        let payload = assemble("any", &[], &ws, &[]);
         let people = payload
             .datasets
             .iter()
@@ -839,7 +856,7 @@ mod tests {
             ws.register_result(result_desc(&name));
             history.push(materialized_turn(&format!("turn {k}"), &name));
         }
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         match &payload.history[0] {
             TurnPayload::Summary {
                 question_excerpt, ..
@@ -874,6 +891,7 @@ mod tests {
             provenance: TurnProvenance::default(),
             asked_at: None,
             settled_at: None,
+            invocations: Vec::new(),
         }
     }
 
@@ -890,6 +908,7 @@ mod tests {
             provenance: TurnProvenance::default(),
             asked_at: None,
             settled_at: None,
+            invocations: Vec::new(),
         }
     }
 
@@ -950,7 +969,7 @@ mod tests {
         // The resolved active rides the payload's `active` field -- the contract
         // the provider sees. After result_3, active = result_3, not the source.
         let (ws, history) = source_plus_turns(3);
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         assert_eq!(payload.active.as_deref(), Some("result_3"));
     }
 
@@ -964,7 +983,7 @@ mod tests {
             &[("order_id", "BIGINT")],
             vec![vec!["1".to_string()]],
         ));
-        let payload = assemble("probe", &ws, &[]);
+        let payload = assemble("probe", &[], &ws, &[]);
         assert_eq!(payload.active.as_deref(), Some("orders"));
     }
 
@@ -998,7 +1017,7 @@ mod tests {
         }
         assert_eq!(history.len(), WINDOW_TURNS + 1);
 
-        let payload = assemble("probe", &ws, &history);
+        let payload = assemble("probe", &[], &ws, &history);
         // Guards: the window really did fold result_1's turn and withhold its
         // sample -- without these, this test stops proving the out-of-window case.
         assert!(matches!(payload.history[0], TurnPayload::Summary { .. }));
@@ -1060,14 +1079,7 @@ mod tests {
             "Coach SQL.",
             "Name the method.\n",
         )];
-        let blocks = assemble_acp_turn(
-            "查询",
-            &ws,
-            &history,
-            ResponseLocale::ZhCN,
-            &skills,
-            &["sql-coach".to_string()],
-        );
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills, &[]);
         // Last block = the user's question.
         let last = blocks.last().expect("at least one block");
         assert_eq!(last.as_text().unwrap(), "查询");
@@ -1075,17 +1087,21 @@ mod tests {
         let skill_block = &blocks[blocks.len() - 2];
         let skill_text = skill_block.as_text().unwrap();
         assert!(
-            skill_text.contains("【激活技能】技能 `sql-coach`："),
-            "activated body frame in separate block"
+            skill_text.contains("【可用技能】"),
+            "metadata index in the separate skill block"
         );
         assert!(
-            skill_text.contains("Name the method."),
-            "skill body verbatim in separate block"
+            skill_text.contains("- `sql-coach` — Coach SQL.\n"),
+            "index row verbatim in the separate block"
+        );
+        assert!(
+            !skill_text.contains("Name the method."),
+            "no body in the ACP skill block (ADR-0119: bodies ride the turn input)"
         );
         // The skill block is NOT the leading block (which holds schema + locale).
         let leading = blocks.first().unwrap().as_text().unwrap();
         assert!(
-            !leading.contains("【激活技能】"),
+            !leading.contains("【可用技能】"),
             "skill fragments must not be in the leading block"
         );
     }
@@ -1113,136 +1129,67 @@ mod tests {
     }
 
     #[test]
-    fn assemble_acp_turn_disclosure_block_four_shapes() {
-        // Issue #702 AC: the four disclosure shapes are isomorphic to the
-        // built-in side -- empty mount adds no block; mounted-only renders
-        // the index section alone; activated-only renders bodies alone; both
-        // present puts the index first. All inside ONE block (the block
-        // count never changes with the disclosure mix).
+    fn assemble_acp_turn_disclosure_block_is_index_only() {
+        // ADR-0119 (issue #983) calibrated on the #702 surface: the block is
+        // the metadata index WHOLESALE -- one block, every snapshot skill's
+        // row, no body section under any mix. The empty snapshot adds no
+        // block; the block count never changes with the invocation state
+        // (there is no invocation state that could change it).
         let (ws, history) = source_plus_turns(0);
         let base = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &[], &[]);
         let both = vec![
             acp_fragment("pdf-tools", "Read PDFs.", "Extract tables first.\n"),
             acp_fragment("sql-coach", "Coach SQL.", "Name the method.\n"),
         ];
-
-        // Shape 4 (the discriminating mix): one of two mounted activated --
-        // index section then body section, in a single block.
-        let blocks = assemble_acp_turn(
-            "查询",
-            &ws,
-            &history,
-            ResponseLocale::ZhCN,
-            &both,
-            &["sql-coach".to_string()],
-        );
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &both, &[]);
         assert_eq!(blocks.len(), base.len() + 1, "exactly one skill block");
         let text = blocks[blocks.len() - 2].as_text().unwrap();
-        assert!(text.contains("- `pdf-tools` — Read PDFs.\n"), "index entry");
-        assert!(
-            text.contains("【激活技能】技能 `sql-coach`：\nName the method.\n"),
-            "activated body"
-        );
-        assert!(
-            !text.contains("pdf-tools`：\n"),
-            "the inactive skill contributes no body"
-        );
-        assert!(
-            !text.contains("- `sql-coach`"),
-            "the activated skill contributes no index entry"
-        );
-        let index_pos = text.find("【可用技能】").unwrap();
-        let body_pos = text.find("【激活技能】").unwrap();
-        assert!(index_pos < body_pos, "index section precedes bodies");
-
-        // Shape 2: mounted-only -> the index section alone.
-        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &both, &[]);
-        assert_eq!(blocks.len(), base.len() + 1, "still exactly one block");
-        let text = blocks[blocks.len() - 2].as_text().unwrap();
         assert!(text.contains("【可用技能】"), "index section present");
+        assert!(text.contains("- `pdf-tools` — Read PDFs.\n"), "row 1");
+        assert!(text.contains("- `sql-coach` — Coach SQL.\n"), "row 2");
         assert!(
             !text.contains("【激活技能】"),
-            "no body section without activations"
+            "the body section is retired"
         );
-
-        // Shape 3: everything activated -> bodies alone.
-        let blocks = assemble_acp_turn(
-            "查询",
-            &ws,
-            &history,
-            ResponseLocale::ZhCN,
-            &both,
-            &["pdf-tools".to_string(), "sql-coach".to_string()],
-        );
-        assert_eq!(blocks.len(), base.len() + 1, "still exactly one block");
-        let text = blocks[blocks.len() - 2].as_text().unwrap();
-        assert!(text.contains("【激活技能】技能 `pdf-tools`："));
-        assert!(text.contains("【激活技能】技能 `sql-coach`："));
         assert!(
-            !text.contains("【可用技能】"),
-            "no index section when everything is activated"
+            !text.contains("Name the method.") && !text.contains("Extract tables first."),
+            "no body anywhere in the block"
         );
     }
 
     #[test]
-    fn assemble_acp_turn_skill_block_preserves_mount_order() {
-        // Mount order is preserved in the skill block (not sorted) -- within
-        // the index section and within the body section alike.
+    fn assemble_acp_turn_skill_block_preserves_snapshot_order() {
+        // Snapshot order is preserved in the skill block's index rows (not
+        // sorted).
         let (ws, history) = source_plus_turns(0);
         let skills = vec![
             acp_fragment("beta", "B.", "Body B.\n"),
             acp_fragment("alpha", "A.", "Body A.\n"),
         ];
-        // Index order: mount order.
         let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &skills, &[]);
         let text = blocks[blocks.len() - 2].as_text().unwrap();
         let b = text.find("beta").unwrap();
         let a = text.find("alpha").unwrap();
-        assert!(b < a, "index entries keep mount order, not sorted");
-        // Body order: mount order too.
-        let blocks = assemble_acp_turn(
-            "查询",
-            &ws,
-            &history,
-            ResponseLocale::ZhCN,
-            &skills,
-            &["beta".to_string(), "alpha".to_string()],
-        );
-        let text = blocks[blocks.len() - 2].as_text().unwrap();
-        let b = text.find("Body B.").unwrap();
-        let a = text.find("Body A.").unwrap();
-        assert!(b < a, "activated bodies keep mount order, not sorted");
+        assert!(b < a, "index entries keep snapshot order, not sorted");
     }
 
     #[test]
-    fn assemble_acp_turn_unmounted_skill_leaves_index_and_bodies() {
-        // Issue #702 AC: unmount cascades onto the ACP assembly -- after the
-        // session drops a skill from BOTH sets (the unmount's cascade), the
-        // next turn's block carries it in NEITHER section. The assembly is
-        // pure over the post-unmount inputs; the cascade itself is session
-        // state, pinned end-to-end on the built-in surface
-        // (skill_injection_blackbox.rs). This pins the ACP rendering of the
-        // post-cascade shape.
+    fn assemble_acp_turn_snapshot_shrink_leaves_the_index() {
+        // The assembly is pure over the snapshot fragments it is handed: a
+        // snapshot that lost a skill renders it nowhere. (For a v7-native
+        // session the snapshot is immutable, so this shape arrives via a
+        // legacy unmount mid-coexistence or a v6-migrated fold -- the
+        // assembly pins only the rendering of the inputs.)
         let (ws, history) = source_plus_turns(0);
-        // Pre-unmount: pdf-tools indexed, sql-coach's body injected.
         let before = vec![
             acp_fragment("pdf-tools", "Read PDFs.", "Extract tables first.\n"),
             acp_fragment("sql-coach", "Coach SQL.", "Name the method.\n"),
         ];
-        let blocks = assemble_acp_turn(
-            "查询",
-            &ws,
-            &history,
-            ResponseLocale::ZhCN,
-            &before,
-            &["sql-coach".to_string()],
-        );
+        let blocks = assemble_acp_turn("查询", &ws, &history, ResponseLocale::ZhCN, &before, &[]);
         let text = blocks[blocks.len() - 2].as_text().unwrap();
-        assert!(text.contains("pdf-tools"), "pre-unmount: indexed");
-        assert!(text.contains("sql-coach"), "pre-unmount: body present");
+        assert!(text.contains("pdf-tools"), "both rows pre-shrink");
+        assert!(text.contains("sql-coach"), "both rows pre-shrink");
 
-        // Post-unmount of sql-coach: the fragment list AND the activated
-        // list both lose it -- the block shows it nowhere.
         let after = vec![acp_fragment(
             "pdf-tools",
             "Read PDFs.",
@@ -1252,11 +1199,11 @@ mod tests {
         let text = blocks[blocks.len() - 2].as_text().unwrap();
         assert!(
             text.contains("pdf-tools"),
-            "the surviving mount keeps its index entry"
+            "the surviving skill keeps its index row"
         );
         assert!(
             !text.contains("sql-coach") && !text.contains("Name the method."),
-            "the unmounted skill left both the index and the bodies"
+            "the shrunk-out skill left the index entirely"
         );
     }
 }
