@@ -190,13 +190,14 @@ impl FakeProvider {
         self
     }
 
-    /// If `question` is registered blocking, poll the cancel token in a tight
-    /// sleep loop and only return once cancel is requested (ADR-0021). Models a
-    /// long-running call so the loop sees the cancel flag and lands the turn as
-    /// Cancelled. Defensive no-op without a token (a misconfigured test never
-    /// hangs).
-    fn block_if_requested(&self, question: &str) {
-        if self.blocking.contains(question) {
+    /// If `key` -- a RESOLVED script key (the staged question, never the
+    /// framed asking content) -- is registered blocking, poll the cancel
+    /// token in a tight sleep loop and only return once cancel is requested
+    /// (ADR-0021). Models a long-running call so the loop sees the cancel
+    /// flag and lands the turn as Cancelled. Defensive no-op without a token
+    /// (a misconfigured test never hangs).
+    fn block_if_requested(&self, key: &str) {
+        if self.blocking.contains(key) {
             if let Some(cancel) = &self.cancel {
                 while !cancel.is_requested() {
                     thread::sleep(Duration::from_millis(5));
@@ -259,22 +260,39 @@ impl FakeProvider {
     /// the question (the renderer joins them with one blank line), while the
     /// script key stays the verbatim question. Exact match first; then a
     /// preamble-stripped suffix match, admitted only when the content starts
-    /// with the invocation frame marker (a longer question that merely ends
-    /// with a scripted key never matches -- the preamble is frame-led by
-    /// construction).
-    fn script_for(&self, content: &str) -> Option<&Script> {
-        if let Some(script) = self.tool_scripts.get(content) {
-            return Some(script);
+    /// with the invocation frame marker -- the gate IS the marker: content
+    /// that does not lead with it never reaches the suffix arm, so a longer
+    /// question that merely ends with a scripted key matches only when it
+    /// leads with the marker; that is the whole guarantee. Among the keys
+    /// that suffix one marker-led content, the LONGEST wins -- deterministic
+    /// where two keys suffix the same content (HashMap iteration order
+    /// cannot pick). Returns the resolved key beside the script so the
+    /// caller's blocking check keys on the staged question, not the framed
+    /// content.
+    fn script_for(&self, content: &str) -> Option<(&Script, &str)> {
+        if let Some((question, script)) = self.tool_scripts.get_key_value(content) {
+            return Some((script, question.as_str()));
         }
         if !content.starts_with(super::prompt::INVOCATION_FRAME_MARKER) {
             return None;
         }
-        self.tool_scripts
-            .iter()
-            .find(|(question, _)| {
-                content.len() > question.len() && content.ends_with(question.as_str())
-            })
-            .map(|(_, script)| script)
+        let mut best: Option<(&String, &Script)> = None;
+        for (question, script) in &self.tool_scripts {
+            if content.len() > question.len() && content.ends_with(question.as_str()) {
+                if let Some((current, _)) = best {
+                    if current.len() >= question.len() {
+                        // Two DISTINCT equal-length keys cannot both suffix
+                        // one content (the length-L suffix is unique), so a
+                        // tie is impossible -- asserted because the
+                        // longest-wins determinism rests on it.
+                        debug_assert_ne!(current.len(), question.len());
+                        continue;
+                    }
+                }
+                best = Some((question, script));
+            }
+        }
+        best.map(|(question, script)| (script, question.as_str()))
     }
 }
 
@@ -291,13 +309,19 @@ impl Provider for FakeProvider {
         if let Ok(mut buf) = self.tool_captured.lock() {
             buf.push(request.clone());
         }
-        // A blocking question simulates a long round-trip (ADR-0021); the loop
-        // sees the cancel flag and lands the turn as Cancelled.
         let question = asking_question(request);
-        self.block_if_requested(question.as_str());
-        self.script_for(question.as_str())
-            .ok_or(ProviderError::NotWired)?
-            .draw()
+        let Some((script, key)) = self.script_for(question.as_str()) else {
+            return Err(ProviderError::NotWired);
+        };
+        // A blocking question simulates a long round-trip (ADR-0021); the
+        // loop sees the cancel flag and lands the turn as Cancelled. Keyed
+        // on the RESOLVED script key (the staged question), so a blocking +
+        // staged-invocation combo keeps its long-round-trip semantics even
+        // though the asking content carries the preamble frame -- and an
+        // unscripted question never blocks (fail fast on misconfig, the
+        // "never invent a reply" posture).
+        self.block_if_requested(key);
+        script.draw()
     }
 }
 
@@ -391,5 +415,53 @@ mod tests {
             2,
             "one capture per generate_tool_turn call"
         );
+    }
+
+    /// B (#987): two script keys that both suffix one marker-led content --
+    /// the longest key wins deterministically (HashMap iteration order can
+    /// no longer pick between them).
+    #[test]
+    fn frame_led_content_prefers_the_longest_suffix_key() {
+        let provider = FakeProvider::new()
+            .scripted_tool_turn("查天气", ToolTurnReply::Text("long".into()))
+            .scripted_tool_turn("天气", ToolTurnReply::Text("short".into()));
+        let framed = format!(
+            "{}技能 `sql-coach`：\n\nCoach the SQL.\n\n查天气",
+            crate::provider::prompt::INVOCATION_FRAME_MARKER
+        );
+        let got = provider
+            .generate_tool_turn(&tool_request(&framed))
+            .expect("the frame-led suffix arm resolves");
+        assert_eq!(got.reply, ToolTurnReply::Text("long".into()));
+    }
+
+    /// B (#987): a blocking + staged-invocation combo keeps its long
+    /// round-trip -- the blocking check keys on the RESOLVED
+    /// (preamble-stripped) question, not the framed asking content.
+    #[test]
+    fn blocking_survives_an_invocation_preamble() {
+        let cancel = Arc::new(CancelToken::new());
+        let provider = FakeProvider::new()
+            .with_cancel(Arc::clone(&cancel))
+            .scripted_tool_turn_blocking("查天气", ToolTurnReply::Text("done".into()));
+        let framed = format!(
+            "{}技能 `sql-coach`：\n\nCoach the SQL.\n\n查天气",
+            crate::provider::prompt::INVOCATION_FRAME_MARKER
+        );
+        let request = tool_request(&framed);
+        let joined = std::thread::spawn(move || provider.generate_tool_turn(&request));
+        // Give the fake a moment to prove it parks on the token (a silent
+        // pass-through would have finished by now).
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !joined.is_finished(),
+            "the blocking question did not engage through the preamble"
+        );
+        cancel.request();
+        let got = joined
+            .join()
+            .expect("the blocked call returns after cancel")
+            .expect("the staged script still resolves");
+        assert_eq!(got.reply, ToolTurnReply::Text("done".into()));
     }
 }

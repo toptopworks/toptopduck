@@ -308,8 +308,8 @@ pub enum LastRuntime {
 }
 
 /// Provenance of a turn's execution context (ADR-0078): which runtime produced
-/// it and which skills were active at assembly time. The persisted audit anchor
-/// for "how was this answer produced".
+/// it and which skills were invoked on the turn (ADR-0119). The persisted
+/// audit anchor for "how was this answer produced".
 ///
 /// A live turn driven by the built-in agent loop records
 /// [`RuntimeKind::BuiltIn`] (issue #319); skills stay empty until skill
@@ -331,14 +331,12 @@ pub struct TurnProvenance {
     /// renders the honest "External (unrecorded)" degradation for them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_id: Option<String>,
-    /// The ACTIVATED skills at this turn's assembly time (ADR-0079/0086,
-    /// issue #363; the activated subset for every runtime, ADR-0110), each
-    /// carrying its `content_hash` so the frontend can drift-compare
-    /// against the registry's current hash and surface a "modified" badge when
-    /// a skill changed after this turn. Empty for turns that injected no
-    /// skill body (mounting alone injects metadata only) or when
-    /// skill tracking is not yet wired (the live path fills this once #364
-    /// wires skill prompt injection).
+    /// The skills INVOKED on this turn (ADR-0119, issue #983): one row per
+    /// name in first-invocation order, each carrying the `content_hash`
+    /// pinned at the name's last invocation of the turn so the frontend can
+    /// drift-compare against the registry's current hash and surface a
+    /// "modified" badge when a skill changed after this turn. Empty when no
+    /// skill was invoked (default-omitted while empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillProvenance>,
 }

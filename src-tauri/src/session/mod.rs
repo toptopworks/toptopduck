@@ -679,9 +679,10 @@ impl TurnAudit {
     /// The audit for one just-recorded turn (ADR-0078/0081, issue #319;
     /// ADR-0086, issue #364; ADR-0101): the loop's real multi-call trace
     /// mapped to its persisted form + the turn's runtime attribution +
-    /// the mounted skills' provenance (each skill's `name` + `content_hash`
-    /// snapshotted at the turn's assembly time). `skills` is empty when no
-    /// skills were mounted (the field is default-omitted from the .duck
+    /// the turn's skill provenance (each invoked `name` + its
+    /// `content_hash` pinned at the name's last invocation of the turn,
+    /// ADR-0119). `skills` is empty when no
+    /// skill was invoked (the field is default-omitted from the .duck
     /// while empty); the projection onto the persisted pair (kind + the
     /// external adapter id) happens inside, so callers pass the one wire
     /// attribution.
@@ -1132,7 +1133,6 @@ impl Session {
             &self.working_set,
             &self.timeline,
             &self.runtime_facts,
-            &self.discovery_snapshot,
         )
     }
 
@@ -1218,12 +1218,8 @@ impl Session {
         }
         let name = trimmed.to_string();
         self.persister.set_session_name(name.clone());
-        self.persister.save_if_bound(
-            &self.working_set,
-            &self.timeline,
-            &self.runtime_facts,
-            &self.discovery_snapshot,
-        );
+        self.persister
+            .save_if_bound(&self.working_set, &self.timeline, &self.runtime_facts);
         Ok(name)
     }
 
@@ -1359,6 +1355,7 @@ impl Session {
                 sink,
                 on_phase,
                 &mut pending_invocations,
+                &turn_invoked,
                 inputs,
             ),
             None => {
@@ -1500,7 +1497,6 @@ impl Session {
                         &mut self.timeline,
                         &mut self.persister,
                         &self.runtime_facts,
-                        &self.discovery_snapshot,
                     );
                     // The attachment read gate (ADR-0111, calibrated by
                     // ADR-0119): pure classification (no transitions, no
@@ -1516,12 +1512,14 @@ impl Session {
                     // and reads the registry live (invocation-time bytes).
                     // Field-disjoint from every borrow above -- the snapshot
                     // is an immutable read of `self.discovery_snapshot`.
-                    let mut invocation_channel = crate::skills::invocation::SkillInvocationCtx {
-                        pending: &mut pending_invocations,
-                        snapshot: &self.discovery_snapshot,
-                        root: inputs.skills_root,
-                        disabled: inputs.disabled_skills,
-                    };
+                    // The gateway branch below wires its channel through the
+                    // SAME constructor, so the two faces cannot drift (#987).
+                    let mut invocation_channel =
+                        crate::skills::invocation::SkillInvocationCtx::from_session(
+                            &mut pending_invocations,
+                            &self.discovery_snapshot,
+                            inputs,
+                        );
                     // The switchover (ADR-0116, issue #918): `turn_loop_for`
                     // is the seam's single entry -- a profile-backed provider
                     // constructs the upstream model (sealed inside
@@ -1648,6 +1646,7 @@ impl Session {
         sink: &dyn ApprovalSink,
         on_phase: O,
         pending_invocations: &mut Vec<crate::model::SkillInvocation>,
+        turn_invoked: &[String],
         inputs: &TurnInputs<'_>,
     ) -> (TurnOutcome, Vec<LoopRound>) {
         // 1. Resolve the CLI binary. Not-on-PATH -> an external-runtime
@@ -1827,31 +1826,28 @@ impl Session {
                 &mut self.timeline,
                 &mut self.persister,
                 &self.runtime_facts,
-                &self.discovery_snapshot,
             );
             // The bridge face's read gate (issue #714; calibrated by
             // ADR-0119): the same immutable bundle the built-in loop's
             // dispatch server gets -- one read semantics on both runtime
             // surfaces (ADR-0111 Decision 7). Eligibility is the turn-start
-            // invoked snapshot; the pending vec still holds only the user's
-            // submit-time invocations at this point (the gateway starts
-            // ahead of the agent's first call), so it feeds the same
-            // constructor the built-in branch uses.
-            let turn_invoked = turn_start_invoked(&self.invoked_skills, pending_invocations);
+            // invoked snapshot, derived ONCE at the submit boundary and
+            // passed in -- no per-branch refold of the pending vec's
+            // user-invocation names.
             let read_gate = crate::skills::read::SkillReadGate {
-                invoked: &turn_invoked,
+                invoked: turn_invoked,
                 root: inputs.skills_root,
             };
             // The bridge face's invocation channel (ADR-0119 Decision 4):
             // the external runtime invokes through the SAME turn-record
             // channel by construction -- the CLI's `invoke_skill` calls land
-            // on the turn exactly like the built-in loop's.
-            let invocation_channel = crate::skills::invocation::SkillInvocationCtx {
-                pending: pending_invocations,
-                snapshot: &self.discovery_snapshot,
-                root: inputs.skills_root,
-                disabled: inputs.disabled_skills,
-            };
+            // on the turn exactly like the built-in loop's, through the same
+            // constructor the built-in branch wires (#987).
+            let invocation_channel = crate::skills::invocation::SkillInvocationCtx::from_session(
+                pending_invocations,
+                &self.discovery_snapshot,
+                inputs,
+            );
             let ctx = GatewayCtx {
                 deps,
                 skills: skill_channel,
@@ -1944,17 +1940,13 @@ impl Session {
         let invocations = unique_invocations;
         // ADR-0119 (issue #983): the turn's skill provenance is the
         // invocation records' name set -- the skills that shaped this turn --
-        // deduped in first-invocation order, each with its pinned
-        // invocation-time hash for drift comparison. One pass also grows the
+        // one row per name in first-invocation order, the hash pinned at
+        // each name's LAST invocation of the turn (see
+        // [`fold_skill_provenance`]). The same records also grow the
         // session-invoked fold (Decision 4: monotonic by construction --
         // nothing can un-invoke a past turn).
-        let mut skills: Vec<SkillProvenance> = Vec::new();
+        let skills = fold_skill_provenance(&invocations);
         for invocation in &invocations {
-            let provenance = SkillProvenance {
-                name: invocation.name.clone(),
-                content_hash: invocation.content_hash.clone(),
-            };
-            crate::util::push_unique(&mut skills, &provenance);
             crate::util::push_unique(&mut self.invoked_skills, &invocation.name);
         }
         // ADR-0102 Decision 1 (issue #589): stamp the turn's executing runtime
@@ -2021,8 +2013,9 @@ impl Session {
             },
             // ADR-0078 (issue #319) + ADR-0101: the loop's real multi-call
             // trace (mapped to the recipe form) + the runtime attribution +
-            // the mounted-skills provenance (ADR-0086, issue #364: each
-            // skill's name + content_hash snapshotted at assembly time). The
+            // the turn's skill provenance (ADR-0119: each invoked name +
+            // its content_hash pinned at the name's last invocation of the
+            // turn). The
             // PERSISTED form rides the Session (the recipe is its .duck
             // layer, read by build_recipe); the TurnRecord's display view
             // above is the same bounded shape.
@@ -2039,12 +2032,8 @@ impl Session {
     /// Build the recipe (ADR-0034). Facade delegate to
     /// [`RecipePersister::build_recipe`](recipe_persister::RecipePersister::build_recipe).
     pub fn build_recipe(&self) -> Recipe {
-        self.persister.build_recipe(
-            &self.working_set,
-            &self.timeline,
-            &self.runtime_facts,
-            &self.discovery_snapshot,
-        )
+        self.persister
+            .build_recipe(&self.working_set, &self.timeline, &self.runtime_facts)
     }
 
     /// Rewrite the recipe at the bound path (ADR-0034 atomic write). Facade
@@ -2059,7 +2048,6 @@ impl Session {
             &self.temp_path,
             &self.timeline,
             &self.runtime_facts,
-            &self.discovery_snapshot,
         );
     }
 
@@ -2088,12 +2076,8 @@ impl Session {
 
     /// Resolve a pending conflict with "Keep Mine" (ADR-0035 Decision 3).
     pub fn conflict_keep_mine(&mut self) -> Result<(), SaveError> {
-        self.persister.conflict_keep_mine(
-            &self.working_set,
-            &self.timeline,
-            &self.runtime_facts,
-            &self.discovery_snapshot,
-        )
+        self.persister
+            .conflict_keep_mine(&self.working_set, &self.timeline, &self.runtime_facts)
     }
 
     /// Resolve a pending conflict with "Save As New" (ADR-0035 Decision 3).
@@ -2103,7 +2087,6 @@ impl Session {
             &self.working_set,
             &self.timeline,
             &self.runtime_facts,
-            &self.discovery_snapshot,
         )
     }
 
@@ -2908,8 +2891,9 @@ impl Drop for Session {
 /// session's monotonic fold plus the turn's user invocations -- a user
 /// invocation is turn INPUT (assembled ahead of the question), so it reads
 /// within its own turn, unlike an agent's mid-turn invoke which joins the
-/// next turn's snapshot. One constructor, both runtime faces -- the built-in
-/// branch and the gateway branch build identical snapshots by construction.
+/// next turn's snapshot. Derived ONCE at the submit boundary and passed into
+/// both runtime faces -- the gateway branch used to refold the pending vec's
+/// user-invocation names (equivalent only by comment, retired #987).
 fn turn_start_invoked(
     session_fold: &[String],
     user_invocations: &[crate::model::SkillInvocation],
@@ -2921,13 +2905,33 @@ fn turn_start_invoked(
     invoked
 }
 
+/// Fold the turn's invocation records into the turn's skill provenance
+/// (ADR-0119 Decision 2, issue #987): the invocation NAME set -- one row
+/// per name, first-invocation order -- each row's `content_hash` pinned at
+/// that name's LAST invocation of the turn. The final bytes are the drift
+/// anchor (they shaped the turn's final output); the full
+/// per-invocation audit, every hash included, rides the turn's invocation
+/// records, so the overwrite loses no evidence.
+fn fold_skill_provenance(invocations: &[crate::model::SkillInvocation]) -> Vec<SkillProvenance> {
+    let mut skills: Vec<SkillProvenance> = Vec::new();
+    for invocation in invocations {
+        match skills.iter_mut().find(|p| p.name == invocation.name) {
+            Some(existing) => existing.content_hash = invocation.content_hash.clone(),
+            None => skills.push(SkillProvenance {
+                name: invocation.name.clone(),
+                content_hash: invocation.content_hash.clone(),
+            }),
+        }
+    }
+    skills
+}
+
 fn persist_snapshot(
     persister: &mut recipe_persister::RecipePersister,
     working_set: &mut WorkingSet,
     temp_path: &Path,
     timeline: &[TimelineEntry],
     runtime_facts: &SessionRuntimeFacts,
-    discovery_snapshot: &[String],
 ) {
     // Migrate derived sources before building the recipe so their
     // source_path carries the portable (.duck-adjacent) location instead
@@ -2937,7 +2941,7 @@ fn persist_snapshot(
     if let Some(duck_path) = persister.duck_path().map(PathBuf::from) {
         migrate_derived_sources(working_set, temp_path, &duck_path);
     }
-    persister.save_if_bound(working_set, timeline, runtime_facts, discovery_snapshot);
+    persister.save_if_bound(working_set, timeline, runtime_facts);
 }
 
 /// Migrate derived source files from temp staging (`temp_path/derived/`) to
@@ -4794,6 +4798,39 @@ mod tests {
         assert!(
             !session.admin_engine.is_materialized(),
             "an external-tool-only turn keeps the engine at zero instances"
+        );
+    }
+
+    /// A (#987): the provenance fold dedupes by NAME -- one row per name in
+    /// first-appearance order, the hash pinned at the name's LAST invocation
+    /// of the turn (a mid-turn edit + re-invoke overwrites the anchor, never
+    /// lands a second row).
+    #[test]
+    fn provenance_fold_dedupes_by_name_keeping_the_last_hash() {
+        let invocation = |name: &str, hash: &str| crate::model::SkillInvocation {
+            name: name.to_string(),
+            body: String::new(),
+            actor: crate::model::SkillLifecycleActor::Agent,
+            content_hash: hash.to_string(),
+        };
+        let folded = super::fold_skill_provenance(&[
+            invocation("sql-coach", "hash-1"),
+            invocation("pdf-tools", "hash-3"),
+            invocation("sql-coach", "hash-2"),
+        ]);
+        assert_eq!(
+            folded,
+            vec![
+                crate::model::SkillProvenance {
+                    name: "sql-coach".to_string(),
+                    content_hash: "hash-2".to_string(),
+                },
+                crate::model::SkillProvenance {
+                    name: "pdf-tools".to_string(),
+                    content_hash: "hash-3".to_string(),
+                },
+            ],
+            "one row per name, first-appearance order, the last hash wins"
         );
     }
 

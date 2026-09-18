@@ -171,12 +171,11 @@ pub(crate) fn resolve_skill_invocation(
         return SkillInvocationOutcome::Refused(unknown_skill_failure(name, ctx.snapshot));
     }
     let fragment = resolve_one(ctx.root, name);
-    ctx.pending.push(crate::model::SkillInvocation {
-        name: name.to_string(),
-        body: fragment.body.clone(),
-        actor: crate::model::SkillLifecycleActor::Agent,
-        content_hash: fragment.content_hash.clone(),
-    });
+    ctx.pending
+        .push(crate::model::SkillInvocation::from_fragment(
+            &fragment,
+            crate::model::SkillLifecycleActor::Agent,
+        ));
     let payload = if fragment.body.is_empty() {
         degraded_body_note(name)
     } else {
@@ -332,5 +331,59 @@ mod tests {
             }
         }
         assert!(pending.is_empty());
+    }
+
+    /// E (#987): the unknown-name refusal with an EMPTY discovery snapshot
+    /// names the empty snapshot -- the variant line the non-empty quintet
+    /// never reaches.
+    #[test]
+    fn unknown_name_with_an_empty_snapshot_names_the_empty_snapshot() {
+        let fx = Fixture::new();
+        let mut pending = Vec::new();
+        let empty: Vec<String> = Vec::new();
+        let mut ctx = fx.ctx(&mut pending, &empty, &[]);
+        match resolve_skill_invocation(&Fixture::call("ghost"), &mut ctx) {
+            SkillInvocationOutcome::Refused(message) => {
+                assert!(message.contains("not an available skill"), "{message}");
+                assert!(
+                    message.contains("discovery snapshot is empty"),
+                    "the empty-snapshot variant line: {message}"
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert!(pending.is_empty(), "a refusal lands no record");
+    }
+
+    /// E (#987): a registry entry whose `SKILL.md` yields no body (here: the
+    /// directory exists, the file does not) still lands the record -- honest
+    /// degrade -- and the payload is the degrade note, not an empty string.
+    #[test]
+    fn degraded_entry_records_and_serves_the_degrade_note() {
+        let fx = Fixture::new();
+        let dir = fx.root.path().join("empty-skill");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pending = Vec::new();
+        let mut ctx = fx.ctx(&mut pending, &[], &[]);
+        match resolve_skill_invocation(&Fixture::call("empty-skill"), &mut ctx) {
+            SkillInvocationOutcome::Local { summary, payload } => {
+                assert_eq!(summary, "empty-skill");
+                let Value::String(text) = payload else {
+                    panic!("expected a string payload, got {payload:?}");
+                };
+                assert!(text.contains("empty-skill"), "the note names the skill");
+                assert!(
+                    text.contains("no instructions to return yet"),
+                    "the degrade note, not a body: {text}"
+                );
+            }
+            other => panic!("expected the degraded Local outcome, got {other:?}"),
+        }
+        assert_eq!(pending.len(), 1, "the degraded record still lands");
+        assert!(pending[0].body.is_empty());
+        assert!(
+            pending[0].content_hash.is_empty(),
+            "the unreadable-file degrade records both empty -- the pairing from_fragment pins"
+        );
     }
 }

@@ -478,7 +478,12 @@ mod transforms {
 /// materialized discovery snapshot (the v6->v7 step's one computation;
 /// mirrors `Recipe::mounted_skills` over raw JSON). Malformed shapes are
 /// honest errors -- a history that is not an array, or a skill entry whose
-/// `data` is not an object, is a corrupt file, not a migration input.
+/// `data` is present but yields no string `name`, is a corrupt file, not a
+/// migration input. The one deliberate gap: an entry with no `data` key at
+/// all is skipped here (any kind), and a `Skill`-tagged entry so skipped
+/// still never opens -- the downstream `history` deserialization rejects
+/// it with its generic missing-field error rather than this fold's typed
+/// `Field` error.
 fn fold_mount_fold(value: &Value) -> Result<Vec<String>, MigrationError> {
     let mut mounted: Vec<String> = Vec::new();
     let Some(history) = value.get("history").and_then(Value::as_array) else {
