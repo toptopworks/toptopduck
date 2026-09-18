@@ -158,7 +158,6 @@ impl super::Session {
             }
             let fragment = crate::skills::prompt::resolve_one(root, name);
             records.push(crate::model::SkillInvocation::from_fragment(
-                name,
                 &fragment,
                 SkillLifecycleActor::User,
             ));
@@ -527,6 +526,46 @@ mod tests {
     fn fresh_session_has_no_mounted_skills() {
         let session = Session::new().expect("session");
         assert!(session.mounted_skills().is_empty());
+    }
+
+    /// I3 (#987 review): the from_session constructor wires ALL four inputs
+    /// through -- a wiring break (an empty disabled list, a wrong root)
+    /// survives the rest of the suite because every other TurnInputs
+    /// literal stages an empty disabled list, so this pin is the enable
+    /// axis's only observer at the seam.
+    #[test]
+    fn invocation_ctx_from_session_wires_all_four_inputs() {
+        let keychain = crate::provider::keychain::KeychainStore::new();
+        let mut inputs = crate::session::TurnInputs::empty(&keychain);
+        let disabled = vec!["ghosted".to_string()];
+        let root = std::path::PathBuf::from("registry-root");
+        inputs.disabled_skills = &disabled;
+        inputs.skills_root = &root;
+        let snapshot = vec!["sql-coach".to_string()];
+        let mut pending = Vec::new();
+        let ctx = crate::skills::invocation::SkillInvocationCtx::from_session(
+            &mut pending,
+            &snapshot,
+            &inputs,
+        );
+        assert_eq!(
+            ctx.disabled,
+            disabled.as_slice(),
+            "the enable axis wires through",
+        );
+        assert_eq!(ctx.root, root.as_path(), "the registry root wires through");
+        assert_eq!(
+            ctx.snapshot,
+            snapshot.as_slice(),
+            "the discovery snapshot wires through",
+        );
+        ctx.pending.push(crate::model::SkillInvocation {
+            name: "sql-coach".to_string(),
+            body: String::new(),
+            actor: crate::model::SkillLifecycleActor::Agent,
+            content_hash: String::new(),
+        });
+        assert_eq!(pending.len(), 1, "the pending vec is the caller's own");
     }
 
     /// mount_skill adds the name to the live cache AND lands a Mount event on

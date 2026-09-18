@@ -279,9 +279,8 @@ export function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
   }
 }
 
-// Issue #381 (provenance semantics per issues #700/#702, ADR-0110): the
-// skills whose bodies were injected into the turn's prompt -- the activated
-// set, either runtime -- whose
+// Issue #381 (provenance semantics per ADR-0119): the skills invoked on
+// this turn -- the invocation records' name set, either runtime -- whose
 // content changed after this turn was recorded. Each provenance skill carries
 // its SKILL.md SHA-256 as pinned at the name's last invocation of the turn;
 // the registry's current

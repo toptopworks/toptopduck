@@ -172,11 +172,10 @@ export type TurnRuntime =
   | { kind: "built_in" }
   | { kind: "external"; data: { adapter_id: string | null } };
 
-// Per-turn provenance crossing IPC (issue #381, ADR-0101; issues
-// #700/#702, ADR-0110): the skills whose bodies were actually injected into
-// the turn's prompt -- the ACTIVATED set for every runtime (mounting injects
-// metadata only; ADR-0110 Decision 5; both injection surfaces render
-// disclosure). Each carries its
+// Per-turn provenance crossing IPC (issue #381, ADR-0101; ADR-0119): the
+// skills invoked on the turn -- the invocation records' name set, either
+// runtime -- whose content changed after this turn was recorded. Each
+// carries its
 // content_hash so the TurnCard can drift-compare against the registry's
 // current SkillEntry.content_hash and surface a "modified" drift badge when a
 // skill changed after a recorded turn, plus the turn's executing runtime.

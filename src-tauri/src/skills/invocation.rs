@@ -173,7 +173,6 @@ pub(crate) fn resolve_skill_invocation(
     let fragment = resolve_one(ctx.root, name);
     ctx.pending
         .push(crate::model::SkillInvocation::from_fragment(
-            name,
             &fragment,
             crate::model::SkillLifecycleActor::Agent,
         ));
@@ -384,7 +383,7 @@ mod tests {
         assert!(pending[0].body.is_empty());
         assert!(
             pending[0].content_hash.is_empty(),
-            "empty body implies empty hash -- the pairing from_fragment pins"
+            "the unreadable-file degrade records both empty -- the pairing from_fragment pins"
         );
     }
 }

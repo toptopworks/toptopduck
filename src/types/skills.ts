@@ -158,12 +158,13 @@ export interface SkillLifecycleEvent {
 // One skill recorded on a turn's provenance (ADR-0086, issue #363). Mirrors
 // the Rust SkillProvenance. `content_hash` is the SHA-256 of the skill's
 // SKILL.md bytes at the name's LAST invocation of the turn, or "" when no
-// baseline exists (a v3->v4 migration product -- never trips the
-// stale-degrade check).
+// baseline exists (a v3->v4 migration product, or the file unreadable at
+// invocation -- never trips the stale-degrade check).
 export interface SkillProvenance {
   // The skill's spec name (kebab-case identity).
   name: string;
-  // SHA-256 at the name's last invocation of the turn, or "" for migrated turns.
+  // SHA-256 at the name's last invocation of the turn, or "" for migrated
+  // turns or an unreadable file.
   content_hash: string;
 }
 

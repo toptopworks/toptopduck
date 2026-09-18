@@ -55,9 +55,11 @@ pub struct SkillPromptFragment {
     /// was unreadable at turn time, or the name failed the spec check so the
     /// file was never read (honest degrade -- nothing to inject).
     pub body: String,
-    /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at the
-    /// turn's assembly time. Empty string when no baseline exists (unreadable
-    /// at turn time); a live v4 turn otherwise records the real digest.
+    /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body),
+    /// pinned at the fragment's read time -- assembly for the system-prompt
+    /// injection, the invocation's pin time on the invocation channel
+    /// (ADR-0119). Empty string when no baseline exists (unreadable at
+    /// read time); a live v4 turn otherwise records the real digest.
     pub content_hash: String,
 }
 
@@ -186,17 +188,19 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
 
 impl crate::model::SkillInvocation {
     /// Pin the fragment -> record mapping shared by both invocation
-    /// producers (#987 C): the body and the `content_hash` always come from
-    /// the SAME `resolve_one` fragment, so an empty body implies an empty
-    /// hash (the honest-degrade pairing) by construction instead of by two
-    /// call sites agreeing.
+    /// producers (#987 C): the name, body, and `content_hash` all come
+    /// from the SAME `resolve_one` fragment, so no call site can pair a
+    /// name with a foreign drift anchor. Note the one-arm exception to
+    /// empty-implies-empty: the unreadable-file degrade records both
+    /// empty, while a readable-but-malformed fence records the REAL hash
+    /// over an empty body (resolve_one's "recording hash only" arm --
+    /// the activation-side semantics, preserved as-is).
     pub(crate) fn from_fragment(
-        name: &str,
         fragment: &SkillPromptFragment,
         actor: crate::model::SkillLifecycleActor,
     ) -> Self {
         Self {
-            name: name.to_string(),
+            name: fragment.name.clone(),
             body: fragment.body.clone(),
             actor,
             content_hash: fragment.content_hash.clone(),

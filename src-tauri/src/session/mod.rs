@@ -1942,7 +1942,7 @@ impl Session {
         // invocation records' name set -- the skills that shaped this turn --
         // one row per name in first-invocation order, the hash pinned at
         // each name's LAST invocation of the turn (see
-        // [`fold_skill_provenance`]). One pass also grows the
+        // [`fold_skill_provenance`]). The same records also grow the
         // session-invoked fold (Decision 4: monotonic by construction --
         // nothing can un-invoke a past turn).
         let skills = fold_skill_provenance(&invocations);
