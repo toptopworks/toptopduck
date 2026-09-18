@@ -203,7 +203,6 @@ struct Harness {
     refs: HashMap<String, crate::session::materializer::CachedDerivedRef>,
     temp: TempDir,
     phases: Arc<Mutex<Vec<TurnPhase>>>,
-    skills: crate::session::skills::SkillActivationFixture,
     read_invoked: Vec<String>,
     read_root: std::path::PathBuf,
     phase_hook: Option<PhaseHook>,
@@ -222,7 +221,6 @@ impl Harness {
             refs: HashMap::new(),
             temp: TempDir::new().unwrap(),
             phases: Arc::new(Mutex::new(Vec::new())),
-            skills: crate::session::skills::SkillActivationFixture::new(Vec::new()),
             read_invoked: Vec::new(),
             read_root: std::path::PathBuf::new(),
             phase_hook: None,
@@ -342,6 +340,7 @@ impl Harness {
         let phase_hook = self.phase_hook.clone();
         let read = crate::skills::read::SkillReadGate {
             invoked: &self.read_invoked,
+            disabled: &[],
             root: &self.read_root,
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
@@ -352,7 +351,6 @@ impl Harness {
             &mut mcp,
             cli,
             &self.delegations,
-            &mut self.skills.ctx(),
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &read,
             approval,

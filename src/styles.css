@@ -897,12 +897,12 @@
 
 /* Lifecycle marker run connector (issue #721, ADR-0047/0086 nodification;
  * fold rows join the line by issue #737).
- * Skill/source markers render as bare glyph nodes (an invisible h-4 w-4
+ * Source markers render as bare glyph nodes (an invisible h-4 w-4
  * box; the circle chrome -- 1px tone border + bg-background punch -- is
- * retired, the kind tone rides the glyph color); consecutive lifecycle
- * events form maximal runs (skill/source mixed species count as contiguous,
- * a turn ALWAYS breaks the run -- Thread.tsx computes the positions at
- * render time via lifecycleRunMarks over the visual row projection). A run
+ * retired, the kind tone rides the glyph color); consecutive source
+ * events form maximal runs (a turn ALWAYS breaks the run -- Thread.tsx
+ * computes the positions at render time via lifecycleRunMarks over the
+ * visual row projection; the skill species retired with ADR-0119). A run
  * of >=2 connects adjacent nodes with a 2px segment; a lone event keeps its
  * node bare. A collapsed fold row (a same-kind subsegment at/above the
  * threshold) participates as its segment's SINGLE node with the same box
@@ -915,7 +915,7 @@
  * is scoped to stale-card <-> source-event lines (interleaved knotting);
  * these adjacent same-column run segments are outside that rejection. The
  * geometry is a contract with the component utilities
- * (SkillMarker/SourceMarker/LifecycleFold): node = h-4 w-4 (16px) at the
+ * (SourceMarker/LifecycleFold): node = h-4 w-4 (16px) at the
  * row's left edge,
  * row = py-0.5 (2px vertical padding) -- so the node's bottom edge sits
  * 18px below the li top (2px padding + 16px box) and the next node's top
@@ -925,13 +925,10 @@
  * visuals to utilities; ::before positioning keyed off a four-state data
  * attribute is the layout-semantics exception, same reasoning as the resize
  * handles above). */
-.skill-entry,
 .source-entry,
 .lifecycle-fold-entry {
   position: relative;
 }
-.skill-entry[data-run="first"]::before,
-.skill-entry[data-run="mid"]::before,
 .source-entry[data-run="first"]::before,
 .source-entry[data-run="mid"]::before,
 .lifecycle-fold-entry[data-run="first"]::before,
@@ -950,8 +947,6 @@
  * portion (4px -> 8px) -- at the compact 20px pitch two 16px nodes leave
  * only 4px for the line, which reads as barely there. Rows outside a run
  * keep the tight pitch, so only linked pairs gain the air. */
-.skill-entry[data-run="mid"],
-.skill-entry[data-run="last"],
 .source-entry[data-run="mid"],
 .source-entry[data-run="last"],
 .lifecycle-fold-entry[data-run="mid"],

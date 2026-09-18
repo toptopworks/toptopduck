@@ -18,7 +18,7 @@
 // non-pointer access.
 //
 // Extracted from Thread.tsx (issue #427) as a shared utility consumed by
-// SourceMarker, SkillMarker, TurnCard, the composer popover sections, and the
+// SourceMarker, TurnCard, the composer popover sections, and the
 // workspace result title (issue #772). Lives in its own file to avoid a
 // circular dependency between Thread.tsx and TurnCard.tsx.
 

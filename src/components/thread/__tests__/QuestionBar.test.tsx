@@ -4,7 +4,7 @@ import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement, ReactNode } from "react";
 import { catalogFor } from "../../../i18n";
-import { listActivatedSkills, listSkills } from "../../../api";
+import { listSkills } from "../../../api";
 import { ComposerSkillChips } from "../ComposerSkillChips";
 import { QuestionBar } from "../QuestionBar";
 import { skillEntry } from "../../../test-fixtures";
@@ -32,7 +32,6 @@ vi.mock("../../../api", async (importOriginal) => {
   return {
     ...actual,
     listSkills: vi.fn(),
-    listActivatedSkills: vi.fn(),
   };
 });
 
@@ -43,7 +42,6 @@ vi.mock("../../../api", async (importOriginal) => {
 function renderPicker(
   onPick: (name: string) => void,
   opts: {
-    sessionId?: string | null;
     onSubmit?: (question: string) => void;
     chips?: ReactNode;
     onChipBackspace?: () => void;
@@ -55,7 +53,6 @@ function renderPicker(
       onCancel={() => {}}
       loading={false}
       skillPicker={{
-        sessionId: opts.sessionId ?? null,
         onPick,
         chips: {
           node: opts.chips,
@@ -217,7 +214,6 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
       ignored: [],
       root_error: null,
     });
-    vi.mocked(listActivatedSkills).mockResolvedValue([]);
   });
 
   /** Type into the (uncontrolled) textarea; selectionStart defaults to the
@@ -368,18 +364,44 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     expect(onPick).toHaveBeenCalledTimes(2);
   });
 
-  it("selects an already-activated skill identically and shows its Active badge", async () => {
-    // The activated cache is DISPLAY data: it renders the badge but never
-    // gates selection -- an already-activated pick lands a chip like any
-    // other (the submit-time materialization absorbs the redundancy).
-    vi.mocked(listActivatedSkills).mockResolvedValue(["charting"]);
+  it("lists only ENABLED skills (ADR-0119 Decision 5)", async () => {
+    // The enablement axis now gates the picker itself: a disabled skill
+    // cannot be invoked, so its row would promise a staging the submit
+    // silently drops -- it never lists.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [
+        skillEntry("charting"),
+        { ...skillEntry("ghosted"), enabled: false },
+      ],
+      ignored: [],
+      root_error: null,
+    });
     const onPick = vi.fn();
-    renderPicker(onPick, { sessionId: "sess-1" });
-    const textarea = type("/");
+    renderPicker(onPick);
+    type("/");
     const rows = await screen.findAllByRole("option");
-    expect(rows[0]).toHaveTextContent("已激活");
-    key(textarea, "Enter");
-    expect(onPick).toHaveBeenCalledWith("charting");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("charting");
+    expect(rows[0]).not.toHaveTextContent("ghosted");
+  });
+
+  it("renders the empty face when the registry is non-empty but everything is disabled (review F, #991)", async () => {
+    // The enablement axis collapsing to zero enabled skills is the same
+    // boundary as an empty registry: totalSkills counts the enabled set,
+    // so the "No skills" empty face renders (never a bare panel, never
+    // the no-matches face -- nothing was filtered out by a query).
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [
+        { ...skillEntry("charting"), enabled: false },
+        { ...skillEntry("ghosted"), enabled: false },
+      ],
+      ignored: [],
+      root_error: null,
+    });
+    renderPicker(() => {});
+    type("/");
+    await screen.findByText("暂无技能");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
   });
 
   it("keeps rows whose description matches and highlights the hit", async () => {

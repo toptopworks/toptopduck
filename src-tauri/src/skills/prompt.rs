@@ -1,20 +1,22 @@
 //! Per-turn skill resolution for prompt injection + provenance (issue #364,
-//! ADR-0086; disclosure levels per ADR-0110, issue #700).
+//! ADR-0086; disclosure levels per ADR-0110, issue #700; invocation
+//! semantics per ADR-0119).
 //!
-//! The mounted-skills set lives on the session timeline; at turn assembly time
-//! the engine resolves each mounted name against the registry root to produce a
-//! [`SkillPromptFragment`] carrying (a) the frontmatter `description` that
-//! rides the built-in prompt's metadata index (L1 -- mounted, not activated),
-//! (b) the verbatim Markdown body that rides the prompt once the skill is
-//! activated (L2), and (c) the SHA-256 of the WHOLE `SKILL.md` bytes that
-//! anchors resume's stale-degrade check. A skill that left the registry (or
-//! whose `SKILL.md` is unreadable) degrades honestly -- empty description,
-//! empty body, empty hash, a warn log -- so the turn still proceeds. Its
-//! provenance fate follows disclosure: every turn records only the ACTIVATED
-//! subset (issues #700/#702 -- both runtime surfaces render disclosure), so
-//! an unactivated (even vanished) skill no longer enters the provenance at
-//! all; an activated one records the name + empty hash, which is resume's
-//! "gone" signal.
+//! The discovery snapshot and the invocation records are the two inputs:
+//! at turn assembly time the engine resolves each snapshot name against
+//! the registry root to produce a [`SkillPromptFragment`] carrying (a) the
+//! frontmatter `description` that rides the built-in prompt's metadata
+//! index (L1 -- the snapshot lists every enabled name uniformly), (b) the
+//! verbatim Markdown body that enters the context at the name's invocation
+//! (L2 -- a turn-scoped single expansion pinned to the invocation-time
+//! bytes), and (c) the SHA-256 of the WHOLE `SKILL.md` bytes that anchors
+//! the drift check. A name that left the registry (or whose `SKILL.md` is
+//! unreadable) degrades honestly -- empty description, empty body, empty
+//! hash, a warn log -- so the turn still proceeds. Provenance follows the
+//! invocation records (issues #700/#702, recalibrated by ADR-0119): every
+//! turn records exactly the names invoked on it -- user picks at submit,
+//! agent calls mid-turn -- with each name's hash pinned at its last
+//! invocation of the turn; the empty-hash record is the "gone" signal.
 
 use std::path::Path;
 
@@ -350,7 +352,8 @@ mod tests {
     fn non_spec_name_never_reaches_filesystem() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // A traversal-shaped name landing in mounted_skills via direct IPC.
+        // A traversal-shaped name reaching the assembly via a hand-edited
+        // recipe.
         // The resolver must refuse to join it onto the root.
         std::fs::create_dir_all(root.join("escape")).unwrap();
         std::fs::write(root.join("escape").join("SKILL.md"), "secret").unwrap();

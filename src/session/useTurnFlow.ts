@@ -129,6 +129,11 @@ export interface LiveTurn {
    *  skill changes) replaces the append with the recorded row -- the turn
    *  flow itself never invalidates the thread (ADR-0051). */
   askedAt: number;
+  /** The skill names staged at submit (ADR-0119: the turn's user
+   *  invocations, client-known before the IPC returns). The live bubble's
+   *  badge renders from them; the settled card reads the recorded
+   *  `TurnRecord.invocations` instead. */
+  invocationNames: string[];
   /** The 1-based step of the latest Thinking event (round-trip count,
    *  ADR-0081); null until the first event arrives. */
   step: number | null;
@@ -391,7 +396,7 @@ export interface UseTurnFlow {
   // implementation: callers can await/.catch to chain post-ask work. Fire-
   // and-forget callers (QuestionBar onSubmit/onCancel) still accept it via
   // TypeScript's void-return covariance.
-  handleAsk: (question: string) => Promise<void>;
+  handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
 }
 
@@ -403,6 +408,9 @@ export interface UseTurnFlow {
 interface LiveState {
   question: string;
   askedAt: number;
+  /** The submit-time staging (see LiveTurn.invocationNames). Survives phase
+   *  evolution (applyPhase spreads the previous state). */
+  invocationNames: string[];
   step: number | null;
   calls: LiveCall[];
   /** Per-round connective prose (index = step-1, null when none), from the
@@ -649,6 +657,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     return {
       question: live.question,
       askedAt: live.askedAt,
+      invocationNames: live.invocationNames,
       step: live.step,
       rounds: buildLiveRounds(live, approvals),
       runtime: live.runtime,
@@ -663,7 +672,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // additionally moves viewedResult (auto-selects) and invalidates workingSet
   // + active (a new result_N registered server-side).
   const handleAsk = useCallback(
-    async (question: string) => {
+    async (question: string, invocations?: string[]) => {
       // Belt-and-suspenders (issue #758): the one-turn rule enforced at the
       // handler too, QuestionBar's submit guard being the visual twin. A
       // synthetic dispatch (fireEvent / automation) clicks through a disabled
@@ -680,8 +689,20 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // another domain invalidates the thread -- the turn flow itself never
       // does, ADR-0051).
       const askedAt = Date.now();
+      // The staged invocations (ADR-0119 Decision 1): the turn's user
+      // invocation names, pinned at submit -- the live bubble's badge renders
+      // from them and the optimistic record stamps the same set.
+      const stagedInvocations = invocations ?? [];
       // The live turn card mounts with the question; events grow its trace.
-      commitLive({ question, askedAt, step: null, calls: [], roundTexts: [], roundThinkings: [] });
+      commitLive({
+        question,
+        askedAt,
+        invocationNames: stagedInvocations,
+        step: null,
+        calls: [],
+        roundTexts: [],
+        roundThinkings: [],
+      });
       // Issue #725: the ask-time runtime choice, fired BEFORE the ask
       // dispatch -- synchronously at submit, no await in between, so it
       // mirrors the turn-top snapshot the backend's ask will consume (see
@@ -731,7 +752,12 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // initializer (which no-useless-assignment would flag as dead).
       let settledTrace: TraceRound[];
       try {
-        outcome = await askQuestion(sessionId, question);
+        // An empty staging omits the optional IPC field entirely (the
+        // pre-invocation wire shape), so two-arg asks stay byte-compatible.
+        outcome =
+          stagedInvocations.length > 0
+            ? await askQuestion(sessionId, question, stagedInvocations)
+            : await askQuestion(sessionId, question);
       } catch (e) {
         setError(toAppError(e, intl, "ask"));
         setTurnLoading(false);
@@ -789,6 +815,23 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
               skills: [],
               ...(runtimeChoice && { runtime: choiceToTurnRuntime(runtimeChoice) }),
             },
+            // ADR-0119: the staged names ARE the submit truth, so the
+            // optimistic record stamps User-actor invocation records now.
+            // The body / content_hash are the backend's materialization
+            // (unknown client-side) and stay empty until the recorded row
+            // lands on a reopen or another domain's invalidation -- the same
+            // optimistic degrade as provenance.skills above. The badge reads
+            // names only, so the visible surface is exact.
+            ...((stagedInvocations.length > 0
+              ? {
+                  invocations: stagedInvocations.map((name) => ({
+                    name,
+                    body: "",
+                    actor: "User" as const,
+                    content_hash: "",
+                  })),
+                }
+              : {})),
             asked_at: askedAt,
             settled_at: Date.now(),
           },

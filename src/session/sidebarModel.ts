@@ -48,6 +48,13 @@ export interface OpenSession {
    *  handleAsk on mount, then clears it through onQuestionConsumed. null for
    *  sessions opened by any other action. */
   pendingQuestion: string | null;
+  /** The skill names staged on the shell-level cold-start bar (ADR-0112
+   *  trigger-then-stage, calibrated by ADR-0119: the picks are the minted
+   *  session's FIRST turn's user invocations -- submit-time materialization,
+   *  no per-session state). Carried next to pendingQuestion; SessionPane
+   *  consumes both in the same first ask, then clears them through
+   *  onQuestionConsumed. Empty for sessions opened by any other action. */
+  pendingSkillInvocations: string[];
 }
 
 /** The four ADR-0060 Chat-style time buckets (Today / Yesterday / Previous 7

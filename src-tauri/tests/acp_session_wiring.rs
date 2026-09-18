@@ -624,15 +624,15 @@ fn external_turn_records_invocation_set_provenance() {
     );
 }
 
-/// Issue #702: a resumed session with NO Activate events in its timeline (the
-/// old-session shape -- pre-v6 recipes cannot carry any) folds an EMPTY
-/// activated set, and the external turn driven on top of it records an empty
-/// skill provenance -- the same honest-degrade behavior as the built-in
-/// side. Pins the resume AC end-to-end: mounts rebuild (so the empty
-/// activation is meaningful, not "nothing resumed"), and the turn's
-/// provenance carries no skill whose body was never injected.
+/// Issue #702 (calibrated by ADR-0119): a resumed session whose discovery
+/// snapshot carries skills but whose history records no invocations drives
+/// an external turn with EMPTY skill provenance -- discoverability alone
+/// never shapes a turn. Pins the resume AC end-to-end: the snapshot
+/// restores (so the empty invocation set is meaningful, not "nothing
+/// resumed"), and the turn's provenance carries no skill whose body was
+/// never expanded.
 #[test]
-fn resumed_external_turn_without_activations_records_empty_provenance() {
+fn resumed_external_turn_without_invocations_records_empty_provenance() {
     let skills_root = tempfile::tempdir().unwrap();
     let skills_root = skills_root.path().to_path_buf();
     put_skill(
@@ -654,10 +654,6 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
     session
         .bind_duck(duck_path.clone(), "resume".into())
         .expect("bind");
-    // Mounts persist through the timeline append; no Activate event ever
-    // lands -- the old-session shape.
-    session.mount_skill("sql-coach").expect("mount");
-    session.mount_skill("pdf-tools").expect("mount");
     drop(session);
 
     let mut resumed = Session::open_duck(
@@ -670,19 +666,15 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
         |_| toptopduck_lib::ActiveResolution::Abort,
     )
     .expect("resume");
-    assert_eq!(
-        resumed.mounted_skills(),
-        vec!["sql-coach".to_string(), "pdf-tools".to_string()],
-        "mounts rebuild off the timeline"
-    );
+    resumed.set_discovery_snapshot(vec!["sql-coach".to_string(), "pdf-tools".to_string()]);
     assert!(
-        resumed.activated_skills().is_empty(),
-        "a timeline with no Activate events folds an empty activated set"
+        resumed.invoked_skills().is_empty(),
+        "a history with no invocation records folds an empty invoked set"
     );
 
     resumed.set_external_runtime(Some(fake_cli_adapter()));
     let fragments: Vec<SkillPromptFragment> =
-        resolve_prompt_fragments(&skills_root, &resumed.mounted_skills());
+        resolve_prompt_fragments(&skills_root, &resumed.discovery_snapshot());
     assert_eq!(fragments.len(), 2);
     let outcome = resumed.ask_with_phase(
         "what is the answer?",
@@ -721,7 +713,11 @@ fn resumed_external_turn_without_activations_records_empty_provenance() {
         .expect("at least one turn in the recipe");
     assert!(
         last_turn.provenance.skills.is_empty(),
-        "a resumed external turn with no activations records no skill bodies"
+        "a resumed external turn with no invocations records no skill bodies"
+    );
+    assert!(
+        last_turn.invocations.is_empty(),
+        "the turn carries no invocation records"
     );
 }
 

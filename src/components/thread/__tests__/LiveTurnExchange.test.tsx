@@ -11,16 +11,14 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { LiveTurnExchange } from "../LiveTurnExchange";
-import type { ReactNode } from "react";
 import type { LiveTurn } from "../../../session/useTurnFlow";
 
-function renderExchange(liveTurn: LiveTurn, agentHead?: ReactNode) {
+function renderExchange(liveTurn: LiveTurn) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
         <LiveTurnExchange
           liveTurn={liveTurn}
-          agentHead={agentHead}
           mentionedDataset={null}
           onRespondApproval={() => {}}
           onThinkingExpandedChange={() => {}}
@@ -33,6 +31,7 @@ function renderExchange(liveTurn: LiveTurn, agentHead?: ReactNode) {
 const liveTurnWith = (runtime: LiveTurn["runtime"]): LiveTurn => ({
   question: "问",
   askedAt: 0,
+  invocationNames: [],
   step: null,
   rounds: [],
   runtime,
@@ -49,18 +48,6 @@ describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
     // swap re-hosts the marker without moving it (#620).
     expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
     expect(stream?.firstElementChild).toHaveTextContent("claude-code");
-  });
-
-  it("keeps the marker ahead of the agent-activation head (adjudication 4)", () => {
-    const { container } = renderExchange(
-      liveTurnWith({ kind: "external", data: { adapter_id: "claude-code" } }),
-      <span data-agent-head>act</span>,
-    );
-    const stream = container.querySelector(".assistant-stream");
-    // Mirrors the settled TurnCard's pin: attribution first, then the
-    // activations the actor triggered.
-    expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
-    expect(stream?.firstElementChild?.nextElementSibling).toHaveAttribute("data-agent-head");
   });
 
   it("renders no marker before the ask-time read lands (runtime absent)", () => {
@@ -91,5 +78,24 @@ describe("LiveTurnExchange trace round width cap (issue #826)", () => {
       rounds: [{ text: "流", rows: [] }],
     });
     expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
+  });
+});
+
+// Review Important 3 (#991): the live exchange renders the client-known
+// staging as the badge face (ADR-0119 Decision 5) -- the same UserBubble
+// the settled card re-renders from the turn's own records at the swap.
+describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5, review I3, #991)", () => {
+  it("renders the staged names above the question", () => {
+    const { getByText, getByLabelText } = renderExchange({
+      ...liveTurnWith(undefined),
+      invocationNames: ["sql-coach"],
+    });
+    expect(getByText("sql-coach")).toBeInTheDocument();
+    expect(getByLabelText("随此消息调用的技能")).toBeInTheDocument();
+  });
+
+  it("renders no badge list with an empty staging", () => {
+    const { queryByLabelText } = renderExchange(liveTurnWith(undefined));
+    expect(queryByLabelText("随此消息调用的技能")).not.toBeInTheDocument();
   });
 });

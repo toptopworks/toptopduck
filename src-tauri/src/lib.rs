@@ -522,11 +522,6 @@ pub fn run() {
             commands::set_agent_enabled,
             commands::list_skill_sources,
             commands::import_skills,
-            commands::mount_skill,
-            commands::unmount_skill,
-            commands::list_mounted_skills,
-            commands::activate_skill,
-            commands::list_activated_skills,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

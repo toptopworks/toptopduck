@@ -11,6 +11,7 @@
 // untranslated; asked_at renders as the locale time (ADR-0052 chrome).
 
 import { useIntl } from "react-intl";
+import { Puzzle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 import { HOVER_REVEAL_CLASS } from "./turn-visual";
@@ -19,6 +20,7 @@ export function UserBubble({
   question,
   askedAt,
   isStale,
+  invokedSkills = [],
 }: {
   question: string;
   /** When the user submitted, Unix epoch ms (ADR-0103). undefined for turns
@@ -26,10 +28,42 @@ export function UserBubble({
    *  one (honest degrade). */
   askedAt: number | undefined;
   isStale: boolean;
+  /** ADR-0119 Decision 5: the skills the user invoked this turn -- the badge
+   *  face of "what shaped this question". The settled card derives the names
+   *  from the turn's own invocation records (actor User); the live exchange
+   *  passes the client-known staging. Empty renders nothing (no records, no
+   *  badge). Decorative badges: the names are layer-4 content, the list
+   *  carries an accessible group label. */
+  invokedSkills?: string[];
 }) {
   const intl = useIntl();
   return (
     <div className="user-bubble group flex flex-col items-end">
+      {/* ADR-0119 Decision 5: the user-invocation badges sit above the
+          question, right-aligned with the bubble -- the turn's shaping skills
+          read before the question does. badge-secondary tokens (muted
+          surface + muted text, md radius, 2px 8px padding per DESIGN.md)
+          with the composer chips' Puzzle glyph keep the "skill" concept one
+          visual language; decorative (no interaction), names untranslated. */}
+      {invokedSkills.length > 0 && (
+        <ul
+          className="invoked-skills m-0 mb-0.5 flex max-w-[85%] flex-wrap justify-end gap-1"
+          aria-label={intl.formatMessage({
+            id: "thread.userBubble.invokedSkillsAria",
+            defaultMessage: "Skills invoked with this message",
+          })}
+        >
+          {invokedSkills.map((name) => (
+            <li
+              key={name}
+              className="invoked-skill inline-flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+            >
+              <Puzzle className="size-3 shrink-0" aria-hidden="true" />
+              <span className="truncate">{name}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {/* The bubble box rides the question element itself (the .turn-question
           hook stays for selector / test stability): secondary surface + lg
           radius per the conversation-surface tokens, the top-right corner

@@ -3,13 +3,11 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { LifecycleFold, LifecycleFoldMembers } from "./LifecycleFold";
 import { LiveTurnExchange } from "./LiveTurnExchange";
 import { SourceMarker } from "./SourceMarker";
-import { SkillMarker } from "./SkillMarker";
 import { TurnCard } from "./TurnCard";
 import {
   primaryReferenceName,
   findMentionedDataset,
   findStaleSourceIdx,
-  agentActivationOwner,
   lifecycleRunMarks,
   lifecycleVisualRows,
   staleDerivativeCount,
@@ -55,13 +53,9 @@ interface ThreadProps {
    * do not exercise the chip; defaults to empty (no chips rendered). */
   datasetLabels?: ReadonlyArray<DatasetLabel>;
   /** The process-global skill registry keyed by spec name (ADR-0086, issue
-   *  #366): a Skill lifecycle marker looks up its name here to detect a name
-   *  the registry no longer carries (resume honest-degrade -- a skill
-   *  deleted / renamed / uninstalled external library since the event was
-   *  recorded). undefined when the caller does not wire the registry: the
-   *  marker then renders the
-   *  verb + name from the event alone (no missing-skill
-   *  warning). The timeline stays readable; the registry only enriches it. */
+   *  #381): each turn's provenance hashes compare against it to surface the
+   *  skill-drift badges. undefined when the caller does not wire the
+   *  registry: drift detection is skipped (honest degrade). */
   skillIndex?: ReadonlyMap<string, SkillEntry>;
   /** The in-flight turn's live trace (ADR-0078/0103, issues #297/#610): when
    * non-null the thread renders the turn's chat exchange at its tail (the
@@ -217,33 +211,6 @@ export function Thread({
     return m;
   }, [staleByReference]);
 
-  // D5 / issue #722 placement: an agent activation renders at the head of its
-  // owning turn's assistant stream (the entry's next Turn), not as a
-  // standalone row; while its turn runs it renders at the live exchange's
-  // head instead ("live"), and a turn-less, live-less tail degrades to a
-  // standalone row. activationsByTurn groups the settled owners' indices.
-  const owners = useMemo(
-    () => agentActivationOwner(entries, liveTurn !== null),
-    [entries, liveTurn],
-  );
-  const { activationsByTurn, liveActivationIdxs } = useMemo(() => {
-    // One pass splits the owned indices by host: a settled owner's Turn
-    // groups them for its card's head; "live" (their turn has no entry yet)
-    // keeps array order for the live exchange's head -- the settle swap
-    // re-hosts that same order inside the appended Turn.
-    const m = new Map<number, number[]>();
-    const live: number[] = [];
-    owners.forEach((owner, i) => {
-      if (owner === "live") live.push(i);
-      else if (typeof owner === "number") {
-        const list = m.get(owner);
-        if (list) list.push(i);
-        else m.set(owner, [i]);
-      }
-    });
-    return { activationsByTurn: m, liveActivationIdxs: live };
-  }, [owners]);
-
   // Issues #721/#737: the visual row projection (scatter rows + collapsed
   // fold rows) and, derived from that SAME projection, each row's position
   // within its maximal run (skill/source mixed contiguity; a turn always
@@ -253,8 +220,8 @@ export function Thread({
   // node connector for first/mid. Turns get null -- they never enter the
   // line.
   const visualRows = useMemo(
-    () => lifecycleVisualRows(entries, owners, { staleCountsByKey, skillIndex }),
-    [entries, owners, staleCountsByKey, skillIndex],
+    () => lifecycleVisualRows(entries, { staleCountsByKey }),
+    [entries, staleCountsByKey],
   );
   const runMarks = useMemo(() => lifecycleRunMarks(visualRows), [visualRows]);
   // The jump contract's member -> group index (issue #737): a stale-chip
@@ -295,40 +262,16 @@ export function Thread({
     [foldByMember, expandedFolds],
   );
 
-  // One owned activation rendered as an agent-activation row (D5 / issue
-  // #722) -- shared by the settled turn's head and the live exchange's head
-  // so the two hosts cannot drift apart.
-  const renderAgentActivation = (idx: number) => {
-    const owned = entries[idx];
-    return owned.entry === "Skill" ? (
-      <div key={idx} className="agent-activation">
-        <SkillMarker event={owned.data} skillIndex={skillIndex} />
-      </div>
-    ) : null;
-  };
-
   // One scatter lifecycle row (issue #737): the subsegments below the fold
   // threshold (a fold group's members render as ONE combined row instead,
   // in the fold branch below). The key stays the entry index -- append-only
   // keeps it attached to the right entry.
   const renderMarkerRow = (idx: number, runMark: LifecycleRunMark | null) => {
     const entry = entries[idx];
-    // The projector only points marker/member rows at Skill/Source entries
-    // (turns ride their own row, absorbed ones render nothing); the guard
-    // narrows the type for the branches below.
-    if (entry.entry !== "Skill" && entry.entry !== "Source") return null;
-    if (entry.entry === "Skill") {
-      return (
-        <li
-          key={idx}
-          className="skill-entry"
-          data-skill-kind={entry.data.kind.toLowerCase()}
-          data-run={runMark}
-        >
-          <SkillMarker event={entry.data} skillIndex={skillIndex} />
-        </li>
-      );
-    }
+    // The projector only points marker/member rows at Source entries (turns
+    // ride their own row; the skill species renders no row at all,
+    // ADR-0119 Decision 2); the guard narrows the type for the branch below.
+    if (entry.entry !== "Source") return null;
     const staleCount = staleDerivativeCount(entry.data, staleCountsByKey);
     return (
       <li
@@ -389,9 +332,6 @@ export function Thread({
             // renders disabled rather than promising a jump it cannot perform.
             const jumpTargetIdx =
               staleAnchor === undefined ? null : findStaleSourceIdx(entries, i, staleAnchor);
-            // D5 / issue #722: the agent activations this turn owns render at
-            // the head of its assistant stream (they happened inside it).
-            const headIdx = activationsByTurn.get(i);
             return (
               <li
                 // The thread is append-only and never reordered (ADR-0028/0039/
@@ -431,15 +371,10 @@ export function Thread({
                       : undefined
                   }
                   skillIndex={skillIndex}
-                  agentHead={headIdx?.map(renderAgentActivation)}
                 />
               </li>
             );
           }
-          // An absorbed activation renders inside its owning turn's
-          // assistant stream (D5 / issue #722), not as a standalone timeline
-          // row -- the projector already dropped it from the line.
-          if (row.row === "absorbed") return null;
           // A collapsed same-kind group (issue #737): the fold row is the
           // group's head; expanded, ONE combined member-name row renders
           // underneath (the combined-member ruling -- a long stretch stays
@@ -464,7 +399,6 @@ export function Thread({
                   group={g}
                   entries={entries}
                   staleCountsByKey={staleCountsByKey}
-                  skillIndex={skillIndex}
                   highlightedIdx={highlightedSourceIdx}
                   continueConnector={runMarks[vi] === "first" || runMarks[vi] === "mid"}
                   rowRef={(el) => {
@@ -495,9 +429,6 @@ export function Thread({
           mentionedDataset={findMentionedDataset(liveTurn.question, datasetLabels)}
           onRespondApproval={onRespondApproval}
           onThinkingExpandedChange={handleLiveThinkingExpanded}
-          agentHead={
-            liveActivationIdxs.length > 0 ? liveActivationIdxs.map(renderAgentActivation) : undefined
-          }
         />
       )}
     </section>

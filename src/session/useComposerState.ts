@@ -24,7 +24,7 @@ export interface ComposerSessionFields {
    *  in-flight window must not flip the bar's Ask/Stop button. */
   loading: boolean;
   phase: TurnPhase | null;
-  handleAsk: (question: string) => Promise<void>;
+  handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
   /** Multi-file ingest from the composer "+" file section (ADR-0083). Routed
    *  through useIngestFlow's handleIngestMany inside SessionPane. */

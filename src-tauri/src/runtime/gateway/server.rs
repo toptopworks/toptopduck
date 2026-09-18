@@ -41,7 +41,6 @@ use crate::session::loop_contract::{
     truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
-use crate::session::skills::SkillActivationCtx;
 use crate::session::turn_dispatch::{
     classify_with_cli_tool, guarded_dispatch, ResolvedClassification,
 };
@@ -90,12 +89,6 @@ pub struct GatewayCtx<'a> {
     /// The per-turn DuckDB + working-set borrows `tools::dispatch` reads +
     /// mutates.
     pub deps: TurnDeps<'a>,
-    /// The mid-turn skill-activation channel (ADR-0110 Decision 3, issue
-    /// #701): serves the `activate_skill` meta-tool's interception below.
-    /// The same disjoint-borrow bundle the built-in loop's dispatch server
-    /// gets -- the bridge face lands activations through the SAME session
-    /// transition by construction.
-    pub skills: SkillActivationCtx<'a>,
     /// The mid-turn skill-invocation channel (ADR-0119 Decision 4, issue
     /// #983): serves the `invoke_skill` meta-tool's interception below --
     /// the bridge face lands invocations on the SAME turn record by
@@ -636,19 +629,10 @@ fn handle_method(
                     .map(tool_to_mcp),
             );
             tools.extend(ctx.mcp.meta_tool_definitions().iter().map(tool_to_mcp));
-            // The skill-activation meta-tool (issue #701): mounted iff the
-            // turn's discovery snapshot is non-empty -- the trio's conditional
-            // posture (ADR-0105 Decision 6). The LEGACY channel, live through
-            // the coexistence period (ADR-0119 Consequences -- the ADR-0086 calibration, issue #983).
-            if !ctx.skills.fragments.is_empty() {
-                tools.push(tool_to_mcp(
-                    &crate::skills::activation::activate_skill_definition(),
-                ));
-            }
             // The skill-invocation meta-tool (ADR-0119 Decision 4, issue
-            // #983): `invoke_skill` succeeds the activation channel,
-            // snapshot-conditional like its predecessor.
-            if !ctx.skills.fragments.is_empty() {
+            // #983): mounted iff the turn's discovery snapshot is non-empty
+            // -- the trio's conditional posture (ADR-0105 Decision 6).
+            if !ctx.invocations.snapshot.is_empty() {
                 tools.push(tool_to_mcp(
                     &crate::skills::invocation::invoke_skill_definition(),
                 ));
@@ -738,32 +722,10 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         }
         meta_tools::MetaDispatch::Fallthrough(call) => call,
     };
-    // The skill-activation meta-tool (ADR-0110 Decision 3, issue #701):
-    // intercepted BESIDE the trio match, ahead of any classification / gate
-    // -- activation is approval-free by design (mounting is the only trust
-    // gate). The resolver lands the `Activate` transition + persists
-    // immediately; this site maps its two variants exactly as it maps the
-    // trio's (a Local call gets a trace row, a Refused call is the bare
-    // isError envelope with no trace entry).
-    if call.name == crate::skills::activation::ACTIVATE_SKILL {
-        return match crate::skills::activation::resolve_skill_activation(
-            call,
-            &mut ctx.skills,
-            ctx.deps.working_set,
-            ctx.deps.temp_path,
-        ) {
-            crate::skills::activation::SkillActivationOutcome::Local { summary, payload } => {
-                local_meta_result(call, &summary, payload, outcome)
-            }
-            crate::skills::activation::SkillActivationOutcome::Refused(message) => {
-                resolution_failure(message)
-            }
-        };
-    }
     // The skill-invocation meta-tool (ADR-0119 Decision 4, issue #983):
-    // intercepted beside the activation arm, equally ahead of any
-    // classification / gate -- invocation is approval-free by design (the
-    // gate is the machine-level enable axis). The resolver appends the
+    // intercepted beside the trio match, ahead of any classification /
+    // gate -- invocation is approval-free by design (the gate is the
+    // machine-level enable axis). The resolver appends the
     // agent-actor record to the turn's pending invocations; this site maps
     // its two variants exactly as the trio's (a Local call gets a trace
     // row, a Refused call is the bare isError envelope with no trace
@@ -780,8 +742,9 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         };
     }
     // The skill-attachment read surface (ADR-0111, issue #714): intercepted
-    // beside the activation arm, equally ahead of any classification / gate
-    // (reading is the injected body's risk class -- Decision 5). A served
+    // beside the invocation arm, equally ahead of any classification / gate
+    // (reading rides the session-invoked set -- ADR-0111 calibrated by
+    // ADR-0119 Decision 4). A served
     // read gets a trace row through the shared local-meta mapper; a refused
     // read is the bare isError envelope with no trace entry.
     if call.name == crate::skills::read::READ_SKILL_FILE {
@@ -1090,20 +1053,19 @@ mod tests {
         gate_ctx(Vec::new(), approval, sink)
     }
 
-    /// A ctx over a SEEDED activation fixture (issue #701) -- the skill-arm
-    /// tests' variant of [`fresh_ctx`]: the all-leak defaults of
-    /// `gate_ctx_with_materializer`, differing only in the seeded fixture.
-    /// The NoopSink gate hides whether the gate was ever asked; the
-    /// approval-free assertions go through the recording sink instead.
-    fn skill_ctx(fragments: Vec<crate::skills::SkillPromptFragment>) -> GatewayCtx<'static> {
-        let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
-            crate::session::skills::SkillActivationFixture::new(fragments),
-        ));
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx)
+    /// A ctx over a SEEDED discovery snapshot -- the skill-surface tests'
+    /// variant of [`fresh_ctx`]: the all-leak defaults of `fresh_ctx`,
+    /// differing only in the invocation channel's snapshot (the
+    /// tools/list mount condition reads it).
+    fn skill_ctx(snapshot: Vec<String>) -> GatewayCtx<'static> {
+        let mut ctx = fresh_ctx();
+        ctx.invocations = crate::skills::invocation::SkillInvocationCtx {
+            pending: Box::leak(Box::new(Vec::new())),
+            snapshot: Box::leak(snapshot.into_boxed_slice()),
+            root: Box::leak(std::path::PathBuf::new().into_boxed_path()),
+            disabled: &[],
+        };
+        ctx
     }
 
     /// The CLI-registration test variant of [`fresh_ctx`]: a caller-chosen
@@ -1117,15 +1079,7 @@ mod tests {
     ) -> GatewayCtx<'static> {
         let fake: &'static mut FakeMaterializer =
             Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        gate_ctx_with_materializer(
-            fake,
-            cli,
-            approval,
-            sink,
-            Box::leak(Box::new(
-                crate::session::skills::SkillActivationFixture::new(Vec::new()),
-            )),
-        )
+        gate_ctx_with_materializer(fake, cli, approval, sink)
     }
 
     /// [`gate_ctx`] with a caller-chosen materializer -- the #321 panic pin
@@ -1135,7 +1089,6 @@ mod tests {
         cli: Vec<crate::cli_tools::config::CliToolConfig>,
         approval: &'static ApprovalState,
         sink: &'static dyn ApprovalSink,
-        skills: &'static mut crate::session::skills::SkillActivationFixture,
     ) -> GatewayCtx<'static> {
         let cli: &'static [crate::cli_tools::config::CliToolConfig] =
             Box::leak(cli.into_boxed_slice());
@@ -1148,7 +1101,6 @@ mod tests {
         let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
         GatewayCtx {
             deps,
-            skills: skills.ctx(),
             // Inert by default (the invocation-surface tests overwrite this
             // field with a seeded channel; the ctx is built `mut` for that
             // purpose).
@@ -2995,129 +2947,6 @@ mod tests {
         );
     }
 
-    /// The bridge face's `activate_skill` arm (issue #701): the intercept
-    /// sits beside the trio match, the envelope carries the body VERBATIM
-    /// (a plain string payload, never JSON-quoted), one trace row lands
-    /// under the tool name with the skill name as its summary, and the
-    /// activation lands on the SAME channel state the built-in loop drives
-    /// -- actor `Agent`.
-    #[test]
-    fn handle_tools_call_activate_skill_serves_body_and_lands_agent_activation() {
-        let fragment =
-            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL.");
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
-            requests: std::sync::Mutex::new(Vec::new()),
-        }));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
-            crate::session::skills::SkillActivationFixture::new(vec![fragment]),
-        ));
-        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx);
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 9,
-            "method": "tools/call",
-            "params": {"name": "activate_skill", "arguments": {"name": "sql-coach"}}
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], false, "an activation is a success");
-                assert_eq!(
-                    v["content"][0]["text"], "Coach the SQL.",
-                    "the body rides the result verbatim"
-                );
-            }
-            Response::Error(code, m) => {
-                panic!("activate_skill must return Result, got error {code}: {m}")
-            }
-            Response::None => panic!("activate_skill must return Result, got None"),
-        }
-        assert_eq!(outcome.trace.len(), 1, "one activation -> one trace row");
-        let row = &outcome.trace[0];
-        assert_eq!(row.name, "activate_skill");
-        assert!(row.success);
-        assert_eq!(row.summary, "sql-coach", "the summary is the skill name");
-        // The idempotent repeat through the SAME face: still a success
-        // carrying the body (the landed-event count is pinned at the
-        // resolver's unit level).
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], false, "a repeat activation is idempotent");
-                assert_eq!(v["content"][0]["text"], "Coach the SQL.");
-            }
-            Response::Error(code, m) => {
-                panic!("the repeat must return Result, got error {code}: {m}")
-            }
-            Response::None => panic!("the repeat must return Result, got None"),
-        }
-        assert!(
-            sink.requests.lock().unwrap().is_empty(),
-            "activation is approval-free on the bridge face too -- the intercept sits ahead of the gate"
-        );
-    }
-
-    /// The bridge face's `activate_skill` Refused arm (issue #701): an
-    /// unknown name is the bare isError envelope carrying the
-    /// self-correcting message (every mounted name), with NO trace row --
-    /// the trio's resolution-failure posture, mirrored for the skill arm.
-    #[test]
-    fn handle_tools_call_activate_skill_unknown_name_refuses_traceless() {
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
-            requests: std::sync::Mutex::new(Vec::new()),
-        }));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
-            crate::session::skills::SkillActivationFixture::new(vec![
-                crate::session::skills::SkillActivationFixture::fragment(
-                    "sql-coach",
-                    "Coach the SQL.",
-                ),
-                crate::session::skills::SkillActivationFixture::fragment(
-                    "pdf-tools",
-                    "Handle PDFs.",
-                ),
-            ]),
-        ));
-        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx);
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 10,
-            "method": "tools/call",
-            "params": {"name": "activate_skill", "arguments": {"name": "ghost"}}
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], true, "an unknown name is refused");
-                let text = v["content"][0]["text"].as_str().unwrap_or_default();
-                assert!(text.contains("ghost"), "{text}");
-                assert!(
-                    text.contains("sql-coach") && text.contains("pdf-tools"),
-                    "the refusal lists EVERY mounted name for self-correction: {text}"
-                );
-            }
-            Response::Error(code, m) => {
-                panic!("a refused activation is still a Result, got error {code}: {m}")
-            }
-            Response::None => panic!("a refused activation must return Result, got None"),
-        }
-        assert!(
-            outcome.trace.is_empty(),
-            "a refused activation records no trace row"
-        );
-        assert!(
-            sink.requests.lock().unwrap().is_empty(),
-            "the refusal never reaches the gate either"
-        );
-        // Nothing lands on a refused call -- pinned at the resolver's unit
-        // level; this face's contract is the envelope + traceless mapping.
-    }
-
     /// The bridge face's `invoke_skill` arm (ADR-0119 Decision 4, issue
     /// #983): the intercept maps the resolver's two variants exactly as
     /// the built-in arm does -- a served invocation is a success envelope
@@ -3217,11 +3046,12 @@ mod tests {
         );
     }
 
-    /// The mount-conditional surface (issue #701, ADR-0105 Decision 6): an
-    /// EMPTY mounted set lists no `activate_skill`; a non-empty set mounts
-    /// it once, beside the trio's conditional attachment.
+    /// The mount-conditional surface (ADR-0119 Decision 4, ADR-0105
+    /// Decision 6): an EMPTY discovery snapshot lists no `invoke_skill`; a
+    /// non-empty snapshot mounts it once, beside the trio's conditional
+    /// attachment.
     #[test]
-    fn tools_list_mounts_activate_skill_only_with_a_nonempty_set() {
+    fn tools_list_mounts_invoke_skill_only_with_a_nonempty_snapshot() {
         let mut ctx = fresh_ctx();
         match handle_method(
             "tools/list",
@@ -3237,8 +3067,8 @@ mod tests {
                     .map(|t| t["name"].as_str().unwrap())
                     .collect();
                 assert!(
-                    !names.contains(&"activate_skill"),
-                    "an empty mounted set pays no standing tool cost"
+                    !names.contains(&"invoke_skill"),
+                    "an empty discovery snapshot pays no standing tool cost"
                 );
             }
             Response::Error(code, m) => {
@@ -3247,9 +3077,7 @@ mod tests {
             Response::None => panic!("tools/list must return Result, got None"),
         }
 
-        let fragment =
-            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach the SQL.");
-        let mut ctx = skill_ctx(vec![fragment]);
+        let mut ctx = skill_ctx(vec!["sql-coach".to_string()]);
         match handle_method(
             "tools/list",
             &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
@@ -3264,8 +3092,8 @@ mod tests {
                     .map(|t| t["name"].as_str().unwrap())
                     .collect();
                 assert!(
-                    names.contains(&"activate_skill"),
-                    "a non-empty mounted set mounts the activation channel"
+                    names.contains(&"invoke_skill"),
+                    "a non-empty discovery snapshot mounts the invocation channel"
                 );
             }
             Response::Error(code, m) => {
@@ -3284,6 +3112,7 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), "---\nname: sql-coach\n---\nBody.\n").unwrap();
         crate::skills::read::SkillReadGate {
             invoked: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
+            disabled: &[],
             root: Box::leak(tmp.path().to_path_buf().into_boxed_path()),
         }
     }
@@ -3297,12 +3126,11 @@ mod tests {
     fn tools_list_mounts_read_skill_file_only_with_a_nonempty_invoked_set() {
         // Snapshot skills but nothing INVOKED yet: the read surface stays
         // off (reading rides the invoked gate, not the snapshot).
-        let mut ctx = skill_ctx(vec![
-            crate::session::skills::SkillActivationFixture::fragment("sql-coach", "Coach."),
-        ]);
+        let mut ctx = skill_ctx(vec!["sql-coach".to_string()]);
         let tmp = tempfile::tempdir().unwrap();
         ctx.read = crate::skills::read::SkillReadGate {
             invoked: &[],
+            disabled: &[],
             root: Box::leak(tmp.path().to_path_buf().into_boxed_path()),
         };
         match handle_method(
@@ -3369,10 +3197,7 @@ mod tests {
         }));
         let fake: &'static mut FakeMaterializer =
             Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let fx: &'static mut crate::session::skills::SkillActivationFixture = Box::leak(Box::new(
-            crate::session::skills::SkillActivationFixture::new(Vec::new()),
-        ));
-        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink, fx);
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
         let tmp = tempfile::tempdir().unwrap();
         ctx.read = leaked_read_gate(&tmp);
         let mut outcome = GatewayOutcome::default();
@@ -3457,15 +3282,7 @@ mod tests {
         let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
         let ghost: &'static mut GhostThenPanicMaterializer =
             Box::leak(Box::new(GhostThenPanicMaterializer));
-        let mut ctx = gate_ctx_with_materializer(
-            ghost,
-            Vec::new(),
-            approval,
-            sink,
-            Box::leak(Box::new(
-                crate::session::skills::SkillActivationFixture::new(Vec::new()),
-            )),
-        );
+        let mut ctx = gate_ctx_with_materializer(ghost, Vec::new(), approval, sink);
         let mut outcome = GatewayOutcome::default();
         let msg = json!({
             "jsonrpc": "2.0",
@@ -3522,15 +3339,7 @@ mod tests {
         let sink: &'static NoopSink = Box::leak(Box::new(NoopSink));
         let sleepy: &'static mut SleepyMaterializer =
             Box::leak(Box::new(SleepyMaterializer { ms: 600 }));
-        let mut ctx = gate_ctx_with_materializer(
-            sleepy,
-            Vec::new(),
-            approval,
-            sink,
-            Box::leak(Box::new(
-                crate::session::skills::SkillActivationFixture::new(Vec::new()),
-            )),
-        );
+        let mut ctx = gate_ctx_with_materializer(sleepy, Vec::new(), approval, sink);
         // The serve must read the very token this test armed: alias the ctx's
         // cancel to the Arc twin the clock publishes on (the same slot the
         // production paths share, ADR-0115).

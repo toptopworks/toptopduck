@@ -31,6 +31,7 @@ import {
   outcomeVisual,
   runtimeMarkerName,
   selectDriftedSkills,
+  userInvocationNames,
   type DatasetLabel,
 } from "./turn-visual";
 import type { StaleAnchor } from "../../types/dataset";
@@ -62,14 +63,8 @@ interface TurnCardProps {
   thinkingInitiallyExpanded?: ReadonlySet<ThinkingTrace>;
   /** The registry index for skill drift detection (issue #381). undefined when
    *  the caller does not wire the registry: drift detection is skipped (honest
-   *  degrade -- the timeline stays readable, mirroring SkillMarker's #366
-   *  no-index posture). */
+   *  degrade -- the timeline stays readable). */
   skillIndex: ReadonlyMap<string, SkillEntry> | undefined;
-  /** D5 / issue #722: the agent activations that happened inside this turn,
-   *  rendered at the head of the assistant stream -- chronologically after the
-   *  user bubble, before the execution they enabled. undefined when the turn
-   *  owns none. */
-  agentHead?: ReactNode;
   /** Issue #758: fires this turn's question again as a fresh turn -- the
    *  Failed/Cancelled continuation (ADR-0028 Why 2: these turns stay visible
    *  AND continuable). undefined when the caller does not wire a retry: the
@@ -106,7 +101,6 @@ export function TurnCard({
   mentionedDataset,
   thinkingInitiallyExpanded,
   skillIndex,
-  agentHead,
   onRetryTurn,
   busy,
 }: TurnCardProps) {
@@ -135,7 +129,12 @@ export function TurnCard({
       className={cn("turn-card rounded-md py-1.5", isStale && "stale-ghost opacity-50")}
       data-stale={isStale ? "true" : undefined}
     >
-      <UserBubble question={record.question} askedAt={record.asked_at} isStale={isStale} />
+      <UserBubble
+        question={record.question}
+        askedAt={record.asked_at}
+        isStale={isStale}
+        invokedSkills={userInvocationNames(record)}
+      />
       <div
         className={cn(
           "assistant-stream group mt-1 flex flex-col items-start",
@@ -144,12 +143,8 @@ export function TurnCard({
       >
         {/* Issue #818: the runtime attribution opens the stream -- who
             answers precedes everything the actor does inside the turn
-            (activations, annotations, rounds). */}
+            (annotations, rounds). */}
         {runtimeName !== null && <RuntimeAttributionMarker adapterId={runtimeName} />}
-        {/* D5 / issue #722: agent activations owned by this turn open the
-            assistant stream -- after the user bubble, before the execution
-            they enabled. */}
-        {agentHead}
         {/* Header annotations (ADR-0103): the app's read of the question --
             which dataset it named (ADR-0047 active chip) and which mounted
             skills drifted since the answer (issue #381) -- open the stream,

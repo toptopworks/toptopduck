@@ -58,7 +58,6 @@ use crate::session::loop_contract::{
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::session::progress::ProgressClock;
-use crate::session::skills::SkillActivationCtx;
 use crate::session::turn_dispatch::{
     classify_call, dispatch_gated_call, panic_to_transient, DispatchAbort, GateCtx,
 };
@@ -145,7 +144,6 @@ impl LoopRuntime {
         mcp: &mut McpAggregator,
         cli: &[crate::cli_tools::config::CliToolConfig],
         delegations: &[crate::agents::DelegationSpec],
-        skills: &mut SkillActivationCtx<'_>,
         invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
         read: &crate::skills::read::SkillReadGate<'_>,
         approval: &crate::approval::ApprovalState,
@@ -345,7 +343,6 @@ impl LoopRuntime {
                     materializer,
                     mcp,
                     cli,
-                    skills,
                     invocations,
                     read,
                     &gate,

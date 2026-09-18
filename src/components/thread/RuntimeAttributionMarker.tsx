@@ -8,8 +8,8 @@
 // equals the spec's display name; divergence would need a name map, left as
 // a follow-up). No vendor logos (ADR-0101 leaves iconography to DESIGN.md).
 // DESIGN.md self-audit: deliberately NOT the badge recipe (its capsule +
-// medium weight would shout on every turn head) -- this is the SkillMarker /
-// skill-drift family of quiet muted captions, tokens only.
+// medium weight would shout on every turn head) -- this is the drift-badge
+// family of quiet muted captions, tokens only.
 
 import { Terminal } from "lucide-react";
 

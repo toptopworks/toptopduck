@@ -464,7 +464,7 @@ mod transforms {
     pub(super) fn v6_to_v7(value: Value) -> Result<Value, MigrationError> {
         let mut value = value;
         if value.get("discovery_snapshot").is_none() {
-            let snapshot = fold_mount_fold(&value)?;
+            let snapshot = fold_mounted_events(&value)?;
             let obj = value
                 .as_object_mut()
                 .ok_or_else(|| MigrationError::Field("recipe root is not an object".into()))?;
@@ -476,7 +476,7 @@ mod transforms {
 
 /// Fold the recipe history's Mount/Unmount skill events into the
 /// materialized discovery snapshot (the v6->v7 step's one computation;
-/// mirrors `Recipe::mounted_skills` over raw JSON). Malformed shapes are
+/// the same Mount-in / Unmount-out fold, computed over raw JSON). Malformed shapes are
 /// honest errors -- a history that is not an array, or a skill entry whose
 /// `data` is present but yields no string `name`, is a corrupt file, not a
 /// migration input. The one deliberate gap: an entry with no `data` key at
@@ -484,7 +484,7 @@ mod transforms {
 /// still never opens -- the downstream `history` deserialization rejects
 /// it with its generic missing-field error rather than this fold's typed
 /// `Field` error.
-fn fold_mount_fold(value: &Value) -> Result<Vec<String>, MigrationError> {
+fn fold_mounted_events(value: &Value) -> Result<Vec<String>, MigrationError> {
     let mut mounted: Vec<String> = Vec::new();
     let Some(history) = value.get("history").and_then(Value::as_array) else {
         return Err(MigrationError::Field("history is not an array".into()));
@@ -736,10 +736,9 @@ mod tests {
         let recipe: crate::persistence::recipe::Recipe =
             serde_json::from_value(migrated).expect("v6 shape parses");
         assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
-        assert!(recipe.mounted_skills().is_empty());
         assert!(
-            recipe.activated_skills().is_empty(),
-            "a pre-activation recipe folds to the honest empty activated set",
+            recipe.invoked_skills().is_empty(),
+            "no pre-v7 turn carries invocations",
         );
     }
 
@@ -777,10 +776,7 @@ mod tests {
             serde_json::from_value(migrated).expect("v7 shape parses");
         assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
         assert_eq!(recipe.discovery_snapshot, vec!["sql-coach".to_string()]);
-        assert_eq!(recipe.mounted_skills(), vec!["sql-coach".to_string()]);
-        // The activated set still folds (the legacy read stays live), and the
-        // invoked set starts empty -- no pre-v7 turn carries invocations.
-        assert_eq!(recipe.activated_skills(), vec!["sql-coach".to_string()]);
+        // The invoked set starts empty -- no pre-v7 turn carries invocations.
         assert!(recipe.invoked_skills().is_empty());
     }
 
@@ -1480,8 +1476,6 @@ mod tests {
             turn.provenance.skills[0].content_hash, "",
             "migrated skills carry an empty hash (no baseline)",
         );
-        // No Skill lifecycle entries in a v3 recipe -> empty mounted set.
-        assert!(recipe.mounted_skills().is_empty());
     }
 
     #[test]

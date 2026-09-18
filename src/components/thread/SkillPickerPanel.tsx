@@ -11,7 +11,6 @@ import {
 import type { ReactNode } from "react";
 import type { SkillEntry } from "../../types/skills";
 import { skillPickerOptionId, type SkillPickerMode } from "./skillPickerLogic";
-import { SkillActiveBadge } from "./SkillActiveBadge";
 
 // The floating picker surface of the composer (ADR-0112, issue #716). One
 // component, two presentation modes: mode "global" ("/") renders the group
@@ -60,9 +59,6 @@ export type SkillPickerPanelProps = {
    *  row instead of collapsing into the "No skills" empty face (the mount
    *  list riding the same cache surfaces its error; so does the picker). */
   registryError?: unknown;
-  /** Activated names for the display-only Active badges (empty on the
-   *  cold-start bar -- no session, no activation truth). */
-  activatedNames: ReadonlySet<string>;
   /** The highlighted row index (already clamped by the parent); null when
    *  the filtered list is empty -- no row is highlighted, and no option id
    *  is named for aria-activedescendant. */
@@ -78,7 +74,6 @@ export function SkillPickerPanel({
   query,
   totalSkills,
   registryError,
-  activatedNames,
   highlightIndex,
   onHoverIndex,
   onSelect,
@@ -169,7 +164,6 @@ export function SkillPickerPanel({
                 />
               )}
             </span>
-            {activatedNames.has(skill.name) && <SkillActiveBadge />}
           </li>
         ))}
       </ul>

@@ -126,24 +126,16 @@ vi.mock("../api", async (importOriginal) => {
     rescanAdapters: vi.fn(async () => [] as const),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
-    // The skill picker reads the registry; the mint / ask chains drive the
-    // mount / unmount / activate writes (issue #365, ADR-0086). Defaults:
-    // empty registry + no-op writes keep the picker quiet.
+    // The skill picker reads the registry (issue #365, ADR-0086); the
+    // staged invocations ride the ask itself (ADR-0119). Defaults: an empty
+    // registry keeps the picker quiet.
     listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
-    mountSkill: vi.fn(async () => {}),
-    unmountSkill: vi.fn(async () => {}),
-    // ADR-0112 picker pre-activation: the activated read feeds the picker's
-    // Active badges + the section's badge; activateSkill is the
-    // submit-time materialization write. Defaults keep both quiet.
-    listActivatedSkills: vi.fn(async () => [] as const),
-    activateSkill: vi.fn(async () => {}),
   };
 });
 
 import App from "../App";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  activateSkill,
   activeDataset,
   askQuestion,
   cancelQuery,
@@ -155,12 +147,10 @@ import {
   getSessionRuntime,
   ingestFile,
   listAdapters,
-  listActivatedSkills,
   listProviderProfiles,
   listSessions,
   listSkills,
   listWorkingSet,
-  mountSkill,
   openDuck,
   readRows,
   rescanAdapters,
@@ -926,9 +916,10 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   it("cold-start draft selections all apply to the minted session on first submit (#500)", async () => {
     // The draft-mode contract: a skill pick, a queued file, and an auth-mode
     // switch made on the centered bar (no session) all land on the session
-    // the first submit mints — skill mount + activation + auth-mode write
-    // via mintAndRegister, the file through the ingest pipeline BEFORE the
-    // first turn fires. (The MCP draft pick retired with the per-session
+    // the first submit mints — the staged skill rides the first ask as its
+    // user invocation (ADR-0119), the auth-mode write lands via
+    // mintAndRegister, and the file goes through the ingest pipeline BEFORE
+    // the first turn fires. (The MCP draft pick retired with the per-session
     // mount chain, ADR-0106; config enablement replaced it.)
     vi.mocked(getAppConfig).mockResolvedValue({
       ...baseAppConfig({ sidebar_collapsed: false }),
@@ -957,7 +948,6 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       await screen.findByRole("option");
       fireEvent.keyDown(screen.getByLabelText("提问"), { key: "Enter" });
       await screen.findByText("charting");
-      expect(mountSkill).not.toHaveBeenCalled();
 
       // Files draft: the "+" pick queues into the pending list — the chip
       // shows the queue; nothing ingests yet.
@@ -985,12 +975,15 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       fireEvent.change(screen.getByLabelText("提问"), { target: { value: "q" } });
       fireEvent.click(screen.getByRole("button", { name: "提问" }));
       await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
-      await waitFor(() => expect(mountSkill).toHaveBeenCalledWith("sess-1", "charting"));
       await waitFor(() =>
         expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
       );
       await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"));
-      await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"));
+      // The staged skill rides the first ask as its user invocation
+      // (ADR-0119: submit-time materialization).
+      await waitFor(() =>
+        expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+      );
       // The file landed BEFORE the first turn fired.
       expect(vi.mocked(ingestFile).mock.invocationCallOrder[0]).toBeLessThan(
         vi.mocked(askQuestion).mock.invocationCallOrder[0],
@@ -2700,44 +2693,34 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
       ignored: [],
       root_error: null,
     });
-    vi.mocked(listActivatedSkills).mockResolvedValue([]);
     // Every turn rejects so each ask settles immediately (openSession pattern).
     vi.mocked(askQuestion).mockRejectedValue(new Error("discard turns"));
   });
 
-  it("materializes picker picks at submit: mount → activate → ask, cold start AND in-session", async () => {
+  it("staged picks ride the ask as the turn's invocations, cold start AND in-session", async () => {
     render(<App />);
     const bar = await screen.findByLabelText("提问");
 
     // Cold start: the trigger char opens the picker; Enter picks charting.
-    // The pick lands the chip (the mount + activate composite, materialized
-    // only at submit) -- nothing fires yet (预激活, not activation).
+    // The pick lands the chip -- nothing fires yet (ADR-0119: staging, not
+    // invocation).
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");
     fireEvent.keyDown(bar, { key: "Enter" });
     // The landed chip renders as an inline token in the input area (its
     // name is the marker; withdrawal rides Backspace at the draft start).
     await screen.findByText("charting");
-    expect(mountSkill).not.toHaveBeenCalled();
-    expect(activateSkill).not.toHaveBeenCalled();
 
-    // Submit: mount → activate → first question, in that order.
+    // Submit: the staged name rides the first ask as its user invocation.
     fireEvent.change(bar, { target: { value: "q" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"));
-    expect(mountSkill).toHaveBeenCalledWith("sess-1", "charting");
-    expect(activateSkill).toHaveBeenCalledWith("sess-1", "charting");
-    expect(vi.mocked(mountSkill).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(activateSkill).mock.invocationCallOrder[0],
-    );
-    expect(vi.mocked(activateSkill).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(askQuestion).mock.invocationCallOrder[0],
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
     );
 
     // In-session: after the first turn settles (the submit button returns
     // from the 停止 face; the draft itself was cleared by the ask), a second
-    // picker pick lands a view chip; the next submit materializes it BEFORE
-    // the ask fires (the activation lands before the turn assembles).
+    // picker pick lands a view chip; the next submit carries it the same way.
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
@@ -2750,14 +2733,45 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     fireEvent.change(bar, { target: { value: "q2" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", ["charting"]),
     );
-    expect(
-      vi.mocked(activateSkill).mock.calls.filter(([sid]) => sid === "sess-1"),
-    ).toHaveLength(2);
-    expect(vi.mocked(activateSkill).mock.invocationCallOrder[1]).toBeLessThan(
-      vi.mocked(askQuestion).mock.invocationCallOrder[1],
+  });
+
+  it("submit clears the in-session staging; the next ask carries no stale pick (review I4, #991)", async () => {
+    // Mint bare (no cold-start pick), then pick IN SESSION: the view-side
+    // staging is the surface the submit boundary must clear -- the cold
+    // start's own reset is pinned separately below.
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "mint" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "mint"),
     );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // In-session pick: the chip lands on the view's staging.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+    );
+    // The settle returns the submit face. NO re-pick: the view's staging was
+    // cleared at the submit boundary, so the next ask must be a bare
+    // two-argument call -- a stale charting silently riding every later
+    // turn is exactly the regression this pins (vitest matches call
+    // arguments exactly, so a third-argument call fails the assertion).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"));
   });
 
   it("cold-start pick lands a chip; Backspace withdraws it before submit", async () => {
@@ -2769,9 +2783,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     // The landed chip renders as an inline token in the input area; nothing
     // fires before the minting submit.
     await screen.findByText("charting");
-    expect(mountSkill).not.toHaveBeenCalled();
-    expect(activateSkill).not.toHaveBeenCalled();
-    // Backspace at the draft start withdraws the chip -- the intent list is
+    // Backspace at the draft start withdraws the chip -- the staging list is
     // the only surface.
     fireEvent.keyDown(bar, { key: "Backspace" });
     await waitFor(() =>
@@ -2792,7 +2804,10 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await screen.findByText("charting");
     fireEvent.change(bar, { target: { value: "q" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q"));
+    // The staged pick rides the ask (ADR-0119 submit-time materialization).
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+    );
     // The turn settles, then the header menu's close drops the only pane --
     // the shell falls back to the cold-start bar.
     await waitFor(() =>
@@ -2874,7 +2889,7 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
-    // A second picker pick lands the in-session chip (the viewActivations
+    // A second picker pick lands the in-session chip (the viewInvocations
     // list is the whole intent -- this surface has no mount facet).
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");
@@ -2886,13 +2901,11 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await waitFor(() =>
       expect(screen.queryByText("charting")).not.toBeInTheDocument(),
     );
-    // ...so the next submit fires the ask with NO materialization at all.
+    // ...so the next submit fires the ask with NO staged invocation (the
+    // optional IPC field stays absent on an empty staging).
     fireEvent.change(bar, { target: { value: "q2" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
-    await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"),
-    );
-    expect(activateSkill).not.toHaveBeenCalled();
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2"));
   });
 
   it("session-scope intents never leak into another session and restore on switch-back (issue #718)", async () => {
@@ -3009,9 +3022,6 @@ describe("shell submit fire-path defensive log (#825)", () => {
     vi.mocked(listAdapters).mockResolvedValue([]);
     vi.mocked(rescanAdapters).mockResolvedValue([]);
     vi.mocked(listSkills).mockResolvedValue({ skills: [skillEntry("charting")], ignored: [], root_error: null });
-    vi.mocked(listActivatedSkills).mockResolvedValue([]);
-    vi.mocked(mountSkill).mockResolvedValue(undefined);
-    vi.mocked(activateSkill).mockResolvedValue(undefined);
     // Every turn rejects so the creation turn settles immediately (the
     // openSession pattern); the stamp tests override the test's own ask.
     vi.mocked(askQuestion).mockRejectedValue(new Error("discard turns"));
@@ -3042,15 +3052,14 @@ describe("shell submit fire-path defensive log (#825)", () => {
     );
   });
 
-  it("logs the stamp throw from the post-materialization fire (activation branch)", async () => {
+  it("logs the stamp throw from the staged-invocation fire (ADR-0119 branch)", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue(UNMAPPED_RUNTIME_CHOICE);
     vi.mocked(askQuestion).mockResolvedValue(STAMP_OUTCOME);
     render(<App />);
     await openSession();
-    // Stage an activation the way a picker pick does (the ADR-0112
-    // in-session pattern): the submit materializes it BEFORE firing the
-    // ask, so the fire rides the materialization .then -- the second fire
-    // site the defensive log must cover.
+    // Stage an invocation the way a picker pick does (the ADR-0119
+    // in-session pattern): the staging rides the ask itself, so the fire
+    // carries it -- the same fire site the defensive log must cover.
     const bar = screen.getByLabelText("提问");
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");
@@ -3059,7 +3068,7 @@ describe("shell submit fire-path defensive log (#825)", () => {
     fireEvent.change(bar, { target: { value: "q2" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>
-      expect(activateSkill).toHaveBeenCalledWith("sess-1", "charting"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", ["charting"]),
     );
     await waitFor(() =>
       expect(logError).toHaveBeenCalledWith(

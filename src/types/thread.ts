@@ -6,7 +6,7 @@
 import type { OperationKind } from "./approval";
 import type { DatasetDescriptor } from "./dataset";
 import type { SourceLifecycleEvent } from "./lifecycle";
-import type { SkillLifecycleEvent, SkillProvenance } from "./skills";
+import type { SkillLifecycleEvent, SkillLifecycleActor, SkillProvenance } from "./skills";
 
 // Which kind of textual response a turn produced (ADR-0009 textual branch,
 // evolved by ADR-0077/0081): a plain agent answer (the tool-calling
@@ -232,7 +232,12 @@ export interface TurnRecord {
 export interface SkillInvocation {
   name: string;
   body: string;
-  actor: "User" | "Agent";
+  // The one-enum-one-alias mirror (the Rust side reuses
+  // model::SkillLifecycleActor for both roles): a future variant added to
+  // the shared alias updates every consumer; an inline literal union here
+  // would compile silently while the runtime filter in userInvocationNames
+  // classed the new actor as non-user.
+  actor: SkillLifecycleActor;
   content_hash: string;
 }
 

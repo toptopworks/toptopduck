@@ -1,34 +1,28 @@
 // The collapsed row for a run of consecutive same-kind lifecycle markers
 // (issue #737): batch operations materialize long same-kind stretches
-// (Mount×N then Activate×N at submit, Added×N on sequential ingest), which
-// bury the surrounding turns -- a stretch at/above LIFECYCLE_FOLD_THRESHOLD
-// (3, turn-visual.ts) renders as THIS one row instead. An accessible disclosure (button +
-// aria-expanded + rotating chevron, the FoldToggle language): expanding is
-// the one way to see the member names (no hover tooltip: the count label
-// never overflows, so a truncation-recovery tooltip would be dead chrome;
-// ruled during implementation). The kind glyph + tone mirror the scatter
-// rows exactly (SkillMarker/SourceMarker: Mount/Activate/Added=primary,
-// Replaced=accent-foreground, Unmount=muted, Deleted=destructive) so the
-// collapsed row reads as the same species at a glance. The aggregated
-// disclosure rides the row: the summed invalidation count reuses the scatter
-// suffix id, and a group holding a missing skill name (the registry drift
-// case, issue #366) carries a destructive count suffix -- the combined
+// (Added×N on sequential ingest), which bury the surrounding turns -- a
+// stretch at/above LIFECYCLE_FOLD_THRESHOLD (3, turn-visual.ts) renders as
+// THIS one row instead. An accessible disclosure (button + aria-expanded +
+// rotating chevron, the FoldToggle language): expanding is the one way to
+// see the member names (no hover tooltip: the count label never overflows,
+// so a truncation-recovery tooltip would be dead chrome; ruled during
+// implementation). The kind glyph + tone mirror the scatter rows exactly
+// (SourceMarker; the timeline's skill species retired with ADR-0119 --
+// only source events fold) so the collapsed row reads as the same species
+// at a glance. The aggregated disclosure rides the row: the summed
+// invalidation count reuses the scatter suffix id, and the combined
 // member row below keeps each name's individual warning.
 
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import {
   ChevronRight,
-  Plug,
   Plus,
   RefreshCw,
   Trash2,
-  Unplug,
-  Zap,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { staleDerivativeCount, type LifecycleFoldInfo } from "./turn-visual";
-import type { SkillEntry } from "../../types/skills";
 import type { ThreadEntry } from "../../types/thread";
 
 // Lucide glyph + i18n'd count text per (species, kind) -- the scatter rows'
@@ -40,52 +34,9 @@ function foldText(
   intl: IntlShape,
   group: LifecycleFoldInfo,
 ): { Icon: LucideIcon; text: string } {
+  // Source-only (ADR-0119 Decision 2): the skill kinds retired with the
+  // timeline's skill species.
   const count = group.memberIdxs.length;
-  if (group.species === "Skill") {
-    // A local alias: switching on the member itself would narrow `group` to
-    // never in the default branch (TS discards the whole object once its
-    // discriminant is exhausted), losing the never-check's error text.
-    const kind = group.kind;
-    switch (kind) {
-      case "Mount":
-        return {
-          Icon: Plug,
-          text: intl.formatMessage(
-            {
-              id: "thread.fold.mountSkills",
-              defaultMessage: "Mounted {count, plural, one {# skill} other {# skills}}",
-            },
-            { count },
-          ),
-        };
-      case "Unmount":
-        return {
-          Icon: Unplug,
-          text: intl.formatMessage(
-            {
-              id: "thread.fold.unmountSkills",
-              defaultMessage: "Unmounted {count, plural, one {# skill} other {# skills}}",
-            },
-            { count },
-          ),
-        };
-      case "Activate":
-        return {
-          Icon: Zap,
-          text: intl.formatMessage(
-            {
-              id: "thread.fold.activateSkills",
-              defaultMessage: "Activated {count, plural, one {# skill} other {# skills}}",
-            },
-            { count },
-          ),
-        };
-      default: {
-        const unhandled: never = kind;
-        throw new Error(`unhandled skill lifecycle kind: ${JSON.stringify(unhandled)}`);
-      }
-    }
-  }
   const sourceKind = group.kind;
   switch (sourceKind) {
     case "Added":
@@ -143,13 +94,11 @@ export function LifecycleFold({
   // rows paint it. Each branch is a literal utility so the Tailwind scanner
   // keeps the class; a computed `text-${x}` string would be tree-shaken away.
   const iconTone =
-    group.kind === "Unmount"
-      ? "text-muted-foreground"
-      : group.kind === "Replaced"
-        ? "text-accent-foreground"
-        : group.kind === "Deleted"
-          ? "text-destructive"
-          : "text-primary"; // Mount | Activate | Added.
+    group.kind === "Replaced"
+      ? "text-accent-foreground"
+      : group.kind === "Deleted"
+        ? "text-destructive"
+        : "text-primary"; // Added.
   // The two aggregate suffixes reuse the scatter rows' disclosure shape: the
   // invalidation count rides the scatter stale-suffix id verbatim, and a
   // group holding missing skill names adds the drift count. Both paint
@@ -161,14 +110,6 @@ export function LifecycleFold({
         id="thread.source.staleSuffix"
         defaultMessage=" · invalidated {count}"
         values={{ count: group.invalidatedCount }}
-      />
-    ) : null;
-  const driftSuffix =
-    group.driftCount > 0 ? (
-      <FormattedMessage
-        id="thread.fold.missingSuffix"
-        defaultMessage=" · {count, plural, one {# no longer exists} other {# no longer exist}}"
-        values={{ count: group.driftCount }}
       />
     ) : null;
   return (
@@ -204,7 +145,6 @@ export function LifecycleFold({
         {invalidatedSuffix && (
           <span className="text-destructive">{invalidatedSuffix}</span>
         )}
-        {driftSuffix && <span className="text-destructive">{driftSuffix}</span>}
       </span>
       {/* The disclosure chevron, the FoldToggle language: ChevronRight
           rotating 90° on expand. */}
@@ -239,7 +179,6 @@ export function LifecycleFoldMembers({
   group,
   entries,
   staleCountsByKey,
-  skillIndex,
   highlightedIdx,
   continueConnector,
   rowRef,
@@ -247,25 +186,18 @@ export function LifecycleFoldMembers({
   group: LifecycleFoldInfo;
   entries: readonly ThreadEntry[];
   staleCountsByKey: ReadonlyMap<string, number>;
-  skillIndex: ReadonlyMap<string, SkillEntry> | undefined;
   highlightedIdx: number | null;
   continueConnector: boolean;
   rowRef?: (el: HTMLLIElement | null) => void;
 }) {
   const members = group.memberIdxs.map((idx) => {
     const entry = entries[idx];
-    if (entry.entry === "Skill") {
-      // Three-way lookup mirroring SkillMarker: only a WIRED registry that
-      // lacks the name counts as drift.
-      const missing = skillIndex !== undefined && !skillIndex.has(entry.data.name);
-      return { idx, name: entry.data.name, missing, stale: 0 };
-    }
-    // The projector only points fold rows at Skill/Source entries.
+    // The projector only points fold rows at Source entries (the skill
+    // species renders no row at all, ADR-0119 Decision 2).
     if (entry.entry !== "Source") return null;
     return {
       idx,
       name: entry.data.display_name,
-      missing: false,
       stale: staleDerivativeCount(entry.data, staleCountsByKey),
     };
   });
@@ -284,14 +216,6 @@ export function LifecycleFoldMembers({
             className={cn("rounded-sm", highlightedIdx === m.idx && "bg-accent ring-1 ring-primary px-0.5")}
           >
             {m.name}
-            {m.missing && (
-              <span className="text-destructive">
-                <FormattedMessage
-                  id="thread.skill.missingSuffix"
-                  defaultMessage=" · no longer exists"
-                />
-              </span>
-            )}
             {m.stale > 0 && (
               <span className="text-destructive">
                 <FormattedMessage

@@ -20,7 +20,7 @@ import type {
   RowReadError,
 } from "../../types/session";
 import type { AgentError } from "../../types/agents";
-import type { SkillError, SkillMountError } from "../../types/skills";
+import type { SkillError } from "../../types/skills";
 import {
   isAgentError,
   isSaveError,
@@ -443,43 +443,6 @@ function formatRenameDatasetError(e: RenameError, intl: IntlShape): string {
 // path (the mirror note lives in turn-failure.ts). The engine detail rides
 // the technical-details fold (the detail is a DuckDB read error, never an
 // API key per ADR-0029).
-// Format a SkillMountError (issue #363, ADR-0086; issue #698, ADR-0110),
-// reached via SessionError::SkillMount. AlreadyMounted / NotMounted /
-// NotMountedForActivation name the offending skill in the primary message;
-// all are self-contained (no fold detail).
-function formatSkillMountError(e: SkillMountError, intl: IntlShape): string {
-  switch (e.kind) {
-    case "AlreadyMounted":
-      return intl.formatMessage(
-        {
-          id: "error.skillMount.alreadyMounted",
-          defaultMessage: "Skill \"{name}\" is already mounted",
-        },
-        { name: e.data.name },
-      );
-    case "NotMounted":
-      return intl.formatMessage(
-        {
-          id: "error.skillMount.notMounted",
-          defaultMessage: "Skill \"{name}\" is not mounted",
-        },
-        { name: e.data.name },
-      );
-    case "NotMountedForActivation":
-      return intl.formatMessage(
-        {
-          id: "error.skillMount.notMountedForActivation",
-          defaultMessage: "Skill \"{name}\" is not mounted; mount it before activating",
-        },
-        { name: e.data.name },
-      );
-    default: {
-      const unhandled: never = e;
-      throw new Error(`unhandled SkillMountError kind: ${JSON.stringify(unhandled)}`);
-    }
-  }
-}
-
 function formatRowReadError(e: RowReadError, intl: IntlShape): string {
   switch (e.kind) {
     case "UnknownDataset":
@@ -588,8 +551,6 @@ export function fmtError(e: unknown, intl: IntlShape): string {
         });
       case "Turn":
         return formatRowReadError(e.data, intl);
-      case "SkillMount":
-        return formatSkillMountError(e.data, intl);
       case "Export":
         return formatExportRowsError(e.data, intl);
       default: {

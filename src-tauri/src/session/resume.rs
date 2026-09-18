@@ -812,28 +812,12 @@ impl super::Session {
             // structural and no separate audit harvest is needed.
             session.timeline =
                 resumer.rebuild_timeline(&mut session.working_set, replay_break.as_ref())?;
-            // ADR-0086 (issue #363): seed the live mounted-skills cache from
-            // the recipe's Mount/Unmount fold. The recipe never stores a
-            // snapshot -- the timeline IS the source of truth -- so the cache
-            // is rebuilt deterministically on every resume. Honest degrade
-            // applies at assembly time (a name missing from the registry is
-            // surfaced then); here every folded name lands regardless.
-            session.mounted_skills = recipe.mounted_skills();
-            // ADR-0110 (issue #698): same discipline for the activated
-            // subset -- fold, never snapshot. A pre-activation (v5) recipe
-            // carries no `Activate` events, so the fold is empty: the honest
-            // post-resume posture (body stops injecting until re-activated),
-            // never a degrade report. open_duck's `seed_initial_skills`
-            // refolds both caches over the auto-included initial set right
-            // after the swap.
-            session.activated_skills = recipe.activated_skills();
             // ADR-0119 (issue #983): the discovery snapshot restores from
             // the recipe header EXPLICITLY (Decision 3 -- persisted, not
             // folded; immutable within the session, so a resume never
             // re-seeds it). A v6 file migrated to v7 carries the
             // materialized mount fold; a v7-native file carries the
-            // creation-time set. open_duck's post-swap `seed_initial_skills`
-            // touches the legacy MOUNT fold only, never this.
+            // creation-time set.
             session.set_discovery_snapshot(recipe.discovery_snapshot.clone());
             // ADR-0119 Decision 4: the invoked set re-folds from the turn
             // invocation records -- monotonic by construction, so the fold

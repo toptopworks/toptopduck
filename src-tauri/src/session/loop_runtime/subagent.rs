@@ -103,9 +103,11 @@ pub(crate) struct SubagentCtx {
     pub(crate) protocol: Option<crate::model::Protocol>,
     pub(crate) thought_level: Option<String>,
     pub(crate) max_tokens: u64,
-    /// The subtracted face (ADR-0117 Decision 4), precomputed once per
-    /// turn: the turn's tool table minus every delegation tool minus
-    /// `activate_skill`.
+    /// The subtracted face (ADR-0117 Decision 4, calibrated by ADR-0119
+    /// Decision 4), precomputed once per turn: the turn's tool table minus
+    /// every delegation tool minus `invoke_skill` (subagents stay excluded
+    /// from the invocation channel; their skill path is the definition's
+    /// skill-name marker injection).
     pub(crate) sub_face: Vec<ToolDefinition>,
 }
 

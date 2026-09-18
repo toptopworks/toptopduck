@@ -28,12 +28,11 @@ type QuestionBarProps = {
   trailing?: ReactNode;
   /** Skill picker channel (ADR-0112, issue #716): "/" opens the global panel
    *  and "$" the skills-direct panel at the textarea; a selection consumes
-   *  the trigger span from the draft and reports the skill name -- the caller
-   *  stages the mount + activate composite intent. Omitted by embedders /
+   *  the trigger span from the draft and reports the skill name -- the
+   *  caller stages this turn's user invocation (ADR-0119). Omitted by embedders /
    *  tests that exercise no picker behavior (the surface is then fully
    *  disabled, queries included). */
   skillPicker?: {
-    sessionId: string | null;
     onPick: (name: string) => void;
     /** The pre-activation chips (ADR-0112, issue #716) travel as a REQUIRED
      *  bundle with the picker surface (issue #718): the chip node renders
@@ -92,7 +91,6 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
   const setValue = setDraft ?? setLocalDraft;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const picker = useSkillPicker({
-    sessionId: skillPicker?.sessionId ?? null,
     onPick: skillPicker?.onPick ?? (() => {}),
     setValue,
     enabled: skillPicker !== undefined,
@@ -217,7 +215,6 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
           query={panel.query}
           totalSkills={panel.totalSkills}
           registryError={panel.registryError}
-          activatedNames={panel.activatedNames}
           highlightIndex={panel.highlightIndex}
           onHoverIndex={picker.setHighlight}
           onSelect={(skill) =>

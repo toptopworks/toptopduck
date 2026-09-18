@@ -29,7 +29,6 @@ function makePanel(query: string, name = "Charting") {
       skills={[skillEntry(name, { description: "Draw charts" })]}
       query={query}
       totalSkills={1}
-      activatedNames={new Set()}
       highlightIndex={0}
       onHoverIndex={vi.fn()}
       onSelect={vi.fn()}
