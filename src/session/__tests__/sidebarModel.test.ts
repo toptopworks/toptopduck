@@ -223,8 +223,9 @@ describe("formatLastModified (ADR-0072, issue #251)", () => {
 
   it("uses local-midnight boundaries, not a rolling 24h window", () => {
     // 11:59pm "today" and 12:01am "today" are both today; just-before-midnight
-    // yesterday is yesterday. The bucket matches timeGroupKind so the sub-line
-    // and the (optional) time-mode group heading agree on the day boundary.
+    // yesterday is yesterday. The bucket matches timeGroupKind so the search
+    // row's time label and the (optional) time-mode group heading agree on the
+    // day boundary.
     const lateToday = new Date("2026-07-10T23:59:00").getTime();
     expect(formatLastModified(lateToday, NOW)).toEqual({ kind: "today" });
     const earlyYesterday = new Date("2026-07-09T00:01:00").getTime();
@@ -243,9 +244,9 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     ];
   }
 
-  it("returns every persisted session (mtime desc) when the query is empty", () => {
-    // ⌘K is also a browse/jump entry point: an empty query lists everything,
-    // freshest first.
+  it("returns the persisted sessions (mtime desc) when the query is empty", () => {
+    // ⌘K is also a browse/jump entry point: an empty query lists the newest
+    // matches (capped at MAX_SEARCH_RESULTS), freshest first.
     const entries = buildSearchEntries(twoPersisted(), [], null, "");
     expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
   });
@@ -276,17 +277,45 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // The jump dialog's viewport holds roughly nine single-line rows; beyond
     // that the list truncates to the freshest matches instead of growing
     // unbounded (scrolling a huge session history is not the dialog's job).
-    const twelve = Array.from({ length: 12 }, (_, i) =>
-      meta(`/s${i}.duck`, `session-${String(i).padStart(2, "0")}`, i),
-    );
-    const entries = buildSearchEntries(twelve, [], null, "");
+    // The value is pinned literally so retuning the cap is a deliberate,
+    // reviewable change (an expectation derived from the constant would
+    // follow any retune silently).
+    expect(MAX_SEARCH_RESULTS).toBe(9);
+    // The oldest row leads the input order and does not match the query, and
+    // the matching sessions enter oldest-first, so the cap cannot cheat by
+    // running before the filter or the sort: eleven sessions match and exactly
+    // the freshest nine (ageDays 0..8 = session-00 .. session-08) survive.
+    const thirteen = [
+      meta("/hold.duck", "hold", 100),
+      ...Array.from({ length: 11 }, (_, i) => {
+        const n = 10 - i;
+        return meta(`/s${n}.duck`, `session-${String(n).padStart(2, "0")}`, n);
+      }),
+    ];
+    const entries = buildSearchEntries(thirteen, [], null, "session");
     expect(entries).toHaveLength(MAX_SEARCH_RESULTS);
-    // The freshest nine survive: ageDays 0..8, i.e. session-00 .. session-08.
     expect(entries.map((e) => e.name)).toEqual(
       Array.from({ length: MAX_SEARCH_RESULTS }, (_, i) =>
         `session-${String(i).padStart(2, "0")}`,
       ),
     );
+  });
+
+  it("does not bridge the name/source boundary without the separating space", () => {
+    // The composed haystack is `${display_name} ${first_source_name}`: the
+    // space is load-bearing. Without it "data" + "set_one" would contain
+    // "dataset" and match a query the row must reject.
+    const entries = buildSearchEntries(
+      [
+        meta("/data.duck", "data", 0, {
+          source_summary: { first_source_name: "set_one", source_count: 1, turn_count: 1 },
+        }),
+      ],
+      [],
+      null,
+      "dataset",
+    );
+    expect(entries).toEqual([]);
   });
 
   it("merges an open binding into the persisted row (sid set) and flags active", () => {

@@ -1,5 +1,5 @@
 // The shared search-match core (issue #978, ADR-0112 Decision 5): the
-// case-insensitive substring match shared by the settings search boxes (a
+// case-insensitive substring match behind the settings search boxes (a
 // pane's searchable text), the composer skill picker (per field), and the
 // sidebar's jump-to-session search (a composed per-row haystack, per
 // ADR-0072). The match lives in exactly one place so the surfaces cannot

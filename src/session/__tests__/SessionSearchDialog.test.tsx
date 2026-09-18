@@ -348,9 +348,11 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
 
   it("keeps the time label on the title's line without a source/turn sub-line", () => {
     // The search row is a single line: the session name with the time label
-    // right-aligned on the SAME flex line (a shared parent span), and no
+    // right-aligned on the SAME flex line (a shared parent), and no
     // first-source or turn-count sub-line. Pins the row structure so a
-    // regression cannot quietly reintroduce the two-line shape.
+    // regression cannot quietly reintroduce the two-line shape: the
+    // parentElement equality catches re-parenting and deletion, the class
+    // check catches a same-parent flex-col re-stack.
     renderDialog(
       <SessionSearchDialog
         {...baseProps}
@@ -371,6 +373,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     const time = row.querySelector(".session-search-option-time");
     expect(name).not.toBeNull();
     expect(time?.parentElement).toBe(name?.parentElement);
+    expect(name?.parentElement?.className).not.toContain("flex-col");
     expect(row.textContent).not.toMatch(/turn/);
     expect(row.textContent).not.toMatch(/Alpha Source/);
   });
@@ -484,7 +487,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
   });
 
   it("formats today / yesterday time labels via the localized heading words", () => {
-    // The today / yesterday arms of sublineDateText reuse the sidebar-group
+    // The today / yesterday arms of formatLastModifiedText reuse the sidebar-group
     // locale message ids; with the empty test catalog the en defaultMessage
     // ("Today" / "Yesterday") surfaces. Pins the relative-day half of the
     // time label so a regression on the message id or the classification

@@ -4,6 +4,8 @@
 
 会话栏(`SessionSidebar`)加搜索入口:居中模态框(Radix `Dialog`,遮罩 + 右上 X + ESC 关闭 + 可滚动),由 sidebar 顶部圆形放大镜按钮或全局 `Ctrl/⌘+K` 触发。搜索范围 = 会话名(`display_name`)+ 首源名(`source_summary.first_source_name`),大小写不敏感子串;结果扁平单段(按 `last_modified_at` 倒序),每项 = 聊气泡图标(`MessageSquare`)+ 标题 + 副行(`首源名 · N turns` 左 + 动态时间右)。空查询显示全部,搜索入口兼作浏览/跳转。
 
+校准：搜索结果行改为单行——聊气泡图标(`MessageSquare`) + 标题 + 动态时间右对齐同行,副行(首源名 · N turns)移除。空查询返回最新 `MAX_SEARCH_RESULTS`(= 9)项而非全部,模态框定位为跳转面而非浏览面。
+
 分组模式改为用户可切换,默认 `flat`(扁平单段,按 mtime 倒序,标题「Recent」);时间分组(`time`,今天/昨天/前 7 天/更老)保留为可选。内部值 `SidebarGrouping = "flat" | "time"`(避开 `recent_files` 的 `recent` 歧义)。持久化字段 `AppConfig.shell.sidebar_grouping`(`#[serde(default)]` 默认 `flat`,`format_version` 不 bump)。切换入口在分组标题 hover `⋯` → Radix `Popover`(Group by: In a list / By time,选中项右侧 `Check`);切换立即 `commitShellPrefs`,与 `sidebar_collapsed` / `rail_collapsed` 同档持久化。
 
 顺带调整两项 sidebar 视觉(细节见 Consequences):顶部从满宽实心 teal New 按钮改为品牌标题行(`TOPTOPDuck` 左 + 圆形搜索放大镜按钮右)+ New icon 按钮(`Pencil` + 文字 + 融合背景 `bg-secondary`);会话行 active 态从整条 teal 实心填充改为浅 tint(`bg-accent text-accent-foreground`)+ 左 2px inset 条(`shadow-[inset_2px_0_var(--primary)]`)。
