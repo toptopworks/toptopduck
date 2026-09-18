@@ -762,8 +762,10 @@ pub async fn ask(
     session_id: String,
     question: String,
     // The user's staged skill names (ADR-0112 picker channel, calibrated by
-    // ADR-0119: submit-time invocation materialization). Optional -- absent
-    // is the pre-invocation shape, so older IPC peers stay unchanged.
+    // ADR-0119: submit-time invocation materialization). Optional; absent and
+    // an empty list are equivalent -- the fold in the body is the single
+    // normalization point, so the frontend sends the array unconditionally
+    // (issue #992).
     skill_invocations: Option<Vec<String>>,
 ) -> Result<TurnOutcome, SessionError> {
     let id = SessionId::parse(&session_id)?;
@@ -5364,6 +5366,12 @@ You are a focused analyst.
             .expect("enable analyst");
         let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &[]);
         let inputs = assembled.turn_inputs(&[]);
+        // An empty staging projects zero user invocations: the command
+        // entry's Option fold lands absent and empty on one path (#992).
+        assert!(
+            inputs.user_invocations.is_empty(),
+            "an empty staging materializes no user invocation records"
+        );
         assert_eq!(inputs.delegations.len(), 1, "the enabled entry projects");
         assert_eq!(inputs.delegations[0].name, "analyst");
         assert_eq!(

@@ -676,7 +676,7 @@ describe("useTurnFlow", () => {
         { name: "sql-coach", body: "", actor: "User", content_hash: "" },
         { name: "charting", body: "", actor: "User", content_hash: "" },
       ]);
-      // The wire carries the third argument only when staging exists.
+      // The staging rides the wire even when empty: a bare ask carries [].
       expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", [
         "sql-coach",
         "charting",

@@ -679,7 +679,7 @@ describe("App ask flow", () => {
     renderPane();
     await submitQuestion("总共几行");
     await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "总共几行", []),
     );
     // the materialized result pane appears (ResultView heading, titled with
     // the producing question, issue #772). The rail's turn card also shows the
@@ -907,7 +907,7 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
     fireEvent.click(screen.getByRole("button", { name: EXPAND_WORKSPACE }));
     const rerun = await screen.findByRole("button", { name: RERUN_LABEL });
     fireEvent.click(rerun);
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1", []));
     // Busy gate: the fired turn is in flight, so the rerun disables until it
     // settles (the composer gate's mirror).
     expect(screen.getByRole("button", { name: RERUN_LABEL })).toBeDisabled();
@@ -952,7 +952,7 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
     await clickRailResultLink("result_1");
     const rerun = await screen.findByRole("button", { name: RERUN_LABEL });
     fireEvent.click(rerun);
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q:result_1", []));
     expect(askQuestion).toHaveBeenCalledTimes(1);
   });
 
@@ -961,7 +961,7 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
     renderPane();
     const retry = await screen.findByRole("button", { name: RETRY_LABEL });
     fireEvent.click(retry);
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "坏查询"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "坏查询", []));
     // Busy gate mirrors the rerun's: disabled while the fired turn runs.
     expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeDisabled();
   });
@@ -971,7 +971,7 @@ describe("App workspace rerun/retry actions (issue #758)", () => {
     renderPane();
     const retry = await screen.findByRole("button", { name: RETRY_LABEL });
     fireEvent.click(retry);
-    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "中途取消"));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "中途取消", []));
     // Busy gate mirrors the rerun/Failed siblings: disabled while in flight.
     expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeDisabled();
   });
@@ -1584,7 +1584,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     });
 
     await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?", []),
     );
     expect(ingestFile).toHaveBeenCalledTimes(2);
     expect(ingestFile).toHaveBeenNthCalledWith(1, "sess-1", "/x/a.csv");
@@ -1601,7 +1601,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
   it("fires the pending question alone when no files are pending", async () => {
     renderPaneWithPending({ pendingQuestion: "bare question" });
     await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "bare question"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "bare question", []),
     );
     expect(ingestFile).not.toHaveBeenCalled();
   });
@@ -1668,7 +1668,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     );
 
     await waitFor(() =>
-      expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?"),
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "how many rows?", []),
     );
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
