@@ -7,10 +7,10 @@ import {
 } from "../searchMatcher";
 
 // The shared search-match core (issue #978): one trimmed, case-insensitive
-// substring matcher behind the settings search boxes and the composer skill
-// picker, so the two surfaces cannot drift apart (ADR-0112 Decision 5).
-// The two-surface agreement itself is pinned on the picker side, in
-// skillPickerLogic.test.ts.
+// substring matcher behind the settings search boxes, the composer skill
+// picker, and the sidebar's jump-to-session search, so the surfaces cannot
+// drift apart (ADR-0112 Decision 5). The picker-side agreement is pinned in
+// skillPickerLogic.test.ts, the sidebar-side in sidebarModel.test.ts.
 
 describe("searchMatcher", () => {
   it("matches everything for an empty query", () => {

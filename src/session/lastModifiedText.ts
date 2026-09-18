@@ -2,7 +2,7 @@ import type { IntlShape } from "react-intl";
 import type { LastModifiedLabel } from "./sidebarModel";
 
 // This file holds two independent time-formatting helpers:
-//   • formatLastModifiedText — calendar-day label for the search dialog sub-line
+//   • formatLastModifiedText — calendar-day label for the search dialog's time label
 //     (Today / Yesterday / date). The pure classification stays in
 //     sidebarModel.ts (`formatLastModified`); this helper is the React-layer
 //     string resolution (needs `intl.formatMessage`).

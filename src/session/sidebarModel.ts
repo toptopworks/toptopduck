@@ -18,6 +18,7 @@
 
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
+import { searchMatcher } from "../lib/searchMatcher";
 
 /** A runtime-open session tracked by the shell (ADR-0060/0051 keep-alive).
  *  Since ADR-0089 every session is persisted from creation, so `path` is always
@@ -85,7 +86,7 @@ export interface SidebarEntry {
   firstSourceName: string | null;
   /** Total loaded source count (ADR-0093, issue #513: hover-card metadata). */
   sourceCount: number;
-  /** Productive turn count for the sub-line. */
+  /** Productive turn count, surfaced in the sidebar row's HoverCard. */
   turnCount: number;
   /** last_modified_at, ms since epoch. A never-saved session has no mtime, so
    *  the caller stamps it at creation to land under "Today" at the top. */
@@ -108,6 +109,11 @@ export type SidebarGroup =
 
 const MS_PER_DAY = 86_400_000;
 
+/** The jump dialog's result cap: the viewport holds roughly this many
+ *  single-line rows, so the list truncates to the freshest matches instead of
+ *  growing unbounded. */
+export const MAX_SEARCH_RESULTS = 9;
+
 function startOfCalendarDay(ms: number): number {
   const d = new Date(ms);
   d.setHours(0, 0, 0, 0);
@@ -127,8 +133,8 @@ export function timeGroupKind(lastModifiedAt: number, now: number): TimeGroupKin
   return "older";
 }
 
-/** A dynamic-format classification of an mtime for sub-line display (ADR-0072
- *  search slice). Pure in (lastModifiedAt, now): returns
+/** A dynamic-format classification of an mtime for the search row's time
+ *  label (ADR-0072 search slice). Pure in (lastModifiedAt, now): returns
  *  `today` / `yesterday` for the past two local calendar days (the caller
  *  localizes via intl), else a `date` arm carrying the Date so the caller can
  *  format with Intl.DateTimeFormat -- year-included when the mtime predates the
@@ -139,7 +145,7 @@ export type LastModifiedLabel =
   | { kind: "yesterday" }
   | { kind: "date"; readonly date: Date };
 
-/** Classify an mtime for sub-line display (ADR-0072, issue #251). See
+/** Classify an mtime for the search row's time label (ADR-0072, issue #251). See
  *  {@link LastModifiedLabel}. */
 export function formatLastModified(lastModifiedAt: number, now: number): LastModifiedLabel {
   const today = startOfCalendarDay(now);
@@ -203,15 +209,16 @@ const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
  *  list_sessions and never appears here, even when it is the active session
  *  (the sidebar still lists it; the modal is a persisted-session jump surface).
  *  Every emitted row therefore has a non-null path, so the return type is
- *  `SearchEntry[]` (a path-non-null narrowing of SidebarEntry).
+ *  `SearchEntry[]`.
  *
  *  Filter: case-insensitive substring over `display_name` + the first source's
- *  name. An empty / whitespace-only query returns every session (Ctrl/⌘+K is
- *  also a browse/jump entry point). Sorted mtime desc with a name tiebreaker
- *  for deterministic rendering, matching `buildSidebarGroups`.
+ *  name (via searchMatcher). An empty / whitespace-only query matches
+ *  everything, truncated to the newest MAX_SEARCH_RESULTS -- the modal is a
+ *  jump surface, not a browser. Sorted mtime desc with a name tiebreaker for
+ *  deterministic rendering, matching `buildSidebarGroups`.
  *
  *  Unlike `buildSidebarGroups`, no `now` parameter: the modal is a single flat
- *  list (no time buckets) and the sub-line's relative-day label is resolved in
+ *  list (no time buckets) and each row's dynamic time label is resolved in
  *  the component via `formatLastModified` (a React-layer concern -- it needs
  *  the localized heading text). */
 export function buildSearchEntries(
@@ -221,18 +228,18 @@ export function buildSearchEntries(
   query: string,
 ): SearchEntry[] {
   const openByPath = indexOpenByPath(open);
-  const q = query.trim().toLowerCase();
+  const matches = searchMatcher(query);
   const entries: SearchEntry[] = [];
   for (const m of persisted) {
     // Compose a single haystack so the substring test runs once per row; the
     // space keeps a name that ends with the source's prefix from bridging into
     // a false positive at the boundary.
-    const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`.toLowerCase();
-    if (q && !hay.includes(q)) continue;
+    const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`;
+    if (!matches(hay)) continue;
     entries.push(persistedEntry(m, openByPath.get(m.duck_path) ?? null, activeSessionId));
   }
   entries.sort(BY_MTIME_DESC);
-  return entries;
+  return entries.slice(0, MAX_SEARCH_RESULTS);
 }
 
 /** Build the merged, grouped, last-modified-descending sidebar model. Pure in

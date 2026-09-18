@@ -316,7 +316,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
 
   it("formats same-year mtimes without a year and prior-year mtimes with one", () => {
     // The dialog captures `now` once per mount via useState(() => Date.now()).
-    // Pin it so the year boundary in the sub-line is deterministic.
+    // Pin it so the year boundary in the time label is deterministic.
     const NOW = new Date("2026-07-26T12:00:00").getTime();
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(NOW);
     try {
@@ -335,15 +335,47 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       );
       const options = screen.getAllByRole("option");
       // alpha (2026-06-01, same year as NOW) -> "Jun 1", no year suffix.
-      const alphaSubline = options[0].querySelector(".session-search-option-subline");
-      expect(alphaSubline?.textContent).toMatch(/Jun 1/);
-      expect(alphaSubline?.textContent).not.toMatch(/2026/);
+      const alphaTime = options[0].querySelector(".session-search-option-time");
+      expect(alphaTime?.textContent).toMatch(/Jun 1/);
+      expect(alphaTime?.textContent).not.toMatch(/2026/);
       // beta (2024-12-31, prior year) -> year included.
-      const betaSubline = options[1].querySelector(".session-search-option-subline");
-      expect(betaSubline?.textContent).toMatch(/Dec 31, 2024/);
+      const betaTime = options[1].querySelector(".session-search-option-time");
+      expect(betaTime?.textContent).toMatch(/Dec 31, 2024/);
     } finally {
       dateNowSpy.mockRestore();
     }
+  });
+
+  it("keeps the time label on the title's line without a source/turn sub-line", () => {
+    // The search row is a single line: the session name with the time label
+    // right-aligned on the SAME flex line (a shared parent), and no
+    // first-source or turn-count sub-line. Pins the row structure so a
+    // regression cannot quietly reintroduce the two-line shape: the
+    // parentElement equality catches re-parenting and deletion, the class
+    // check catches a same-parent flex-col re-stack.
+    renderDialog(
+      <SessionSearchDialog
+        {...baseProps}
+        sessions={[
+          meta("/a.duck", "alpha", {
+            last_modified_at: 2000,
+            source_summary: {
+              first_source_name: "Alpha Source",
+              source_count: 2,
+              turn_count: 4,
+            },
+          }),
+        ]}
+      />,
+    );
+    const row = screen.getByRole("option");
+    const name = row.querySelector(".session-search-option-name");
+    const time = row.querySelector(".session-search-option-time");
+    expect(name).not.toBeNull();
+    expect(time?.parentElement).toBe(name?.parentElement);
+    expect(name?.parentElement?.className).not.toContain("flex-col");
+    expect(row.textContent).not.toMatch(/turn/);
+    expect(row.textContent).not.toMatch(/Alpha Source/);
   });
 
   it("exposes aria-activedescendant pointing at the highlighted option id", () => {
@@ -454,12 +486,12 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     expect(options[1]).toHaveAttribute("aria-selected", "false");
   });
 
-  it("formats today / yesterday sub-lines via the localized heading words", () => {
-    // The today / yesterday arms of sublineDateText reuse the sidebar-group
+  it("formats today / yesterday time labels via the localized heading words", () => {
+    // The today / yesterday arms of formatLastModifiedText reuse the sidebar-group
     // locale message ids; with the empty test catalog the en defaultMessage
     // ("Today" / "Yesterday") surfaces. Pins the relative-day half of the
-    // sub-line so a regression on the message id or the classification cannot
-    // ship silently.
+    // time label so a regression on the message id or the classification
+    // cannot ship silently.
     const NOW = new Date("2026-07-26T12:00:00").getTime();
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(NOW);
     try {
@@ -478,10 +510,10 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       );
       const options = screen.getAllByRole("option");
       // alpha (modified today) -> "Today"; beta (modified yesterday) -> "Yesterday".
-      const alphaSubline = options[0].querySelector(".session-search-option-subline");
-      const betaSubline = options[1].querySelector(".session-search-option-subline");
-      expect(alphaSubline?.textContent).toMatch(/Today/);
-      expect(betaSubline?.textContent).toMatch(/Yesterday/);
+      const alphaTime = options[0].querySelector(".session-search-option-time");
+      const betaTime = options[1].querySelector(".session-search-option-time");
+      expect(alphaTime?.textContent).toMatch(/Today/);
+      expect(betaTime?.textContent).toMatch(/Yesterday/);
     } finally {
       dateNowSpy.mockRestore();
     }

@@ -1,10 +1,11 @@
 // The shared search-match core (issue #978, ADR-0112 Decision 5): the
-// case-insensitive substring match that the settings search boxes apply to
-// a pane's searchable text and the composer skill picker applies per field.
-// Within those two surfaces the match lives in exactly one place so they
-// cannot drift apart -- their callers must not re-implement the
-// normalization inline. The query is trimmed and both sides are
-// lower-cased here; an empty or whitespace-only query matches everything.
+// case-insensitive substring match behind the settings search boxes (a
+// pane's searchable text), the composer skill picker (per field), and the
+// sidebar's jump-to-session search (a composed per-row haystack, per
+// ADR-0072). The match lives in exactly one place so the surfaces cannot
+// drift apart -- their callers must not re-implement the normalization
+// inline. The query is trimmed and both sides are lower-cased here; an
+// empty or whitespace-only query matches everything.
 // The picker's hit highlighting rides the same two halves (the needle and
 // the lower-cased haystack), so a future core change lands for matching
 // and highlighting together.

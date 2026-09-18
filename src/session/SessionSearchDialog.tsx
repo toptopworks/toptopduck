@@ -21,7 +21,7 @@ import type { SessionMetadata } from "../types/session";
 // The Ctrl/⌘+K session-search modal (ADR-0072, issue #252). The shell
 // owns a single open state; both the global keydown (App.tsx) and the sidebar's
 // search magnifier (ADR-0072, wired in this slice -- issue #252) route here. The body
-// reuses `buildSearchEntries` (pure filter + sort over `list_sessions`) so the
+// reuses `buildSearchEntries` (pure filter + sort + cap over `list_sessions`) so the
 // merge / filter / sort contract is unit-tested in sidebarModel.test.ts; this
 // component stays a thin caller over input state + keyboard navigation.
 //
@@ -60,8 +60,9 @@ export function SessionSearchDialog({
   // The highlighted listbox index (always within entries range, or 0 when
   // empty). Arrow keys wrap; mouse-enter and click sync it to the hovered row.
   const [selected, setSelected] = useState(0);
-  // Capture "now" once per mount (Date.now is impure in render). The sub-line
-  // relative-day label is stable within a session for our purposes.
+  // Capture "now" once per mount (Date.now is impure in render). The time
+  // label's relative-day classification is stable within a session for our
+  // purposes.
   const [now] = useState(() => Date.now());
   const inputRef = useRef<HTMLInputElement>(null);
   // One ref per option <li> so arrow-key navigation can scrollIntoView the
@@ -214,12 +215,14 @@ export function SessionSearchDialog({
   );
 }
 
-// One result row: leading chat-bubble glyph + the session name + a sub-line
-// (first source + turn count left, dynamic last-modified right). Mirrors the
-// sidebar row contract (ADR-0060 row shape; ADR-0072 unified the leading glyph
-// + subline) so the two surfaces agree
-// on what a "session row" looks like. React 19 ref-as-prop: the parent attaches
-// a per-index callback ref so it can scrollIntoView the highlighted row.
+// One result row: leading chat-bubble glyph + the session name with the
+// dynamic last-modified label right-aligned on the same line. The dialog
+// keeps the ADR-0072 result-row face (the MessageSquare glyph) collapsed to
+// a single line -- a jump target is identified by name + recency alone;
+// sidebar rows carry neither the glyph nor a sub-line since ADR-0093
+// (conditional status dot, metadata in a HoverCard). React 19 ref-as-prop:
+// the parent attaches a per-index callback ref so it can scrollIntoView the
+// highlighted row.
 function SearchRow({
   ref,
   id,
@@ -261,22 +264,11 @@ function SearchRow({
       )}
     >
       <MessageSquare className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-      <span className="flex-1 min-w-0 flex flex-col">
-        <span className="session-search-option-name truncate text-foreground">
-          {displayName}
-        </span>
-        <span className="session-search-option-subline flex items-center gap-1 text-xs text-muted-foreground">
-          <span className="truncate">
-            {entry.firstSourceName ?? "—"}
-            {" · "}
-            <FormattedMessage
-              id="sidebar.turns"
-              defaultMessage="{count, plural, =0 {no turns} one {# turn} other {# turns}}"
-              values={{ count: entry.turnCount }}
-            />
-          </span>
-          <span className="ml-auto whitespace-nowrap pl-2">{lastModifiedText}</span>
-        </span>
+      <span className="session-search-option-name min-w-0 flex-1 truncate text-foreground">
+        {displayName}
+      </span>
+      <span className="session-search-option-time shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+        {lastModifiedText}
       </span>
     </li>
   );
