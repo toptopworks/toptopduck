@@ -676,7 +676,9 @@ describe("useTurnFlow", () => {
         { name: "sql-coach", body: "", actor: "User", content_hash: "" },
         { name: "charting", body: "", actor: "User", content_hash: "" },
       ]);
-      // The staging rides the wire even when empty: a bare ask carries [].
+      // The staging always rides the wire as the third argument (#992;
+      // non-empty here -- the bare-ask [] direction is pinned in the
+      // optimistic-append suite).
       expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", [
         "sql-coach",
         "charting",
@@ -986,6 +988,9 @@ describe("useTurnFlow", () => {
         await result.current.handleAsk("why?");
       });
 
+      // A bare ask carries an empty staging array on the wire (#992):
+      // the hook-layer half of the absent-equals-empty contract.
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "why?", []);
       const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
       expect(thread).toHaveLength(1);
       expect(thread?.[0]).toMatchObject({

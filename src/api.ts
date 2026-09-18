@@ -226,7 +226,7 @@ export async function setDatasetPrivacy(
 export async function askQuestion(
   sessionId: string,
   question: string,
-  skillInvocations?: string[],
+  skillInvocations: string[],
 ): Promise<TurnOutcome> {
   return invoke<TurnOutcome>("ask", { sessionId, question, skillInvocations });
 }

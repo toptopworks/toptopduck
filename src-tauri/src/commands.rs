@@ -5366,8 +5366,9 @@ You are a focused analyst.
             .expect("enable analyst");
         let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &[]);
         let inputs = assembled.turn_inputs(&[]);
-        // An empty staging projects zero user invocations: the command
-        // entry's Option fold lands absent and empty on one path (#992).
+        // An empty staging projects zero user invocations; both wire
+        // forms (absent, empty) converge on this slice upstream, at
+        // the ask entry's Option fold (#992).
         assert!(
             inputs.user_invocations.is_empty(),
             "an empty staging materializes no user invocation records"
