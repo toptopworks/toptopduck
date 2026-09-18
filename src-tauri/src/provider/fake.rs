@@ -276,23 +276,16 @@ impl FakeProvider {
         if !content.starts_with(super::prompt::INVOCATION_FRAME_MARKER) {
             return None;
         }
-        let mut best: Option<(&String, &Script)> = None;
-        for (question, script) in &self.tool_scripts {
-            if content.len() > question.len() && content.ends_with(question.as_str()) {
-                if let Some((current, _)) = best {
-                    if current.len() >= question.len() {
-                        // Two DISTINCT equal-length keys cannot both suffix
-                        // one content (the length-L suffix is unique), so a
-                        // tie is impossible -- asserted because the
-                        // longest-wins determinism rests on it.
-                        debug_assert_ne!(current.len(), question.len());
-                        continue;
-                    }
-                }
-                best = Some((question, script));
-            }
-        }
-        best.map(|(question, script)| (script, question.as_str()))
+        // Longest suffix wins. Two DISTINCT equal-length keys cannot both
+        // suffix one content (the length-L suffix is unique), so max_by_key's
+        // tie branch is unreachable -- determinism needs no tie-break.
+        self.tool_scripts
+            .iter()
+            .filter(|(question, _)| {
+                content.len() > question.len() && content.ends_with(question.as_str())
+            })
+            .max_by_key(|(question, _)| question.len())
+            .map(|(question, script)| (script, question.as_str()))
     }
 }
 
@@ -311,6 +304,17 @@ impl Provider for FakeProvider {
         }
         let question = asking_question(request);
         let Some((script, key)) = self.script_for(question.as_str()) else {
+            // The fake never invents a reply (fail fast on misconfig), so
+            // NotWired doubles as the script table's misconfiguration label
+            // -- name the unresolved content at debug level so app-shell
+            // debugging points at the missing script key instead of reading
+            // as a wiring fault (issue #989 H; pure cargo test has no log
+            // sink -- the Cargo.toml log note prescribes an env_logger
+            // dev-dep if test diagnostics are ever needed).
+            log::debug!(
+                target: "provider::fake",
+                "no script resolves the asking content (misconfigured script table): {question}"
+            );
             return Err(ProviderError::NotWired);
         };
         // A blocking question simulates a long round-trip (ADR-0021); the

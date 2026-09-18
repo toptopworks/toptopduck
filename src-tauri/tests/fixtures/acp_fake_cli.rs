@@ -854,6 +854,61 @@ fn play_scenario(
             notify(out, agent_message("done via cli gateway"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // Issue #989 review I2: the external face's mid-turn invocation
+        // binding had no observation point -- a detached-vec mutant
+        // survived the entire wiring file because every external
+        // provenance assertion is satisfied by the submit-time user
+        // invocations alone. This scenario drives the agent-side
+        // `invoke_skill` through the gateway (the invocation channel's
+        // external consumer) and lists the tools first so the wiring test
+        // can pin the read surface's turn-start mount off the same turn:
+        // `read_skill_file` appears on the bridge's tools/list only when
+        // the turn-start invoked set is non-empty (the read gate's
+        // external wiring -- asserting it HERE makes an empty-set
+        // regression fail loudly at the source).
+        "invoke_skill_mid_turn" => {
+            bridge_write(&mcp_request(
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
+            ));
+            let _ = bridge_read();
+            bridge_write(&mcp_request(2, "tools/list", serde_json::json!({})));
+            let listed = bridge_read().expect("tools/list response");
+            let names: Vec<&str> = listed["result"]["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .map(|t| t["name"].as_str().expect("named entry"))
+                .collect();
+            assert!(
+                names.contains(&"read_skill_file"),
+                "the turn-start invoked set mounts the read surface on the bridge: {names:?}"
+            );
+            bridge_write(&mcp_request(
+                3,
+                "tools/call",
+                serde_json::json!({
+                    "name": "invoke_skill",
+                    "arguments": {"name": "sql-coach"}
+                }),
+            ));
+            let invoked = bridge_read().expect("invoke_skill response");
+            assert_eq!(
+                invoked["result"]["isError"],
+                serde_json::json!(false),
+                "the mid-turn invoke serves through the gateway: {invoked}"
+            );
+            assert!(
+                invoked["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Coach"),
+                "the body rides the invocation result verbatim: {invoked}"
+            );
+            notify(out, agent_message("done after invoking"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         // Issue #646: same chain as gateway_tool_call, but the tools/call
         // frame exceeds the gateway's per-line byte cap. The gateway fails the
         // read and tears the connection down -- no id=2 response ever exists

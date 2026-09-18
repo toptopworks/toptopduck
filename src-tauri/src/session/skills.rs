@@ -88,9 +88,26 @@ impl super::Session {
 
     /// The session's discovery snapshot (ADR-0119 Decision 3, issue #983):
     /// the enabled set at session creation, immutable within the session.
-    /// Cloned so the command layer can serialize the vec without holding
-    /// the session lock.
+    /// Cloned so the production read (the command layer's turn assembly)
+    /// takes an owned vec without holding the session borrow open.
     pub fn discovery_snapshot(&self) -> Vec<String> {
+        // The dual storage is set-once by convention, not by type (issue
+        // #989 F): one setter writes both stores, and this debug check trips
+        // at the first read if a future session-construction path ever
+        // writes a field directly -- that path's persist would otherwise
+        // write an empty header (skip_serializing_if drops the key
+        // entirely), and every later resume would SILENTLY open with an
+        // empty snapshot, refusing every invoke_skill / activate_skill for
+        // that session's life -- a capability loss with no failure signal,
+        // worse than a refusal to open. Collapsing to a single store is
+        // not possible here: the invocation channel reads the session-side
+        // copy while the activation channel holds `&mut self.persister`,
+        // so the persister cannot be the sole owner.
+        debug_assert_eq!(
+            self.discovery_snapshot,
+            self.persister.discovery_snapshot(),
+            "the dual discovery-snapshot stores drifted (set_discovery_snapshot is the only writer)",
+        );
         self.discovery_snapshot.clone()
     }
 
@@ -108,7 +125,8 @@ impl super::Session {
         self.discovery_snapshot = seen.clone();
         // The persister layers the same snapshot onto every recipe build
         // (#987 F): one set point feeds both stores -- immutable within the
-        // session, so no drift surface.
+        // session, so no drift surface today (the accessor's debug check
+        // guards a future direct-write path).
         self.persister.set_discovery_snapshot(seen);
     }
 
@@ -351,6 +369,38 @@ fn land_skill_activation(
     true
 }
 
+/// The turn-scoped skill state bundle (issue #989 D): the turn's
+/// accumulating invocation records + the turn-start invoked-set snapshot --
+/// one construction at the submit boundary, shared by both runtime faces
+/// (the built-in loop and the external gateway) and consumed by value at
+/// the `record_turn` call site. The pair is one turn-scope concern -- the pending
+/// accumulation and the eligibility set its records feed -- so they travel
+/// as one parameter instead of growing `run_external_turn`'s orchestration
+/// signature one invocation-semantics feature at a time.
+pub(crate) struct SkillTurnState<'a> {
+    /// The in-flight turn's accumulating invocation records: the user's
+    /// submit-time materialization starts the vec, the agent's
+    /// `invoke_skill` calls append mid-turn through the invocation channel,
+    /// and the whole lands on the turn record at `record_turn` (via
+    /// [`Self::into_pending`]).
+    pub(crate) pending: &'a mut Vec<crate::model::SkillInvocation>,
+    /// The turn-start invoked-set snapshot (ADR-0119 Decision 4): the read
+    /// gate's eligibility + the read-tool mount read this -- immutable for
+    /// the turn's duration (an agent's mid-turn invoke joins the NEXT
+    /// turn's snapshot).
+    pub(crate) start_invoked: &'a [String],
+}
+
+impl<'a> SkillTurnState<'a> {
+    /// Drain the pending records for the turn's record: the `record_turn`
+    /// call site consumes the bundle by value and the borrowed vec cannot
+    /// move out of it, so the take drains the caller's accumulation into
+    /// an owned vec.
+    pub(crate) fn into_pending(self) -> Vec<crate::model::SkillInvocation> {
+        std::mem::take(self.pending)
+    }
+}
+
 /// The mid-turn skill-activation channel the dispatch layer serves the
 /// `activate_skill` meta-tool through (ADR-0110 Decision 3, issue #701):
 /// field-disjoint borrows off one locked [`Session`] -- the activated cache,
@@ -526,6 +576,30 @@ mod tests {
     fn fresh_session_has_no_mounted_skills() {
         let session = Session::new().expect("session");
         assert!(session.mounted_skills().is_empty());
+    }
+
+    /// F (#989): the accessor's debug consistency check trips when the dual
+    /// stores drift -- a future direct-write path (a session constructor
+    /// bypassing the setter) surfaces at the first read instead of
+    /// persisting an empty header. Debug-builds only: the check compiles
+    /// away under release, so the pin sits behind cfg(debug_assertions).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn discovery_snapshot_accessor_trips_on_dual_store_drift() {
+        let mut session = Session::new().expect("session");
+        session.set_discovery_snapshot(vec!["sql-coach".to_string()]);
+        // Simulate the drift: the persister copy re-set without the
+        // session's.
+        session
+            .persister
+            .set_discovery_snapshot(vec!["other".to_string()]);
+        let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.discovery_snapshot();
+        }));
+        assert!(
+            tripped.is_err(),
+            "the debug consistency check trips on dual-store drift",
+        );
     }
 
     /// I3 (#987 review): the from_session constructor wires ALL four inputs
