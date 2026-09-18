@@ -18,6 +18,7 @@
 
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
+import { searchMatcher } from "../lib/searchMatcher";
 
 /** A runtime-open session tracked by the shell (ADR-0060/0051 keep-alive).
  *  Since ADR-0089 every session is persisted from creation, so `path` is always
@@ -107,6 +108,11 @@ export type SidebarGroup =
   | { mode: "time"; kind: TimeGroupKind; entries: SidebarEntry[] };
 
 const MS_PER_DAY = 86_400_000;
+
+/** The jump dialog's result cap: the viewport holds roughly this many
+ *  single-line rows, so the list truncates to the freshest matches instead of
+ *  growing unbounded. */
+export const MAX_SEARCH_RESULTS = 9;
 
 function startOfCalendarDay(ms: number): number {
   const d = new Date(ms);
@@ -221,18 +227,18 @@ export function buildSearchEntries(
   query: string,
 ): SearchEntry[] {
   const openByPath = indexOpenByPath(open);
-  const q = query.trim().toLowerCase();
+  const matches = searchMatcher(query);
   const entries: SearchEntry[] = [];
   for (const m of persisted) {
     // Compose a single haystack so the substring test runs once per row; the
     // space keeps a name that ends with the source's prefix from bridging into
     // a false positive at the boundary.
-    const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`.toLowerCase();
-    if (q && !hay.includes(q)) continue;
+    const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`;
+    if (!matches(hay)) continue;
     entries.push(persistedEntry(m, openByPath.get(m.duck_path) ?? null, activeSessionId));
   }
   entries.sort(BY_MTIME_DESC);
-  return entries;
+  return entries.slice(0, MAX_SEARCH_RESULTS);
 }
 
 /** Build the merged, grouped, last-modified-descending sidebar model. Pure in

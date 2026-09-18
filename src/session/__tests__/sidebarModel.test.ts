@@ -3,6 +3,7 @@ import {
   buildSearchEntries,
   buildSidebarGroups,
   formatLastModified,
+  MAX_SEARCH_RESULTS,
   timeGroupKind,
   type OpenSession,
 } from "../sidebarModel";
@@ -269,6 +270,23 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
 
   it("drops entries that match neither display_name nor first_source_name", () => {
     expect(buildSearchEntries(twoPersisted(), [], null, "gamma")).toEqual([]);
+  });
+
+  it("caps the list at the newest MAX_SEARCH_RESULTS matches", () => {
+    // The jump dialog's viewport holds roughly nine single-line rows; beyond
+    // that the list truncates to the freshest matches instead of growing
+    // unbounded (scrolling a huge session history is not the dialog's job).
+    const twelve = Array.from({ length: 12 }, (_, i) =>
+      meta(`/s${i}.duck`, `session-${String(i).padStart(2, "0")}`, i),
+    );
+    const entries = buildSearchEntries(twelve, [], null, "");
+    expect(entries).toHaveLength(MAX_SEARCH_RESULTS);
+    // The freshest nine survive: ageDays 0..8, i.e. session-00 .. session-08.
+    expect(entries.map((e) => e.name)).toEqual(
+      Array.from({ length: MAX_SEARCH_RESULTS }, (_, i) =>
+        `session-${String(i).padStart(2, "0")}`,
+      ),
+    );
   });
 
   it("merges an open binding into the persisted row (sid set) and flags active", () => {

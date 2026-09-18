@@ -214,12 +214,12 @@ export function SessionSearchDialog({
   );
 }
 
-// One result row: leading chat-bubble glyph + the session name + a sub-line
-// (first source + turn count left, dynamic last-modified right). Mirrors the
-// sidebar row contract (ADR-0060 row shape; ADR-0072 unified the leading glyph
-// + subline) so the two surfaces agree
-// on what a "session row" looks like. React 19 ref-as-prop: the parent attaches
-// a per-index callback ref so it can scrollIntoView the highlighted row.
+// One result row: leading chat-bubble glyph + the session name with the
+// dynamic last-modified label right-aligned on the same line. Unlike the
+// sidebar rows (the ADR-0060/0072 glyph + sub-line shape), the search dialog
+// keeps a single-line row: a jump target is identified by name + recency
+// alone. React 19 ref-as-prop: the parent attaches a per-index callback ref
+// so it can scrollIntoView the highlighted row.
 function SearchRow({
   ref,
   id,
@@ -261,21 +261,12 @@ function SearchRow({
       )}
     >
       <MessageSquare className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-      <span className="flex-1 min-w-0 flex flex-col">
-        <span className="session-search-option-name truncate text-foreground">
+      <span className="flex-1 min-w-0 flex items-center gap-2">
+        <span className="session-search-option-name min-w-0 flex-1 truncate text-foreground">
           {displayName}
         </span>
-        <span className="session-search-option-subline flex items-center gap-1 text-xs text-muted-foreground">
-          <span className="truncate">
-            {entry.firstSourceName ?? "—"}
-            {" · "}
-            <FormattedMessage
-              id="sidebar.turns"
-              defaultMessage="{count, plural, =0 {no turns} one {# turn} other {# turns}}"
-              values={{ count: entry.turnCount }}
-            />
-          </span>
-          <span className="ml-auto whitespace-nowrap pl-2">{lastModifiedText}</span>
+        <span className="session-search-option-time shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+          {lastModifiedText}
         </span>
       </span>
     </li>
