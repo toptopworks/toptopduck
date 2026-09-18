@@ -1,11 +1,7 @@
-// Issue #993: the user-invocation badge face -- chips flow INLINE inside the
-// bubble box ahead of the question text (no muted pill surface, no separate
-// row above the bubble). The bubble element stays the semantic host: the
-// list is phrasing content with list roles (a <ul> may not nest in a <p>),
-// and the stale strike rides the question text alone (text-decoration
-// propagates through inline descendants, so chips must sit outside it).
-// The bare (no-invocation) bubble keeps the exact pre-#993 markup: the
-// question element IS the bubble and carries the strike itself.
+// Issue #993 render pins for the user-invocation chips; the markup rationale
+// (phrasing-content list roles, strike isolation, the bare bubble's stable
+// shape) lives on the component. The bare (no-invocation) bubble keeps the
+// exact pre-#993 markup: the question element IS the bubble.
 
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
@@ -60,7 +56,7 @@ describe("UserBubble invocation chips (issue #993)", () => {
     expect(q!.textContent).toContain("怎么跑这个查询");
   });
 
-  it("drops the pill face: accent-tinted names behind an aria-hidden Puzzle", () => {
+  it("drops the pill face: composer-chip accent behind an aria-hidden Puzzle", () => {
     const { container } = renderBubble({ invokedSkills: ["sql-coach"] });
     const items = container.querySelectorAll("[role=\"listitem\"]");
     expect(items).toHaveLength(1);
@@ -69,8 +65,11 @@ describe("UserBubble invocation chips (issue #993)", () => {
     const icon = items[0].querySelector("svg");
     expect(icon).not.toBeNull();
     expect(icon).toHaveAttribute("aria-hidden", "true");
+    // The accent rides the chip container (the composer chip's own wiring),
+    // tinting the glyph and the name alike; names run medium-weight.
+    expect(items[0].className.split(/\s+/)).toContain("text-accent-foreground");
+    expect(items[0].className.split(/\s+/)).toContain("font-medium");
     const name = items[0].querySelector("span:not([aria-hidden])");
-    expect(name!.className.split(/\s+/)).toContain("text-accent-foreground");
     expect(name!.textContent).toBe("sql-coach");
   });
 

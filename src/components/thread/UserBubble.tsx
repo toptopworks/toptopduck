@@ -16,6 +16,11 @@ import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 import { HOVER_REVEAL_CLASS } from "./turn-visual";
 
+// The stale strike rides dotted (ADR-0041/0047), shared by both shapes: the
+// bare bubble carries it on the bubble element itself, the chips shape on the
+// question span.
+const STALE_STRIKE = "stale line-through decoration-dotted";
+
 export function UserBubble({
   question,
   askedAt,
@@ -43,11 +48,14 @@ export function UserBubble({
       {/* ADR-0119 Decision 5: the invocation chips share the bubble's inline
           flow (issue #993) -- they read ahead of the question inside the
           bubble box and the question text wraps naturally after them, with no
-          pill surface: the name keeps the composer chips' accent face
-          (DESIGN.md's sole accent system) behind the same Puzzle glyph. A
-          <ul> is flow content and may not nest in the <p>, so the list rides
-          phrasing content with list roles; decorative (no interaction), names
-          untranslated. */}
+          pill surface: each chip keeps the composer chips' face -- accent
+          color riding the chip container (the glyph tints through
+          currentColor) over medium-weight text -- behind the same Puzzle
+          glyph, DESIGN.md's sole accent system. A <ul> is flow content and
+          may not nest in the <p>, so the list rides phrasing content with
+          list roles; decorative (no interaction), names untranslated. Chip
+          spacing rides the item margin; the literal space after the list is
+          the question's word gap and its wrap point. */}
       {/* The bubble box rides the question element itself (the .turn-question
           hook stays for selector / test stability): secondary surface + lg
           radius per the conversation-surface tokens, the top-right corner
@@ -63,7 +71,7 @@ export function UserBubble({
         className={cn(
           "turn-question m-0 max-w-[85%] rounded-lg rounded-tr-sm bg-secondary px-3 py-2",
           "text-sm text-secondary-foreground whitespace-pre-wrap break-words",
-          isStale && !hasSkills && "stale line-through decoration-dotted",
+          isStale && !hasSkills && STALE_STRIKE,
         )}
       >
         {hasSkills && (
@@ -80,19 +88,17 @@ export function UserBubble({
                 <span
                   key={name}
                   role="listitem"
-                  className="invoked-skill mr-1 inline-flex max-w-full items-center gap-1 align-baseline"
+                  className="invoked-skill mr-1 inline-flex max-w-full items-center gap-1 align-baseline font-medium text-accent-foreground"
                 >
                   <Puzzle className="size-3 shrink-0" aria-hidden="true" />
-                  <span className="truncate text-accent-foreground">{name}</span>
+                  <span className="truncate">{name}</span>
                 </span>
               ))}
             </span>{" "}
           </>
         )}
         {hasSkills ? (
-          <span className={cn(isStale && "stale line-through decoration-dotted")}>
-            {question}
-          </span>
+          <span className={cn(isStale && STALE_STRIKE)}>{question}</span>
         ) : (
           question
         )}
