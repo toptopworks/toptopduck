@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use toptopduck_lib::model::SkillLifecycleActor;
-use toptopduck_lib::persistence::SaveError;
+use toptopduck_lib::persistence::{LoadError, SaveError};
 use toptopduck_lib::provider::tool_calling::{
     ToolTurnOutcome, ToolTurnReply, ToolTurnRequest, ToolUse,
 };
@@ -592,13 +592,18 @@ fn open_duck_migrates_a_v6_file_to_v7_invocation_semantics() {
 fn a_v6_skill_entry_without_data_fails_to_open() {
     // H (#989): the v6->v7 fold deliberately SKIPS a data-less entry (any
     // kind), and that skip is only safe because the downstream `history`
-    // deserialization REJECTS the same entry (the internal
-    // SkillLifecycleEvent shape requires its fields) -- the file never
-    // opens, so the skip can never become a silent loss (a skill vanishing
-    // from the mount fold while the file opens clean). This pin holds that
-    // backstop: a future serde shape change (a blanket `#[serde(default)]`
-    // or a tag representation switch) that would let the entry open must go
-    // red HERE first, not in the field.
+    // deserialization REJECTS the same entry (the adjacent `entry`/`data`
+    // envelope requires the `data` content -- a `{"entry":"Skill"}` with no
+    // `data` fails the envelope before the event shape is ever consulted;
+    // the event shape's required fields backstop the `data: {}` case) --
+    // the file never opens, so the skip can never become a silent loss (a
+    // skill vanishing from the mount fold while the file opens clean).
+    // This pin holds that backstop: a future serde shape change (a tag /
+    // representation switch that makes the content optional) that would
+    // let the entry open must go red HERE first, not in the field. The
+    // error-class assertion below also holds WHICH layer refuses: the
+    // envelope deserialization (LoadError::Parse), never a fold-side
+    // hard error (LoadError::Migration).
     let dir = tempfile::tempdir().expect("tempdir");
     let duck = dir.path().join("v6-no-data.duck");
     let v6 = json!({
@@ -614,10 +619,17 @@ fn a_v6_skill_entry_without_data_fails_to_open() {
     fs::write(&duck, serde_json::to_string(&v6).unwrap()).unwrap();
 
     let (_events, cb) = collect_events();
-    let outcome = resume_defaults(&duck, Arc::new(CancelToken::new()), cb);
+    let err = match resume_defaults(&duck, Arc::new(CancelToken::new()), cb) {
+        Ok(_) => panic!("a Skill entry without `data` must not open"),
+        Err(err) => err,
+    };
+    // The refusing layer is the history deserialization, never the fold: a
+    // fold-side hard error (turning the deliberate skip into a
+    // MigrationError) would surface as LoadError::Migration and fail this
+    // match -- the skip stays a skip, and the backstop stays the envelope.
     assert!(
-        outcome.is_err(),
-        "a Skill entry without `data` must not open -- the migration fold's skip is not a loss",
+        matches!(err, ResumeError::Load(LoadError::Parse(_))),
+        "the open failure is the envelope deserialization, not the fold: {err:?}"
     );
 }
 

@@ -87,7 +87,8 @@ pub(super) struct RecipePersister {
     pending_conflict: Option<PendingConflict>,
     /// The session's immutable discovery snapshot (ADR-0119 Decision 3):
     /// set once (creation / resume adoption) through the session-side
-    /// setter -- the only writer, so this copy cannot drift -- and layered
+    /// setter -- the only writer today, so this copy cannot drift (the
+    /// accessor's debug check trips on a future bypass) -- and layered
     /// onto every build ([`Recipe::with_discovery_snapshot`]).
     discovery_snapshot: Vec<String>,
 }
@@ -126,7 +127,8 @@ impl RecipePersister {
     /// Set the discovery snapshot (ADR-0119 Decision 3): called once, from
     /// the session-side setter (`Session::set_discovery_snapshot`), at
     /// creation and at resume adoption -- immutable afterwards, so the
-    /// persister-held copy cannot drift from the session's.
+    /// persister-held copy cannot drift from the session's today (the
+    /// accessor's debug check guards a future direct-write bypass).
     pub(super) fn set_discovery_snapshot(&mut self, names: Vec<String>) {
         self.discovery_snapshot = names;
     }

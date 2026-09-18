@@ -306,9 +306,11 @@ impl Provider for FakeProvider {
         let Some((script, key)) = self.script_for(question.as_str()) else {
             // The fake never invents a reply (fail fast on misconfig), so
             // NotWired doubles as the script table's misconfiguration label
-            // -- name the unresolved content at debug level so a red test
-            // points at the missing script key instead of reading as a
-            // wiring fault (issue #989 H).
+            // -- name the unresolved content at debug level so app-shell
+            // debugging points at the missing script key instead of reading
+            // as a wiring fault (issue #989 H; pure cargo test has no log
+            // sink -- the Cargo.toml log note prescribes an env_logger
+            // dev-dep if test diagnostics are ever needed).
             log::debug!(
                 target: "provider::fake",
                 "no script resolves the asking content (misconfigured script table): {question}"

@@ -22,7 +22,7 @@ use toptopduck_lib::cli_tools::config::{
     CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
 };
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
-use toptopduck_lib::model::SkillProvenance;
+use toptopduck_lib::model::{SkillLifecycleActor, SkillProvenance};
 use toptopduck_lib::persistence::recipe::{RecipeEntry, RuntimeKind};
 use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
 use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
@@ -442,6 +442,82 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
     fs::create_dir_all(&dir).unwrap();
     let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
     fs::write(dir.join("SKILL.md"), content).unwrap();
+}
+
+/// Issue #989 review I2: the external face's mid-turn invocation binding
+/// had no observation point -- rebinding the external
+/// `SkillInvocationCtx::from_session` to a detached local vec survived
+/// this entire file (every provenance assertion is satisfied by the
+/// submit-time user invocations seeded in the real vec), and the external
+/// read-surface mount had no positive pin either (emptying `start_invoked`
+/// left this file green while reddening the built-in face's read-gate
+/// pins). One turn closes both halves: the CLI's `tools/list` pins the
+/// turn-start read mount (`read_skill_file` appears only with a non-empty
+/// invoked set -- the fixture asserts it at the source), and the CLI's
+/// mid-turn `invoke_skill` pins the binding. The record-count assertion is
+/// the discriminant: provenance alone cannot see the mid-turn agent record
+/// (the fold collapses same-name records), so the raw invocation records
+/// are counted by actor.
+#[test]
+fn external_mid_turn_invoke_lands_on_the_turn() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(&skills_root, "sql-coach", "Coach SQL.", "Coach the SQL.\n");
+    let (mut session, old_path, _guard) = external_session("invoke_skill_mid_turn");
+    session.set_discovery_snapshot(vec!["sql-coach".to_string()]);
+    let sql_coach_bytes = fs::read(skills_root.join("sql-coach").join("SKILL.md")).unwrap();
+    let sql_coach_hash = sha256_hex(&sql_coach_bytes);
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let keychain = KeychainStore::new();
+    // The user invocation seeds the turn-start invoked set (mounting the
+    // read surface the fixture asserts) and leaves the discriminating gap:
+    // a detached-vec rebinding keeps this record (seeded in the real vec
+    // before the turn starts) and drops only the agent's.
+    let user_invocations =
+        session.materialize_user_invocations(&["sql-coach".to_string()], &skills_root, &[]);
+    let outcome = session.ask_with_phase(
+        "invoke the skill",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &keychain,
+            skills: &[],
+            skills_root: &skills_root,
+            user_invocations: &user_invocations,
+            disabled_skills: &[],
+            cli_tools: &[],
+            delegations: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    // Two records through ONE channel: the user's submit-time
+    // materialization, then the agent's mid-turn invoke_skill the gateway
+    // served. The count and the actor assertions fail together under a
+    // detached binding (the agent record lands nowhere observable).
+    assert_eq!(last_turn.invocations.len(), 2, "both actors' records land");
+    assert_eq!(last_turn.invocations[0].actor, SkillLifecycleActor::User);
+    assert_eq!(last_turn.invocations[1].name, "sql-coach");
+    assert_eq!(last_turn.invocations[1].actor, SkillLifecycleActor::Agent);
+    assert_eq!(last_turn.invocations[1].content_hash, sql_coach_hash);
 }
 
 /// Issue #368 AC #2: an external-runtime turn with a mounted skill records
