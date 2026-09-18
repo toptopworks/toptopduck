@@ -279,7 +279,8 @@ pub enum CancelledReason {
 
 /// One skill recorded on a turn's provenance (ADR-0086, issue #363/#381): the
 /// spec `name` (stable identity, equal to the directory name) + the SHA-256 of
-/// the skill's `SKILL.md` bytes at the turn's assembly time. The hash is the
+/// the skill's `SKILL.md` bytes pinned at the name's last invocation of the
+/// turn (ADR-0119). The hash is the
 /// stale-degrade anchor -- the frontend drift-compares it against the
 /// registry's current
 /// [`SkillEntry::content_hash`](crate::skills::model::SkillEntry::content_hash)
@@ -297,11 +298,13 @@ pub enum CancelledReason {
 pub struct SkillProvenance {
     /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
     pub name: String,
-    /// SHA-256 hex of the `SKILL.md` bytes at the invocation's pin time
-    /// (submit time for a user invocation, call time for an agent's), or
-    /// the empty string when no baseline exists (v3->v4 migration output,
-    /// or the file was unreadable at invocation -- never trips the drift
-    /// check).
+    /// SHA-256 hex of the `SKILL.md` bytes at the name's LAST invocation
+    /// of the turn (submit time for a user invocation, call time for an
+    /// agent's; a mid-turn re-invocation after an edit overwrites -- the
+    /// final bytes are the drift anchor, and the full per-invocation audit
+    /// rides the turn's invocation records), or the empty string when no
+    /// baseline exists (v3->v4 migration output, or the file was unreadable
+    /// at invocation -- never trips the drift check).
     pub content_hash: String,
 }
 

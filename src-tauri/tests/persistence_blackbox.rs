@@ -449,6 +449,51 @@ fn resume_restores_invocation_semantics_state() {
 }
 
 #[test]
+fn open_duck_accepts_a_v7_file_without_the_header_snapshot_key() {
+    // E (#987): a v7 file hand-written without the `discovery_snapshot`
+    // header key relies on the field's serde default -- every fixture so
+    // far writes the key explicitly, so the default path (empty snapshot,
+    // resume still succeeds, the invoked fold still re-folds) went
+    // unexercised.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("no-header-key.duck");
+    let v7 = json!({
+        "format_version": 7,
+        "session_name": "no-header-key",
+        "sources": [],
+        "history": [{
+            "entry": "Turn",
+            "data": {
+                "question": "q",
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {"text_kind": "Agent", "body": "a", "assumption": null},
+                },
+                "invocations": [
+                    {"name": "sql-coach", "body": "Coach the SQL.\n", "actor": "User", "content_hash": "h1"},
+                ],
+            },
+        }],
+        "active": null,
+    });
+    fs::write(&duck, serde_json::to_string(&v7).unwrap()).unwrap();
+
+    let (_events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb)
+        .expect("the missing header key degrades to the empty snapshot, not a load failure");
+
+    assert!(
+        resumed.discovery_snapshot().is_empty(),
+        "the absent key deserializes as the empty-snapshot default",
+    );
+    assert_eq!(
+        resumed.invoked_skills(),
+        vec!["sql-coach".to_string()],
+        "the invoked fold still re-folds from the turn records",
+    );
+}
+
+#[test]
 fn open_duck_migrates_a_v6_file_to_v7_invocation_semantics() {
     // ADR-0119 Decision 6 (issue #983): the v6 -> v7 breakpoint rides the
     // registered migration chain -- a pre-v7 file OPENS (the chain's

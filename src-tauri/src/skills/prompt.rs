@@ -184,6 +184,26 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     }
 }
 
+impl crate::model::SkillInvocation {
+    /// Pin the fragment -> record mapping shared by both invocation
+    /// producers (#987 C): the body and the `content_hash` always come from
+    /// the SAME `resolve_one` fragment, so an empty body implies an empty
+    /// hash (the honest-degrade pairing) by construction instead of by two
+    /// call sites agreeing.
+    pub(crate) fn from_fragment(
+        name: &str,
+        fragment: &SkillPromptFragment,
+        actor: crate::model::SkillLifecycleActor,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            body: fragment.body.clone(),
+            actor,
+            content_hash: fragment.content_hash.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

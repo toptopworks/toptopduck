@@ -94,10 +94,10 @@ impl super::Session {
         self.discovery_snapshot.clone()
     }
 
-    /// Materialize the discovery snapshot at session creation (ADR-0119
-    /// Decision 3): called once, alongside the legacy mount-fold seed -- the
-    /// snapshot captures the same enabled-set computation explicitly. No
-    /// other writer exists; immutability is by construction.
+    /// Materialize the discovery snapshot (ADR-0119 Decision 3): called at
+    /// session creation (alongside the legacy mount-fold seed, off the same
+    /// enabled-set computation) and at resume adoption (from the recipe
+    /// header). No other writer exists; immutability is by construction.
     pub fn set_discovery_snapshot(&mut self, names: Vec<String>) {
         // Dedupe defensively in order (the seed computation is already
         // unique; this only guards a hypothetical future duplicate).
@@ -105,7 +105,11 @@ impl super::Session {
         for name in &names {
             crate::util::push_unique(&mut seen, name);
         }
-        self.discovery_snapshot = seen;
+        self.discovery_snapshot = seen.clone();
+        // The persister layers the same snapshot onto every recipe build
+        // (#987 F): one set point feeds both stores -- immutable within the
+        // session, so no drift surface.
+        self.persister.set_discovery_snapshot(seen);
     }
 
     /// The session-INVOKED skill names (ADR-0119 Decision 4, issue #983), in
@@ -153,12 +157,11 @@ impl super::Session {
                 continue;
             }
             let fragment = crate::skills::prompt::resolve_one(root, name);
-            records.push(crate::model::SkillInvocation {
-                name: name.clone(),
-                body: fragment.body,
-                actor: SkillLifecycleActor::User,
-                content_hash: fragment.content_hash,
-            });
+            records.push(crate::model::SkillInvocation::from_fragment(
+                name,
+                &fragment,
+                SkillLifecycleActor::User,
+            ));
         }
         records
     }
@@ -372,11 +375,6 @@ pub(crate) struct SkillActivationCtx<'a> {
     timeline: &'a mut Vec<super::TimelineEntry>,
     persister: &'a mut super::recipe_persister::RecipePersister,
     runtime_facts: &'a super::SessionRuntimeFacts,
-    /// The session's immutable discovery snapshot (ADR-0119): rides the ctx
-    /// only so the legacy channel's immediate persist can stamp the recipe
-    /// header (the coexistence-period write path takes the same header as
-    /// the new one).
-    snapshot: &'a [String],
 }
 
 impl<'a> SkillActivationCtx<'a> {
@@ -389,7 +387,6 @@ impl<'a> SkillActivationCtx<'a> {
         timeline: &'a mut Vec<super::TimelineEntry>,
         persister: &'a mut super::recipe_persister::RecipePersister,
         runtime_facts: &'a super::SessionRuntimeFacts,
-        snapshot: &'a [String],
     ) -> Self {
         Self {
             fragments,
@@ -397,7 +394,6 @@ impl<'a> SkillActivationCtx<'a> {
             timeline,
             persister,
             runtime_facts,
-            snapshot,
         }
     }
 
@@ -430,8 +426,28 @@ impl<'a> SkillActivationCtx<'a> {
             temp_path,
             self.timeline,
             self.runtime_facts,
-            self.snapshot,
         );
+    }
+}
+
+impl<'a> crate::skills::invocation::SkillInvocationCtx<'a> {
+    /// Production constructor: pins the wiring shared by both runtime faces
+    /// -- the built-in loop and the external gateway channel their
+    /// invocation records through this one site, so the registry root /
+    /// enable axis / discovery snapshot cannot drift between the two (the
+    /// [`SkillActivationCtx::from_session`] posture, issue #707). The
+    /// pending vec is the turn's own accumulation, borrowed by the caller.
+    pub(crate) fn from_session(
+        pending: &'a mut Vec<crate::model::SkillInvocation>,
+        snapshot: &'a [String],
+        inputs: &super::TurnInputs<'a>,
+    ) -> Self {
+        Self {
+            pending,
+            snapshot,
+            root: inputs.skills_root,
+            disabled: inputs.disabled_skills,
+        }
     }
 }
 
@@ -447,7 +463,6 @@ pub(crate) struct SkillActivationFixture {
     pub timeline: Vec<super::TimelineEntry>,
     pub(super) persister: super::recipe_persister::RecipePersister,
     pub facts: super::SessionRuntimeFacts,
-    pub snapshot: Vec<String>,
 }
 
 #[cfg(test)]
@@ -459,7 +474,6 @@ impl SkillActivationFixture {
             timeline: Vec::new(),
             persister: super::recipe_persister::RecipePersister::new(),
             facts: super::SessionRuntimeFacts::default(),
-            snapshot: Vec::new(),
         }
     }
 
@@ -473,7 +487,6 @@ impl SkillActivationFixture {
             timeline: &mut self.timeline,
             persister: &mut self.persister,
             runtime_facts: &self.facts,
-            snapshot: &self.snapshot,
         }
     }
 

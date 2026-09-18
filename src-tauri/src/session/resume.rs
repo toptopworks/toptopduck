@@ -834,7 +834,7 @@ impl super::Session {
             // materialized mount fold; a v7-native file carries the
             // creation-time set. open_duck's post-swap `seed_initial_skills`
             // touches the legacy MOUNT fold only, never this.
-            session.discovery_snapshot = recipe.discovery_snapshot.clone();
+            session.set_discovery_snapshot(recipe.discovery_snapshot.clone());
             // ADR-0119 Decision 4: the invoked set re-folds from the turn
             // invocation records -- monotonic by construction, so the fold
             // is the identity of the whole timeline.

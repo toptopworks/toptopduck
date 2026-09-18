@@ -283,7 +283,8 @@ export function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
 // skills whose bodies were injected into the turn's prompt -- the activated
 // set, either runtime -- whose
 // content changed after this turn was recorded. Each provenance skill carries
-// its SKILL.md SHA-256 at assembly time; the registry's current
+// its SKILL.md SHA-256 as pinned at the name's last invocation of the turn;
+// the registry's current
 // SkillEntry.content_hash is the same hash recomputed at load. A mismatch
 // means the skill was edited after this answer -- the TurnCard surfaces a
 // drift badge so a reader can tell the answer may be stale. An empty
