@@ -10,16 +10,12 @@ import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { UserBubble } from "../UserBubble";
 
-function renderBubble(props: {
-  question?: string;
-  isStale?: boolean;
-  invokedSkills?: string[];
-}) {
+function renderBubble(props: { isStale?: boolean; invokedSkills?: string[] }) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
         <UserBubble
-          question={props.question ?? "怎么跑这个查询"}
+          question="怎么跑这个查询"
           askedAt={0}
           isStale={props.isStale ?? false}
           invokedSkills={props.invokedSkills ?? []}
@@ -49,11 +45,11 @@ describe("UserBubble invocation chips (issue #993)", () => {
     // Inside the bubble element itself (the pre-#993 face hosted the list as
     // a sibling row above the bubble).
     expect(list!.parentElement).toBe(q);
-    // Chips read before the question does.
+    // Chips read before the question does, and the composition is
+    // byte-exact: chips, then the literal word-gap space (the declared
+    // wrap point), then the question.
     expect(q!.firstElementChild).toBe(list);
-    expect(q!.textContent).toContain("sql-coach");
-    expect(q!.textContent).toContain("chart-kit");
-    expect(q!.textContent).toContain("怎么跑这个查询");
+    expect(q!.textContent).toBe("sql-coachchart-kit 怎么跑这个查询");
   });
 
   it("drops the pill face: composer-chip accent behind an aria-hidden Puzzle", () => {
@@ -69,6 +65,8 @@ describe("UserBubble invocation chips (issue #993)", () => {
     // tinting the glyph and the name alike; names run medium-weight.
     expect(items[0].className.split(/\s+/)).toContain("text-accent-foreground");
     expect(items[0].className.split(/\s+/)).toContain("font-medium");
+    // The item margin is the only chip-spacing carrier (no list-level gap).
+    expect(items[0].className.split(/\s+/)).toContain("mr-1");
     const name = items[0].querySelector("span:not([aria-hidden])");
     expect(name!.textContent).toBe("sql-coach");
   });
@@ -86,8 +84,8 @@ describe("UserBubble invocation chips (issue #993)", () => {
     });
     const q = container.querySelector(".turn-question");
     expect(q).not.toBeNull();
-    // The bubble element itself carries no strike (the chips are inline
-    // children and would inherit it).
+    // The bubble element itself carries no strike; the decoration is
+    // scoped to the question span.
     expect(q!.className.split(/\s+/)).not.toContain("line-through");
     const struck = q!.querySelector(".line-through");
     expect(struck).not.toBeNull();

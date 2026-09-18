@@ -1,11 +1,12 @@
 // The chat projection's user side (ADR-0103, issue #609): one turn's question
 // rendered as a right-aligned bubble. The bubble carries ONLY user output and
-// conversation facts -- the verbatim question in full (pre-wrap; the ADR-0054
-// single-line + tooltip posture is retired), the asked_at stamp, the copy
-// affordance, and the stale strike-through when the turn's result died. Every
-// app annotation (active chip, skill drift, outcome, failures) lives on the
-// assistant side (TurnCard's stream) -- reading order is question, then
-// annotations, then reply.
+// conversation facts -- the invocation chips (ADR-0119 Decision 5), the
+// verbatim question in full (pre-wrap; the ADR-0054 single-line + tooltip
+// posture is retired), the asked_at stamp, the copy affordance, and the stale
+// strike-through when the turn's result died. Every app annotation (active
+// chip, skill drift, outcome, failures) lives on the assistant side
+// (TurnCard's stream) -- reading order is the invocation chips, then the
+// question, then the assistant-side annotations, then reply.
 //
 // The verbatim question is layer-4 content (ADR-0039) and passes through
 // untranslated; asked_at renders as the locale time (ADR-0052 chrome).
@@ -63,10 +64,12 @@ export function UserBubble({
           side. Full text wraps -- the identity handle (ADR-0039) is never
           clipped. A stale turn strikes the question through dotted
           (ADR-0041/0047); in the chips shape the strike rides a dedicated
-          question span -- text-decoration propagates through inline
-          descendants, so leaving it on the bubble would strike the chips
-          too. The bare (no-invocation) bubble keeps the strike on the
-          bubble element itself, exactly as before the chips moved in. */}
+          question span, scoping the decoration to the question text -- the
+          chips are atomic inline boxes (inline-flex) that text-decoration
+          does not propagate into, and the span pins that isolation even if
+          the chips' display ever changes. The bare (no-invocation) bubble
+          keeps the strike on the bubble element itself, exactly as before
+          the chips moved in. */}
       <p
         className={cn(
           "turn-question m-0 max-w-[85%] rounded-lg rounded-tr-sm bg-secondary px-3 py-2",
@@ -74,7 +77,7 @@ export function UserBubble({
           isStale && !hasSkills && STALE_STRIKE,
         )}
       >
-        {hasSkills && (
+        {hasSkills ? (
           <>
             <span
               role="list"
@@ -95,10 +98,8 @@ export function UserBubble({
                 </span>
               ))}
             </span>{" "}
+            <span className={cn(isStale && STALE_STRIKE)}>{question}</span>
           </>
-        )}
-        {hasSkills ? (
-          <span className={cn(isStale && STALE_STRIKE)}>{question}</span>
         ) : (
           question
         )}
