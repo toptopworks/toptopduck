@@ -204,8 +204,9 @@ export interface TurnRecord {
   // Issue #381: the turn's skill provenance for drift comparison against the
   // registry (the turn's invocation name set since ADR-0119 -- see
   // TurnProvenance above). Empty `skills` for turns
-  // that invoked no skill and for turns recorded before v7 (no baseline --
-  // never trips the drift check).
+  // that invoked no skill under v7 semantics; turns recorded before v7 keep
+  // the legacy activated-subset provenance they were recorded with (hashes
+  // included -- the drift check still applies to them).
   provenance: TurnProvenance;
   // The turn's skill invocation records (ADR-0119, #983): each skill invoked
   // this turn -- by the user (submit-time picker materialization) or the

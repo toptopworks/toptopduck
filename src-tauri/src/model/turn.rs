@@ -297,9 +297,11 @@ pub enum CancelledReason {
 pub struct SkillProvenance {
     /// The skill's spec `name` (kebab-case identity, ADR-0086 Decision 2).
     pub name: String,
-    /// SHA-256 hex of the `SKILL.md` bytes at the turn's assembly time, or the
-    /// empty string when no baseline exists (v3->v4 migration output, or the
-    /// file was unreadable at turn time -- never trips the drift check).
+    /// SHA-256 hex of the `SKILL.md` bytes at the invocation's pin time
+    /// (submit time for a user invocation, call time for an agent's), or
+    /// the empty string when no baseline exists (v3->v4 migration output,
+    /// or the file was unreadable at invocation -- never trips the drift
+    /// check).
     pub content_hash: String,
 }
 
@@ -349,8 +351,11 @@ pub struct SkillInvocation {
 
 /// Per-turn provenance crossing IPC (issue #381, ADR-0101; calibrated by
 /// ADR-0119): the skills INVOKED this turn -- the turn's invocation records'
-/// name set (the drift badge tracks the bodies the model actually saw). Empty
-/// for turns that invoked no skill and for turns recorded before v7.
+/// name set (the drift badge tracks the bodies the model actually saw).
+/// Empty for turns that invoked no skill under v7 semantics; turns
+/// recorded before v7 keep the legacy activated-subset provenance they
+/// were recorded with (pre-ADR-0119 semantics, hashes included -- the
+/// drift badge still applies to them).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TurnProvenance {
     pub skills: Vec<SkillProvenance>,
@@ -387,8 +392,9 @@ pub struct TurnRecord {
     /// issue #983): the name set of the turn's [`SkillInvocation`] records --
     /// the skills that shaped this turn -- each with its `content_hash` for
     /// drift comparison against the registry. Derived from
-    /// [`Self::invocations`] at record time; empty for turns that invoked no
-    /// skill and for turns recorded before v7.
+    /// [`Self::invocations`] at record time; empty for turns that invoked
+    /// no skill under v7 semantics (turns recorded before v7 carry the
+    /// legacy activated-subset provenance they were recorded with).
     pub provenance: TurnProvenance,
     /// The turn's skill invocation records (ADR-0119, issue #983): each
     /// skill invoked this turn -- by the user (submit-time materialization,

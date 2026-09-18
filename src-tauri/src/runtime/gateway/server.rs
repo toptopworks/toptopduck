@@ -3118,6 +3118,105 @@ mod tests {
         // level; this face's contract is the envelope + traceless mapping.
     }
 
+    /// The bridge face's `invoke_skill` arm (ADR-0119 Decision 4, issue
+    /// #983): the intercept maps the resolver's two variants exactly as
+    /// the built-in arm does -- a served invocation is a success envelope
+    /// carrying the body verbatim with one trace row under the tool name
+    /// and the agent-actor record on the pending vec; a refused name is
+    /// the bare isError envelope carrying the self-correcting snapshot
+    /// listing, with NO trace row and nothing landed. The mapping is
+    /// hand-duplicated from the built-in face, so this test is its only
+    /// pin on the bridge.
+    #[test]
+    fn handle_tools_call_invoke_skill_serves_and_refuses_on_the_bridge_face() {
+        let mut ctx = fresh_ctx();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("sql-coach");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: sql-coach\ndescription: Coach SQL.\n---\nCoach the SQL.\n",
+        )
+        .unwrap();
+        let pending: &'static mut Vec<crate::model::SkillInvocation> =
+            Box::leak(Box::new(Vec::new()));
+        ctx.invocations = crate::skills::invocation::SkillInvocationCtx {
+            pending,
+            snapshot: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
+            root: Box::leak(root.path().to_path_buf().into_boxed_path()),
+            disabled: &[],
+        };
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "invoke_skill", "arguments": {"name": "sql-coach"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "an invocation is a success");
+                assert_eq!(
+                    v["content"][0]["text"], "Coach the SQL.\n",
+                    "the body rides the result verbatim"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("invoke_skill must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("invoke_skill must return Result, got None"),
+        }
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "one served invocation -> one trace row"
+        );
+        assert_eq!(outcome.trace[0].name, "invoke_skill");
+        assert!(outcome.trace[0].success);
+        assert_eq!(
+            outcome.trace[0].summary, "sql-coach",
+            "summary is the skill name"
+        );
+        assert_eq!(ctx.invocations.pending.len(), 1, "the agent record lands");
+        assert_eq!(ctx.invocations.pending[0].name, "sql-coach");
+        assert_eq!(
+            ctx.invocations.pending[0].actor,
+            crate::model::SkillLifecycleActor::Agent
+        );
+
+        let bad = json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {"name": "invoke_skill", "arguments": {"name": "ghost"}}
+        });
+        match handle_tools_call(&bad, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "an unknown name is refused");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.contains("ghost"), "{text}");
+                assert!(
+                    text.contains("sql-coach"),
+                    "the refusal lists the snapshot names for self-correction: {text}"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("a refused invocation is still a Result, got error {code}: {m}")
+            }
+            Response::None => panic!("a refused invocation must return Result, got None"),
+        }
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "a refused invocation adds no trace row"
+        );
+        assert_eq!(
+            ctx.invocations.pending.len(),
+            1,
+            "a refused invocation lands nothing"
+        );
+    }
+
     /// The mount-conditional surface (issue #701, ADR-0105 Decision 6): an
     /// EMPTY mounted set lists no `activate_skill`; a non-empty set mounts
     /// it once, beside the trio's conditional attachment.
@@ -3221,7 +3320,7 @@ mod tests {
                     .collect();
                 assert!(
                     !names.contains(&"read_skill_file"),
-                    "a mounted-but-inactive turn pays no read cost"
+                    "a session that invoked nothing pays no read cost"
                 );
             }
             Response::Error(code, m) => {
@@ -3248,7 +3347,7 @@ mod tests {
                     .collect();
                 assert!(
                     names.contains(&"read_skill_file"),
-                    "a non-empty activated set mounts the read surface"
+                    "a non-empty invoked set mounts the read surface"
                 );
             }
             Response::Error(code, m) => {

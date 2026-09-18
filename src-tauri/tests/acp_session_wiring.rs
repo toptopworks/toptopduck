@@ -446,16 +446,17 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
 
 /// Issue #368 AC #2: an external-runtime turn with a mounted skill records
 /// `{name, content_hash}` in TurnProvenance.skills. The ask_with_phase facade
-/// computes provenance once before the built-in / external branch and passes it
-/// to record_turn after; this test pins the external branch so a future change
-/// cannot silently drop the skill provenance on the ACP path.
+/// passes the turn's accumulating invocation records to record_turn, which
+/// derives the provenance from them; this test pins the external branch so a
+/// future change cannot silently drop the skill provenance on the ACP path.
 ///
-/// ADR-0110 (issues #700/#702): since the ACP assembly renders disclosure,
-/// the external turn records the ACTIVATED subset -- the same set the
-/// built-in turn records (ADR-0119: the invocation records' name set). The
-/// invocation deliberately covers only one of the two snapshot skills, so
-/// recording the full snapshot -- the pre-#702 fork -- reddens this test
-/// with an extra pdf-tools entry.
+/// ADR-0110 (issues #700/#702), calibrated by ADR-0119 (issue #983): since
+/// the ACP assembly renders the metadata index, the external turn records
+/// the invocation records' name set -- the same rule the built-in turn
+/// follows (the disclosure-parity lineage). The invocation deliberately
+/// covers only one of the two snapshot skills, so recording the full
+/// snapshot -- the retired pre-#983 shape -- reddens this test with an
+/// extra pdf-tools entry.
 #[test]
 fn external_turn_records_invocation_set_provenance() {
     let skills_root = tempfile::tempdir().unwrap();

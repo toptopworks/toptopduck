@@ -742,12 +742,14 @@ impl TurnAudit {
 
 /// The per-turn borrowed data inputs for [`Session::ask_with_phase`] (issue
 /// #378): the effective MCP servers, the keychain for secret env resolution,
-/// and the mounted skill prompt fragments. These three are "data passed in"
-/// rather than orchestration concerns -- the approval state / sink / phase
-/// callback are wiring, not data -- so they collapse into one struct. This
-/// keeps `run_external_turn` (currently 8 params, `#[allow]` retained) from
-/// growing further, and prevents `ask_with_phase` from exceeding the
-/// threshold as more data inputs are added.
+/// the discovery snapshot's prompt fragments, the user's materialized skill
+/// invocations, the machine-level disabled skill names, the skills registry
+/// root, the CLI tool configs, and the delegation specs. All of these are
+/// "data passed in" rather than orchestration concerns -- the approval
+/// state / sink / phase callback are wiring, not data -- so they collapse
+/// into one struct. This keeps `run_external_turn` (currently 8 params,
+/// `#[allow]` retained) from growing further, and prevents `ask_with_phase`
+/// from exceeding the threshold as more data inputs are added.
 pub struct TurnInputs<'a> {
     /// The effective MCP server configs for this turn (the config-level
     /// enabled slice, computed at the command boundary -- ADR-0106 single
@@ -1929,6 +1931,17 @@ impl Session {
         runtime: TurnRuntime,
         asked_at: Option<u64>,
     ) -> TurnOutcome {
+        // Identical repeats collapse (review Important 3, issue #983): the
+        // user channel dedupes at staging, so this catches the agent's
+        // identical re-invoke -- one invocation renders, persists, and
+        // replays once. Full-record equality by design: a re-invocation
+        // after a mid-turn edit (a different hash) is a distinct, honest
+        // record and survives.
+        let mut unique_invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        for invocation in &invocations {
+            crate::util::push_unique(&mut unique_invocations, invocation);
+        }
+        let invocations = unique_invocations;
         // ADR-0119 (issue #983): the turn's skill provenance is the
         // invocation records' name set -- the skills that shaped this turn --
         // deduped in first-invocation order, each with its pinned

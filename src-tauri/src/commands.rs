@@ -5517,11 +5517,19 @@ mod tests {
         // legacy blob (review C).
         live.upsert_cli_tool(cli_tool("pandoc-guide", true))
             .expect("upsert one enabled CLI tool");
+        // The enable axis feeds the turn inputs (review Importants 1-2,
+        // issue #983): gamma is machine-disabled through the real config
+        // path, so the staged set exercises all three halves at once -- the
+        // disabled name rides `disabled_skills`, a disabled stage lands no
+        // record, and a duplicated stage collapses to one.
+        live.set_skill_enabled("gamma", false)
+            .expect("disable gamma on the enable axis");
         // An empty agents root (issue #933): the delegation scan reads an
         // absent registry as the legitimate never-created state and lists
         // nothing, pinning the empty-family projection here too.
         let agents_tmp = tempfile::tempdir().unwrap();
-        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &[]);
+        let staged = ["beta".to_string(), "gamma".to_string(), "beta".to_string()];
+        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &staged);
         let inputs = assembled.turn_inputs(&[]);
 
         // The assembly's skill set is the discovery SNAPSHOT, wholesale --
@@ -5536,6 +5544,31 @@ mod tests {
         assert_eq!(
             inputs.skills[0].description, "Alpha description.",
             "the snapshot's rows carry the frontmatter description"
+        );
+        // The field-wiring half the pin exists for (the #707 mirror-drift
+        // class, restored -- review Important 1): both new fields are
+        // observed, so a seam that wires either one to an empty slice
+        // reddens here, and the disabled filter's drop (review Important 2)
+        // reddens on gamma's absence from the records.
+        assert_eq!(
+            inputs.disabled_skills,
+            &["gamma".to_string()],
+            "the machine-level disabled names ride the turn inputs"
+        );
+        assert_eq!(
+            inputs.user_invocations.len(),
+            1,
+            "one enabled staged name materializes one record (duplicates collapse, \
+             disabled stages land nothing)"
+        );
+        assert_eq!(inputs.user_invocations[0].name, "beta");
+        assert_eq!(
+            inputs.user_invocations[0].actor,
+            crate::model::SkillLifecycleActor::User
+        );
+        assert!(
+            !inputs.user_invocations[0].content_hash.is_empty(),
+            "the record pins the invocation-time whole-file hash"
         );
         // The empty agents registry projects the empty delegation family
         // (issue #933): a never-created registry is the legitimate state.

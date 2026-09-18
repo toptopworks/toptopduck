@@ -27,10 +27,12 @@ use crate::util::sha256_hex;
 /// `pub(crate)` leak).
 const SKILL_MD: &str = "SKILL.md";
 
-/// One mounted skill resolved for prompt injection + provenance (issue #364,
-/// ADR-0086). Carries the spec `name` (stable identity), the verbatim Markdown
+/// One named skill resolved for prompt injection or invocation (issue #364,
+/// ADR-0086; calibrated by ADR-0119). Carries the spec `name` (stable
+/// identity), the verbatim Markdown
 /// body (frontmatter stripped -- the prompt fragment), and the SHA-256 of the
-/// WHOLE `SKILL.md` bytes (frontmatter + body) at the turn's assembly time.
+/// WHOLE `SKILL.md` bytes (frontmatter + body) at the resolve site's pin
+/// time.
 ///
 /// The hash is the stale-degrade anchor: on resume the engine recomputes the
 /// skill's current hash and compares (ADR-0086 Decision 2). An empty hash means
@@ -79,10 +81,12 @@ pub fn resolve_prompt_fragments(root: &Path, mounted: &[String]) -> Vec<SkillPro
     mounted.iter().map(|name| resolve_one(root, name)).collect()
 }
 
-/// Resolve one mounted skill into its fragment, or an empty-body / empty-hash
-/// fragment on any failure (honest degrade). Kept separate so the per-skill
-/// failure mode is explicit and the `?` operator stays out of the map closure
-/// (a single unreadable skill never fails the whole turn).
+/// Resolve one named skill into its fragment, or an empty-body / empty-hash
+/// fragment on any failure (honest degrade). Serves both callers -- the
+/// snapshot's index resolution and the invocation channel's record
+/// materialization. Kept separate so the per-skill failure mode is explicit
+/// and the `?` operator stays out of the map closure (a single unreadable
+/// skill never fails the whole turn).
 pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     // Defense in depth: the mount API does not validate names, so a non-spec
     // name could reach here via direct IPC. Refuse to join it onto the root --
@@ -91,7 +95,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     if !is_valid_skill_name(name) {
         log::warn!(
             target: "skills",
-            "mounted skill `{name}` is not a spec-shaped name -- \
+            "skill `{name}` is not a spec-shaped name -- \
              injecting no body, recording empty hash",
         );
         return SkillPromptFragment {
@@ -107,7 +111,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
         Err(e) => {
             log::warn!(
                 target: "skills",
-                "mounted skill `{name}` is unreadable at turn time \
+                "skill `{name}` is unreadable at resolve time \
                  (`{}`: {e}) -- injecting no body, recording empty hash",
                 path.display(),
             );
@@ -145,7 +149,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
                     Some(_) => {
                         log::warn!(
                             target: "skills",
-                            "mounted skill `{name}` has a wrong-typed `description` -- \
+                            "skill `{name}` has a wrong-typed `description` -- \
                              the index entry degrades to an empty description",
                         );
                         String::new()
@@ -157,7 +161,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
             _ => {
                 log::warn!(
                     target: "skills",
-                    "mounted skill `{name}` has unparseable frontmatter YAML -- \
+                    "skill `{name}` has unparseable frontmatter YAML -- \
                      the description contributes nothing (the body is still injected)",
                 );
                 (String::new(), body)
@@ -166,7 +170,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
         Err(reason) => {
             log::warn!(
                 target: "skills",
-                "mounted skill `{name}` has a malformed SKILL.md fence ({reason}) \
+                "skill `{name}` has a malformed SKILL.md fence ({reason}) \
                  -- injecting no body, recording hash only",
             );
             (String::new(), String::new())

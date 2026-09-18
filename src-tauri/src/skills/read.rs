@@ -1,5 +1,6 @@
-//! The `read_skill_file` gateway meta-tool (ADR-0111, issue #714): the
-//! restricted read surface over an ACTIVATED skill's attachment tree.
+//! The `read_skill_file` gateway meta-tool (ADR-0111, issue #714; gate
+//! recalibrated by ADR-0119 Decision 4): the restricted read surface over
+//! an INVOKED skill's attachment tree.
 //!
 //! Progressive disclosure's third layer: a skill is more than its injected
 //! body, and the extra files (`references/`, `assets/`, `scripts/`, and
@@ -16,16 +17,17 @@
 //! and be a regular file -- an in-tree symlink pointing outside follows to
 //! its real target and is refused as out of bounds.
 //!
-//! Like [`crate::skills::activation`], this is a gateway-local meta call
+//! Like [`crate::skills::invocation`], this is a gateway-local meta call
 //! served BEFORE the approval gate on both dispatch faces: reading is the
-//! same risk class as the injected body (a prompt-injection surface), so
-//! mounting + activation are the only trust gates (Decision 5). The
-//! classification IS pure -- a read mutates nothing, so unlike activation
+//! same risk class as the invoked body (a prompt-injection surface), so
+//! the session-invoked set plus the lexical/canonical bounds above are the
+//! only trust gates (Decision 5, calibrated by ADR-0119 Decision 4). The
+//! classification IS pure -- a read mutates nothing, so unlike invocation
 //! there is no transition and no persist. Failure states carry
-//! self-correcting signals (ADR-0077): an unmounted name lists the mounted
-//! names, a mounted-but-inactive name points at `activate_skill`, and a bad
-//! path lists the skill's real readable files (Decision 4 -- discovery rides
-//! the injected body, never a directory advertisement).
+//! self-correcting signals (ADR-0077): a name nobody invoked this session
+//! points at `invoke_skill` (and lists the already-invoked names), and a
+//! bad path lists the skill's real readable files (Decision 4 -- discovery
+//! rides the invocation, never a directory advertisement).
 //!
 //! Execution is text relay (Decision 7): the description teaches that a
 //! script's text, once read, goes to a registered CLI tool's content
@@ -145,10 +147,10 @@ pub(crate) fn read_skill_file_definition() -> ToolDefinition {
 }
 
 /// Classify one `read_skill_file` call against the gate (ADR-0111 Decisions
-/// 2-4; issue #714's locked four cases): served / name unmounted (lists every
-/// mounted name) / name mounted but not activated (points at
-/// `activate_skill`) / path missing, out of bounds, or a directory (lists the
-/// skill's readable files). Pure -- no state changes anywhere.
+/// 2-4, calibrated by ADR-0119 Decision 4): served / name not invoked this
+/// session (points at `invoke_skill` and lists the already-invoked names) /
+/// path missing, out of bounds, or a directory (lists the skill's readable
+/// files). Pure -- no state changes anywhere.
 pub(crate) fn resolve_skill_read(call: &ToolUse, gate: &SkillReadGate<'_>) -> SkillReadOutcome {
     let Some(name) = str_param(&call.input, "name") else {
         return SkillReadOutcome::Refused(missing_param_failure("name"));

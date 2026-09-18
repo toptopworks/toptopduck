@@ -125,27 +125,42 @@ impl super::Session {
     /// never a refusal. A DISABLED name (ADR-0119 Decision 3: the invocation
     /// eligibility gate is the enable axis, both actors) lands no record at
     /// all -- the normal picker never offers disabled names, so reaching
-    /// this filter means a stale view or a direct IPC, and silence is the
-    /// honest posture for a name that has no right to invoke.
+    /// this filter means a stale view or a direct IPC -- and the drop warns,
+    /// the same ladder every sibling degrade on this path logs (the agent
+    /// channel's identical case answers with a self-correcting refusal).
+    /// Staged names dedupe order-preservingly BEFORE the map (review
+    /// Important 3, issue #983): a duplicated stage is one invocation --
+    /// the byte-rendering consumer has no set semantics to absorb a
+    /// duplicate, so it collapses here, at the source.
     pub fn materialize_user_invocations(
         &self,
         names: &[String],
         root: &std::path::Path,
         disabled: &[String],
     ) -> Vec<crate::model::SkillInvocation> {
-        names
-            .iter()
-            .filter(|name| !disabled.iter().any(|d| d == *name))
-            .map(|name| {
-                let fragment = crate::skills::prompt::resolve_one(root, name);
-                crate::model::SkillInvocation {
-                    name: name.clone(),
-                    body: fragment.body,
-                    actor: SkillLifecycleActor::User,
-                    content_hash: fragment.content_hash,
-                }
-            })
-            .collect()
+        let mut staged: Vec<String> = Vec::new();
+        for name in names {
+            crate::util::push_unique(&mut staged, name);
+        }
+        let mut records = Vec::new();
+        for name in &staged {
+            if disabled.iter().any(|d| d == name) {
+                log::warn!(
+                    target: "skills",
+                    "staged skill `{name}` is disabled on the enable axis -- \
+                     the invocation lands no record",
+                );
+                continue;
+            }
+            let fragment = crate::skills::prompt::resolve_one(root, name);
+            records.push(crate::model::SkillInvocation {
+                name: name.clone(),
+                body: fragment.body,
+                actor: SkillLifecycleActor::User,
+                content_hash: fragment.content_hash,
+            });
+        }
+        records
     }
 
     /// Mount a skill into the session's active set (ADR-0086, issue #363).

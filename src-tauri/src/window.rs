@@ -60,19 +60,19 @@ pub fn assemble(
 
 /// Assemble the tool-calling request for one agent turn (ADR-0081, issue #318;
 /// ADR-0086, issue #364): the tool-use system prompt (capability boundary +
-/// mounted-skill fragments + locale directive + the windowed schema context),
-/// the windowed conversation as user/assistant message turns closed by the
-/// asking question, and the built-in tool table. Pure over the same state as
-/// [`assemble`] -- the single-SQL payload is built first and reused as the
-/// schema-context source, so the two paths can never disagree on which
-/// datasets / samples / privacy pruning the model sees.
+/// the skill metadata index + locale directive + the windowed schema
+/// context), the windowed conversation as user/assistant message turns
+/// closed by the asking question, and the built-in tool table. Pure over
+/// the same state as [`assemble`] -- the single-SQL payload is built first
+/// and reused as the schema-context source, so the two paths can never
+/// disagree on which datasets / samples / privacy pruning the model sees.
 ///
-/// `skills` is the session's resolved mounted-skill fragments (issue #364);
-/// `activated` is the session's activated-skill name list -- the L1/L2 sort
-/// key that splits the fragments into a metadata index (mounted, not
-/// activated) and verbatim bodies (activated) inside the system prompt
-/// (ADR-0110, issue #700). An empty mounted set adds nothing, preserving
-/// the pre-skill prompt shape.
+/// `skills` is the discovery snapshot's resolved fragments (ADR-0119
+/// Decision 3, issue #983): the system prompt's skill section is the
+/// wholesale metadata index -- no body anywhere (bodies ride the turn
+/// input through [`assemble`]'s invocation preamble, never the standing
+/// prompt). An empty snapshot adds nothing, preserving the pre-skill
+/// prompt shape.
 ///
 /// The agent loop owns the request for the whole turn: each round-trip re-sends
 /// this system + tool table with the conversation extended by the prior tool
@@ -109,12 +109,12 @@ pub fn assemble_tool_turn(
 /// M-contract (`result_N` naming) rides the gateway tool descriptions, not
 /// this assembly.
 ///
-/// Mounted-skill fragments (issue #368) land as a SEPARATE text block right
-/// before the user's question: the progressive-disclosure rendering shared
-/// with the built-in system prompt ([`render_skill_block`] -- index entries
-/// for mounted-but-not-activated skills + verbatim bodies for the activated
-/// set, sorted by `activated`; ADR-0110 Decision 8, issue #702 parity). An
-/// empty mount set adds no block, so the pre-skill block order is preserved.
+/// Discovery-skill fragments (issue #368) land as a SEPARATE text block
+/// right before the user's question: the same metadata-index rendering the
+/// built-in system prompt embeds ([`render_skill_block`] -- every snapshot
+/// skill's index row, no bodies; ADR-0110 Decision 8 calibrated by
+/// ADR-0119, issue #702 parity). An empty snapshot adds no block, so the
+/// pre-skill block order is preserved.
 pub fn assemble_acp_turn(
     question: &str,
     working_set: &WorkingSet,

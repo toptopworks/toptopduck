@@ -197,16 +197,7 @@ fn user_invocation_body_in_prompt_and_provenance() {
     );
     // The invocation body rides the turn input, AHEAD of the question: the
     // first user message is the framed preamble + the question.
-    let first_user = guard[0]
-        .messages
-        .iter()
-        .find_map(|m| match m {
-            toptopduck_lib::provider::tool_calling::ToolTurnMessage::User { content } => {
-                Some(content.clone())
-            }
-            _ => None,
-        })
-        .expect("at least one user message");
+    let first_user = message_text(&guard[0], 0);
     let frame_pos = first_user
         .find("【技能调用】技能 `sql-coach`：")
         .expect("invocation frame in the turn input");
