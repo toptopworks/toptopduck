@@ -237,7 +237,7 @@ pub(crate) fn parse_invoke_input(input: &Value) -> Result<(String, Value), Strin
 /// Flatten one locally-served meta payload to its model-facing text -- the
 /// `content` / excerpt string both dispatch faces serve. JSON objects
 /// serialize to their string form; a PLAIN string payload (the
-/// `activate_skill` body return, issue #701) rides verbatim -- a body must
+/// `invoke_skill` body return) rides verbatim -- a body must
 /// not come back JSON-quoted / escaped.
 pub(crate) fn meta_payload_text(payload: Value) -> String {
     match payload {

@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 
 import { listSkills } from "../../api";
 import { skillKeys } from "../../session/queryKeys";
-import { useActivatedSkills } from "./useActivatedSkills";
 import type { SkillEntry } from "../../types/skills";
 import {
   clampHighlight,
@@ -19,19 +18,16 @@ import {
 // QuestionBar delegates its textarea's change / key events here and renders
 // the SkillPickerPanel from the returned snapshot. Owns the trigger state
 // (which char opened the panel, where it sits in the draft), the query text,
-// the highlight index, and the two reads the panel needs -- the registry
-// listing (the shared skillKeys.all() cache) and, session mode only, the
-// activated set behind the display-only Active badges. The pure algebra
-// lives in skillPickerLogic.ts.
+// the highlight index, and the one read the panel needs -- the registry
+// listing (the shared skillKeys.all() cache), filtered to the ENABLEMENT
+// axis (ADR-0119 Decision 5). The pure algebra lives in skillPickerLogic.ts.
 
 export interface UseSkillPickerOpts {
-  /** The session whose activation truth the Active badges read. null on the
-   *  cold-start bar (ADR-0092): the activated query stays disabled. */
-  sessionId: string | null;
-  /** Receives each selected skill name. A selection is the mount + activate
-   *  composite intent (ADR-0112 Decision 2) -- what it MEANS is entirely the
-   *  caller's business (chip staging + submit-time materialization); this
-   *  hook only consumes the trigger span and reports the name. */
+  /** Receives each selected skill name. A selection stages this turn's user
+   *  invocation (ADR-0112 trigger-then-stage, calibrated by ADR-0119) --
+   *  what it MEANS is entirely the caller's business (chip staging +
+   *  submit-time materialization); this hook only consumes the trigger span
+   *  and reports the name. */
   onPick: (name: string) => void;
   /** Draft setter: selection consumes the trigger span through it (Esc, by
    *  contrast, keeps the span -- the parent never touches the draft on
@@ -60,15 +56,9 @@ export type SkillPickerState =
     highlightIndex: number | null;
     totalSkills: number;
     registryError: Error | null;
-    activatedNames: ReadonlySet<string>;
   };
 
-export function useSkillPicker({
-  sessionId,
-  onPick,
-  setValue,
-  enabled = true,
-}: UseSkillPickerOpts) {
+export function useSkillPicker({ onPick, setValue, enabled = true }: UseSkillPickerOpts) {
   const [trigger, setTrigger] = useState<SkillPickerTrigger | null>(null);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
@@ -85,26 +75,15 @@ export function useSkillPicker({
     queryFn: listSkills,
     enabled,
   });
-  // Deliberately NOT filtered on the enablement axis (issue #961, ADR-0118
-  // Decision 1): "disabled = out of the seed (undiscoverable)" is the MODEL
-  // side -- a disabled skill never enters a new session's seed, so the model
-  // never sees it. The picker is the USER's explicit override channel (the
-  // trust gate's own expression): an explicit pick of a disabled skill mounts
-  // it for that session by design; permanent removal goes through the
-  // enablement axis in settings.
-  const registry = useMemo(() => listing?.skills ?? [], [listing]);
-  // Display-only activation truth (Decision 5): session mode reads the
-  // activated set; cold start keeps the query disabled -- no session exists,
-  // so no badges. The set NEVER gates selection (Decision 3).
-  // Failure ruling (issue #718): a rejected read here degrades to "no
-  // badges", NOT an error surface -- deliberately asymmetric with the
-  // listing failure (which renders the error row): the badges are pure
-  // display, so a failed read misstates nothing actionable, while a failed
-  // listing hides the panel's whole substance.
-  const { data: activated } = useActivatedSkills(
-    enabled ? sessionId : null,
+  // Filtered to the enablement axis (ADR-0119 Decision 5, reversing the
+  // issue #961 sub-decision): a disabled skill cannot be invoked, so listing
+  // it as a pick was a dead end -- the row promised a staging the submit
+  // would silently drop. Permanent removal goes through the enablement axis
+  // in settings; the picker surfaces exactly what the submit will invoke.
+  const registry = useMemo(
+    () => (listing?.skills ?? []).filter((skill) => skill.enabled),
+    [listing],
   );
-  const activatedNames = useMemo(() => new Set(activated ?? []), [activated]);
 
   const rows = useMemo(
     () => (trigger !== null ? filterSkills(registry, query) : []),
@@ -129,7 +108,6 @@ export function useSkillPicker({
           highlightIndex,
           totalSkills: registry.length,
           registryError: listingError ?? null,
-          activatedNames,
         };
 
   /** Feed every textarea change: opens the panel on a freshly typed

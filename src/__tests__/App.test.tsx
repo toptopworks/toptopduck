@@ -101,7 +101,6 @@ vi.mock("../api", async (importOriginal) => {
     // the real invoke.
     listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
     mountSkill: vi.fn(async () => {}),
-    unmountSkill: vi.fn(async () => {}),
     readRows: vi.fn(),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
@@ -193,6 +192,7 @@ function renderPane(
         sessionId="sess-1"
         isActive={isActive}
         pendingIngestPaths={[]}
+        pendingSkillInvocations={[]}
         onIngestConsumed={() => {}}
         pendingQuestion={null}
         onQuestionConsumed={() => {}}
@@ -1487,6 +1487,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
         sessionId="sess-1"
         isActive={true}
         pendingIngestPaths={payload.pendingIngestPaths ?? []}
+        pendingSkillInvocations={[]}
         onIngestConsumed={onIngestConsumed}
         pendingQuestion={payload.pendingQuestion ?? null}
         onQuestionConsumed={onQuestionConsumed}
@@ -1519,6 +1520,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
           sessionId="sess-1"
           isActive={true}
           pendingIngestPaths={next.pendingIngestPaths ?? []}
+          pendingSkillInvocations={[]}
           onIngestConsumed={onIngestConsumed}
           pendingQuestion={next.pendingQuestion ?? null}
           onQuestionConsumed={onQuestionConsumed}

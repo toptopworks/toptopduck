@@ -171,13 +171,6 @@ pub enum SessionError {
     #[error("{0}")]
     #[serde(rename = "Turn")]
     RowRead(crate::model::RowReadError),
-    /// A skill mount / unmount was refused (issue #363, ADR-0086):
-    /// `mount_skill` / `unmount_skill` wrap the typed
-    /// [`SkillMountError`](crate::session::skills::SkillMountError) here instead
-    /// of flattening it to [`Self::Engine`] (string), so the frontend recurses
-    /// `SkillMount.data.kind` and renders the skill-domain locale message.
-    #[error("{0}")]
-    SkillMount(crate::session::skills::SkillMountError),
     /// A full-result CSV export failed (issue #769): `export_rows_csv` wraps
     /// the typed [`ExportRowsError`](crate::model::ExportRowsError) here
     /// instead of flattening the destination half to [`Self::Engine`]

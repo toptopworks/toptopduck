@@ -350,7 +350,8 @@ mod tests {
     fn non_spec_name_never_reaches_filesystem() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // A traversal-shaped name landing in mounted_skills via direct IPC.
+        // A traversal-shaped name reaching the assembly via a hand-edited
+        // recipe.
         // The resolver must refuse to join it onto the root.
         std::fs::create_dir_all(root.join("escape")).unwrap();
         std::fs::write(root.join("escape").join("SKILL.md"), "secret").unwrap();

@@ -226,7 +226,7 @@ fn str_param<'v>(input: &'v Value, key: &str) -> Option<&'v str> {
 }
 
 /// The fixed malformed-input message (the `mcp_search_tools` /
-/// `activate_skill` style, shared by both dispatch sites through the
+/// `invoke_skill` style, shared by both dispatch sites through the
 /// resolver).
 fn missing_param_failure(param: &str) -> String {
     format!("read_skill_file failed: parameter `{param}`: expected a non-empty string")
@@ -572,7 +572,7 @@ mod tests {
     }
 
     /// An unmounted name is refused with EVERY mounted name in the error --
-    /// the one-hop self-correction signal, mirroring `activate_skill`.
+    /// the one-hop self-correction signal, mirroring `invoke_skill`.
     #[test]
     fn not_invoked_name_lists_every_invoked_name() {
         let fx = Fixture::new();

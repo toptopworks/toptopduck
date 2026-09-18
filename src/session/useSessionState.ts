@@ -117,7 +117,7 @@ export interface UseSessionState {
   // Actions.
   // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
   // QuestionBar consumer accepts it via void-return covariance.
-  handleAsk: (question: string) => Promise<void>;
+  handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
   handleIngest: (path: string) => void;
   /** Multi-file ingest from the composer "+" file section (ADR-0083, issue
@@ -357,12 +357,12 @@ export function useSessionState(
   // first turn, the name is never auto-changed again (the backend enforces
   // this in record_turn); subsequent turns never fire onFirstTurnSettled.
   const handleAskWithAutoName = useCallback(
-    async (question: string) => {
+    async (question: string, invocations?: string[]) => {
       const key = sessionKeys.thread(sessionId);
       const hadTurns = (queryClient.getQueryData<ThreadEntry[]>(key) ?? []).some(
         (e) => e.entry === "Turn",
       );
-      await handleAsk(question);
+      await handleAsk(question, invocations);
       // Fire only when this was the first turn AND it actually landed (the
       // optimistic append happened inside handleAsk on success). On IPC failure
       // handleAsk catches + returns without appending, so the cache is

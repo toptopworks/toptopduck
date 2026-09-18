@@ -14,7 +14,7 @@
 //! full gateway face MINUS every delegation tool (depth-1 physical
 //! exclusion -- the sub-agent is constructed with no delegation tool
 //! mounted, so recursion is structurally impossible, not merely refused)
-//! MINUS `activate_skill` (the session-level activation channel stays
+//! MINUS `invoke_skill` (the invocation channel stays
 //! user + main-agent only); `read_skill_file` and the discovery trio
 //! survive untouched, and every call the sub-agent makes dispatches
 //! through the SAME shared core -- approval, audit, `result_N` promotion
@@ -118,7 +118,7 @@ impl DelegationSpec {
     /// definition name, description embeds the entry's routing
     /// description, and the single parameter is the natural-language task.
     /// English by the tool-face language split (the established fact the
-    /// `activate_skill` definition also records).
+    /// `invoke_skill` definition also records).
     pub fn tool_definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name.clone(),
@@ -170,7 +170,7 @@ pub fn subagent_preamble(spec: &DelegationSpec) -> String {
 }
 
 /// The sub-agent's tool face (ADR-0117 Decision 4): the turn's tool table
-/// minus every delegation tool minus `activate_skill`. Depth-1 physical
+/// minus every delegation tool minus `invoke_skill`. Depth-1 physical
 /// exclusion: the returned face cannot contain a delegation tool,
 /// so a sub-agent has nothing to recurse through even if its model tried.
 /// `read_skill_file` and everything else survive verbatim.
@@ -182,7 +182,7 @@ pub fn subagent_tool_face(
         .iter()
         .filter(|tool| {
             !delegation_names.contains(tool.name.as_str())
-                && tool.name != crate::skills::activation::ACTIVATE_SKILL
+                && tool.name != crate::skills::invocation::INVOKE_SKILL
         })
         .cloned()
         .collect()
@@ -221,17 +221,18 @@ mod tests {
             .collect()
     }
 
-    /// AC #1 (face subtraction): the sub-face strips every delegation tool
-    /// and `activate_skill` while `read_skill_file` and the built-in table
-    /// survive verbatim -- the depth-1 exclusion is a subtraction over the
-    /// assembled table, so what survives is exactly the shared gateway face.
+    /// AC #1 (face subtraction; ADR-0119 Decision 4): the sub-face strips
+    /// every delegation tool and `invoke_skill` while `read_skill_file` and
+    /// the built-in table survive verbatim -- the depth-1 exclusion is a
+    /// subtraction over the assembled table, so what survives is exactly the
+    /// shared gateway face.
     #[test]
-    fn subagent_face_strips_delegation_and_activation_keeps_read() {
+    fn subagent_face_strips_delegation_and_invocation_keeps_read() {
         let tools = vec![
             definition("explore"),
             definition("materialize"),
             definition("read_skill_file"),
-            definition("activate_skill"),
+            definition("invoke_skill"),
             definition("general-purpose"),
             definition("data-cleaner"),
         ];
@@ -251,7 +252,7 @@ mod tests {
         let tools = vec![
             definition("explore"),
             definition("general-purpose"),
-            definition("activate_skill"),
+            definition("invoke_skill"),
         ];
         let names: BTreeSet<&str> = ["general-purpose"].into_iter().collect();
         let face = subagent_tool_face(&tools, &names);

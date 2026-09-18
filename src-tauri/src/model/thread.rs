@@ -75,7 +75,7 @@ pub enum SkillLifecycleKind {
 
 /// Who initiated a lifecycle event (ADR-0110 Decision 4). Mount / unmount are
 /// user-only; activation may be initiated by the user (the mounted-list
-/// affordance) or by the agent (the `activate_skill` gateway meta-tool).
+/// affordance) or by the agent (the `invoke_skill` gateway meta-tool).
 /// Issue #698 records only the user actor -- the agent channel rides #701.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillLifecycleActor {

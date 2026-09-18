@@ -2,17 +2,15 @@ import { useIntl } from "react-intl";
 import { Puzzle, X } from "lucide-react";
 import { bareButtonReset } from "../../lib/buttonReset";
 
-// Skill chips (ADR-0112, issue #716; the display union + removal of issue
-// #961 / ADR-0118 Decision 4): the composer's display of the pre-activation
-// intents expressed since the last submit UNION the session's activated
-// truth. Rendered inline in the QuestionBar input area, flowing with the
-// draft text -- the list is display:contents so each chip participates in
-// the input row's flex wrap and the caret seats right after the last chip.
-// Withdrawal rides the textarea's Backspace at the draft start (the last
-// INTENT deletes like a text char) and, when the caller wires `onRemove`,
-// the per-chip button -- removal of a mounted chip is the unmount cascade
-// (deactivation rides the event fold), so the chip is the session-level
-// exit; permanent removal goes through the enablement axis in settings.
+// Skill chips (ADR-0112 trigger-then-stage, calibrated by ADR-0119
+// Decision 5): the composer's display of THIS turn's staged invocations,
+// cleared at the submit boundary -- there is no session-level skill state
+// left to display. Rendered inline in the QuestionBar input area, flowing
+// with the draft text -- the list is display:contents so each chip
+// participates in the input row's flex wrap and the caret seats right after
+// the last chip. Withdrawal rides the textarea's Backspace at the draft
+// start (the last staged name deletes like a text char) and the per-chip
+// button; permanent removal goes through the enablement axis in settings.
 
 export type ComposerSkillChipsProps = {
   /** The display union (pre-activation intents, then unseen activated

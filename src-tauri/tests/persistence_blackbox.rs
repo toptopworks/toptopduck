@@ -333,58 +333,6 @@ fn resume_restores_the_header_last_runtime_and_the_rewrite_keeps_it() {
 }
 
 #[test]
-fn resume_rebuilds_mounted_skills_from_timeline_fold() {
-    // AC#5 (ADR-0086, issue #363): the live `Session.mounted_skills` cache is
-    // re-seeded from `Recipe::mounted_skills()` -- the fold over the
-    // timeline's Mount/Unmount sequence -- NOT from a stored snapshot. A
-    // session that mounts two skills and unmounts the first must, after close
-    // + resume, yield the same single-skill active set (the surviving skill,
-    // in first-mount insertion order). The timeline's Skill events are also
-    // restored verbatim so the fold has the same input.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
-    let mut session = build_session(&duck);
-    session.mount_skill("sql-coach").expect("mount sql-coach");
-    session
-        .mount_skill("chart-helper")
-        .expect("mount chart-helper");
-    session
-        .unmount_skill("sql-coach")
-        .expect("unmount sql-coach");
-    let before_mounted = session.mounted_skills();
-    assert_eq!(
-        before_mounted,
-        vec!["chart-helper".to_string()],
-        "live cache after the mount/unmount sequence",
-    );
-    let before_skill_events = session
-        .conversation()
-        .iter()
-        .filter(|e| matches!(e, ThreadEntry::Skill(_)))
-        .count();
-    assert_eq!(before_skill_events, 3, "Mount + Mount + Unmount");
-    drop(session);
-
-    let (_events, cb) = collect_events();
-    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
-
-    assert_eq!(
-        resumed.mounted_skills(),
-        before_mounted,
-        "resume rebuilds the live cache from the timeline fold, not a snapshot",
-    );
-    let after_skill_events = resumed
-        .conversation()
-        .iter()
-        .filter(|e| matches!(e, ThreadEntry::Skill(_)))
-        .count();
-    assert_eq!(
-        after_skill_events, before_skill_events,
-        "skill lifecycle events restored verbatim on the timeline",
-    );
-}
-
-#[test]
 fn resume_restores_invocation_semantics_state() {
     // ADR-0119 (issue #983): the v7 open path restores the discovery
     // snapshot from the header (explicit, never re-folded) and re-folds the
@@ -582,10 +530,17 @@ fn open_duck_migrates_a_v6_file_to_v7_invocation_semantics() {
         resumed.invoked_skills().is_empty(),
         "no pre-v7 turn carries invocation records",
     );
-    // The skill events passed through: the legacy folds still read (the
-    // coexistence-period channels keep writing them).
-    assert_eq!(resumed.mounted_skills(), vec!["sql-coach".to_string()]);
-    assert_eq!(resumed.activated_skills(), vec!["sql-coach".to_string()]);
+    // The skill events passed through: the timeline still carries them
+    // verbatim (a migrated pre-v7 file renders its legacy events).
+    let skill_events = resumed
+        .conversation()
+        .iter()
+        .filter(|e| matches!(e, ThreadEntry::Skill(_)))
+        .count();
+    assert_eq!(
+        skill_events, 4,
+        "Mount + Mount + Activate + Unmount pass through the migration",
+    );
 }
 
 #[test]
@@ -630,67 +585,6 @@ fn a_v6_skill_entry_without_data_fails_to_open() {
     assert!(
         matches!(err, ResumeError::Load(LoadError::Parse(_))),
         "the open failure is the envelope deserialization, not the fold: {err:?}"
-    );
-}
-
-#[test]
-fn resume_rebuilds_activated_skills_from_timeline_fold() {
-    // AC#5 (ADR-0110, issue #698): the live `Session.activated_skills` cache
-    // re-seeds from `Recipe::activated_skills()` -- the fold over the same
-    // timeline (Activate in / Unmount cascades out / Mount invisible) -- NOT
-    // from a stored snapshot. A session that mounts two skills, activates
-    // both, then unmounts the first (the cascade) must, after close + resume,
-    // yield the same single-skill mounted AND activated set.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
-    let mut session = build_session(&duck);
-    session.mount_skill("sql-coach").expect("mount sql-coach");
-    session
-        .mount_skill("chart-helper")
-        .expect("mount chart-helper");
-    session
-        .activate_skill("sql-coach", SkillLifecycleActor::User)
-        .expect("activate sql-coach");
-    session
-        .activate_skill("chart-helper", SkillLifecycleActor::User)
-        .expect("activate chart-helper");
-    // The unmount cascades sql-coach's activation out (the sole exit).
-    session.unmount_skill("sql-coach").expect("unmount");
-    let before_mounted = session.mounted_skills();
-    let before_activated = session.activated_skills();
-    assert_eq!(
-        before_mounted,
-        vec!["chart-helper".to_string()],
-        "mounted fold drops the unmounted name",
-    );
-    assert_eq!(
-        before_activated,
-        vec!["chart-helper".to_string()],
-        "the unmount cascaded sql-coach's activation out",
-    );
-    drop(session);
-
-    let (_events, cb) = collect_events();
-    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("resume");
-
-    assert_eq!(
-        resumed.mounted_skills(),
-        before_mounted,
-        "the mounted fold survives resume",
-    );
-    assert_eq!(
-        resumed.activated_skills(),
-        before_activated,
-        "resume rebuilds the activated cache from the fold, not a snapshot",
-    );
-    let after_skill_events = resumed
-        .conversation()
-        .iter()
-        .filter(|e| matches!(e, ThreadEntry::Skill(_)))
-        .count();
-    assert_eq!(
-        after_skill_events, 5,
-        "Mount + Mount + Activate + Activate + Unmount restored verbatim",
     );
 }
 

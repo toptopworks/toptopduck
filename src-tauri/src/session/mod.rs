@@ -58,7 +58,7 @@ use crate::session::loop_contract::{
     LoopOutcome, LoopRound, NoProgressDetail, Termination, TraceEntry,
 };
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
-use crate::session::skills::{SkillActivationCtx, SkillTurnState};
+use crate::session::skills::SkillTurnState;
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
 use crate::window;
@@ -576,25 +576,6 @@ pub struct Session {
     /// next auto-write persists a selection made WITHOUT a following turn
     /// (the resume promise, ADR-0095 D6).
     runtime_facts: SessionRuntimeFacts,
-    /// The session's currently-mounted skills (ADR-0086, issue #363). A live
-    /// memoization of the timeline's Mount/Unmount fold -- [`Self::build_recipe`]
-    /// is the single source of truth (the recipe never stores a snapshot, only
-    /// the event sequence), and this cache stays in sync because every mount /
-    /// unmount mutates both together. Seeded by `open_duck` from the recipe
-    /// fold on resume. Looked up by the assembly path's skill set builder
-    /// (wired in #364) and by the `list_mounted_skills` IPC command. Names are
-    /// unique, in first-mount insertion order (mirrors
-    /// [`crate::persistence::recipe::Recipe::mounted_skills`]).
-    mounted_skills: Vec<String>,
-    /// The session's currently-ACTIVATED skills (ADR-0110, issue #698): the
-    /// persistent activation subset, always ⊆ [`Self::mounted_skills`]. A
-    /// live memoization of the timeline's Activate/Unmount fold
-    /// ([`crate::persistence::recipe::Recipe::activated_skills`]); seeded
-    /// empty for a pre-activation (v5) recipe at resume -- the honest
-    /// post-resume posture, never a degrade. Mutated only by `activate_skill`
-    /// (idempotent) and cascaded by `unmount_skill` (the sole exit). Read by
-    /// the `list_activated_skills` IPC command.
-    activated_skills: Vec<String>,
     /// The session's discovery snapshot (ADR-0119 Decision 3, issue #983):
     /// the enabled set at session creation, immutable within the session.
     /// Materialized once at creation (from the same seed computation the
@@ -1022,8 +1003,6 @@ impl Session {
             external_runtime: None,
             last_discovered_runtime: None,
             runtime_facts: SessionRuntimeFacts::default(),
-            mounted_skills: Vec::new(),
-            activated_skills: Vec::new(),
             discovery_snapshot: Vec::new(),
             invoked_skills: Vec::new(),
         })
@@ -1266,7 +1245,7 @@ impl Session {
         // struct, ADR-0029) -- get_mcp_secret reads None for every env key, so
         // a server with keychain_env_keys still spawns, just secret-free.
         let keychain = KeychainStore::new();
-        // No mounted skills either: tests that need skill injection call
+        // No discovery snapshot either: tests that need skill injection call
         // ask_with_phase directly with resolved fragments (issue #364).
         let inputs = TurnInputs::empty(&keychain);
         self.ask_with_phase(question, &approval, &sink, |_| {}, &inputs)
@@ -1445,22 +1424,12 @@ impl Session {
                     request
                         .tools
                         .extend(crate::cli_tools::config::tool_definitions(inputs.cli_tools));
-                    // The skill-activation meta-tool (ADR-0110 Decision 3,
-                    // issue #701): mounted iff the turn's discovery snapshot
-                    // is non-empty -- the trio's conditional-attachment
-                    // posture (ADR-0105 Decision 6). The LEGACY channel --
-                    // it stays live and green through the coexistence period
-                    // (ADR-0119 Consequences -- the ADR-0086 calibration, issue #983); its activation state no
-                    // longer drives assembly.
-                    if !inputs.skills.is_empty() {
-                        request
-                            .tools
-                            .push(crate::skills::activation::activate_skill_definition());
-                    }
                     // The skill-invocation meta-tool (ADR-0119 Decision 4,
-                    // issue #983): `invoke_skill` succeeds the activation
-                    // channel. Snapshot-conditional like its predecessor --
-                    // an empty discovery snapshot pays no standing tool cost.
+                    // issue #983): mounted iff the turn's discovery snapshot
+                    // is non-empty (the fragments resolve FROM the snapshot,
+                    // so the two emptiness tests agree) -- the trio's
+                    // conditional-attachment posture (ADR-0105 Decision 6).
+                    // An empty discovery snapshot pays no standing tool cost.
                     if !inputs.skills.is_empty() {
                         request
                             .tools
@@ -1495,18 +1464,6 @@ impl Session {
                         temp_path: &self.temp_path,
                         tool_output_refs: &mut self.tool_output_refs,
                     };
-                    // The mid-turn activation channel (issue #701): the same
-                    // disjoint-borrow posture as `deps` above -- the four
-                    // session fields no `TurnDeps` field touches, plus the
-                    // turn's fragments. Both runtimes share the one channel
-                    // shape; the gateway path constructs its own below.
-                    let mut skill_channel = SkillActivationCtx::from_session(
-                        inputs.skills,
-                        &mut self.activated_skills,
-                        &mut self.timeline,
-                        &mut self.persister,
-                        &self.runtime_facts,
-                    );
                     // The attachment read gate (ADR-0111, calibrated by
                     // ADR-0119): pure classification (no transitions, no
                     // persist), so an immutable bundle -- the turn-start
@@ -1562,7 +1519,6 @@ impl Session {
                                 &mut mcp,
                                 inputs.cli_tools,
                                 inputs.delegations,
-                                &mut skill_channel,
                                 &mut invocation_channel,
                                 &read_gate,
                                 approval,
@@ -1826,17 +1782,6 @@ impl Session {
                 temp_path: &self.temp_path,
                 tool_output_refs: &mut self.tool_output_refs,
             };
-            // The bridge face's activation channel (issue #701): the same
-            // disjoint-borrow bundle the built-in loop gets -- the external
-            // runtime activates through the SAME session transition by
-            // construction.
-            let skill_channel = SkillActivationCtx::from_session(
-                inputs.skills,
-                &mut self.activated_skills,
-                &mut self.timeline,
-                &mut self.persister,
-                &self.runtime_facts,
-            );
             // The bridge face's read gate (issue #714; calibrated by
             // ADR-0119): the same immutable bundle the built-in loop's
             // dispatch server gets -- one read semantics on both runtime
@@ -1860,7 +1805,6 @@ impl Session {
             );
             let ctx = GatewayCtx {
                 deps,
-                skills: skill_channel,
                 invocations: invocation_channel,
                 read: read_gate,
                 materializer: &mut *self.materializer,
@@ -3543,7 +3487,7 @@ mod tests {
     /// The meta catalog pair + skill tool calls pair BY NAME (issue #820
     /// per-class pin): the gateway records those dispatches under the
     /// tool's own name (unlike the external fall-through, which renames
-    /// -- the third meta tool, `mcp_invoke`, takes the pool arm instead,
+    /// -- the fourth meta tool, `mcp_invoke`, takes the pool arm instead,
     /// so it is deliberately absent from this fixture), so each
     /// same-named engine echo is replaced by its gateway row at its slot.
     #[test]
@@ -3551,7 +3495,7 @@ mod tests {
         let names = [
             "mcp_search_tools",
             "mcp_list_servers",
-            "activate_skill",
+            "invoke_skill",
             "read_skill_file",
         ];
         let gateway = gateway_outcome(
@@ -5320,11 +5264,21 @@ mod tests {
     }
 
     #[test]
-    fn is_timeline_empty_false_after_skill_mount() {
-        // A skill mount adds a Skill lifecycle event to the timeline
-        // (ADR-0086, the third TimelineEntry variant).
+    fn is_timeline_empty_false_after_skill_event() {
+        // A skill lifecycle event occupies a timeline slot (ADR-0086, the
+        // third TimelineEntry variant). v7 sessions no longer write one
+        // (ADR-0119 Decision 2), but a migrated pre-v7 file still carries
+        // them -- the emptiness read must see them regardless.
+        use super::TimelineEntry;
+
         let mut session = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
-        session.mount_skill("code-review").expect("mount skill");
+        session
+            .timeline
+            .push(TimelineEntry::Skill(crate::model::SkillLifecycleEvent {
+                kind: crate::model::SkillLifecycleKind::Mount,
+                name: "code-review".to_string(),
+                actor: None,
+            }));
         assert!(
             !session.is_timeline_empty(),
             "session with a skill lifecycle event is not empty"

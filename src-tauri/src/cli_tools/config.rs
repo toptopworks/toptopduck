@@ -341,7 +341,7 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
         || name == crate::mcp::meta_tools::META_LIST_SERVERS
         || name == crate::mcp::meta_tools::META_SEARCH_TOOLS
         || name == crate::mcp::meta_tools::META_INVOKE
-        || name == crate::skills::activation::ACTIVATE_SKILL
+        || name == crate::skills::invocation::INVOKE_SKILL
         || name == crate::skills::read::READ_SKILL_FILE
 }
 
@@ -783,7 +783,7 @@ mod tests {
         // full-set membership) -- a user `pandoc` would race the
         // conflict-deference mechanism for the builtin entry's own name.
         for reserved in [
-            "activate_skill",
+            "invoke_skill",
             "explore",
             "materialize",
             "mcp__srv__tool",

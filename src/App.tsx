@@ -23,7 +23,7 @@ import type { ComposerSessionFields } from "./session/useComposerState";
 import { QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
-import { SkillChips } from "./components/thread/SkillChips";
+import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
 import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
@@ -46,7 +46,6 @@ import type { SettingsSection } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
-import { toAppError } from "./lib/error-presentation";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
@@ -100,21 +99,20 @@ function handleIntlError(err: Error): void {
 }
 
 // The composer fire path's defensive log (#825): the shell bar's submit
-// delegates to the active session's handleAsk at three fire sites (the
-// no-activation direct fire, and the fires inside the materialization
-// .then / .catch callbacks). handleAsk settles its designed failures
-// internally (session error state), so this catch only records an
-// UNEXPECTED throw -- the unmapped runtime stamp's loud failure (#725) or
-// a settled callback -- instead of surfacing it as an unhandled rejection
-// with no trace on the main interaction path. The same contract
+// delegates to the active session's handleAsk. handleAsk settles its
+// designed failures internally (session error state), so this catch only
+// records an UNEXPECTED throw -- the unmapped runtime stamp's loud failure
+// (#725) or a settled callback -- instead of surfacing it as an unhandled
+// rejection with no trace on the main interaction path. The same contract
 // SessionPane's pendingQuestion replay and ask-again sinks carry; log-only
 // -- once the tail try is entered, the busy gate reopens in useTurnFlow's
 // tail finally, so nothing user-facing is compensated here.
 function fireShellAsk(
   fields: Pick<ComposerSessionFields, "handleAsk">,
   question: string,
+  invocations?: string[],
 ): void {
-  void fields.handleAsk(question).catch((e: unknown) =>
+  void fields.handleAsk(question, invocations).catch((e: unknown) =>
     log.error("App", "shell submit handleAsk threw unexpectedly", e),
   );
 }
@@ -280,7 +278,6 @@ export default function App() {
     busy,
     resumeStatus,
     createSessionWithQuestion,
-    materializeActivations,
     openPersisted,
     clearPendingIngest,
     clearPendingQuestion,
@@ -432,13 +429,15 @@ export default function App() {
   const [pendingAuthMode, setPendingAuthMode] =
     useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
-  // Pre-activation intents (ADR-0112, issue #716), two facets with different
-  // lifecycles: the cold-start list lives in shell memory (it survives a
-  // session peek and dies only on the minting submit); the session list is
-  // view-scoped -- it dies on any active-session switch / close so
-  // unsubmitted intents never leak across sessions. A picker selection is a
-  // mount + activate composite; both halves materialize at submit -- the
-  // ONLY materialization moment (Decision 4).
+  // Skill invocation staging (ADR-0112 trigger-then-stage, calibrated by
+  // ADR-0119: a pick stages THIS turn's user invocation), two facets with
+  // different lifecycles: the cold-start list lives in shell memory (it
+  // survives a session peek and dies only on the minting submit); the
+  // session list is view-scoped -- it dies on any active-session switch /
+  // close so unstaged names never leak across sessions. The staging
+  // materializes as the turn's invocation records at submit -- the ONLY
+  // materialization moment -- and clears with it: the chips show this
+  // turn's staging only, never a persistent state.
   const [coldActivations, setColdActivations] = useState<string[]>([]);
   // Session-scope pre-activations carry their owning view id: a switch /
   // close (or the null->session mint) stops the ids matching, so the derived
@@ -512,8 +511,8 @@ export default function App() {
 
   // ADR-0092: shell-level bar submit handler. When activeSessionId is
   // non-null, delegate to the active session's handleAsk; when the pane has
-  // not reported its fields yet (activation -> mount-report window), the
-  // submit is a no-op — NEVER mint a second session for an active id. When
+  // not reported its fields yet (mint -> first-report window), the submit is
+  // a no-op — NEVER mint a second session for an active id. When
   // null, run the honest gate, then create a session carrying the question.
   // Draft lifecycle: an in-session submit clears the session draft at the
   // ask (the optimistic Turn append already carries the question into the
@@ -528,29 +527,12 @@ export default function App() {
         // The ask leaves the composer: one clear up front covers all three
         // fire sites below, and the no-op window above never reaches it.
         setComposerDraft("");
+        // ADR-0119 Decision 1: the staging IS this turn's user invocation --
+        // it rides the ask (the backend materializes the records at submit)
+        // and the staging clears at the submit boundary.
         const intents = sessionActivations;
-        if (intents.length === 0) {
-          fireShellAsk(fields, question);
-          return;
-        }
-        // ADR-0112 Decision 4: materialize the pre-activations BEFORE the ask
-        // -- the activation lands before the turn assembles, so the question
-        // sees the injected body. The chips are consumed by the submit either
-        // way (an isolated write failure surfaces via the shell error without
-        // blocking the ask). The .catch is the same contract for an
-        // unexpected fault higher up: clear the spent intents, surface the
-        // fault, and STILL fire the ask -- a materialization crash never
-        // silently eats the submit.
-        void materializeActivations(activeSessionId, intents)
-          .then(() => {
-            setViewActivations({ sid: activeSessionId, names: [] });
-            fireShellAsk(fields, question);
-          })
-          .catch((e: unknown) => {
-            setViewActivations({ sid: activeSessionId, names: [] });
-            setShellError(toAppError(e, intl, "shell"));
-            fireShellAsk(fields, question);
-          });
+        setViewActivations({ sid: activeSessionId, names: [] });
+        fireShellAsk(fields, question, intents);
         return;
       }
       if (effectivePendingRuntime.kind === "built_in" && builtInGateOpen) {
@@ -576,11 +558,12 @@ export default function App() {
           ? effectivePendingRuntime.data
           : null;
       const authMode = pendingAuthMode;
-      const activations = coldActivations;
+      const invocations = coldActivations;
       const files = pendingFiles;
       void createSessionWithQuestion(
         question,
-        { runtime, modelPosture, authMode, activations },
+        invocations,
+        { runtime, modelPosture, authMode },
         files,
       ).then((created) => {
         if (created) {
@@ -612,7 +595,6 @@ export default function App() {
       composerFieldsMap,
       setComposerDraft,
       createSessionWithQuestion,
-      materializeActivations,
       sessionActivations,
       coldActivations,
       queryClient,
@@ -624,8 +606,6 @@ export default function App() {
       builtInGateOpen,
       profileKeys.activeProfileId,
       openSettings,
-      intl,
-      setShellError,
     ],
   );
 
@@ -1069,6 +1049,7 @@ export default function App() {
                             pendingIngestPaths={s.pendingIngestPaths}
                             onIngestConsumed={() => clearPendingIngest(s.sid)}
                             pendingQuestion={s.pendingQuestion}
+                            pendingSkillInvocations={s.pendingSkillInvocations}
                             onQuestionConsumed={() =>
                               clearPendingQuestion(s.sid)}
                             onSeedDraft={composer.seedDraft}
@@ -1207,22 +1188,17 @@ export default function App() {
                         draft={composer.draft}
                         setDraft={composer.setDraft}
                         skillPicker={{
-                          sessionId: activeSessionId,
                           onPick: handleSkillPick,
                           chips: {
                             node: (
                               // The skill chips flow inline in the input
-                              // area (the composer-held intents UNION the
-                              // session's activated truth, issue #961); the
-                              // caret seats right after the last chip. A
-                              // component (not a direct hook call) so the
-                              // queries ride the provider subtree.
-                              <SkillChips
-                                sessionId={activeSessionId}
-                                intents={pendingActivations}
-                                onIntentRemove={handleRemoveActivation}
-                                onRemoveError={(e) =>
-                                  setShellError(toAppError(e, intl, "shell"))}
+                              // area and show THIS turn's staging only
+                              // (ADR-0119: the activated-truth union of
+                              // #961 retired with its channel); the caret
+                              // seats right after the last chip.
+                              <ComposerSkillChips
+                                names={pendingActivations}
+                                onRemove={handleRemoveActivation}
                               />
                             ),
                             onBackspace: handleChipBackspace,

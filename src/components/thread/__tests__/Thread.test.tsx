@@ -83,12 +83,6 @@ describe("Thread", () => {
     return { entry: "Turn", data: record };
   }
 
-  // The bare live turn the issue #722 live-path pins mount -- no rounds, no
-  // step: the exchange's head is the surface under test, not its body.
-  function bareLiveTurn(): LiveTurn {
-    return { question: "q", askedAt: 1724232000000, step: null, rounds: [] };
-  }
-
   it("renders a multi-promotion turn as a primary result link + a muted antecedents line (ADR-0084)", () => {
     // A result turn that materialized two results in promotion order: the chain
     // tail (result_2) is the primary -- the clickable result link; the
@@ -591,458 +585,31 @@ describe("Thread", () => {
     });
   });
 
-  it("renders skill lifecycle markers as bare glyph nodes distinct from turn cards (issue #366)", () => {
-    // The two skill lifecycle kinds (Mount / Unmount) ride the timeline
-    // isomorphic to source events but as a distinct species -- non-interactive
-    // glyph-led markers (data-skill-kind + .skill-lifecycle), never turn
-    // cards. Each leads with its kind's bare tone-colored glyph (issue #727
-    // calibration) + an i18n'd verb + the spec name (the stable identity the
-    // timeline carries, never a snapshot) right of the glyph.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
-      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
-    ];
-    const skillIndex = new Map([["pdf-tools", skillEntry("pdf-tools")]]);
-    const { container } = renderThread(
-      <Thread
-        entries={entries}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        skillIndex={skillIndex}
-      />,
-    );
-    // Two distinct markers by kind; never rendered as .turn-entry.
-    const markers = container.querySelectorAll(".skill-entry");
-    expect(Array.from(markers).map((li) => li.getAttribute("data-skill-kind"))).toEqual([
-      "mount",
-      "unmount",
-    ]);
-    expect(container.querySelectorAll(".turn-entry")).toHaveLength(0);
-    // Each kind's i18n'd verb rides one ICU message with the spec name.
-    expect(screen.getByText(/挂载技能「pdf-tools」/)).toBeInTheDocument();
-    expect(screen.getByText(/卸载技能「pdf-tools」/)).toBeInTheDocument();
-    // Issue #721 nodification: the marker row leads with the glyph's node
-    // box (children[0] identity pin -- the verb text follows, "动词右置") and
-    // the retired bar chrome (border-l-2 prefix line + bg-muted fill) must
-    // not survive on the row.
-    const mountRow = container.querySelector(
-      `.skill-entry[data-skill-kind="mount"] .skill-lifecycle`,
-    ) as HTMLElement;
-    expect(mountRow.children[0].className.split(/\s+/)).toContain("skill-node");
-    expect(mountRow.className.split(/\s+/)).not.toContain("border-l-2");
-    expect(mountRow.className.split(/\s+/)).not.toContain("bg-muted");
-    // The row's py-0.5 is the OTHER half of the styles.css geometry
-    // contract (the connector's top: 18px / bottom: -6px derive from node
-    // h-4 w-4 AND row py-0.5); the retired bar's px-1.5 must not return --
-    // horizontal padding would shift the left origin the connector hangs
-    // from.
-    expect(mountRow.className.split(/\s+/)).toContain("py-0.5");
-    expect(mountRow.className.split(/\s+/)).not.toContain("px-1.5");
-    // The node box is chrome-free: the #721 circle (rounded-full + 1px tone
-    // border + bg-background punch) is retired; only the h-4 w-4 geometry
-    // contract the styles.css data-run connector offsets are computed from
-    // remains.
-    const node = (kind: string) =>
-      container.querySelector(
-        `.skill-entry[data-skill-kind="${kind}"] .skill-node`,
-      ) as HTMLElement;
-    for (const cls of ["h-4", "w-4"]) {
-      expect(node("mount").className.split(/\s+/)).toContain(cls);
-    }
-    for (const cls of ["rounded-full", "border", "bg-background"]) {
-      expect(node("mount").className.split(/\s+/)).not.toContain(cls);
-    }
-    // Mount = active tone; Unmount = weakened tone -- the tier mapping rides
-    // the glyph color (the retired circle carried it as a border).
-    // The glyph is an SVG, so read its class via getAttribute -- an SVG's
-    // className is an SVGAnimatedString, not a string.
-    const icon = (kind: string) =>
-      node(kind).querySelector(".skill-icon")?.getAttribute("class")?.split(/\s+/);
-    expect(icon("mount")).toContain("text-primary");
-    expect(icon("unmount")).toContain("text-muted-foreground");
-  });
-
-  it("renders one Activate verb for both actors, the placement carrying the initiator (issues #698/#701/#722)", () => {
-    // ADR-0110: an Activate event renders as the third lifecycle species --
-    // verb + spec name + the primary present-tense tier (same as Mount).
-    // The actor no longer picks the copy (#722): an agent activation renders
-    // inside its owning turn, so both actors share #698's message verbatim;
-    // the retired agent-specific copy is gone from the visible timeline (the
-    // tooltip discloses the initiator instead).
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Activate", name: "pdf-tools", actor: "User" } },
-      { entry: "Skill", data: { kind: "Activate", name: "sql-coach", actor: "Agent" } },
-    ];
-    const skillIndex = new Map([["pdf-tools", skillEntry("pdf-tools")]]);
-    const { container } = renderThread(
-      <Thread
-        entries={entries}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        skillIndex={skillIndex}
-      />,
-    );
-    expect(screen.getByText(/激活技能「pdf-tools」/)).toBeInTheDocument();
-    expect(screen.getByText(/激活技能「sql-coach」/)).toBeInTheDocument();
-    expect(screen.queryByText(/Agent 激活技能/)).toBeNull();
-    // Activate shares Mount's primary present-tense tier; the tone rides the
-    // glyph color.
-    const node = container.querySelector(
-      `.skill-entry[data-skill-kind="activate"] .skill-node`,
-    ) as HTMLElement;
-    expect(node).not.toBeNull();
-    expect(
-      node.querySelector(".skill-icon")?.getAttribute("class")?.split(/\s+/),
-    ).toContain("text-primary");
-  });
-
-  it("renders an agent activation at the head of its owning turn's stream (D5, issue #722)", () => {
-    // The backend inserts an agent activation at occurrence -- inside the
-    // turn that settles after it -- so the marker renders at the head of the
-    // owning turn's assistant stream (question bubble -> activation -> card),
-    // not as a standalone timeline row and never above the turn.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-      turnEntry(materializedRecord("result_1", null)),
-    ];
-    const { container } = renderThread(
-      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
-    );
-    // No standalone row: the activation lives inside the turn li, opening the
-    // assistant stream ahead of the outcome body.
-    expect(container.querySelector("ol > .skill-entry")).toBeNull();
-    const stream = container.querySelector(".turn-entry .assistant-stream") as HTMLElement;
-    const head = stream.firstElementChild as HTMLElement;
-    expect(head.className.split(/\s+/)).toContain("agent-activation");
-    expect(head.querySelector(".skill-node")).not.toBeNull();
-  });
-
-  it("absorbed activations break standalone runs like turns do (issue #722)", () => {
-    // The absorbed activation renders inside the turn, so the user events on
-    // either side are lone standalone nodes -- the line never crosses the
-    // turn that swallowed the middle event.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
-      turnEntry(materializedRecord("result_1", null)),
-    ];
-    const { container } = renderThread(
-      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
-    );
-    const marks = Array.from(container.querySelectorAll(".skill-entry")).map((li) =>
-      li.getAttribute("data-run"),
-    );
-    expect(marks).toEqual(["single", "single"]);
-    expect(container.querySelector(".turn-entry .agent-activation .skill-node")).not.toBeNull();
-  });
-
-  it("renders an in-flight activation at the live exchange's head (issue #722)", () => {
-    // While a turn runs, its activation has no Turn entry yet (the Turn
-    // lands at settle) -- the marker opens the live exchange's assistant
-    // stream, the same slot the settled turn's agentHead occupies, not a
-    // standalone timeline row.
-    const entries: ThreadEntry[] = [
-      turnEntry(materializedRecord("result_1", null)),
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-    ];
-    const liveTurn = bareLiveTurn();
-    const { container } = renderThread(
-      <Thread
-        entries={entries}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        liveTurn={liveTurn}
-      />,
-    );
-    // No standalone row: the activation lives inside the live exchange.
-    expect(container.querySelector("ol > .skill-entry")).toBeNull();
-    const stream = container.querySelector(".live-turn-exchange .assistant-stream") as HTMLElement;
-    const head = stream.firstElementChild as HTMLElement;
-    expect(head.className.split(/\s+/)).toContain("agent-activation");
-    expect(head.querySelector(".skill-node")).not.toBeNull();
-  });
-
-  it("swaps live-owned activations into the settled turn's head in order (issue #722)", () => {
-    // Two activations stream into the running turn's head (array order); at
-    // settle the Turn entry lands and owns them in the same order -- the
-    // swap moves the markers as a block without reordering.
-    const base: ThreadEntry[] = [
-      turnEntry(materializedRecord("result_1", null)),
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-      { entry: "Skill", data: { kind: "Activate", name: "web-search", actor: "Agent" } },
-    ];
-    const liveTurn = bareLiveTurn();
-    const { container, rerender } = renderThread(
-      <Thread
-        entries={base}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        liveTurn={liveTurn}
-      />,
-    );
-    const activationTexts = () =>
-      Array.from(container.querySelectorAll(".agent-activation .skill-text")).map(
-        (el) => el.textContent,
-      );
-    expect(activationTexts()).toEqual(["激活技能「python」", "激活技能「web-search」"]);
-    // Settle: the live exchange folds away, the Turn entry appends owning
-    // both activations in the same order (the same single rerender the
-    // settle swap performs).
-    rerender(
-      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-        <TooltipProvider>
-          <Thread
-            entries={[...base, turnEntry(materializedRecord("result_2", null))]}
-            selectedResult={null}
-            onSelectResult={() => {}}
-            liveTurn={null}
-          />
-        </TooltipProvider>
-      </IntlProvider>,
-    );
-    expect(container.querySelector(".live-turn-exchange")).toBeNull();
-    expect(activationTexts()).toEqual(["激活技能「python」", "激活技能「web-search」"]);
-    // The host is the newly settled turn's card (the owning turn).
-    const turns = container.querySelectorAll(".turn-entry");
-    expect(turns).toHaveLength(2);
-    expect(turns[1].querySelectorAll(".agent-activation")).toHaveLength(2);
-  });
-
-  it("degrades an ownerless activation to a standalone row when nothing hosts it (issue #722)", () => {
-    // The resume inconsistency edge: no Turn entry follows and no live turn
-    // runs -- the event stays honest as a top-level marker rather than
-    // vanishing into a turn it cannot be attributed to.
-    const entries: ThreadEntry[] = [
-      turnEntry(materializedRecord("result_1", null)),
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-    ];
-    const { container } = renderThread(
-      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
-    );
-    const li = container.querySelector(".skill-entry") as HTMLElement;
-    expect(li).not.toBeNull();
-    expect(li.getAttribute("data-run")).toBe("single");
-    expect(container.querySelector(".turn-entry .agent-activation")).toBeNull();
-  });
-
-  it("keeps the agent activation ahead of the dataset chip in both hosts across the settle swap (issue #722)", () => {
-    // The reading order DESIGN.md's chat-exchange defines -- the
-    // agent-activation head opens the stream, the dataset chip (stream
-    // header) follows -- must hold in the live exchange AND the settled
-    // card, so the swap never moves the one past the other. Naming a
-    // dataset mounts the chip; without it the head is only pinned against
-    // an empty stream.
-    const labels = [{ reference_name: "people", display_name: "员工表" }];
-    const base: ThreadEntry[] = [
-      turnEntry(materializedRecord("result_1", null)),
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-    ];
-    const liveTurn: LiveTurn = {
-      question: "在员工表上统计",
-      askedAt: 1724232000000,
-      step: null,
-      rounds: [],
-    };
-    const { container, rerender } = renderThread(
-      <Thread
-        entries={base}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        datasetLabels={labels}
-        liveTurn={liveTurn}
-      />,
-    );
-    // Live half: the chip is present (guards the guard -- the order pins
-    // are vacuous without it) and the activation opens ahead of it.
-    const liveStream = container.querySelector(
-      ".live-turn-exchange .assistant-stream",
-    ) as HTMLElement;
-    expect(liveStream.querySelector(".turn-active-chip")).not.toBeNull();
-    const liveChildren = Array.from(liveStream.children);
-    expect(liveChildren[0].className).toContain("agent-activation");
-    expect(liveChildren[1].className).toContain("stream-header");
-    // Settle: the appended Turn owns the activation and its question names
-    // the same dataset (the chip renders settled) -- the order must survive.
-    const settledRecord: TurnRecord = {
-      question: "在员工表上统计",
-      outcome: { kind: "Cancelled", data: null },
-      trace: [],
-      provenance: { skills: [] },
-    };
-    rerender(
-      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-        <TooltipProvider>
-          <Thread
-            entries={[...base, turnEntry(settledRecord)]}
-            selectedResult={null}
-            onSelectResult={() => {}}
-            datasetLabels={labels}
-          />
-        </TooltipProvider>
-      </IntlProvider>,
-    );
-    expect(container.querySelector(".live-turn-exchange")).toBeNull();
-    const turns = container.querySelectorAll(".turn-entry");
-    expect(turns).toHaveLength(2);
-    const settledStream = turns[1].querySelector(".assistant-stream") as HTMLElement;
-    expect(settledStream.querySelector(".turn-active-chip")).not.toBeNull();
-    const settledChildren = Array.from(settledStream.children);
-    expect(settledChildren[0].className).toContain("agent-activation");
-    expect(settledChildren[1].className).toContain("stream-header");
-  });
-
-  it("groups each turn's activations under it, not only the last owner (issue #722)", () => {
-    // The steady state of a long session: every turn's agent activates
-    // what it needs, so two turns each own their own activations. The
-    // grouping must give each owner its own head -- a merge into one owner
-    // would strand the first turn's activation hostless.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-      turnEntry(materializedRecord("result_1", null)),
-      { entry: "Skill", data: { kind: "Activate", name: "web-search", actor: "Agent" } },
-      { entry: "Skill", data: { kind: "Activate", name: "sql-coach", actor: "Agent" } },
-      turnEntry(materializedRecord("result_2", null)),
-    ];
-    const { container } = renderThread(
-      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
-    );
-    const activationTexts = (scope: Element) =>
-      Array.from(scope.querySelectorAll(".agent-activation .skill-text")).map(
-        (el) => el.textContent,
-      );
-    const turns = container.querySelectorAll(".turn-entry");
-    expect(turns).toHaveLength(2);
-    expect(activationTexts(turns[0])).toEqual(["激活技能「python」"]);
-    expect(activationTexts(turns[1])).toEqual(["激活技能「web-search」", "激活技能「sql-coach」"]);
-    // No activation falls back to a standalone row while its owner renders.
-    expect(container.querySelectorAll("ol > .skill-entry")).toHaveLength(0);
-  });
-
-  it("discloses the agent initiator in the tooltip while the visible copy stays unified (issue #722)", async () => {
-    // The placement carries the actor: both actors share the single Activate
-    // verb in the visible copy (the agent-specific variant retired), and the
-    // tooltip names the initiator -- the disclosure that survives where the
-    // placement cannot speak (e.g. the degraded standalone row).
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Activate", name: "python", actor: "Agent" } },
-    ];
-    const { container } = renderThread(
-      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
-    );
-    const markerText = container.querySelector(
-      `.skill-entry[data-skill-kind="activate"] .skill-text`,
-    ) as HTMLElement;
-    expect(markerText.textContent).toBe("激活技能「python」");
-    fireEvent.pointerMove(markerText);
-    await waitFor(() => {
-      const tip = screen.getByRole("tooltip");
-      expect(tip.textContent).toContain("由 Agent 发起");
-    });
-  });
-
-  it("keeps the byAgent disclosure off a user activation's tooltip (issue #722)", async () => {
-    // The negative half of the disclosure: the tooltip names the initiator
-    // only when the agent initiated. A dropped actor guard would stamp the
-    // byAgent suffix on every activation, permanently misattributing the
-    // user's own (the file's convention pins the negative branch too).
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Activate", name: "pdf-tools", actor: "User" } },
-    ];
-    const { container } = renderThread(
-      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
-    );
-    const markerText = container.querySelector(
-      `.skill-entry[data-skill-kind="activate"] .skill-text`,
-    ) as HTMLElement;
-    expect(markerText.textContent).toBe("激活技能「pdf-tools」");
-    fireEvent.pointerMove(markerText);
-    // The tooltip carries the verb alone -- no initiator disclosure, no
-    // other suffix (the registry is not wired and the skill declares
-    // nothing), so the exact text pins the absence.
-    await waitFor(() => {
-      expect(screen.getByRole("tooltip").textContent).toBe("激活技能「pdf-tools」");
-    });
-  });
-
-  it("flags a skill the registry no longer carries with a missing-skill warning (issue #366)", () => {
-    // Resume honest-degrade (ADR-0086): a Mount/Unmount event whose name left
-    // the registry (deleted / renamed / external library uninstalled) renders
-    // a destructive tone + a warning glyph + a "已不存在" suffix. The event
-    // stays in the timeline (it happened) but the reader sees the skill is
-    // gone; the base text keeps the verbatim name (the timeline's record).
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "ghost-skill", actor: null } },
-    ];
-    // Empty registry: "ghost-skill" is not carried.
-    const skillIndex = new Map<string, SkillEntry>();
-    const { container } = renderThread(
-      <Thread
-        entries={entries}
-        selectedResult={null}
-        onSelectResult={() => {}}
-        skillIndex={skillIndex}
-      />,
-    );
-    const marker = container.querySelector(
-      `.skill-entry[data-skill-kind="mount"] .skill-lifecycle`,
-    ) as HTMLElement;
-    const node = container.querySelector(
-      `.skill-entry[data-skill-kind="mount"] .skill-node`,
-    ) as HTMLElement;
-    // Missing overrides the kind tone: the destructive tier lands on the
-    // glyph while the warning text tone stays on the row.
-    expect(
-      node.querySelector(".skill-icon")?.getAttribute("class")?.split(/\s+/),
-    ).toContain("text-destructive");
-    expect(marker.className.split(/\s+/)).toContain("text-destructive");
-    expect(screen.getByText(/已不存在/)).toBeInTheDocument();
-  });
-
-  it("renders skill markers from the event alone when no registry index is wired (issue #366)", () => {
-    // Honest degrade: a call site that does not pass skillIndex still gets a
-    // readable marker (verb + name from the event). Without a registry to
-    // check against, NO missing-skill warning is raised and NO MCP detail is
-    // promised -- the timeline is always readable, the registry only enriches.
-    const entries: ThreadEntry[] = [
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
-    ];
-    const { container } = renderThread(
-      <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
-    );
-    expect(screen.getByText(/挂载技能「pdf-tools」/)).toBeInTheDocument();
-    expect(screen.queryByText(/已不存在/)).not.toBeInTheDocument();
-    // No tooltip provider lookup needed -- the marker text is the bare verb.
-    expect(container.querySelector(".skill-entry")).not.toBeNull();
-  });
-
   it("marks lifecycle runs first/mid/last/single; a turn always breaks the run (issue #721)", () => {
-    // The run connector (issue #721): consecutive lifecycle events form
-    // maximal runs -- skill and source count as ONE contiguous species, and a
-    // turn ALWAYS breaks the run. The connector expression rides data-run on
-    // the marker <li>: first/mid connect down to the next node (styles.css
-    // ::before), last/single draw nothing. A turn never enters a run -- it
-    // carries no data-run and no node, so it neither rides nor indents the
-    // line.
+    // The run connector (issue #721): consecutive source events form maximal
+    // runs, and a turn ALWAYS breaks the run. The connector expression rides
+    // data-run on the marker <li>: first/mid connect down to the next node
+    // (styles.css ::before), last/single draw nothing. A turn never enters a
+    // run -- it carries no data-run and no node, so it neither rides nor
+    // indents the line.
     const entries: ThreadEntry[] = [
       { entry: "Source", data: { kind: "Added", reference_name: "people", display_name: "员工表" } },
-      { entry: "Skill", data: { kind: "Mount", name: "pdf-tools", actor: null } },
       { entry: "Source", data: { kind: "Deleted", reference_name: "people", display_name: "员工表" } },
+      { entry: "Source", data: { kind: "Replaced", reference_name: "people", display_name: "员工表" } },
       turnEntry(materializedRecord("result_1", null)),
       { entry: "Source", data: { kind: "Replaced", reference_name: "orders", display_name: "订单表" } },
       turnEntry(materializedRecord("result_2", null)),
-      { entry: "Skill", data: { kind: "Unmount", name: "pdf-tools", actor: null } },
       { entry: "Source", data: { kind: "Deleted", reference_name: "orders", display_name: "订单表" } },
+      { entry: "Source", data: { kind: "Added", reference_name: "orders", display_name: "订单表" } },
     ];
     const { container } = renderThread(
       <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
     );
-    // The head run spans BOTH species (mixed contiguity): first/mid/last; the
-    // lone event between the turns is single; the tail mixed pair is
-    // first/last. A regression that connects across a turn, splits mixed
-    // species, or miscounts the singleton turns one of these red.
+    // The head run: first/mid/last; the lone event between the turns is
+    // single; the tail pair is first/last. A regression that connects across
+    // a turn or miscounts the singleton turns one of these red.
     const markers = Array.from(
-      container.querySelectorAll(".skill-entry, .source-entry"),
+      container.querySelectorAll(".source-entry"),
     ) as HTMLElement[];
     expect(markers.map((li) => li.getAttribute("data-run"))).toEqual([
       "first",
@@ -1055,7 +622,7 @@ describe("Thread", () => {
     // The turns between the runs carry no data-run and no node slot.
     for (const turnLi of Array.from(container.querySelectorAll(".turn-entry"))) {
       expect(turnLi.hasAttribute("data-run")).toBe(false);
-      expect(turnLi.querySelector(".skill-node, .source-node")).toBeNull();
+      expect(turnLi.querySelector(".source-node")).toBeNull();
     }
   });
 
@@ -1822,6 +1389,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "统计一下",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: null,
         rounds: [],
       };
@@ -1845,6 +1413,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 2,
         rounds: [],
       };
@@ -1858,6 +1427,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 2,
         rounds: [
           liveRound({
@@ -1920,6 +1490,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 3,
         rounds: [
           liveRound({ text: "先看一眼数据。" }),
@@ -1953,6 +1524,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 2,
         rounds: [liveRound({ rows: [liveRow({ key: "call-0", running: false, success: true })] })],
       };
@@ -1966,6 +1538,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 1,
         rounds: [
           liveRound({
@@ -2010,6 +1583,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 1,
         rounds: [
           liveRound({
@@ -2043,6 +1617,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "第一问",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: null,
         rounds: [],
       };
@@ -2064,6 +1639,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "在员工表上统计总销售额",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: null,
         rounds: [],
       };
@@ -2114,6 +1690,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "随便看看",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: null,
         rounds: [],
       };
@@ -2142,6 +1719,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 2,
         rounds: [
           liveRound({ thinking: openedThinking, text: "先看一眼数据。" }),
@@ -2205,6 +1783,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 3,
         rounds: [
           // The round the projection drops: a pending card that never
@@ -2271,6 +1850,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 1,
         rounds: [liveRound({ thinking })],
       };
@@ -2312,6 +1892,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 1,
         rounds: [liveRound({ thinking: openedThinking })],
       };
@@ -2378,6 +1959,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 1,
         rounds: [liveRound({ thinking: firstThinking })],
       };
@@ -2435,6 +2017,7 @@ describe("Thread", () => {
       const liveTurn: LiveTurn = {
         question: "q",
         askedAt: ASKED_AT,
+        invocationNames: [],
         step: 1,
         rounds: [liveRound({ thinking })],
       };
@@ -2493,6 +2076,7 @@ describe("Thread", () => {
           liveTurn={{
             question: "问甲",
             askedAt: ASKED_AT,
+            invocationNames: [],
             step: 1,
             rounds: [liveRound({ thinking: thinkingA })],
           }}
@@ -2527,6 +2111,7 @@ describe("Thread", () => {
               liveTurn={{
                 question: "问乙",
                 askedAt: ASKED_AT + 1000,
+                invocationNames: [],
                 step: 1,
                 rounds: [liveRound({ thinking: thinkingB })],
               }}
@@ -2934,10 +2519,6 @@ describe("Thread", () => {
       entry: "Source",
       data: { kind: "Replaced", reference_name: name, display_name: display },
     });
-    const mount = (name: string): ThreadEntry => ({
-      entry: "Skill",
-      data: { kind: "Mount", name, actor: null },
-    });
 
     it("folds a same-kind run at the threshold into one collapsed row; below it stays scatter", () => {
       // Three Added events (a sequential ingest) collapse to ONE row
@@ -3003,11 +2584,11 @@ describe("Thread", () => {
       // across it; a lone fold (single) carries none -- there is no line to
       // conduct.
       const midRunEntries: ThreadEntry[] = [
+        replaced("a", "甲"),
         added("a", "甲"),
-        mount("s1"),
-        mount("s2"),
-        mount("s3"),
         added("b", "乙"),
+        added("c", "丙"),
+        replaced("b", "乙"),
       ];
       const midRun = renderThread(
         <Thread
@@ -3027,7 +2608,12 @@ describe("Thread", () => {
         midRun.container.querySelector(".lifecycle-fold-entry")?.getAttribute("data-run"),
       ).toBe("mid");
 
-      const loneEntries: ThreadEntry[] = [turnEntry(materializedRecord("result_1", null)), mount("s1"), mount("s2"), mount("s3")];
+      const loneEntries: ThreadEntry[] = [
+        turnEntry(materializedRecord("result_1", null)),
+        added("a", "甲"),
+        added("b", "乙"),
+        added("c", "丙"),
+      ];
       const lone = renderThread(
         <Thread
           entries={loneEntries}
@@ -3043,35 +2629,6 @@ describe("Thread", () => {
       expect(
         lone.container.querySelector(".lifecycle-fold-entry")?.getAttribute("data-run"),
       ).toBe("single");
-    });
-
-    it("aggregates the drift count onto a skill fold; expanded members keep their warnings", () => {
-      // A Mount fold whose registry misses two of three names carries the
-      // destructive drift suffix; expanding keeps the individual per-name
-      // warnings on the scatter rows.
-      const skillIndex = new Map([["keep", skillEntry("keep")]]);
-      const { container } = renderThread(
-        <Thread
-          entries={[mount("keep"), mount("gone"), mount("lost")]}
-          selectedResult={null}
-          onSelectResult={() => {}}
-          skillIndex={skillIndex}
-        />,
-      );
-      const foldBtn = screen.getByRole("button", { name: /挂载 3 个技能.*2 个已不存在/ });
-      fireEvent.click(foldBtn);
-      // The combined row names all three members side by side; the two
-      // missing ones keep their individual drift notes beside their names.
-      const names = container.querySelectorAll(
-        ".lifecycle-fold-members span[data-entry-idx]",
-      );
-      expect(Array.from(names).map((n) => n.textContent)).toEqual([
-        "keep",
-        "gone · 已不存在",
-        "lost · 已不存在",
-      ]);
-      // The fold suffix plus the two member notes: three disclosures.
-      expect(screen.getAllByText(/已不存在/)).toHaveLength(3);
     });
 
     it("sums the invalidation counts onto the fold row; expanded members keep their counts", () => {

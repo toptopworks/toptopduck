@@ -5,7 +5,6 @@
 // events, and persisted session sidebar metadata.
 
 import type { OperationKind } from "./approval";
-import type { SkillMountError } from "./skills";
 import type { ThinkingTrace, TraceEntry } from "./thread";
 
 // --- Session-scoped command errors ---------------------------------------
@@ -18,9 +17,8 @@ import type { ThinkingTrace, TraceEntry } from "./thread";
 // matching backend Chinese. `Resume` wraps the typed `ResumeError` (issue #120);
 // `RemoveSource` / `RenameDataset` / `RenameSession` / `Turn` wrap their typed
 // source-management sub-errors (issue #121), recursed by the frontend the same
-// way; `SkillMount` wraps the typed `SkillMountError` (issue #363); `Engine`
-// is the catch-all for internal failures and carries a free-text detail under
-// `data` (technical, never an API key per ADR-0029).
+// way; `Engine` is the catch-all for internal failures and carries a free-text
+// detail under `data` (technical, never an API key per ADR-0029).
 export type SessionError =
   | { kind: "InvalidId" }
   | { kind: "NotFound" }
@@ -31,7 +29,6 @@ export type SessionError =
   | { kind: "RenameDataset"; data: RenameError }
   | { kind: "RenameSession"; data: RenameSessionError }
   | { kind: "Turn"; data: RowReadError }
-  | { kind: "SkillMount"; data: SkillMountError }
   | { kind: "Export"; data: ExportRowsError }
   | { kind: "Engine"; data: string };
 

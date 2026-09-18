@@ -126,7 +126,7 @@ function rigRail(rail: HTMLElement) {
 }
 
 function makeLiveTurn(): LiveTurn {
-  return { question: "q", askedAt: 0, step: null, rounds: [] };
+  return { question: "q", askedAt: 0, invocationNames: [], step: null, rounds: [] };
 }
 
 // The hook owns the rail ref, so the host attaches it to a real element --

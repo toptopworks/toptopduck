@@ -65,7 +65,7 @@ describe("buildSidebarGroups", () => {
   it("merges an open binding into its persisted row (sid set) and marks active", () => {
     const persisted = [meta("/a.duck", "alpha", 0)];
     const open: OpenSession[] = [
-      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPaths: [], pendingQuestion: null },
+      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const groups = buildSidebarGroups(persisted, open, "uuid-a", NOW, "time");
@@ -103,7 +103,7 @@ describe("buildSidebarGroups", () => {
     // in the list_sessions result (async refetch). It becomes a standalone
     // entry stamped to `now` until the persisted list catches up.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null },
+      { sid: "uuid-new", name: "", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const groups = buildSidebarGroups([], open, "uuid-new", NOW, "time");
@@ -125,7 +125,7 @@ describe("buildSidebarGroups", () => {
       meta("/b.duck", "beta", 0),
     ];
     const open: OpenSession[] = [
-      { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null },
+      { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const groups = buildSidebarGroups(persisted, open, "uuid-b", NOW, "time");
@@ -171,7 +171,7 @@ describe("buildSidebarGroups", () => {
     // active/open semantics are identical to time mode.
     const persisted = [meta("/a.duck", "alpha", 0), meta("/b.duck", "beta", 5)];
     const open: OpenSession[] = [
-      { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null },
+      { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const groups = buildSidebarGroups(persisted, open, "uuid-b", NOW, "flat");
@@ -277,7 +277,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // activate-by-sid instead of re-resuming) and reflects the in-memory name
     // (a rename mid-flight lands without waiting for list_sessions to refresh).
     const open: OpenSession[] = [
-      { sid: "uuid-b", name: "beta renamed", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null },
+      { sid: "uuid-b", name: "beta renamed", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     const entries = buildSearchEntries(twoPersisted(), open, "uuid-b", "");
     const beta = entries.find((e) => e.path === "/b.duck");
@@ -296,7 +296,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // appears here even when it is the active session. The sidebar still lists
     // it; the modal is a persisted-session jump surface.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "unsaved", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null },
+      { sid: "uuid-new", name: "unsaved", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     const entries = buildSearchEntries(twoPersisted(), open, "uuid-new", "");
     expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);

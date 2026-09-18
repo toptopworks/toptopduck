@@ -265,24 +265,20 @@ pub fn create_session(
         // persists it (ADR-0100 Decision 1; see the helper's doc).
         apply_startup_posture(&handle, &posture)?;
         let mut s = handle.session_lock()?;
-        // Mount seeding (issue #961, ADR-0118 Decision 1; the #677 builtin
-        // auto-include generalized): the registry INTERSECT the enablement
-        // axis seeds the folded active set's INITIAL state -- no Mount
-        // event, no timeline entry, nothing persisted (the recipe stays
-        // event-only). A materialized builtin additionally requires its
+        // Discovery snapshot (issue #961, ADR-0118 Decision 1; the #677
+        // builtin auto-include generalized; ADR-0119 Decision 3, issue
+        // #983): the registry INTERSECT the enablement axis materializes
+        // the session's discovery snapshot -- the enabled set at creation,
+        // immutable within the session, persisted explicitly in the recipe
+        // header. A materialized builtin additionally requires its
         // companion CLI entry detected + enabled (the two-axis conjunction);
         // the materialized gate is the side-table mark (the same anchor the
         // frontend's `acquired: builtin` derives from) -- the mark gates the
         // BUILTIN arm only: a reverse-conflict user file reads `acquired:
-        // local` and rides the user arm, seeded like any user skill unless
-        // disabled (ADR-0118 Decision 1).
+        // local` and rides the user arm, discoverable like any user skill
+        // unless disabled (ADR-0118 Decision 1).
         let cfg = live.load();
         let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
-        // ADR-0119 Decision 3 (issue #983): the same enabled-set computation
-        // materializes the discovery snapshot explicitly (immutable within
-        // the session) alongside the legacy mount-fold seed -- both consume
-        // this one seed, so they can never disagree at birth.
-        s.seed_initial_skills(seed.clone());
         s.set_discovery_snapshot(seed);
         s.bind_duck(duck_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
@@ -915,19 +911,19 @@ struct AssembledTurnInputs<'a> {
     keychain: &'a crate::provider::keychain::KeychainStore,
 }
 
-/// Read the session's mounted + activated skill sets and resolve the mounted
-/// names into prompt fragments (name + description + verbatim body +
+/// Read the session's discovery snapshot (ADR-0119 Decision 3) and resolve
+/// its names into prompt fragments (name + description + verbatim body +
 /// whole-file SHA-256) against the registry root, here at the command
 /// boundary where the root lives, so the session stays I/O-free for skill
 /// content (it consumes fragments, mirroring the mcp_servers "data passed in"
-/// pattern). The caller must hold the session lock, so neither set can
-/// change between this read and the turn. The activated names (ADR-0110,
-/// issue
-/// #700) are the L1/L2 sort key for the disclosure rendering and the
-/// provenance's activated-subset filter. One seam so neither set read nor the
-/// `TurnInputs` field wiring can silently pass the wrong set (issue #707's
-/// wiring pin) -- the black-box tests hand-assemble their inputs, which left
-/// the command body itself uncovered.
+/// pattern). The user's staged invocation names materialize here too
+/// (ADR-0119 Decision 1: the body + hash pin the invocation-time bytes at
+/// the submit boundary). The caller must hold the session lock, so the
+/// snapshot cannot change between this read and the turn. One seam so
+/// neither snapshot read nor the `TurnInputs` field wiring can silently pass
+/// the wrong set (issue #707's wiring pin) -- the black-box tests
+/// hand-assemble their inputs, which left the command body itself
+/// uncovered.
 fn assemble_turn_inputs<'a>(
     session: &Session,
     skills_root: &'a Path,
@@ -2152,7 +2148,6 @@ pub async fn open_duck(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
-    skills_root: State<'_, SkillsRoot>,
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
@@ -2207,21 +2202,6 @@ pub async fn open_duck(
     // closure; the snapshot is plain data) and the auto-include fold below.
     let cfg = live.load();
     let engine_defaults = cfg.engine.clone();
-    // Auto-include recomputed at resume (issue #677, ADR-0109 Decision 6):
-    // a tool disabled since the session last ran drops its skill from the
-    // initial set; the recipe's own Mount/Unmount events still fold over
-    // the initial set, so an explicit in-session unmount keeps winning. The
-    // materialized gate (the side-table mark, mirroring the creation path)
-    // keeps a reverse-conflict user file out.
-    // Issue #961 (ADR-0118 Decision 7) keeps this resume seed BUILTIN-ONLY:
-    // the general registry∩enabled seed feeds session creation alone, so a
-    // resumed session never absorbs newly enabled USER skills (the frozen
-    // capability face -- the picker is the escape hatch).
-    let auto_skills = crate::skills::builtin::auto_included_names(
-        &live.cli_tools(),
-        &crate::skills::BuiltinSkillMark::from_config(&cfg),
-        &skills_root.0,
-    );
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_duck(
             &path,
@@ -2293,7 +2273,6 @@ pub async fn open_duck(
         let stale_duck = s.duck_path().map(|p| p.to_path_buf());
         let stale_was_empty = s.is_timeline_empty();
         *s = new_session;
-        s.seed_initial_skills(auto_skills.clone());
         // Release the session lock before filesystem cleanup.
         drop(s);
         // The resumed postures in one batch: the security-plane resets
@@ -3665,117 +3644,6 @@ fn build_skill_source_candidates(
     candidates
 }
 
-// --- Skills mount / unmount (issue #363, ADR-0086) --------------------------
-//
-// Session-SCOPED skill lifecycle (distinct from the registry CRUD above): the
-// backend records each Mount / Unmount on the session timeline + folds the
-// active set from the event sequence (no snapshot). The frontend's `loading`
-// flag is the primary defense against mounting / unmounting during a turn;
-// `reject_if_in_flight` is the Rust-side backstop (a second window / IPC
-// replay / automation that triggers mount while an approval-pending turn
-// holds the session lock). Rejects are the typed
-// [`SkillMountError`](crate::session::skills::SkillMountError) (wrapped in
-// [`SessionError::SkillMount`]) so the frontend renders each refusal through
-// the locale catalog.
-
-/// Mount a skill into the session's active set (issue #363, ADR-0086). Appends
-/// a `Mount` event to the timeline + atomically persists the recipe. Refuses a
-/// redundant mount (`AlreadyMounted`) and rejects during resume / an in-flight
-/// turn (the loading gate, AC #5).
-#[tauri::command]
-pub fn mount_skill(
-    store: State<'_, Arc<SessionStore>>,
-    session_id: String,
-    name: String,
-) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    reject_if_in_flight(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.mount_skill(&name).map_err(SessionError::SkillMount)?;
-    Ok(())
-}
-
-/// Unmount a skill from the session's active set (issue #363, ADR-0086).
-/// Appends an `Unmount` event + atomically persists. Refuses an unmount of a
-/// name not in the set (`NotMounted`) and rejects during resume / an in-flight
-/// turn (the loading gate, AC #5).
-#[tauri::command]
-pub fn unmount_skill(
-    store: State<'_, Arc<SessionStore>>,
-    session_id: String,
-    name: String,
-) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    reject_if_in_flight(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.unmount_skill(&name).map_err(SessionError::SkillMount)?;
-    Ok(())
-}
-
-/// The session's currently-mounted skill names, in first-mount insertion order
-/// (issue #363). Read-only; the frontend uses this to render the active-set
-/// chip list + drive the mount/unmount button states. The fold over the
-/// timeline is the source of truth; this returns the live memoization.
-#[tauri::command]
-pub fn list_mounted_skills(
-    store: State<'_, Arc<SessionStore>>,
-    session_id: String,
-) -> Result<Vec<String>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    let s = handle.session_lock()?;
-    Ok(s.mounted_skills())
-}
-
-/// Activate a MOUNTED skill into the session's activated subset (issue #698,
-/// ADR-0110 Decision 2). Appends an `Activate` event (carrying the user
-/// actor) + atomically persists. A name not in the mounted set is a typed
-/// refuse (`NotMountedForActivation`, no event); a repeat activation is
-/// idempotent success with no second event (Decision 3). Rejects during
-/// resume / an in-flight turn -- the same loading gate as the mount
-/// commands. This ticket exposes the channel only; the user-visible
-/// affordance rides #699, the agent channel + body-return semantics #701.
-#[tauri::command]
-pub fn activate_skill(
-    store: State<'_, Arc<SessionStore>>,
-    session_id: String,
-    name: String,
-) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    reject_if_in_flight(&handle)?;
-    let mut s = handle.session_lock()?;
-    // The user channel: the IPC command always records the User actor (the
-    // agent channel -- actor Agent -- is the gateway meta-tool, issue #701;
-    // both ride the same Session::activate_skill transition).
-    s.activate_skill(&name, crate::model::SkillLifecycleActor::User)
-        .map_err(SessionError::SkillMount)?;
-    Ok(())
-}
-
-/// The session's currently-ACTIVATED skill names, in first-activation
-/// insertion order (issue #698, ADR-0110). Read-only mirror of
-/// [`list_mounted_skills`]'s write/read split; the timeline fold is the
-/// source of truth, this returns the live memoization (always a subset of
-/// the mounted set).
-#[tauri::command]
-pub fn list_activated_skills(
-    store: State<'_, Arc<SessionStore>>,
-    session_id: String,
-) -> Result<Vec<String>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    reject_if_resuming(&handle)?;
-    let s = handle.session_lock()?;
-    Ok(s.activated_skills())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4730,110 +4598,6 @@ mod tests {
 
     // --- Skill lifecycle command wiring (issue #363, ADR-0086) -------------
 
-    /// `mount_skill`'s command body routes `Session::mount_skill`'s typed
-    /// `SkillMountError` through `.map_err(SessionError::SkillMount)`. The
-    /// command's `State` arg blocks a direct call (same approach as
-    /// set_privacy_unknown_reference above), so exercise the mapping at the
-    /// layer the command wraps. AC#5's loading gate (resuming / in-flight) is
-    /// pinned by `reject_if_resuming_blocks_while_the_session_is_resuming` and
-    /// `second_ask_on_same_session_rejects_while_one_is_in_flight` above; the
-    /// command body's `?` propagation is compile-time enforced, so a dropped
-    /// reject fails the build rather than silently passing the gate.
-    #[test]
-    fn mount_skill_command_maps_already_mounted_to_session_skill_mount_error() {
-        let store = SessionStore::new();
-        let id = store
-            .create(
-                Arc::new(CancelToken::new()),
-                Box::new(crate::UnwiredProvider),
-                Default::default(),
-            )
-            .expect("create session");
-        let handle = store.get(&id).expect("handle");
-        let mut s = handle.session_lock().expect("lock");
-        s.mount_skill("sql-coach").expect("first mount");
-        // Reproduce the command body's `.map_err(SessionError::SkillMount)`
-        // wrapping (the `State` arg blocks calling the command directly).
-        let err = s
-            .mount_skill("sql-coach")
-            .map_err(SessionError::SkillMount)
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SessionError::SkillMount(
-                    crate::session::skills::SkillMountError::AlreadyMounted { ref name }
-                ) if name == "sql-coach"
-            ),
-            "expected SessionError::SkillMount(AlreadyMounted), got {err:?}",
-        );
-    }
-
-    /// `unmount_skill`'s command body routes `Session::unmount_skill`'s typed
-    /// `SkillMountError` through the same `.map_err(SessionError::SkillMount)`
-    /// wrapping; the `NotMounted` refuse is symmetric with `AlreadyMounted`.
-    #[test]
-    fn unmount_skill_command_maps_not_mounted_to_session_skill_mount_error() {
-        let store = SessionStore::new();
-        let id = store
-            .create(
-                Arc::new(CancelToken::new()),
-                Box::new(crate::UnwiredProvider),
-                Default::default(),
-            )
-            .expect("create session");
-        let handle = store.get(&id).expect("handle");
-        let mut s = handle.session_lock().expect("lock");
-        let err = s
-            .unmount_skill("ghost")
-            .map_err(SessionError::SkillMount)
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SessionError::SkillMount(
-                    crate::session::skills::SkillMountError::NotMounted { ref name }
-                ) if name == "ghost"
-            ),
-            "expected SessionError::SkillMount(NotMounted), got {err:?}",
-        );
-    }
-
-    /// `activate_skill`'s command body routes `Session::activate_skill`'s
-    /// typed refusal through the same `.map_err(SessionError::SkillMount)`
-    /// wrapping (issue #698): an activation can only name a MOUNTED skill.
-    /// The loading-gate posture is identical to the mount commands (pinned
-    /// by the tests above); the repeat-activation idempotence is pinned in
-    /// `session::skills`.
-    #[test]
-    fn activate_skill_command_maps_not_mounted_for_activation_to_session_skill_mount_error() {
-        let store = SessionStore::new();
-        let id = store
-            .create(
-                Arc::new(CancelToken::new()),
-                Box::new(crate::UnwiredProvider),
-                Default::default(),
-            )
-            .expect("create session");
-        let handle = store.get(&id).expect("handle");
-        let mut s = handle.session_lock().expect("lock");
-        let err = s
-            .activate_skill("ghost", crate::model::SkillLifecycleActor::User)
-            .map_err(SessionError::SkillMount)
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SessionError::SkillMount(
-                    crate::session::skills::SkillMountError::NotMountedForActivation {
-                        ref name
-                    }
-                ) if name == "ghost"
-            ),
-            "expected SessionError::SkillMount(NotMountedForActivation), got {err:?}",
-        );
-    }
-
     /// Blank name short-circuits to BlankName BEFORE canonicalize runs (issue
     /// #130). The path's parent does not exist, so a reorder that canonicalized
     /// first would surface IoFailure instead -- pinning the result as BlankName
@@ -5494,15 +5258,9 @@ mod tests {
             Session::with_provider(Box::new(crate::UnwiredProvider)).expect("session");
         // The snapshot is the assembly source (ADR-0119 Decision 3):
         // materialized at creation, immutable -- here it names two of the
-        // three registry skills, and the legacy mount fold carries a THIRD
-        // set (gamma mounted, alpha activated) so a wrong-set wiring (mount
-        // fold or activation subset) fails the pin.
+        // three registry skills (gamma stays out) so a wrong-set wiring
+        // (the full registry, an ad-hoc name list) fails the pin.
         session.set_discovery_snapshot(vec!["alpha".to_string(), "beta".to_string()]);
-        session.mount_skill("gamma").expect("mount gamma");
-        session.mount_skill("alpha").expect("mount alpha");
-        session
-            .activate_skill("alpha", crate::model::SkillLifecycleActor::User)
-            .expect("activate alpha");
 
         let live = LiveProviderConfig::new(
             crate::provider::keychain::KeychainStore::new(),

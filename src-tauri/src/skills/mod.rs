@@ -33,7 +33,6 @@
 //!   (issue #714, ADR-0111) -- the gate trilogy + the gateway meta-tool
 //!   resolver over an ACTIVATED skill's tree.
 
-pub mod activation;
 pub mod builtin;
 pub mod frontmatter;
 pub mod import;

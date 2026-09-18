@@ -400,13 +400,7 @@ fn invocation_resides_in_history_and_index_stays_constant() {
             .expect("invocation frame on the asking turn");
         let question = user_text.find("第一轮").expect("the question");
         assert!(frame < question, "the frame precedes the question");
-        // Both meta-tools mount under a non-empty snapshot (the legacy
-        // activate_skill stays live through the coexistence period;
-        // invoke_skill is its successor).
-        assert!(
-            guard[0].tools.iter().any(|t| t.name == "activate_skill"),
-            "a non-empty snapshot keeps the legacy activate_skill mounted"
-        );
+        // The invocation meta-tool mounts under a non-empty snapshot.
         assert!(
             guard[0].tools.iter().any(|t| t.name == "invoke_skill"),
             "a non-empty snapshot mounts invoke_skill"
@@ -537,11 +531,12 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
         system.contains("默认工具"),
         "tool-selection section missing"
     );
-    // The mount-conditional surface (issue #701): an EMPTY mounted set pays
-    // no standing tool cost -- the trio's posture (ADR-0105 D6).
+    // The mount-conditional surface (ADR-0119 D4): an EMPTY discovery
+    // snapshot pays no standing tool cost -- the trio's posture
+    // (ADR-0105 D6).
     assert!(
-        !guard[0].tools.iter().any(|t| t.name == "activate_skill"),
-        "an empty mounted set must not mount activate_skill"
+        !guard[0].tools.iter().any(|t| t.name == "invoke_skill"),
+        "an empty discovery snapshot must not mount invoke_skill"
     );
     drop(guard);
 
@@ -583,18 +578,17 @@ fn disabled_mcp_server_stays_out_of_the_enabled_slice() {
     );
 }
 
-/// The mid-turn persistence probe (issue #701): round 1 emits the
-/// `activate_skill` call; round 2 -- after the dispatch has returned, before
-/// the turn has ended -- reads the bound `.duck` off the disk, records
-/// whether the `Activate` event is already there, and fails the turn
-/// (permanent NotWired). A batched-at-turn-end persist would miss the read.
-struct ProbeThenFailProvider {
-    duck_path: std::path::PathBuf,
+/// The failed-turn invocation probe (ADR-0119 Decision 2, the successor of
+/// issue #701's activation pin): round 1 emits the `invoke_skill` call;
+/// round 2 fails the turn (permanent NotWired). The served invocation must
+/// already be ON the turn record when the failed outcome lands -- invocation
+/// is turn input, so a failed turn keeps it (there is no session-level state
+/// to lose).
+struct InvokeThenFailProvider {
     calls: std::sync::atomic::AtomicUsize,
-    midturn_activate_on_disk: std::sync::atomic::AtomicBool,
 }
 
-impl toptopduck_lib::Provider for ProbeThenFailProvider {
+impl toptopduck_lib::Provider for InvokeThenFailProvider {
     fn generate_tool_turn(
         &self,
         _request: &toptopduck_lib::provider::tool_calling::ToolTurnRequest,
@@ -609,31 +603,23 @@ impl toptopduck_lib::Provider for ProbeThenFailProvider {
                 reply: ToolTurnReply::tool_calls(vec![
                     toptopduck_lib::provider::tool_calling::ToolUse {
                         id: "tu_s".into(),
-                        name: "activate_skill".into(),
+                        name: "invoke_skill".into(),
                         input: serde_json::json!({"name": "sql-coach"}),
                     },
                 ]),
             })
         } else {
-            let text = fs::read_to_string(&self.duck_path).unwrap_or_default();
-            self.midturn_activate_on_disk.store(
-                text.contains("\"Activate\"") && text.contains("sql-coach"),
-                Ordering::SeqCst,
-            );
             Err(toptopduck_lib::ProviderError::NotWired)
         }
     }
 }
 
-/// AC (issue #701, the session-level pin): an agent activation lands on the
-/// timeline AND persists to the bound recipe INSIDE the dispatch call
-/// (real-time, atomic), the `Activate` marker precedes the turn's own entry
-/// (fact-order rendering), and a turn that FAILS afterwards keeps the
-/// activation on disk + on resume (the exit is unmount, never a failed
-/// turn).
+/// The session-level pin (ADR-0119 Decision 2): a served `invoke_skill`
+/// lands on the turn record -- name + invocation-time body + Agent actor --
+/// even when the turn FAILS afterwards, and the invoked set survives a
+/// restart (the fold re-derives from the persisted records).
 #[test]
-fn agent_activation_persists_midturn_and_survives_turn_failure() {
-    use std::sync::atomic::Ordering;
+fn agent_invocation_survives_a_failed_turn_and_a_restart() {
     let skills_root = tempfile::tempdir().unwrap();
     let skills_root = skills_root.path().to_path_buf();
     put_skill(&skills_root, "sql-coach", "Coach SQL.", "Coach the SQL.\n");
@@ -641,21 +627,19 @@ fn agent_activation_persists_midturn_and_survives_turn_failure() {
     let duck_dir = tempfile::tempdir().unwrap();
     let duck_path = duck_dir.path().join("mid.duck");
 
-    let provider = ProbeThenFailProvider {
-        duck_path: duck_path.clone(),
+    let provider = InvokeThenFailProvider {
         calls: std::sync::atomic::AtomicUsize::new(0),
-        midturn_activate_on_disk: std::sync::atomic::AtomicBool::new(false),
     };
     let probe = Arc::new(provider);
     let mut session = Session::with_provider(Box::new(ProbeHandle {
         inner: Arc::clone(&probe),
     }))
     .expect("session");
-    session.mount_skill("sql-coach").expect("mount");
+    session.set_discovery_snapshot(vec!["sql-coach".to_string()]);
     session
         .bind_duck(duck_path.clone(), "mid".into())
         .expect("bind");
-    let fragments = resolve_prompt_fragments(&skills_root, &session.mounted_skills());
+    let fragments = resolve_prompt_fragments(&skills_root, &session.discovery_snapshot());
 
     let approval = ApprovalState::new();
     let outcome = session.ask_with_phase(
@@ -679,34 +663,32 @@ fn agent_activation_persists_midturn_and_survives_turn_failure() {
         matches!(outcome, TurnOutcome::Failed { .. }),
         "got {outcome:?}"
     );
-    // ...but the activation had already crossed to disk INSIDE the dispatch.
-    assert!(
-        probe.midturn_activate_on_disk.load(Ordering::SeqCst),
-        "the Activate event must be on disk before the turn ends"
-    );
-    // ...and it survives the failed turn on the live session state.
-    assert_eq!(session.activated_skills(), vec!["sql-coach".to_string()]);
-    // Fact-order rendering: the Activate marker precedes the turn's own
-    // entry in the persisted history (the event happened mid-turn).
+    // ...but the invocation already rides the turn record.
     let recipe = session.build_recipe();
-    let activate_pos = recipe
+    let last_turn = recipe
         .history
         .iter()
-        .position(|e| matches!(e, RecipeEntry::Skill(ev) if ev.name == "sql-coach"))
-        .expect("an Activate entry in history");
-    let last_turn_pos = recipe
-        .history
-        .iter()
-        .rposition(|e| matches!(e, RecipeEntry::Turn(_)))
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
         .expect("the failed turn in history");
+    assert_eq!(last_turn.invocations.len(), 1, "one invocation record");
+    assert_eq!(last_turn.invocations[0].name, "sql-coach");
+    assert_eq!(
+        last_turn.invocations[0].actor,
+        toptopduck_lib::model::SkillLifecycleActor::Agent,
+        "the mid-turn channel records the Agent actor",
+    );
+    assert_eq!(last_turn.invocations[0].body, "Coach the SQL.\n");
     assert!(
-        activate_pos < last_turn_pos,
-        "the Activate marker precedes the failed turn's entry"
+        !last_turn.invocations[0].content_hash.is_empty(),
+        "the invocation-time hash is pinned",
     );
 
-    // Resume rebuilds the activated set off the persisted events -- the
-    // activation outlives the failed turn across a restart. The live
-    // session must drop first: it owns the canonical key.
+    // The invoked fold re-derives off the persisted records after a restart.
+    // The live session must drop first: it owns the canonical key.
     drop(session);
     let resumed = Session::open_duck(
         &duck_path,
@@ -719,16 +701,16 @@ fn agent_activation_persists_midturn_and_survives_turn_failure() {
     )
     .expect("resume");
     assert_eq!(
-        resumed.activated_skills(),
+        resumed.invoked_skills(),
         vec!["sql-coach".to_string()],
-        "the activation survives the restart"
+        "the invocation survives the restart",
     );
 }
 
 /// The Arc-backed handle so the session owns a `Box<dyn Provider>` while
 /// the test keeps read access to the probe's atomics.
 struct ProbeHandle {
-    inner: Arc<ProbeThenFailProvider>,
+    inner: Arc<InvokeThenFailProvider>,
 }
 
 impl toptopduck_lib::Provider for ProbeHandle {

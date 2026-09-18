@@ -168,15 +168,6 @@ export interface SkillProvenance {
   content_hash: string;
 }
 
-// Typed reject for skill mount / unmount / activate (issue #363, ADR-0086;
-// issue #698, ADR-0110). Wraps under SessionError.SkillMount (adjacently
-// tagged) so the frontend narrows on `data.kind`. Mirrors the Rust
-// SkillMountError.
-export type SkillMountError =
-  | { kind: "AlreadyMounted"; data: { name: string } }
-  | { kind: "NotMounted"; data: { name: string } }
-  | { kind: "NotMountedForActivation"; data: { name: string } };
-
 // --- Skill import (issue #367, ADR-0086) -----------------------------------
 //
 // The import dialog discovers Agent Skills spec directories under external

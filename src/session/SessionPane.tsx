@@ -69,6 +69,10 @@ interface SessionPaneProps {
    *  via handleAsk once the pending ingest settles. null once consumed or for
    *  sessions opened by any other action. */
   pendingQuestion: string | null;
+  /** The skill names staged on the cold-start bar beside the pending
+   *  question (ADR-0119: the first ask's user invocations). Consumed in the
+   *  same one-shot effect; cleared by onQuestionConsumed. */
+  pendingSkillInvocations: string[];
   /** ADR-0092: shell callback after the pending question is fired, so the
    *  OpenSession entry is cleared and a remount cannot re-fire. */
   onQuestionConsumed: () => void;
@@ -132,7 +136,7 @@ const NO_APPROVALS: ApprovalEntry[] = [];
 const WORKSPACE_TABS = ["result", "workingSet"] as const;
 type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -243,10 +247,11 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   useEffect(() => {
     const paths = pendingIngestPaths;
     const question = pendingQuestion;
+    const invocations = pendingSkillInvocations;
     if (paths.length === 0 && question === null) return;
-    // JSON.stringify makes the (paths, question) pair collision-free without
-    // an ad-hoc separator character.
-    const key = JSON.stringify([paths, question]);
+    // JSON.stringify makes the (paths, question, invocations) triple
+    // collision-free without an ad-hoc separator character.
+    const key = JSON.stringify([paths, question, invocations]);
     if (consumedPendingRef.current === key) return;
     consumedPendingRef.current = key;
     if (paths.length > 0) onIngestConsumed();
@@ -260,13 +265,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
         }
       }
       if (question !== null) {
-        void s.handleAsk(question).catch((e) =>
+        // ADR-0119: the staged names are the first ask's user invocations --
+        // they ride the ask itself (submit-time materialization), so the
+        // minted session's first turn carries the picks with no per-session
+        // state.
+        void s.handleAsk(question, invocations).catch((e) =>
           log.error("SessionPane", "pendingQuestion handleAsk threw unexpectedly", e),
         );
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
-  }, [pendingIngestPaths, pendingQuestion, sessionId, onSeedDraft]);
+  }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft]);
 
   // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
   // column). 结果 = the derived chart+table stage; 工作集 = source management.
