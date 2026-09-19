@@ -301,6 +301,35 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     );
   });
 
+  it("gives the active session no cap exemption (pure mtime competition)", () => {
+    // The cap competes on mtime alone: an open, active session with a stale
+    // mtime falls off the truncated list like any other row -- there is no
+    // exemption and no truncation signal (an empty query's newest rows and a
+    // query's hits share the same newest-first one-viewport window).
+    // Eleven sessions match; the oldest (session-10) is the active session.
+    const eleven = Array.from({ length: 11 }, (_, i) => {
+      const n = 10 - i;
+      return meta(`/s${n}.duck`, `session-${String(n).padStart(2, "0")}`, n);
+    });
+    const open: OpenSession[] = [
+      { sid: "uuid-active", name: "session-10", path: "/s10.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+    ];
+    // The binding is live: queried alone, the stale row carries the active flag.
+    const solo = buildSearchEntries(eleven, open, "uuid-active", "session-10");
+    expect(solo).toHaveLength(1);
+    expect(solo[0].active).toBe(true);
+    // Under the cap the same row loses the mtime race and is absent -- no row
+    // in the truncated list is active.
+    const entries = buildSearchEntries(eleven, open, "uuid-active", "session");
+    expect(entries).toHaveLength(MAX_SEARCH_RESULTS);
+    expect(entries.map((e) => e.name)).toEqual(
+      Array.from({ length: MAX_SEARCH_RESULTS }, (_, i) =>
+        `session-${String(i).padStart(2, "0")}`,
+      ),
+    );
+    expect(entries.find((e) => e.active)).toBeUndefined();
+  });
+
   it("does not bridge the name/source boundary without the separating space", () => {
     // The composed haystack is `${display_name} ${first_source_name}`: the
     // space is load-bearing. Without it "data" + "set_one" would contain
