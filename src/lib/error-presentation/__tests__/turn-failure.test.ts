@@ -6,8 +6,12 @@ import type { TurnFailure } from "../../../types/thread";
 
 // An IntlShape carrying the TurnFailure message ids (mirroring en-US.json) so
 // formatTurnFailure resolves kind -> catalog wording. The wording lives once in
-// the locale files; this pins the kind -> id mapping and the detail-fold
-// routing, not the wording itself.
+// the locale files. The message map below mirrors the defaultMessage strings,
+// so a mistyped id silently falls back to defaultMessage and this suite stays
+// green -- what is pinned here is the defaultMessage-level kind -> wording
+// mapping and the detail-fold routing, not the id binding itself. The
+// id-level pin lives in the Thread component tests, which resolve through the
+// real locale catalog (issue #857).
 const intl = createIntl({
   locale: "en",
   messages: {

@@ -1325,6 +1325,36 @@ describe("Thread", () => {
       expect(container.querySelector(".turn-meta .meta-reveal")).not.toBeNull();
     });
 
+    it("renders the Runtime failure reason via its catalog id with the diagnostic riding the fold (issue #852)", () => {
+      // #852 split TurnFailure::Runtime out of Execute: the reason points at
+      // the external runtime, not the SQL. The id-level pin lives here, not in
+      // the unit suite -- a createIntl message map mirrors the defaultMessage
+      // strings, so a mistyped id silently falls back and the unit stays green
+      // (issue #857); resolving through the real zh-CN catalog is what turns a
+      // wrong id red.
+      const { container } = renderChat(
+        chatRecord({
+          outcome: {
+            kind: "Failed",
+            data: {
+              kind: "Runtime",
+              data: { detail: "external runtime `cli-a` not found on PATH" },
+            },
+          },
+        }),
+      );
+      const card = container.querySelector(".turn-outcome.failed");
+      expect(card).not.toBeNull();
+      expect(card!.querySelector(".failed-reason")?.textContent).toBe("外部运行时连接失败");
+      // The runtime diagnostic rides the collapsed technical fold (audited to
+      // hold no API key, ADR-0029), never the reason line.
+      const fold = card!.querySelector(".error-details");
+      expect(fold).not.toBeNull();
+      expect(fold!.querySelector(".error-stack")?.textContent).toBe(
+        "external runtime `cli-a` not found on PATH",
+      );
+    });
+
     it("renders Cancelled as a same-shape muted card whose glyph head is the whole body (issue #720)", () => {
       const { container } = renderChat(chatRecord({ outcome: { kind: "Cancelled", data: null } }));
       const card = container.querySelector(".turn-outcome.cancelled");
