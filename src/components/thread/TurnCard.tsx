@@ -545,8 +545,9 @@ function TurnBody({
     }
     case "Failed": {
       // Outcome C (issue #125): render by TurnFailure kind via the locale
-      // catalog (no backend Display string crosses IPC). Execute / Resource
-      // carry a technical detail under the collapsed fold. Issue #720: one
+      // catalog (no backend Display string crosses IPC). Execute / Runtime /
+      // Resource / InvalidConfig carry a technical detail under the collapsed
+      // fold. Issue #720: one
       // destructive tint card -- the outcome glyph at the card head with the
       // reason on the same line, the fold inside the card below them -- taking
       // the tinted bg + border treatment the shadcn Alert destructive variant

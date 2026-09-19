@@ -5,13 +5,13 @@ import { formatTurnFailure, turnFailureDetail } from "../turn-failure";
 import type { TurnFailure } from "../../../types/thread";
 
 // An IntlShape carrying the TurnFailure message ids (mirroring en-US.json) so
-// formatTurnFailure resolves kind -> catalog wording. The wording lives once in
-// the locale files. The message map below mirrors the defaultMessage strings,
-// so a mistyped id silently falls back to defaultMessage and this suite stays
-// green -- what is pinned here is the defaultMessage-level kind -> wording
-// mapping and the detail-fold routing, not the id binding itself. The
-// id-level pin lives in the Thread component tests, which resolve through the
-// real locale catalog (issue #857).
+// formatTurnFailure resolves kind -> catalog wording. The canonical wording
+// lives in the locale files; the map below mirrors the defaultMessage strings,
+// so a mistyped id silently falls back and this suite stays green -- what is
+// pinned here is the defaultMessage-level kind -> wording mapping and the
+// detail-fold routing, not the id binding itself. The id-level pin lives in
+// the Thread component tests, which resolve through the real locale catalog
+// (issue #857).
 const intl = createIntl({
   locale: "en",
   messages: {
@@ -25,15 +25,18 @@ const intl = createIntl({
 });
 
 describe("formatTurnFailure", () => {
-  // Each TurnFailure kind renders through its own catalog id (issue #125), not
-  // a backend string. The detail (engine diagnosis or the configuration policy
-  // reason) never enters the primary message -- it rides the fold below.
+  // In production each TurnFailure kind renders through its own catalog id
+  // (issue #125), not a backend string; this suite pins kind -> wording at
+  // defaultMessage level only -- the id binding is pinned in Thread.test.tsx.
+  // The detail (engine diagnosis, the runtime diagnostic, or the
+  // configuration policy reason) never enters the primary message -- it rides
+  // the fold below.
   // Issue #852: turn-level Execute renders the neutral `error.turn.execution`
   // (a turn may be a pure conversation, so "query" prejudges the context);
   // external-runtime failures render `error.turn.runtime`. The query-worded
   // `error.turn.execute` is RowReadError::Execute's id (format.ts), pinned
   // there.
-  it("renders each TurnFailure kind via the locale catalog", () => {
+  it("maps each TurnFailure kind to its catalog wording (defaultMessage level)", () => {
     const cases: Array<[TurnFailure, string]> = [
       [{ kind: "Execute", data: { detail: "bad column" } }, "Execution failed"],
       [

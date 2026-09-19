@@ -1331,7 +1331,10 @@ describe("Thread", () => {
       // the unit suite -- a createIntl message map mirrors the defaultMessage
       // strings, so a mistyped id silently falls back and the unit stays green
       // (issue #857); resolving through the real zh-CN catalog is what turns a
-      // wrong id red.
+      // wrong id red. The hardcoded zh literal below is deliberate, contra the
+      // retry-label catalog-tracking convention (issue #139): the pin's
+      // subject is the id-to-wording binding, so the expectation must not
+      // track the catalog.
       const { container } = renderChat(
         chatRecord({
           outcome: {
@@ -1350,6 +1353,7 @@ describe("Thread", () => {
       // hold no API key, ADR-0029), never the reason line.
       const fold = card!.querySelector(".error-details");
       expect(fold).not.toBeNull();
+      expect(fold).not.toHaveAttribute("open");
       expect(fold!.querySelector(".error-stack")?.textContent).toBe(
         "external runtime `cli-a` not found on PATH",
       );
