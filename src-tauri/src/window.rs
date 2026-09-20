@@ -14,14 +14,13 @@
 use std::collections::HashSet;
 
 use crate::model::{ColumnSchema, DatasetDescriptor, TurnOutcome, TurnRecord};
+use crate::provider::output_cap::OUTPUT_TOKEN_CAP;
 use crate::provider::prompt::{
     build_acp_context_block, build_tool_system_prompt, render_history_messages, render_response,
     render_skill_block, render_summary_turn_note, render_turn_input, ResponseLocale,
 };
 use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnRequest};
-use crate::provider::{
-    ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload, MAX_REPLY_TOKENS,
-};
+use crate::provider::{ColumnRef, DatasetRef, ProviderRequest, ResponsePayload, TurnPayload};
 use crate::runtime::acp::wire::ContentBlock;
 use crate::skills::SkillPromptFragment;
 use crate::workingset::WorkingSet;
@@ -90,7 +89,11 @@ pub fn assemble_tool_turn(
         system: build_tool_system_prompt(&request, locale, skills),
         messages: tool_turn_messages(&request),
         tools: crate::tools::builtin_table(),
-        max_tokens: MAX_REPLY_TOKENS,
+        // The window knows nothing of the serving model either (issue
+        // #1001): this is the model-blind default, and the dispatch seam
+        // stamps the model-keyed catalog cap onto the request after
+        // assembly.
+        max_tokens: OUTPUT_TOKEN_CAP,
         // The window knows nothing of the session posture; the dispatch seam
         // stamps the session's thought-level onto the request after assembly
         // (issue #614), so the default here is "thinking disabled".
@@ -508,6 +511,27 @@ mod tests {
             history.push(materialized_turn(&format!("turn {k}"), &name));
         }
         (ws, history)
+    }
+
+    /// The assembled tool-turn request's model-blind defaults (issue #1001):
+    /// the window stamps the global output cap -- the retired
+    /// `MAX_REPLY_TOKENS = 4096` truncated long tool-call arguments, so the
+    /// default is the same constant the dispatch seam clamps to -- and
+    /// thinking stays off until the seam stamps the posture's level (#614).
+    /// A revert of this assembled default to a hard-coded 4096 reddens
+    /// here (the bridge floor and the clamp have their own pins).
+    #[test]
+    fn assembled_tool_turn_carries_the_model_blind_cap_default() {
+        let request = assemble_tool_turn(
+            "probe",
+            &WorkingSet::default(),
+            &[],
+            ResponseLocale::EnUS,
+            &[],
+            &[],
+        );
+        assert_eq!(request.max_tokens, OUTPUT_TOKEN_CAP);
+        assert_eq!(request.thought_level, None);
     }
 
     #[test]

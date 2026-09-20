@@ -35,6 +35,7 @@ use rig_core::providers::{anthropic, openai};
 
 use crate::model::Protocol;
 use crate::provider::http::validate_http_base_url;
+use crate::provider::output_cap;
 use crate::provider::{Provider, TurnModelFacts};
 use crate::session::loop_contract::Termination;
 
@@ -96,7 +97,14 @@ fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
                 .completion_model(&facts.model),
         ),
     };
-    Ok(LoopRuntime::live(handle, facts.protocol))
+    // The stamped output cap (issue #1001) reads the SAME facts that built
+    // the handle above, so the cap is keyed on the exact model serving the
+    // turn -- a profile switch lands handle + cap together, never apart.
+    Ok(LoopRuntime::live(
+        handle,
+        facts.protocol,
+        output_cap::output_token_cap(&facts.model),
+    ))
 }
 
 /// The bridged face's app-private key carrying the posture's thought level
@@ -222,7 +230,46 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(crate::provider::UnwiredProvider);
         // Ok = the bridged branch; the live branch is the only Err source
         // and it refuses on facts this provider does not present.
-        turn_loop_for(provider).expect("the facts-less fork bridges, never refuses");
+        let runtime = turn_loop_for(provider).expect("the facts-less fork bridges, never refuses");
+        // Issue #1001: the bridged face carries no model-keyed cap -- no
+        // facts, no stamp; the request keeps its assembled cap.
+        assert_eq!(runtime.output_cap, None);
+    }
+
+    /// Issue #1001's wiring half, pinned: the live factory stamps the
+    /// catalog's answer for the facts' model -- the same facts that built
+    /// the handle -- so a catalog-hit model's live runtime carries its
+    /// documented ceiling and a miss carries the global cap. The seam pin
+    /// in the module suite cannot see this (it drives the stamp through
+    /// the test seam); without this pin, any wrong value at the factory's
+    /// call ships undetected (offline -- the construction builds the
+    /// shared client but sends nothing).
+    #[test]
+    fn live_factory_stamps_the_catalog_cap_for_the_facts_model() {
+        let runtime = live_runtime(TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-3-haiku-20240307".into(),
+            api_key: Some("sk-test".into()),
+        })
+        .expect("a fully-present profile builds the live runtime");
+        assert_eq!(
+            runtime.output_cap,
+            Some(4_096),
+            "a catalog-hit model carries its documented ceiling"
+        );
+        let runtime = live_runtime(TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-sonnet-4-6".into(),
+            api_key: Some("sk-test".into()),
+        })
+        .expect("a fully-present profile builds the live runtime");
+        assert_eq!(
+            runtime.output_cap,
+            Some(crate::provider::output_cap::OUTPUT_TOKEN_CAP),
+            "a catalog miss carries the global cap"
+        );
     }
 
     /// ADR-0029: a present-but-keyless profile refuses as NotWired before
@@ -248,12 +295,11 @@ mod tests {
     /// the 2nd+ call, regardless of whether another test already
     /// initialized the client (tests run in parallel, so `before` may
     /// already be non-zero) -- the probe face's `EGRESS_AGENT` pin is the
-    /// precedent this mirrors. The `<= 1` bound is deterministic only
-    /// under this suite's shape: `egress_client` has no other caller here
-    /// (the other live tests refuse at the key/scheme gates before any
-    /// build), so a racing first build cannot land between the snapshots;
-    /// a future concurrent caller would need the bound loosened to
-    /// tolerate the init race's double build.
+    /// precedent this mirrors. The `<= 2` bound tolerates one racing first
+    /// build landing between the snapshots: the #1001 live-cap pin is now
+    /// a concurrent Ok-path caller of `egress_client` (it constructs the
+    /// live runtime, which builds), where the other live tests refuse at
+    /// the key/scheme gates before any build.
     #[test]
     fn egress_client_builds_only_once_across_calls() {
         let before = EGRESS_CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
@@ -264,7 +310,7 @@ mod tests {
         let after_third = EGRESS_CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
 
         assert!(
-            after_first - before <= 1,
+            after_first - before <= 2,
             "the first call builds the client at most once (got {} builds)",
             after_first - before
         );

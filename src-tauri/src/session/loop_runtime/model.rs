@@ -23,6 +23,7 @@ use rig_core::message::{AssistantContent, Reasoning, ReasoningContent, ToolCall,
 use rig_core::streaming::{RawStreamingChoice, StreamFinal, StreamingCompletionResponse};
 use rig_core::ProviderResponseError;
 
+use crate::provider::output_cap::OUTPUT_TOKEN_CAP;
 use crate::provider::tool_calling::{
     ThinkingBlock, ToolDefinition as AppToolDefinition, ToolTurnMessage, ToolTurnReply,
     ToolTurnRequest,
@@ -46,10 +47,6 @@ const BRIDGE_PROVIDER: &str = "app-provider";
 /// classification (ADR-0116 Decision 5) already maps to `NotWired` --
 /// the same rule that covers live rig providers.
 pub(crate) const INVALID_CONFIG_PREFIX: &str = "\u{1}invalid-config: ";
-
-/// The reply-length floor when the request carried no cap (rig leaves
-/// `max_tokens` optional; the app's own adapters always sent one).
-const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// The bridge: an app provider object seen as a rig completion model.
 pub(crate) struct ProviderCompletionModel {
@@ -206,7 +203,17 @@ fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
                 input_schema: def.parameters.clone(),
             })
             .collect(),
-        max_tokens: request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS as u64) as u32,
+        // The floor when the rig request carried no cap (issue #1001 retired
+        // the private 4096): rig leaves `max_tokens` optional, but the app's
+        // own drive always sets one, so this arm guards only foreign rig
+        // callers -- and floors to the same global cap the window assembles.
+        // An over-u32 value converts rather than truncating: a modulo cast
+        // would silently mint an arbitrary cap (the one spot a cap could
+        // become a different cap), so the overflow arm falls to the floor.
+        max_tokens: request
+            .max_tokens
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .unwrap_or(OUTPUT_TOKEN_CAP),
         // ADR-0103 (#918): the bridged face carries the posture's thought
         // level under the app-private key (the drive thread stamps it);
         // read it back so the app provider's request keeps its stamp.
@@ -481,5 +488,50 @@ fn to_completion_error(err: ProviderError) -> CompletionError {
             ))
         }
         ProviderError::Unavailable(detail) => CompletionError::ProviderError(detail),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bare minimum fixture for the translation's floor arm: the
+    /// fields `to_app_request` consumes, everything else empty.
+    fn bare_request() -> CompletionRequest {
+        CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: vec![],
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        }
+    }
+
+    /// Issue #1001's second retirement, pinned: the bridge's no-cap floor
+    /// resolves to the global output cap (the retired private 4096 must
+    /// not come back through this arm), and an over-u32 foreign value
+    /// floors rather than truncating into an arbitrary cap. The arm is
+    /// foreign-only (the app's own drive always carries a value), so only
+    /// a direct translation call observes it.
+    #[test]
+    fn the_bridge_floor_resolves_to_the_global_cap() {
+        let request = bare_request();
+        assert_eq!(to_app_request(&request).max_tokens, OUTPUT_TOKEN_CAP);
+
+        let request = CompletionRequest {
+            max_tokens: Some(u64::from(u32::MAX) + 2),
+            ..request
+        };
+        assert_eq!(
+            to_app_request(&request).max_tokens,
+            OUTPUT_TOKEN_CAP,
+            "an over-u32 value floors, never truncates into an arbitrary cap"
+        );
     }
 }

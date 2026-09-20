@@ -81,6 +81,14 @@ pub(crate) struct LoopRuntime {
     /// openai reasoning effort, ADR-0103 / #918), while the bridged face
     /// (`None`) carries it under an app-private key instead.
     protocol: Option<crate::model::Protocol>,
+    /// The live face's stamped output cap (issue #1001): the
+    /// [`provider::output_cap`] formula's answer for the model, computed
+    /// at the live factory from the same facts that built the model
+    /// handle -- the cap can never drift from the model actually
+    /// serving the turn. `None` on the bridged face: the request keeps
+    /// its assembled cap (the window's model-blind default; tests script
+    /// their own).
+    output_cap: Option<u32>,
 }
 
 impl LoopRuntime {
@@ -91,17 +99,24 @@ impl LoopRuntime {
             step_cap: DEFAULT_STEP_CAP,
             no_progress_cap: Some(DEFAULT_NO_PROGRESS_CAP),
             protocol: None,
+            output_cap: None,
         }
     }
 
-    /// The live construction -- the live factory's two inputs in one step
-    /// (the model handle and the wire-shape protocol the thought level
-    /// renders into), so no half-stamped live runtime exists between them
-    /// (issue #926; the bridged / mock faces keep [`LoopRuntime::new`]'s
-    /// protocol-less shape).
-    pub(crate) fn live(model: ModelHandle, protocol: crate::model::Protocol) -> Self {
+    /// The live construction -- the live factory's three inputs in one step
+    /// (the model handle, the wire-shape protocol the thought level
+    /// renders into, and the model-keyed output cap the drive stamps onto
+    /// the request), so no half-stamped live runtime exists between them
+    /// (issue #926; the cap rides the same step since #1001; the bridged /
+    /// mock faces keep [`LoopRuntime::new`]'s stamp-less shape).
+    pub(crate) fn live(
+        model: ModelHandle,
+        protocol: crate::model::Protocol,
+        output_cap: u32,
+    ) -> Self {
         Self {
             protocol: Some(protocol),
+            output_cap: Some(output_cap),
             ..Self::new(model)
         }
     }
@@ -112,6 +127,17 @@ impl LoopRuntime {
     pub(crate) fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
         self.step_cap = step_cap;
         self.no_progress_cap = no_progress_cap;
+        self
+    }
+
+    /// Stamp an output cap onto the bridged face (the test seam for the
+    /// dispatch-stamp pin, issue #1001): production reaches the stamp only
+    /// through the live factory, so this exists for the module suite to
+    /// drive a stamped runtime against the scripted bridge. Test-only at
+    /// the call sites; mirrors [`Self::with_caps`]'s posture.
+    #[allow(dead_code)]
+    pub(crate) fn with_output_cap(mut self, output_cap: u32) -> Self {
+        self.output_cap = Some(output_cap);
         self
     }
 
@@ -211,6 +237,7 @@ impl LoopRuntime {
                 let request = request.clone();
                 let step_cap = self.step_cap;
                 let protocol = self.protocol;
+                let output_cap = self.output_cap;
                 let clock = clock.clone();
                 let token = Arc::clone(&cancel);
                 // Keyed by name (issue #945): the map IS the name set --
@@ -248,6 +275,7 @@ impl LoopRuntime {
                         req_tx,
                         step_cap,
                         protocol,
+                        output_cap,
                         clock: clock.clone(),
                         token,
                         delegations,
@@ -555,6 +583,9 @@ struct DriveInputs {
     /// The live face's protocol (thought-level wire rendering); `None` on
     /// the bridged face.
     protocol: Option<crate::model::Protocol>,
+    /// The live face's stamped output cap (issue #1001); `None` on the
+    /// bridged face -- the assembled cap stands.
+    output_cap: Option<u32>,
     /// The turn's no-progress clock (ADR-0115): the fold touches it on every
     /// inbound stream event -- the generation segment's liveness signal.
     clock: Option<Arc<ProgressClock>>,
@@ -592,17 +623,27 @@ struct DriveOutcome {
 async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
     let DriveInputs {
         model,
-        request,
+        mut request,
         state,
         phases,
         notify,
         req_tx,
         step_cap,
         protocol,
+        output_cap,
         clock,
         token,
         delegations,
     } = inputs;
+    // The dispatch seam's cap stamp (issue #1001), the thought-level
+    // stamp's #614 shape: the window assembled a model-blind default, and
+    // the agent-build point -- the one place holding the model-keyed cap
+    // -- rewrites it once, ahead of BOTH consumers (the main agent's
+    // builder and the sub-agent context, which inherits the main
+    // request's cap). `None` (the bridged face) keeps the assembled cap.
+    if let Some(cap) = output_cap {
+        request.max_tokens = cap;
+    }
     // The whole windowed conversation rides the request (the app assembled
     // it; the loop runtime re-feeds it verbatim) split at rig's boundary:
     // the LAST message is the prompt, everything before it the history. An
