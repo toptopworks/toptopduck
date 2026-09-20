@@ -3,7 +3,7 @@ import { useIntl, FormattedMessage } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
-import { listSkills } from "../api";
+import { getApprovalAttachments, listSkills } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
@@ -154,6 +154,13 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const handleRespondApproval = useCallback(
     (requestId: string, response: ApprovalResponse) => respond(sessionId, requestId, response),
     [respond, sessionId],
+  );
+  // Issue #1009: the card's expand view pulls the FULL pre-truncation file
+  // values through the pending-window command; the capped broadcast snapshot
+  // stays the fallback when it rejects (answered / cancelled / IPC failure).
+  const handleLoadApprovalAttachments = useCallback(
+    (requestId: string) => getApprovalAttachments(sessionId, requestId),
+    [sessionId],
   );
   const handleApprovalsSettled = useCallback(
     () => clearSession(sessionId),
@@ -556,6 +563,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   // recorded thread while a turn runs.
                   liveTurn={s.liveTurn}
                   onRespondApproval={handleRespondApproval}
+                  onLoadApprovalAttachments={handleLoadApprovalAttachments}
                   onRetryTurn={handleAskAgain}
                   busy={s.loading}
                 />

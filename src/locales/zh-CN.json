@@ -552,6 +552,7 @@
   "thread.approval.pending": "等待审批",
   "thread.approval.viewFiles": "查看传值文件（{count}）",
   "thread.approval.hideFiles": "收起传值文件",
+  "thread.approval.fileValuesLoadFailed": "完整内容暂不可用，已回退为截断预览。",
   "thread.approval.resolved.allowOnce": "已允许",
   "thread.approval.resolved.alwaysAllow": "已始终允许",
   "thread.approval.resolved.deny": "已拒绝",

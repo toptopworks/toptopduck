@@ -28,7 +28,9 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 
 use crate::app_config::{AppConfig, DefaultRuntime, ModelPosture};
-use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, ToolKey};
+use crate::approval::{
+    ApprovalRequestBody, ApprovalResponse, ApprovalSink, AuthMode, FileAttachment, ToolKey,
+};
 use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use crate::mcp::McpClient;
@@ -2459,6 +2461,32 @@ pub fn respond_tool_approval(
         .respond(request_uuid, response)
         .map_err(|e| SessionError::Engine(format!("{e:?}")))?;
     Ok(())
+}
+
+/// Fetch the full (pre-truncation) file-delivery values for the session's
+/// in-flight approval request (issue #1009, ADR-0109 Decision 8): the
+/// `approval-request` broadcast caps each attachment at
+/// `FILE_ATTACHMENT_MAX_CHARS` as a budget (the ADR-0056 cross-pane surface),
+/// so the card's expand view pulls the uncut originals through this command
+/// while the turn is suspended on the gate. The full snapshot lives exactly
+/// as long as the pending slot: once answered or cancelled this rejects (a
+/// `SessionError::Engine` carrying the `RespondError` `Debug` form, mirroring
+/// `respond_tool_approval`), and the card falls back to the capped broadcast
+/// copy. Read-only -- no resuming guard (mirrors `get_authorization_mode`).
+#[tauri::command]
+pub fn get_approval_attachments(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    request_id: String,
+) -> Result<Vec<FileAttachment>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let request_uuid = uuid::Uuid::parse_str(&request_id)
+        .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
+    handle
+        .approval_state()
+        .pending_attachments(request_uuid)
+        .map_err(|e| SessionError::Engine(format!("{e:?}")))
 }
 
 /// Read the session's authorization posture (ADR-0080 Decision 4):

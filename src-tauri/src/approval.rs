@@ -454,6 +454,13 @@ pub struct ApprovalRequest {
 struct Pending {
     request_id: uuid::Uuid,
     response: Option<ApprovalResponse>,
+    /// The pre-truncation file attachments (issue #1009): the broadcast copy
+    /// caps each content at [`FILE_ATTACHMENT_MAX_CHARS`] as a budget (the
+    /// ADR-0056 cross-pane surface), while this slot keeps the uncut
+    /// originals alive for the pending window so [`Self::pending_attachments`]
+    /// can serve the card's full view. Dropped with the slot when the gate
+    /// takes it (respond / cancel / close).
+    file_attachments: Vec<FileAttachment>,
 }
 
 /// Authorization policy fields guarded by a single mutex so [`ApprovalState::reset`]
@@ -641,6 +648,9 @@ impl ApprovalState {
             *g = Some(Pending {
                 request_id,
                 response: None,
+                // The uncut originals move into the slot; the broadcast body
+                // above already holds its own capped copies (issue #1009).
+                file_attachments: request.file_attachments,
             });
         }
         sink.emit_request(&body);
@@ -755,6 +765,29 @@ impl ApprovalState {
         p.response = Some(response);
         self.cv.notify_all();
         Ok(())
+    }
+
+    /// Serve the pre-truncation file attachments for the still-pending
+    /// request (issue #1009): the card's expand view pulls the full contents
+    /// through the `get_approval_attachments` command while the turn is
+    /// suspended on the gate -- the broadcast's capped copy is a budget, not
+    /// the content boundary (ADR-0109 Decision 8). The full snapshot lives
+    /// exactly as long as the slot: once the gate takes it (respond / cancel
+    /// / close) this rejects, and the frontend falls back to the capped
+    /// broadcast copy. Read-only -- takes no lock the gate holds across its
+    /// wait.
+    pub fn pending_attachments(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Vec<FileAttachment>, RespondError> {
+        let g = self.pending.lock().expect("pending lock poisoned");
+        let Some(p) = g.as_ref() else {
+            return Err(RespondError::NoPending);
+        };
+        if p.request_id != request_id {
+            return Err(RespondError::UnknownRequest);
+        }
+        Ok(p.file_attachments.clone())
     }
 
     /// Whether a tool key is currently in the session trust set (test surface
@@ -1165,6 +1198,126 @@ mod tests {
             "the cut is visible (the ellipsis), never silent"
         );
         assert_eq!(body.file_attachments[1].content, "short");
+    }
+
+    /// Issue #1009: the pre-truncation snapshot outlives the broadcast cap.
+    /// While the turn is suspended on the gate, `pending_attachments` serves
+    /// the uncut originals (the broadcast stays capped, #672); once the gate
+    /// takes the slot (respond / cancel) the snapshot is gone with it.
+    #[test]
+    fn pending_attachments_serve_the_uncut_snapshot_for_the_pending_window_only() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
+                operation_kind: OperationKind::Execute,
+                summary: "run".into(),
+                file_attachments: vec![
+                    FileAttachment {
+                        param: "code".into(),
+                        content: "x".repeat(FILE_ATTACHMENT_MAX_CHARS + 100),
+                    },
+                    FileAttachment {
+                        param: "notes".into(),
+                        content: "short".into(),
+                    },
+                ],
+                origin_agent: None,
+            };
+            (
+                state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
+                sink_c,
+            )
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // Suspended window: the broadcast copy is capped, the pending-window
+        // copy is the full pre-truncation original.
+        let attachments = state
+            .pending_attachments(request_id)
+            .expect("full snapshot served while pending");
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].param, "code");
+        assert_eq!(
+            attachments[0].content.chars().count(),
+            FILE_ATTACHMENT_MAX_CHARS + 100,
+            "the pending-window snapshot is the pre-truncation original"
+        );
+        assert_eq!(attachments[1].content, "short");
+        let body = sink.last_request().expect("card body recorded");
+        assert_eq!(
+            body.file_attachments[0].content.chars().count(),
+            FILE_ATTACHMENT_MAX_CHARS,
+            "the broadcast copy stays capped (the #672 pin, other side of the seam)"
+        );
+        // A different id while one request is pending: unknown request, not a
+        // silent serve of whichever slot happens to be live.
+        assert!(matches!(
+            state.pending_attachments(uuid::Uuid::new_v4()),
+            Err(RespondError::UnknownRequest)
+        ));
+        state
+            .respond(request_id, ApprovalResponse::Deny)
+            .expect("respond ok");
+        handle.join().expect("gate thread").0.expect("deny");
+        // The slot is taken with the gate's return: the snapshot is gone.
+        assert!(matches!(
+            state.pending_attachments(request_id),
+            Err(RespondError::NoPending)
+        ));
+    }
+
+    #[test]
+    fn pending_attachments_reject_with_nothing_in_flight() {
+        let state = ApprovalState::new();
+        assert!(matches!(
+            state.pending_attachments(uuid::Uuid::new_v4()),
+            Err(RespondError::NoPending)
+        ));
+    }
+
+    /// The cancelled release path (the AC's other half): a cancel-driven
+    /// gate return takes the slot exactly like a respond, so the full-view
+    /// command rejects after cancellation too -- the pending window and the
+    /// slot share one lifecycle.
+    #[test]
+    fn pending_attachments_reject_after_a_cancelled_gate() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
+                operation_kind: OperationKind::Execute,
+                summary: "run".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // Mirrors fire_cancel: the token plus the interrupt wake.
+        cancel.request();
+        state.interrupt_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled
+        );
+        assert!(matches!(
+            state.pending_attachments(request_id),
+            Err(RespondError::NoPending)
+        ));
     }
 
     #[test]

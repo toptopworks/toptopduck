@@ -292,6 +292,48 @@ describe("LiveRow approval card file values", () => {
       screen.queryByRole("button", { name: /file values/i }),
     ).not.toBeInTheDocument();
   });
+
+  // Issue #1009: expanding pulls the FULL pre-truncation contents through
+  // the loader (the broadcast snapshot is a 4 KiB budget, not the content
+  // boundary) and replaces the capped preview in place.
+  it("pulls the uncut contents when expanded and replaces the capped preview", async () => {
+    const onLoad = vi.fn().mockResolvedValue([{ param: "code", content: "print(1); print(2)" }]);
+    renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expect(onLoad).toHaveBeenCalledWith("req-1");
+    expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
+  });
+
+  it("falls back to the capped preview with an error note when the pull rejects", async () => {
+    const onLoad = vi.fn().mockRejectedValue(new Error("slot released"));
+    renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    // The async fallback note is a live note (role="status").
+    const note = await screen.findByRole("status");
+    expect(note).toHaveTextContent(/Full contents unavailable/i);
+    // The capped broadcast snapshot stays visible as the fallback face.
+    expect(screen.getByText("print(1)")).toBeInTheDocument();
+  });
+
+  // One fetch per card: the pending-window snapshot is immutable while the
+  // card is up, so collapsing and re-expanding reuses the settled full view.
+  it("does not refetch when collapsing and re-expanding", async () => {
+    const onLoad = vi.fn().mockResolvedValue([{ param: "code", content: "print(1); print(2)" }]);
+    renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    await screen.findByText("print(1); print(2)");
+    fireEvent.click(screen.getByRole("button", { name: "Hide file values" }));
+    expect(screen.queryByText("print(1); print(2)")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
+    expect(onLoad).toHaveBeenCalledTimes(1);
+  });
 });
 
 // The approval card's originator annotation (issue #934): a sub-agent's

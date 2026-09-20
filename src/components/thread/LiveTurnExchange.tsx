@@ -31,7 +31,7 @@ import { StreamHeader } from "./StreamHeader";
 import { TurnActiveChip } from "./TurnActiveChip";
 import { RuntimeAttributionMarker } from "./RuntimeAttributionMarker";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
-import type { ApprovalResponse } from "../../types/approval";
+import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 import type { ThinkingTrace } from "../../types/thread";
 import { runtimeMarkerName, type DatasetLabel } from "./turn-visual";
 
@@ -42,10 +42,14 @@ import { runtimeMarkerName, type DatasetLabel } from "./turn-visual";
 function LiveRoundBlock({
   round,
   onRespondApproval,
+  onLoadApprovalAttachments,
   onThinkingExpandedChange,
 }: {
   round: LiveRound;
   onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
+  /** Pulls the full (uncapped) file values for a pending approval card
+   * (issue #1009); optional, threaded straight to LiveRow. */
+  onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
 }) {
   // Destructured const so the aliased guard narrows the binding itself; the
@@ -74,7 +78,12 @@ function LiveRoundBlock({
       {rows.length > 0 && (
         <TraceList>
           {rows.map((row) => (
-            <LiveRow key={row.key} row={row} onRespond={onRespondApproval} />
+            <LiveRow
+              key={row.key}
+              row={row}
+              onRespond={onRespondApproval}
+              onLoadAttachments={onLoadApprovalAttachments}
+            />
           ))}
         </TraceList>
       )}
@@ -86,6 +95,7 @@ export function LiveTurnExchange({
   liveTurn,
   mentionedDataset,
   onRespondApproval,
+  onLoadApprovalAttachments,
   onThinkingExpandedChange,
 }: {
   liveTurn: LiveTurn;
@@ -95,6 +105,10 @@ export function LiveTurnExchange({
    *  when the question names none. */
   mentionedDataset: DatasetLabel | null;
   onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
+  /** Pulls the full (uncapped) file values for a pending approval card
+   * (issue #1009); optional -- absent loaders keep the capped broadcast
+   * snapshot. Threaded to each round's LiveRow. */
+  onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
   /** Reports each thinking-fold toggle with the block's reference (the key
    *  the settle seed matches on -- the projection carries the same
    *  reference onto the settled round). */
@@ -142,6 +156,7 @@ export function LiveTurnExchange({
             key={i + 1}
             round={round}
             onRespondApproval={onRespondApproval}
+            onLoadApprovalAttachments={onLoadApprovalAttachments}
             onThinkingExpandedChange={onThinkingExpandedChange}
           />
         ))}

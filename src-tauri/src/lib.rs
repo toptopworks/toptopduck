@@ -495,6 +495,7 @@ pub fn run() {
             commands::take_persist_error,
             commands::take_pending_conflict,
             commands::respond_tool_approval,
+            commands::get_approval_attachments,
             commands::get_authorization_mode,
             commands::set_authorization_mode,
             commands::list_session_trust,

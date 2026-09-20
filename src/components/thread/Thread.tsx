@@ -18,7 +18,7 @@ import {
 } from "./turn-visual";
 import type { LiveTurn } from "../../session/useTurnFlow";
 import { isLatestTurnFailed } from "../../session/useTurnFailureSids";
-import type { ApprovalResponse } from "../../types/approval";
+import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
 import type { ThinkingTrace, ThreadEntry } from "../../types/thread";
@@ -70,6 +70,12 @@ interface ThreadProps {
    * ADR-0083). Wired to the app-level approval hook; defaults to a no-op so
    * tests that render a pending card without the hook do not crash. */
   onRespondApproval?: (requestId: string, response: ApprovalResponse) => void;
+  /** Pulls the full (uncapped) file-delivery values for a pending approval
+   * card (issue #1009): the broadcast snapshot is capped at the 4 KiB
+   * budget; this fetches the uncut originals while the turn is suspended on
+   * the gate. Optional -- absent loaders keep the capped snapshot (the #672
+   * behavior). Wired to the app-level IPC surface. */
+  onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
   /** Issue #758: fires a Failed/Cancelled turn's question again as a fresh
    * turn (ADR-0028 Why 2: those turns stay visible AND continuable). Each
    * outcome card carries the question itself; this is the shared sink.
@@ -117,6 +123,7 @@ export function Thread({
   skillIndex,
   liveTurn = null,
   onRespondApproval = NOOP_RESPOND,
+  onLoadApprovalAttachments,
   onRetryTurn,
   busy = false,
 }: ThreadProps) {
@@ -436,6 +443,7 @@ export function Thread({
           liveTurn={liveTurn}
           mentionedDataset={findMentionedDataset(liveTurn.question, datasetLabels)}
           onRespondApproval={onRespondApproval}
+          onLoadApprovalAttachments={onLoadApprovalAttachments}
           onThinkingExpandedChange={handleLiveThinkingExpanded}
         />
       )}
