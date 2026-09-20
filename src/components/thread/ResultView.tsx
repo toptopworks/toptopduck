@@ -386,11 +386,9 @@ export function ResultView({
         stacked item). A null viz (plain table turn) renders neither.
       */}
       {showChart && decoded?.ok && (
-        // Suspense boundary (issue #218) rides the shared chart slot -- see
-        // VizChartSlot for why the lazy door and its fallback live in one
-        // place. This load state is a separate layer from the render-failure
-        // degrade path below -- a Vega rejection still routes through onError
-        // and swaps in the disclosure.
+        // This load state is a separate layer from the render-failure degrade
+        // path below -- a Vega rejection still routes through onError and
+        // swaps in the disclosure.
         <VizChartSlot spec={decoded.spec} onError={setRenderError} />
       )}
       {degradedReason && (

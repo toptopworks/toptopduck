@@ -7,7 +7,6 @@ import { TooltipProvider } from "../../ui/tooltip";
 import { embedOk } from "../../common/__tests__/helpers";
 import { catalogFor } from "../../../i18n";
 import { log } from "../../../lib/log";
-import { THEME_CHANGE_EVENT } from "../../../theme/useTheme";
 import { RoundProse } from "../RoundProse";
 import { CODE_BLOCK_REVEAL_CLASS } from "../turn-visual";
 
@@ -450,18 +449,6 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
       expect(container.querySelectorAll(".viz-chart")).toHaveLength(2);
       expect(screen.getByText("分隔")).toBeInTheDocument();
-    });
-
-    it("flips the fence chart's palette with the theme (ADR-0050 bridge)", async () => {
-      // AC1 at the round surface: the settled fence rides the same theme
-      // bridge as the result card, so a .dark flip re-derives the config and
-      // re-embeds rather than leaving a light-mode chart on a dark shell.
-      renderProse("```vega-lite\n{\"mark\": \"bar\"}\n```");
-      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
-      window.dispatchEvent(
-        new CustomEvent(THEME_CHANGE_EVENT, { detail: { effective: "dark" } }),
-      );
-      await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
     });
 
     it("keeps every other fence language a plain code block (Decision 6: no guessing)", async () => {

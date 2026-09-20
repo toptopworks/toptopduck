@@ -6,12 +6,24 @@
 // stays a single decision: two lazy() doors to the same module would drift in
 // fallback shape and defeat the point of one chunk boundary.
 //
-// VizChartSlot is the whole slot -- the lazy door plus the Suspense boundary
-// and its fallback. The fallback reuses the real chart's .viz-chart class so
-// the surrounding layout stays put while the vega chunk loads; aria-hidden
-// keeps the empty placeholder out of the a11y tree. This load state is a
-// separate layer from a render-failure degrade (the caller owns that swap via
-// onError) -- a Vega rejection still routes through onError.
+// VizChartSlot is the whole slot -- the lazy door, its Suspense boundary and
+// fallback, and the load-failure boundary around both. The Suspense fallback
+// reuses the real chart's .viz-chart class so the slot's margins match the
+// loaded chart and the surrounding layout stays put while the vega chunk
+// loads; the chart height itself is not reserved (vega-embed injects the
+// canvas, so the slot grows from 0 to the spec height on resolve; a brief
+// transient in a desktop app where the chunk is local and cached after the
+// first view). aria-hidden keeps the empty placeholder out of the a11y tree.
+// This load state is a separate layer from a render-failure degrade (the
+// caller owns that swap via onError) -- a Vega rejection still routes through
+// onError.
+//
+// A chunk-load rejection is the one throw this module can produce (React.lazy
+// turns a rejected import into a render throw, and it caches the rejection --
+// a remount does not retry the import). The boundary scopes it to ONE chart:
+// without it the throw bubbles to the thread-track region boundary and takes
+// the whole conversation down. No Retry on purpose -- the cached rejection
+// makes a remount futile; everything around the failed chart keeps rendering.
 //
 // VegaChart is a named export, so the dynamic import is reshaped to a default
 // for React.lazy. The component's own render / theme-bridge / resize-on-unhide
@@ -19,6 +31,9 @@
 // behavior.
 
 import { Suspense, lazy } from "react";
+import { FormattedMessage } from "react-intl";
+import { Alert, AlertDescription } from "../ui/alert";
+import { ErrorBoundary } from "../common/ErrorBoundary";
 import type { VizFailureReason } from "./viz";
 
 const LazyVegaChart = lazy(() =>
@@ -26,7 +41,8 @@ const LazyVegaChart = lazy(() =>
 );
 
 /** One decoded spec through the lazy chart inside the standard Suspense
- * boundary. `spec` is a decodeViz/decodeVizSpec success payload; `onError`
+ * boundary, with a load-failure boundary scoping a chunk rejection to one
+ * chart. `spec` is a decodeViz/decodeVizSpec success payload; `onError`
  * receives the typed render failure so the caller can swap in its disclosure
  * (ADR-0033). */
 export function VizChartSlot({
@@ -37,8 +53,22 @@ export function VizChartSlot({
   onError: (reason: VizFailureReason) => void;
 }) {
   return (
-    <Suspense fallback={<div className="viz-chart" aria-hidden="true" />}>
-      <LazyVegaChart spec={spec} onError={onError} />
-    </Suspense>
+    <ErrorBoundary
+      name="viz-chart"
+      fallback={() => (
+        <Alert variant="warning" role="status">
+          <AlertDescription>
+            <FormattedMessage
+              id="disclosure.viz.chartLoadFailed"
+              defaultMessage="The chart could not be loaded"
+            />
+          </AlertDescription>
+        </Alert>
+      )}
+    >
+      <Suspense fallback={<div className="viz-chart" aria-hidden="true" />}>
+        <LazyVegaChart spec={spec} onError={onError} />
+      </Suspense>
+    </ErrorBoundary>
   );
 }

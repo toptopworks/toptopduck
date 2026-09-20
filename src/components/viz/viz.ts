@@ -47,8 +47,8 @@ export type VizFailureReason =
 
 /** The decode pre-check can never produce `render` -- that path belongs to
  * VegaChart. Narrowing the failure variant to the decode-only subset documents
- * that boundary at the type level (and keeps ResultView's exhaustiveness check
- * honest about which kinds `decodeViz` can actually emit). */
+ * that boundary at the type level (and keeps the callers' exhaustiveness
+ * checks honest about which kinds the decode doors can actually emit). */
 export type VizDecodeReason = Exclude<VizFailureReason, { kind: "render" }>;
 
 /** The outcome of decoding one provider viz spec. The `ok` variant carries the
@@ -90,9 +90,10 @@ export function decodeViz(viz: VizSpec): DecodeResult {
 
 /** Read a Vega-Lite spec's top-level mark type, whether `mark` is a string
  * ("bar") or a mark object ({"type":"bar"}). `null` when there is no top-level
- * mark (a layered spec, or one relying on a default) -- decodeViz lets such a
- * spec through so Vega-Embed can judge it, with a render failure degrading via
- * the ResultView error path. */
+ * mark (a layered spec, or one relying on a default) -- decodeVizSpec lets
+ * such a spec through so Vega-Embed can judge it, with a render failure
+ * degrading via the caller's disclosure (the result card's table swap, or the
+ * fence's bare disclosure). */
 function readMark(spec: object): string | null {
   const mark = (spec as Record<string, unknown>).mark;
   if (typeof mark === "string") return mark;

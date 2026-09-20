@@ -74,6 +74,7 @@
   "disclosure.result.staleRerunLabel": "以原问题重跑",
   "disclosure.result.vizDegraded": "图表无法渲染，已显示表格。{reason}",
   "disclosure.viz.fenceDegraded": "图表无法渲染。{reason}",
+  "disclosure.viz.chartLoadFailed": "图表无法加载",
   "error.dataset.displayTaken": "显示名「{label}」已被其他数据集使用，请换一个",
   "error.dataset.invalidContinueWith": "「{name}」不是剩余可用源之一，无法作为删除后的继续焦点（请刷新工作集后重选）",
   "error.dataset.invalidLabel": "显示名不能为空或仅含空白",

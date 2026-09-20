@@ -18,7 +18,7 @@
 
 ## Context
 
-ADR-0016 定义了 viz 意图与白名单，ADR-0033 补触发与退化披露，但生产端从未接线：工具调用契约只有 ToolCalls / Text 两形态，LLM 无表达图表意图的通道，turn 投影恒产 `viz: None`，全库唯一 `VizSpec` 构造点在契约测试——消费端（decode 门禁 / VegaChart / 主题桥 / 降级披露）完整空转。实际诉求是对话中生成「文字 + 多图表」报告：`Materialized.viz` 是单数槽（一 turn 一图），且 external 运行时（ACP）路径需工具桥接才能喂结构化通道。
+ADR-0016 定义了 viz 意图与白名单，ADR-0033 补触发与退化披露，但生产端从未接线：工具调用契约只有 ToolCalls / Text 两形态，LLM 无表达图表意图的通道，turn 投影恒产 `viz: None`，`VizSpec` 仅测试构造（Rust 契约测试与前端测试 fixture），无生产构造点——消费端（decode 门禁 / VegaChart / 主题桥 / 降级披露）完整空转。实际诉求是对话中生成「文字 + 多图表」报告：`Materialized.viz` 是单数槽（一 turn 一图），且 external 运行时（ACP）路径需工具桥接才能喂结构化通道。
 
 ## Why
 

@@ -74,6 +74,7 @@
   "disclosure.result.staleRerunLabel": "Rerun the original question",
   "disclosure.result.vizDegraded": "The chart could not render; the table is shown instead. {reason}",
   "disclosure.viz.fenceDegraded": "The chart could not render. {reason}",
+  "disclosure.viz.chartLoadFailed": "The chart could not be loaded",
   "error.dataset.displayTaken": "Display label \"{label}\" is already used by another dataset; pick a different one",
   "error.dataset.invalidContinueWith": "\"{name}\" is not among the remaining sources; cannot use it as the continuation (refresh the working set and re-pick)",
   "error.dataset.invalidLabel": "Display label must not be empty or whitespace-only",
