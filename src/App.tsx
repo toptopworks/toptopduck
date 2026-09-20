@@ -50,6 +50,7 @@ import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
 import { adapterKeys } from "./session/queryKeys";
+import { useTurnFailureSids } from "./session/useTurnFailureSids";
 
 // WheelEvent deltaMode values (spec constants, inlined so the handler does
 // not depend on the WheelEvent global being present) and the effective line
@@ -334,6 +335,12 @@ export default function App() {
   // cross-session view, so -- unlike the pane-local turn-progress listener
   // (ADR-0059) -- this channel cannot live inside a pane.
   const approvalEvents = useApprovalEvents();
+
+  // Issue #1005: the cross-session turn-failure view -- the sidebar's error
+  // state derives from each open session's thread query cache (read-only
+  // subscribers; the panes own every fetch), standing beside
+  // useApprovalEvents as the second shell-level cross-session read.
+  const turnFailureSids = useTurnFailureSids(queryClient, openSessions.map((s) => s.sid));
 
   // ADR-0060 soft cap: a non-blocking badge in the top bar (not the sidebar)
   // signals memory pressure once the open keep-alive set reaches the cap; it
@@ -943,6 +950,7 @@ export default function App() {
                   loadError={sessionsError}
                   grouping={sidebarGrouping}
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
+                  turnFailedSids={turnFailureSids}
                   onNew={goToEmptyState}
                   onOpenDuck={() => void handleOpenDuck()}
                   onActivate={activateSession}

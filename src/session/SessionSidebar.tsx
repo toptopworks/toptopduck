@@ -75,6 +75,8 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // A frozen empty set so the optional prop's default keeps a stable identity
 // (no every-render fresh Set -> SidebarRow prop churn).
 const NO_PENDING_APPROVALS: ReadonlySet<string> = new Set();
+// Same frozen-empty posture for the turn-failure set (issue #1005).
+const NO_TURN_FAILURES: ReadonlySet<string> = new Set();
 
 interface SessionSidebarProps {
   // Collapse state (ADR-0054 level 1, issue #287): when true the whole
@@ -95,6 +97,13 @@ interface SessionSidebarProps {
    *  sid (the approval events' addressing), so only OPEN entries match -- a
    *  persisted-but-closed session can never hold a pending gate. */
   pendingApprovalSids?: ReadonlySet<string>;
+  /** Runtime sids whose latest settled turn is Failed (issue #1005): the
+   *  matching entry rows carry the error state -- a destructive status dot +
+   *  sr-only label -- so a failed turn stays visible from anywhere in the
+   *  shell. State-style, like the approval tint (ADR-0083): it clears only
+   *  when the session's newest settled turn lands non-Failed, never on
+   *  activation. Keyed by runtime sid, so only OPEN entries match. */
+  turnFailedSids?: ReadonlySet<string>;
   onNew: () => void;
   onOpenDuck: () => void;
   onActivate: (sid: string) => void;
@@ -123,6 +132,7 @@ export function SessionSidebar({
   loadError,
   grouping,
   pendingApprovalSids = NO_PENDING_APPROVALS,
+  turnFailedSids = NO_TURN_FAILURES,
   onNew,
   onOpenDuck,
   onActivate,
@@ -257,6 +267,9 @@ export function SessionSidebar({
                   now={now}
                   hasPendingApproval={
                     entry.sid !== null && pendingApprovalSids.has(entry.sid)
+                  }
+                  hasTurnFailed={
+                    entry.sid !== null && turnFailedSids.has(entry.sid)
                   }
                   disabled={disabled}
                   onActivate={() => {
@@ -430,6 +443,7 @@ function SidebarRow({
   displayName,
   now,
   hasPendingApproval,
+  hasTurnFailed,
   disabled,
   onActivate,
 }: {
@@ -441,6 +455,11 @@ function SidebarRow({
    *  status dot flips to warning color + an sr-only label so a suspended turn
    *  stays visible while the user works in another session. */
   hasPendingApproval: boolean;
+  /** The session's latest settled turn is Failed (issue #1005): the status
+   *  dot flips to destructive + an sr-only label, same visibility contract
+   *  as the approval tint. Lower priority than the approval tint: when both
+   *  hold, the approval dot + label win (the classes coexist on the row). */
+  hasTurnFailed: boolean;
   disabled: boolean;
   onActivate: () => void;
 }) {
@@ -463,8 +482,10 @@ function SidebarRow({
         entry.active && "active",
         entry.sid && "open",
         hasPendingApproval && "pending-approval",
+        hasTurnFailed && "turn-failed",
       )}
       data-pending-approval={hasPendingApproval ? "true" : undefined}
+      data-turn-failed={hasTurnFailed ? "true" : undefined}
     >
       <HoverCard openDelay={300} closeDelay={200}>
         <HoverCardTrigger asChild>
@@ -484,23 +505,41 @@ function SidebarRow({
           >
             <span className="session-name flex-1 min-w-0 text-left text-sm truncate">
               {displayName}
-              {hasPendingApproval && (
+              {/* Highest priority wins (issue #1005): the approval label
+                  outranks the failure label when both states hold. Static
+                  literal ids only -- the extract gate cannot follow a
+                  ternary id. */}
+              {hasPendingApproval ? (
                 <span className="sr-only">
                   <FormattedMessage
                     id="sidebar.pendingApproval"
                     defaultMessage="(awaiting approval)"
                   />
                 </span>
-              )}
+              ) : hasTurnFailed ? (
+                <span className="sr-only">
+                  <FormattedMessage
+                    id="sidebar.turnFailed"
+                    defaultMessage="(last turn failed)"
+                  />
+                </span>
+              ) : null}
             </span>
             {/* Status dot on the right edge (ADR-0093): open = primary dot,
-                pending approval = warning dot (overrides open), not-open = no
-                dot. shrink-0 prevents truncation from consuming the dot. */}
+                pending approval = warning dot, turn failed = destructive dot,
+                not-open = no dot. Priority approval > failure > plain open;
+                the row classes coexist, the dot + label take the highest
+                (issue #1005). shrink-0 prevents truncation from consuming
+                the dot. */}
             {entry.sid && (
               <span
                 className={cn(
                   "sidebar-status-dot inline-block h-2 w-2 shrink-0 rounded-full",
-                  hasPendingApproval ? "bg-warning" : "bg-primary",
+                  hasPendingApproval
+                    ? "bg-warning"
+                    : hasTurnFailed
+                      ? "bg-destructive"
+                      : "bg-primary",
                 )}
                 aria-hidden="true"
               />

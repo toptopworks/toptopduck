@@ -12,9 +12,17 @@ export interface TechnicalDetailsFoldProps {
    *  audited to keep secrets out of these payloads, so the raw detail is safe to
    *  surface here. */
   detail: string | null | undefined;
+  /** Issue #1005: mount the fold already expanded -- the failed card whose
+   *  turn is the thread's latest settled one (the shared predicate with the
+   *  sidebar's dot). React only writes the `open` attribute when the prop
+   *  VALUE changes, so a steady value never clobbers the user's manual
+   *  collapse; when the turn stops being the latest, the flip back to
+   *  undefined returns the fold to the collapsed posture -- the same
+   *  state-style semantics the sidebar dot follows. */
+  defaultOpen?: boolean;
 }
 
-export function TechnicalDetailsFold({ detail }: TechnicalDetailsFoldProps) {
+export function TechnicalDetailsFold({ detail, defaultOpen }: TechnicalDetailsFoldProps) {
   if (!detail) return null;
   return (
     // ADR-0067 (issue #172): the fold's visual rules used to live under
@@ -27,7 +35,7 @@ export function TechnicalDetailsFold({ detail }: TechnicalDetailsFoldProps) {
     // render with the same muted-bg + scroll-container treatment. The
     // .error-details / .error-stack class hooks stay for selector / test
     // stability (Shell.test.tsx queries .shell-error .error-details).
-    <details className="error-details mt-2">
+    <details className="error-details mt-2" open={defaultOpen}>
       <summary className="text-muted-foreground cursor-pointer text-[0.82rem]">
         <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
       </summary>

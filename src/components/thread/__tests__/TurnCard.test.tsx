@@ -18,8 +18,10 @@ import type { TextKind, TurnRecord } from "../../../types/thread";
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
 // shared fixture convention, and the marker's label is the raw adapter id
 // (layer-4 content, untranslated) so the assertions hold under any locale.
-function renderCard(record: TurnRecord) {
-  return render(
+// Split element / render so the default-open pins (#1005) can rerender the
+// same tree.
+function cardEl(record: TurnRecord, defaultOpenDetail?: boolean) {
+  return (
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
         <TurnCard
@@ -33,10 +35,15 @@ function renderCard(record: TurnRecord) {
           skillIndex={undefined}
           onRetryTurn={undefined}
           busy={false}
+          defaultOpenDetail={defaultOpenDetail}
         />
       </TooltipProvider>
-    </IntlProvider>,
+    </IntlProvider>
   );
+}
+
+function renderCard(record: TurnRecord, defaultOpenDetail?: boolean) {
+  return render(cardEl(record, defaultOpenDetail));
 }
 
 function recordWith(runtime: TurnRecord["provenance"]["runtime"]): TurnRecord {
@@ -212,6 +219,43 @@ describe("TurnCard outcome-card narrow-column caps (issue #862)", () => {
     // string can actually wrap inside the capped card.
     const { container } = renderCard(failedRecord());
     expect(container.querySelector(".failed-reason")).toHaveClass("min-w-0", "break-words");
+  });
+});
+
+// Issue #1005: the latest failure card's technical-details fold mounts
+// already open; every other posture keeps the collapsed default.
+describe("TurnCard failed-card default-open technical details (issue #1005)", () => {
+  function failedRecord(): TurnRecord {
+    return {
+      ...recordWith(undefined),
+      outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } },
+    };
+  }
+
+  it("mounts the fold already open when the flag rides the card", () => {
+    const { container } = renderCard(failedRecord(), true);
+    const details = container.querySelector("details.error-details");
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute("open")).toBe(true);
+  });
+
+  it("keeps the collapsed default without the flag (historical card / other callers)", () => {
+    const { container } = renderCard(failedRecord());
+    const details = container.querySelector("details.error-details");
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute("open")).toBe(false);
+  });
+
+  it("never clobbers a manual collapse while the prop value is steady", () => {
+    const view = renderCard(failedRecord(), true);
+    const details = view.container.querySelector<HTMLDetailsElement>("details.error-details");
+    expect(details).not.toBeNull();
+    // The user collapses the fold (React does not own the toggle), then the
+    // card re-renders with an unchanged flag: React skips the open-attribute
+    // write, so the manual collapse survives.
+    details!.open = false;
+    view.rerender(cardEl(failedRecord(), true));
+    expect(details!.open).toBe(false);
   });
 });
 

@@ -17,6 +17,7 @@ import {
   type LifecycleRunMark,
 } from "./turn-visual";
 import type { LiveTurn } from "../../session/useTurnFlow";
+import { isLatestTurnFailed } from "../../session/useTurnFailureSids";
 import type { ApprovalResponse } from "../../types/approval";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
@@ -189,6 +190,11 @@ export function Thread({
       break;
     }
   }
+  // Issue #1005: the shared "latest settled turn is Failed" predicate (the
+  // sidebar dot's discriminant) -- the latest failure card's technical
+  // details fold mounts already open, so the diagnostics read without the
+  // second click.
+  const latestTurnFailed = isLatestTurnFailed(entries);
   // One ref per source-event <li> so a chip jump can scrollIntoView the match.
   // The thread is append-only (ADR-0028/0040) so indices are stable positions.
   // The cleanup nulls the slot so a future break of the append-only invariant
@@ -371,6 +377,8 @@ export function Thread({
                       : undefined
                   }
                   skillIndex={skillIndex}
+                  // #1005: only the latest failure card's fold mounts open.
+                  defaultOpenDetail={i === lastTurnIdx && latestTurnFailed ? true : undefined}
                 />
               </li>
             );

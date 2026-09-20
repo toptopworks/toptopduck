@@ -1349,11 +1349,13 @@ describe("Thread", () => {
       const card = container.querySelector(".turn-outcome.failed");
       expect(card).not.toBeNull();
       expect(card!.querySelector(".failed-reason")?.textContent).toBe("外部运行时连接失败");
-      // The runtime diagnostic rides the collapsed technical fold (audited to
-      // hold no API key, ADR-0029), never the reason line.
+      // The runtime diagnostic rides the technical fold (audited to hold no
+      // API key, ADR-0029), never the reason line. The card here is the
+      // thread's latest settled failure, so the fold mounts already open
+      // (issue #1005) -- the diagnostic is readable without the second click.
       const fold = card!.querySelector(".error-details");
       expect(fold).not.toBeNull();
-      expect(fold).not.toHaveAttribute("open");
+      expect(fold).toHaveAttribute("open");
       expect(fold!.querySelector(".error-stack")?.textContent).toBe(
         "external runtime `cli-a` not found on PATH",
       );
@@ -2728,6 +2730,117 @@ describe("Thread", () => {
         `.lifecycle-fold-members span[data-highlighted="true"]`,
       );
       expect(highlighted?.textContent).toContain("甲");
+    });
+  });
+
+  // Issue #1005: the latest failure card's technical-details fold mounts
+  // already open -- the same "latest settled turn is Failed" predicate the
+  // sidebar dot derives from. Historical cards and non-Failed landings keep
+  // the collapsed default.
+  describe("Thread failed-card default-open technical details (issue #1005)", () => {
+    function sourceAdded(name: string): ThreadEntry {
+      return {
+        entry: "Source",
+        data: { kind: "Added", reference_name: name, display_name: name },
+      };
+    }
+
+    it("mounts the latest failure card's fold already open", () => {
+      const entries: ThreadEntry[] = [
+        turnEntry(materializedRecord("result_1", null)),
+        failed("boom"),
+      ];
+      const { container } = renderThread(
+        <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      const details = container.querySelector("details.error-details");
+      expect(details).not.toBeNull();
+      expect(details?.hasAttribute("open")).toBe(true);
+    });
+
+    it("opens only the LAST failure card when failures stack (historical cards stay collapsed)", () => {
+      const entries: ThreadEntry[] = [failed("first"), failed("second")];
+      const { container } = renderThread(
+        <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      const details = container.querySelectorAll("details.error-details");
+      expect(details).toHaveLength(2);
+      expect(details[0]?.hasAttribute("open")).toBe(false);
+      expect(details[1]?.hasAttribute("open")).toBe(true);
+    });
+
+    it("keeps the latest failure card open across trailing source events (tail-scan skips lifecycle)", () => {
+      const entries: ThreadEntry[] = [
+        turnEntry(materializedRecord("result_1", null)),
+        failed("boom"),
+        sourceAdded("people"),
+      ];
+      const { container } = renderThread(
+        <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      expect(container.querySelector("details.error-details")?.hasAttribute("open")).toBe(true);
+    });
+
+    it("keeps every fold collapsed once a newer turn settles non-Failed", () => {
+      const entries: ThreadEntry[] = [
+        failed("boom"),
+        turnEntry(materializedRecord("result_1", null)),
+      ];
+      const { container } = renderThread(
+        <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      expect(container.querySelector("details.error-details")?.hasAttribute("open")).toBe(false);
+    });
+
+    it("keeps folds collapsed when the latest turn is Cancelled (a user action, not an error)", () => {
+      const entries: ThreadEntry[] = [failed("boom"), cancelled("stop")];
+      const { container } = renderThread(
+        <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      expect(container.querySelector("details.error-details")?.hasAttribute("open")).toBe(false);
+    });
+
+    it("renders no fold for a self-contained NotWired failure (nothing to default-open)", () => {
+      const notWired: ThreadEntry = {
+        entry: "Turn",
+        data: {
+          question: "q",
+          outcome: { kind: "Failed", data: { kind: "NotWired" } },
+          trace: [],
+          provenance: { skills: [] },
+        },
+      };
+      const entries: ThreadEntry[] = [
+        turnEntry(materializedRecord("result_1", null)),
+        notWired,
+      ];
+      const { container } = renderThread(
+        <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      expect(container.querySelector("details.error-details")).toBeNull();
+    });
+
+    it("renders no fold for a StaleReference failure either (same self-contained family)", () => {
+      const stale: ThreadEntry = {
+        entry: "Turn",
+        data: {
+          question: "q",
+          outcome: {
+            kind: "Failed",
+            data: { kind: "StaleReference", data: { reference_name: "result_1" } },
+          },
+          trace: [],
+          provenance: { skills: [] },
+        },
+      };
+      const entries: ThreadEntry[] = [
+        turnEntry(materializedRecord("result_1", null)),
+        stale,
+      ];
+      const { container } = renderThread(
+        <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,
+      );
+      expect(container.querySelector("details.error-details")).toBeNull();
     });
   });
 });
