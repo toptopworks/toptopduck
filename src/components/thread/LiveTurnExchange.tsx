@@ -47,8 +47,6 @@ function LiveRoundBlock({
 }: {
   round: LiveRound;
   onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
-  /** Pulls the full (uncapped) file values for a pending approval card
-   * (issue #1009); optional, threaded straight to LiveRow. */
   onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
 }) {

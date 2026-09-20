@@ -774,8 +774,9 @@ impl ApprovalState {
     /// the content boundary (ADR-0109 Decision 8). The full snapshot lives
     /// exactly as long as the slot: once the gate takes it (respond / cancel
     /// / close) this rejects, and the frontend falls back to the capped
-    /// broadcast copy. Read-only -- takes no lock the gate holds across its
-    /// wait.
+    /// broadcast copy. Read-only -- the gate releases `pending` while parked
+    /// inside `cv.wait_timeout`, so this cannot deadlock the wait (it may
+    /// briefly contend between the gate's poll iterations).
     pub fn pending_attachments(
         &self,
         request_id: uuid::Uuid,
@@ -813,7 +814,9 @@ impl ApprovalState {
     }
 }
 
-/// Why a `respond_tool_approval` call did not land (issue #294).
+/// Why a `respond_tool_approval` call or a `pending_attachments` read did
+/// not land (issues #294, #1009). The read path never produces
+/// `AlreadyAnswered` -- a taken slot reads as `NoPending`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RespondError {
     /// No approval is pending on this session.

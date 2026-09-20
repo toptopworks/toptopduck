@@ -7,6 +7,7 @@ import { DelegationTraceDialog } from "./DelegationTraceDialog";
 import { OperationBadge, TraceRow } from "./TraceRow";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import { isSettledRow, traceEntryFromRow, type LiveRoundRow } from "../../session/useTurnFlow";
+import { log } from "../../lib/log";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 
 // The execution-trace renderers (ADR-0078, issue #297): the expanded tool-call
@@ -53,8 +54,8 @@ function resolvedLabel(intl: IntlShape, response: ApprovalResponse): string {
 // the 4 KiB budget, not the content boundary); the capped preview renders
 // during the load gap and stays as the fallback when the pull rejects (slot
 // released, IPC failure) with a one-line error note. Without a loader the
-// expand keeps the capped snapshot (the #672 behavior -- call sites and
-// tests without the session id).
+// expand keeps the capped snapshot (the #672 behavior -- tests without the
+// session id).
 function ApprovalFileValues({
   preview,
   requestId,
@@ -84,7 +85,17 @@ function ApprovalFileValues({
       setFullView({ kind: "loading" });
       void onLoad(requestId).then(
         (files) => setFullView({ kind: "full", files }),
-        () => setFullView({ kind: "failed" }),
+        (err) => {
+          // The durable trace the respond-command catch keeps too (ADR-0029):
+          // an expected lifecycle rejection and a real IPC failure are
+          // indistinguishable in the UI, so the log carries the difference.
+          log.warn(
+            "approval",
+            "full-attachments pull rejected; falling back to the capped preview",
+            { requestId, err },
+          );
+          setFullView({ kind: "failed" });
+        },
       );
     }
   };
