@@ -699,6 +699,41 @@ fn the_seam_stamps_the_request_cap_and_the_bridged_face_passes_it_through() {
     );
 }
 
+/// The stamp's sub-agent half (issue #1001): the drive rewrites the
+/// request's cap ahead of BOTH consumers, and the sub-agent context
+/// inherits it -- a stamp moved past the context's construction would
+/// hand sub-agents the assembled default instead of the stamped catalog
+/// cap. The delegation fixture's second recorded request is the
+/// sub-agent's own turn; its max_tokens must be the stamped value.
+#[test]
+fn the_seam_stamp_reaches_the_subagent_contexts_cap() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "count the rows"}))],
+        ),
+        text_turn("sub done"),
+        text_turn("main done"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "count"),
+        mock_runtime(model.clone()).with_output_cap(2048),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(outcome.termination, Termination::Text("main done".into()));
+    let requests = model.requests();
+    // Both consumers of one stamped turn: the main request carries the
+    // stamped 2048 (the seam's overwrite), and the sub-agent's own turn
+    // carries the same cap through the context built from the post-stamp
+    // request -- the assembled 512 appears in neither.
+    assert_eq!(requests[0].max_tokens, Some(2048));
+    assert_eq!(requests[1].max_tokens, Some(2048));
+}
+
 /// Dispatch call ids mint uuid-backed: uniqueness is intrinsic to the
 /// mint, never an artifact of counter scope (#922 retired the per-turn
 /// `gateway-0` collisions a scoped counter minted). This pin holds the

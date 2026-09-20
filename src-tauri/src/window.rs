@@ -518,7 +518,8 @@ mod tests {
     /// `MAX_REPLY_TOKENS = 4096` truncated long tool-call arguments, so the
     /// default is the same constant the dispatch seam clamps to -- and
     /// thinking stays off until the seam stamps the posture's level (#614).
-    /// A revert to any hard-coded 4096 reddens here.
+    /// A revert of this assembled default to a hard-coded 4096 reddens
+    /// here (the bridge floor and the clamp have their own pins).
     #[test]
     fn assembled_tool_turn_carries_the_model_blind_cap_default() {
         let request = assemble_tool_turn(
