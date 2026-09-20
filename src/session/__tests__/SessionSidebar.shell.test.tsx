@@ -661,6 +661,101 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
   });
 });
 
+describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
+  function baseProps() {
+    return {
+      collapsed: false,
+      sessions: [] as SessionMetadata[],
+      openSessions: twoOpenSessions(),
+      activeSessionId: "sess-active",
+      disabled: false,
+      loadError: null,
+      onNew: () => {},
+      onOpenDuck: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      grouping: "flat" as const,
+      onSwitchGrouping: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+    };
+  }
+
+  it("marks the entry of a session whose latest turn failed (destructive dot + sr-only + data hook)", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...baseProps()} turnFailedSids={new Set(["sess-bg"])} />,
+    );
+    const entry = container.querySelector(".session-entry[data-turn-failed=\"true\"]");
+    expect(entry).not.toBeNull();
+    expect(entry?.className.split(/\s+/)).toContain("turn-failed");
+    // The background session's row -- not the active one -- carries the mark.
+    expect(entry?.querySelector(".session-name")?.textContent).toContain("Background");
+    const dot = entry?.querySelector(".sidebar-status-dot");
+    expect(dot?.className.split(/\s+/)).toContain("bg-destructive");
+    // The sr-only failure text stays for assistive tech.
+    expect(entry?.querySelector(".sr-only")?.textContent).toContain("last turn failed");
+    // This set does not name the active session, so its row stays unmarked.
+    expect(container.querySelector(".session-entry.active[data-turn-failed]")).toBeNull();
+  });
+
+  it("does not exempt the active row: a failed active session lights like any other", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...baseProps()} turnFailedSids={new Set(["sess-active"])} />,
+    );
+    expect(
+      container.querySelector(".session-entry.active[data-turn-failed=\"true\"]"),
+    ).not.toBeNull();
+  });
+
+  it("gives the approval tint priority (classes coexist; the dot + label take the highest)", () => {
+    const { container } = renderShell(
+      <SessionSidebar
+        {...baseProps()}
+        pendingApprovalSids={new Set(["sess-bg"])}
+        turnFailedSids={new Set(["sess-bg"])}
+      />,
+    );
+    const entry = container.querySelector(".session-entry[data-turn-failed=\"true\"]");
+    expect(entry).not.toBeNull();
+    // Both state classes ride the row -- they are not mutually exclusive.
+    const classes = entry?.className.split(/\s+/);
+    expect(classes).toContain("pending-approval");
+    expect(classes).toContain("turn-failed");
+    // The dot + sr-only label take the higher-priority approval state.
+    const dot = entry?.querySelector(".sidebar-status-dot");
+    expect(dot?.className.split(/\s+/)).toContain("bg-warning");
+    expect(dot?.className.split(/\s+/)).not.toContain("bg-destructive");
+    expect(entry?.querySelector(".sr-only")?.textContent).toContain("awaiting approval");
+  });
+
+  it("leaves every row unmarked when no session's latest turn failed (default)", () => {
+    const { container } = renderShell(<SessionSidebar {...baseProps()} />);
+    expect(container.querySelector("[data-turn-failed]")).toBeNull();
+    expect(container.querySelector(".bg-destructive")).toBeNull();
+  });
+
+  it("clears all three marks together once the latest turn settles non-Failed", () => {
+    // The full state flip in one row: class + dot + sr-only label + data
+    // hook all ride the same prop, so the extinguish is one render away.
+    const view = renderShell(
+      <SessionSidebar {...baseProps()} turnFailedSids={new Set(["sess-bg"])} />,
+    );
+    expect(view.container.querySelector(".session-entry[data-turn-failed]")).not.toBeNull();
+    view.rerender(
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          <SessionSidebar {...baseProps()} />
+        </IntlProvider>
+      </TooltipProvider>,
+    );
+    expect(view.container.querySelector("[data-turn-failed]")).toBeNull();
+    expect(view.container.querySelector(".turn-failed")).toBeNull();
+    expect(view.container.querySelector(".bg-destructive")).toBeNull();
+    expect(view.container.querySelector(".sr-only")).toBeNull();
+  });
+});
+
 describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
   // Radix HoverCard opens on pointerEnter / focus after openDelay (300 ms). The
   // content renders inside a Radix Portal (document.body); React context

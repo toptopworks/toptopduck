@@ -73,6 +73,12 @@ interface TurnCardProps {
   /** Issue #758: the session busy gate (the composer's mirror) -- a turn or
    *  mutation in flight; the retry button renders disabled until it clears. */
   busy: boolean;
+  /** Issue #1005: the failed outcome card's technical-details fold mounts
+   *  already open -- the "latest settled turn is Failed" state, the same
+   *  predicate the sidebar dot derives from. Undefined (the default) keeps
+   *  the collapsed posture: every historical failure card, and every other
+   *  fold caller. Only the Failed branch consumes it. */
+  defaultOpenDetail?: boolean;
 }
 
 // One turn rendered as a chat exchange (ADR-0103): the user bubble (verbatim
@@ -103,6 +109,7 @@ export function TurnCard({
   skillIndex,
   onRetryTurn,
   busy,
+  defaultOpenDetail,
 }: TurnCardProps) {
   const intl = useIntl();
   const isStale = !!staleAnchor;
@@ -182,6 +189,7 @@ export function TurnCard({
           onStaleChipJump={onStaleChipJump}
           onRetryTurn={onRetryTurn}
           busy={busy}
+          defaultOpenDetail={defaultOpenDetail}
         />
         {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
             state, always visible -- for Materialized/Textual (issue #720 moves
@@ -342,6 +350,9 @@ interface TurnBodyProps {
   onStaleChipJump: (() => void) | undefined;
   onRetryTurn: ((question: string) => void) | undefined;
   busy: boolean;
+  /** Issue #1005: the Failed branch hands this to the technical-details
+   *  fold's defaultOpen -- see TurnCardProps. */
+  defaultOpenDetail?: boolean;
 }
 
 // The shared shell of the Failed/Cancelled outcome cards (issue #720): one
@@ -363,6 +374,7 @@ function TurnBody({
   onStaleChipJump,
   onRetryTurn,
   busy,
+  defaultOpenDetail,
 }: TurnBodyProps) {
   const intl = useIntl();
   // Issue #758: the Failed/Cancelled continuation action, shared by the two
@@ -575,7 +587,7 @@ function TurnBody({
               {formatTurnFailure(failure, intl)}
             </span>
           </div>
-          <TechnicalDetailsFold detail={detail} />
+          <TechnicalDetailsFold detail={detail} defaultOpen={defaultOpenDetail} />
           {renderRetry()}
         </div>
       );

@@ -73,3 +73,12 @@ export function cancelled(question: string): ThreadEntry {
     },
   };
 }
+
+/** A source-added lifecycle event (issue #1005's tail-scan consumers):
+ *  never a turn, so it never displaces a latest-turn verdict. */
+export function sourceAdded(referenceName: string): ThreadEntry {
+  return {
+    entry: "Source",
+    data: { kind: "Added", reference_name: referenceName, display_name: referenceName },
+  };
+}

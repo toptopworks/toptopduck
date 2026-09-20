@@ -535,6 +535,7 @@
   "sidebar.importSession": "导入会话",
   "sidebar.importSession.title": "导入会话数据恢复此前的会话",
   "sidebar.pendingApproval": "（待审批）",
+  "sidebar.turnFailed": "（轮次失败）",
   "sidebar.search.ariaLabel": "搜索会话",
   "sidebar.search.description": "按名称或数据源过滤会话。方向键移动选择，回车打开所选会话。",
   "sidebar.search.empty": "没有匹配的会话。",

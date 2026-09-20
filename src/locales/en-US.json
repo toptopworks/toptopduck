@@ -535,6 +535,7 @@
   "sidebar.importSession": "Import session",
   "sidebar.importSession.title": "Import a .duck to resume a prior session",
   "sidebar.pendingApproval": "(awaiting approval)",
+  "sidebar.turnFailed": "(last turn failed)",
   "sidebar.search.ariaLabel": "Search sessions",
   "sidebar.search.description": "Filter sessions by name or source. Arrow keys move the selection; Enter opens the selected session.",
   "sidebar.search.empty": "No matching sessions.",
