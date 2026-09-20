@@ -23,6 +23,7 @@ use rig_core::message::{AssistantContent, Reasoning, ReasoningContent, ToolCall,
 use rig_core::streaming::{RawStreamingChoice, StreamFinal, StreamingCompletionResponse};
 use rig_core::ProviderResponseError;
 
+use crate::provider::output_cap::OUTPUT_TOKEN_CAP;
 use crate::provider::tool_calling::{
     ThinkingBlock, ToolDefinition as AppToolDefinition, ToolTurnMessage, ToolTurnReply,
     ToolTurnRequest,
@@ -46,10 +47,6 @@ const BRIDGE_PROVIDER: &str = "app-provider";
 /// classification (ADR-0116 Decision 5) already maps to `NotWired` --
 /// the same rule that covers live rig providers.
 pub(crate) const INVALID_CONFIG_PREFIX: &str = "\u{1}invalid-config: ";
-
-/// The reply-length floor when the request carried no cap (rig leaves
-/// `max_tokens` optional; the app's own adapters always sent one).
-const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// The bridge: an app provider object seen as a rig completion model.
 pub(crate) struct ProviderCompletionModel {
@@ -206,7 +203,11 @@ fn to_app_request(request: &CompletionRequest) -> ToolTurnRequest {
                 input_schema: def.parameters.clone(),
             })
             .collect(),
-        max_tokens: request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS as u64) as u32,
+        // The floor when the rig request carried no cap (issue #1001 retired
+        // the private 4096): rig leaves `max_tokens` optional, but the app's
+        // own drive always sets one, so this arm guards only foreign rig
+        // callers -- and floors to the same global cap the window assembles.
+        max_tokens: request.max_tokens.unwrap_or(OUTPUT_TOKEN_CAP as u64) as u32,
         // ADR-0103 (#918): the bridged face carries the posture's thought
         // level under the app-private key (the drive thread stamps it);
         // read it back so the app provider's request keeps its stamp.

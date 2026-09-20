@@ -35,6 +35,7 @@ use rig_core::providers::{anthropic, openai};
 
 use crate::model::Protocol;
 use crate::provider::http::validate_http_base_url;
+use crate::provider::output_cap;
 use crate::provider::{Provider, TurnModelFacts};
 use crate::session::loop_contract::Termination;
 
@@ -96,7 +97,14 @@ fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
                 .completion_model(&facts.model),
         ),
     };
-    Ok(LoopRuntime::live(handle, facts.protocol))
+    // The stamped output cap (issue #1001) reads the SAME facts that built
+    // the handle above, so the cap is keyed on the exact model serving the
+    // turn -- a profile switch lands handle + cap together, never apart.
+    Ok(LoopRuntime::live(
+        handle,
+        facts.protocol,
+        output_cap::output_token_cap(&facts.model),
+    ))
 }
 
 /// The bridged face's app-private key carrying the posture's thought level
@@ -222,7 +230,10 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(crate::provider::UnwiredProvider);
         // Ok = the bridged branch; the live branch is the only Err source
         // and it refuses on facts this provider does not present.
-        turn_loop_for(provider).expect("the facts-less fork bridges, never refuses");
+        let runtime = turn_loop_for(provider).expect("the facts-less fork bridges, never refuses");
+        // Issue #1001: the bridged face carries no model-keyed cap -- no
+        // facts, no stamp; the request keeps its assembled cap.
+        assert_eq!(runtime.output_cap, None);
     }
 
     /// ADR-0029: a present-but-keyless profile refuses as NotWired before

@@ -650,6 +650,55 @@ fn bridged_requests_keep_the_system_prompt_and_thought_level() {
     );
 }
 
+/// The dispatch seam's cap stamp (issue #1001): the drive thread rewrites
+/// the request's assembled cap ahead of both of its consumers -- the main
+/// agent build and the sub-agent context -- so the bridge hand-over
+/// carries the stamped value, never the window's model-blind default.
+/// The stamp-less counterpart pins the bridged face's pass-through: no
+/// stamp, the assembled cap stands verbatim. Asserted off the scripted
+/// provider's recorded requests, INSIDE the module suite -- a module-local
+/// revert (the stamp dropped, or made to clobber the bridged face too)
+/// must redden here first.
+#[test]
+fn the_seam_stamps_the_request_cap_and_the_bridged_face_passes_it_through() {
+    // Stamped (via the test seam -- production reaches the stamp only
+    // through the live factory): the overwrite beats the request's own 512.
+    let mut h = Harness::new();
+    let provider = Arc::new(BlockingProvider::new(vec![Ok(ToolTurnOutcome {
+        thinking: Vec::new(),
+        reply: ToolTurnReply::Text("ok".into()),
+    })]));
+    let outcome = h.run(
+        &h.request("capped"),
+        bridged_runtime(Arc::clone(&provider) as Arc<dyn Provider>).with_output_cap(2048),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(outcome.termination, Termination::Text("ok".into()));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one round-trip: the reply ends the turn");
+    assert_eq!(
+        requests[0].max_tokens, 2048,
+        "the seam overwrites the assembled default before the bridge hand-over"
+    );
+
+    // Stamp-less (the bridged production shape): the assembled cap stands.
+    let provider = Arc::new(BlockingProvider::new(vec![Ok(ToolTurnOutcome {
+        thinking: Vec::new(),
+        reply: ToolTurnReply::Text("ok".into()),
+    })]));
+    let outcome = h.run(
+        &h.request("uncapped"),
+        bridged_runtime(Arc::clone(&provider) as Arc<dyn Provider>),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(outcome.termination, Termination::Text("ok".into()));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests[0].max_tokens, 512,
+        "the bridged face keeps the request's assembled cap verbatim"
+    );
+}
+
 /// Dispatch call ids mint uuid-backed: uniqueness is intrinsic to the
 /// mint, never an artifact of counter scope (#922 retired the per-turn
 /// `gateway-0` collisions a scoped counter minted). This pin holds the
