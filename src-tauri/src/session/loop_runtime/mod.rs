@@ -490,25 +490,17 @@ impl LoopRuntime {
 /// signature's history.
 #[derive(Default)]
 struct LoopDetector {
-    /// Per (tool name, argument signature): the pair's counting state --
-    /// one key, one entry, so arrivals and the steer flag can never drift
-    /// apart.
+    /// Per (tool name, argument signature): that pair's counting state.
     calls: std::collections::HashMap<(String, String), CallState>,
 }
 
-/// One exact call's counting state. Carrying the steer flag beside the
-/// arrival count in one entry keeps the pair from drifting apart across
-/// containers (the flag can never detach from its count) and saves the
-/// whole-key clone and second hash lookup the two-container shape paid on
-/// every screen (issue #926). The threshold invariant (`steered ⇒
-/// arrivals >= IDENTICAL_STEER_AT`) still rides screen's control flow.
+/// One exact call's counting state: the arrival counter alone -- the
+/// steer/abort fork is derived from it at screen time (issue #930), so
+/// there is no steer latch to keep coherent with the count.
 #[derive(Default)]
 struct CallState {
     /// Arrivals this turn.
     arrivals: u32,
-    /// Already refused once (the steer); the next repeat latches the
-    /// abort.
-    steered: bool,
 }
 
 /// Refuse first at this many arrivals of one exact call.
@@ -541,11 +533,12 @@ impl LoopDetector {
             return ScreenDecision::Dispatch;
         }
         let tool_name = call.name.as_str();
-        if !state.steered {
-            // First refusal: the steer -- the call does not run, the text
-            // routes back as the error result the model can self-correct
-            // from (ADR-0028).
-            state.steered = true;
+        if repetitions == IDENTICAL_STEER_AT {
+            // First refusal (the count's first crossing of the threshold
+            // -- arrivals is monotonic, so this arm holds exactly once per
+            // key): the steer -- the call does not run, the text routes
+            // back as the error result the model can self-correct from
+            // (ADR-0028).
             ScreenDecision::Steer(format!(
                 "tool call refused: `{tool_name}` was called {repetitions} times with \
                  identical arguments. The result will not change -- change approach, or \
