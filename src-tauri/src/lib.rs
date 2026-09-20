@@ -358,9 +358,10 @@ pub fn run() {
             // only, never a spawn) and silently auto-register the hits BEFORE
             // the frontend loads its first config snapshot (setup completes
             // before any webview IPC -- the structural timing guarantee).
-            // The same window materializes the companion builtin skills
-            // (issue #677) into the skills registry. Failures log and
-            // degrade: the settings-page rescan retries.
+            // The same window materializes the builtin skills (issue #677)
+            // into the skills registry -- companions off CLI detections,
+            // knowledge-only ones unconditionally (ADR-0120 Decision 7).
+            // Failures log and degrade: the settings-page rescan retries.
             if let Err(detail) = cli_tools::builtin::startup_register(&live, None, &skills_root) {
                 log::warn!(
                     "builtin CLI startup registration failed (the settings-page \

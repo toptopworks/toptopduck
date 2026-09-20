@@ -288,15 +288,17 @@ relationship between two measures (point family), or a dense two-axis grid \
 A couple of numbers, a lone KPI figure, a flowchart, or a diagram is not a \
 chart -- write prose or a table instead.\n\
 \n\
-The fence contract (each rule is load-bearing; a violation degrades the chart \
-to a code block or an empty render):\n\
+The fence contract (a broken fence never renders silently: a wrong fence \
+language stays a plain code block, and a spec that fails to decode renders \
+a visible error disclosure):\n\
 - the fence language is exactly `vega-lite` -- never `vega`, never a bare \
 `json` fence;\n\
 - `$schema` is mandatory: `https://vega.github.io/schema/vega-lite/v5.json`;\n\
 - the content is strict JSON: double-quoted keys and strings, no trailing \
 commas, no comments, no JavaScript expressions;\n\
-- encoding field names are case-sensitive -- `field`, `type`, `mark`, \
-`encoding` verbatim, and every `field` must match a key of the inlined data;\n\
+- the spec's key names are case-sensitive -- top-level `mark` and \
+`encoding`, and `field` and `type` inside each encoding channel, verbatim, \
+and every `field` must match a key of the inlined data;\n\
 - each encoding channel's `type` is one of `quantitative`, `nominal`, \
 `ordinal`, `temporal`.\n\
 \n\
@@ -338,12 +340,13 @@ fence 渲染成图表；其余代码块保持纯文本呈现。\n\
 族）、双轴密集网格（rect 热力图）。\n\
 寥寥几个数字、孤立的 KPI 数字、流程图或示意图不是图表——改写文字或表格。\n\
 \n\
-fence 契约（每条规则都是承重的；违反任一条，图表退化为代码块或渲染为空）：\n\
+fence 契约（坏 fence 不会静默渲染：fence 语言错误保持纯代码块，解析失败的 \
+spec 渲染为可见的错误披露）：\n\
 - fence 语言恒为 `vega-lite`——不是 `vega`，也不是裸 `json` fence；\n\
 - `$schema` 必带：`https://vega.github.io/schema/vega-lite/v5.json`；\n\
 - 内容是严格 JSON：键与字符串双引号、无尾逗号、无注释、无 JS 表达式；\n\
-- encoding 字段名大小写敏感——`field`、`type`、`mark`、`encoding` 逐字对齐，\
-且每个 `field` 必须匹配内联数据的某个键；\n\
+- spec 键名大小写敏感——顶层 `mark`、`encoding` 与编码通道内的 `field`、\
+`type` 逐字对齐，且每个 `field` 必须匹配内联数据的某个键；\n\
 - 每个编码通道的 `type` 只认 `quantitative`、`nominal`、`ordinal`、\
 `temporal` 四者之一。\n\
 \n\
@@ -739,6 +742,21 @@ mod tests {
         find_skill_definition("pandoc").expect("pandoc skill definition")
     }
 
+    /// The side-table keys a fresh install settles on: exactly the
+    /// knowledge-only definitions (a companioned skill needs its CLI entry
+    /// detected to materialize). Sorted to match the BTreeMap key order, so
+    /// the exact-set assertions below self-scale as the knowledge-only set
+    /// grows instead of hardcoding today's count.
+    fn knowledge_only_names_sorted() -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = BUILTIN_SKILL_DEFINITIONS
+            .iter()
+            .filter(|def| def.companion_cli.is_none())
+            .map(|def| def.name)
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     // --- shipped set --------------------------------------------------------
 
     #[test]
@@ -1008,31 +1026,42 @@ mod tests {
     fn reconcile_skips_dormant_and_user_sourced_entries() {
         let root = tempfile::tempdir().expect("root");
         let mut baselines = BTreeMap::new();
+        // Let the knowledge-only skill settle FIRST (the drops-test pattern)
+        // so the scenario window itself must stay quiet -- keeping the
+        // not-dirty pin vega-chart's same-window materialization had
+        // masked.
+        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
         let mut user = builtin_pandoc(true);
         user.source = CliToolSource::User;
-        reconcile(
+        let dirty = reconcile(
             root.path(),
             "en-US",
             &registry_with(vec![user]),
             &mut baselines,
         );
         // The user-sourced entry anchors nothing: no pandoc file, no pandoc
-        // record. (vega-chart materializes independently in this window --
-        // the knowledge-only anchor needs no CLI entry -- so the assertions
-        // scope to pandoc.)
+        // record, and no side-table change at all.
+        assert!(!dirty);
         assert!(!root.path().join("pandoc/SKILL.md").exists());
-        assert!(!baselines.contains_key("pandoc"));
+        assert_eq!(
+            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
+            knowledge_only_names_sorted(),
+            "only the settled knowledge-only records remain"
+        );
     }
 
     #[test]
     fn reconcile_defers_when_a_user_skill_owns_the_name() {
         // Reverse conflict: a directory we never wrote occupies the name.
         let root = tempfile::tempdir().expect("root");
+        // Let the knowledge-only skill settle FIRST so the defer window
+        // itself must stay quiet (a defer is not a side-table change).
+        let mut baselines = BTreeMap::new();
+        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
         let user_file = "---\nname: pandoc\ndescription: owned\n---\nBody.\n";
         std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
         std::fs::write(root.path().join("pandoc/SKILL.md"), user_file).expect("write");
-        let mut baselines = BTreeMap::new();
-        reconcile(
+        let dirty = reconcile(
             root.path(),
             "en-US",
             &registry_with(vec![builtin_pandoc(true)]),
@@ -1042,10 +1071,16 @@ mod tests {
             !baselines.contains_key("pandoc"),
             "no record: the file is not ours"
         );
+        assert!(!dirty, "a defer is not a side-table change");
         assert_eq!(
             std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).unwrap(),
             user_file,
             "the user file is preserved"
+        );
+        assert_eq!(
+            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
+            knowledge_only_names_sorted(),
+            "only the settled knowledge-only records remain"
         );
     }
 
@@ -1171,9 +1206,9 @@ mod tests {
         assert!(!baselines.contains_key("pandoc"));
         assert!(!baselines.contains_key("retired-skill"));
         assert_eq!(
-            baselines.len(),
-            1,
-            "only the settled vega-chart record remains"
+            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
+            knowledge_only_names_sorted(),
+            "only the settled knowledge-only records remain"
         );
         assert!(dirty, "a dropped record is a side-table change");
     }
@@ -1291,12 +1326,19 @@ mod tests {
             None,
             "vega-chart is knowledge-only"
         );
-        // The declared companions stay 1:1 with the CLI shipped set: every
-        // companion name addresses a CLI definition (the module-doc
-        // invariant -- a hand-copied trio would silently drift as the CLI
-        // set grows).
+        // The declared companions stay 1:1 with the CLI shipped set, and the
+        // pairing is same-name (the module-doc invariant): every companion
+        // addresses a shipped CLI definition AND equals the skill's own
+        // name -- a divergent pair would desync the anchor (companion-keyed)
+        // from the record-retain arm (name-keyed), and a hand-copied trio
+        // would silently drift as the CLI set grows.
         for def in BUILTIN_SKILL_DEFINITIONS {
             if let Some(companion) = def.companion_cli {
+                assert_eq!(
+                    companion, def.name,
+                    "a companioned skill shares its CLI entry's name (the \
+                     two namespaces are disjoint only through these pairs)"
+                );
                 assert!(
                     crate::cli_tools::builtin::BUILTIN_DEFINITIONS
                         .iter()
@@ -1354,6 +1396,55 @@ mod tests {
         assert!(auto_included_names(&[], &marked, root.path()).is_empty());
     }
 
+    /// The knowledge-only steady state: a vega-chart materialized under one
+    /// locale stays byte-stable and quiet under another. The anchor fires
+    /// EVERY window (no CLI condition), so a non-idempotency bug here would
+    /// churn the config on every startup, unlike the trio's (whose anchor
+    /// needs a detection). Also pins the zh-CN materialization combination.
+    #[test]
+    fn reconcile_keeps_a_no_companion_skill_quiet_across_a_locale_switch() {
+        let root = tempfile::tempdir().expect("root");
+        let mut baselines = BTreeMap::new();
+        reconcile(root.path(), "zh-CN", &registry_with(vec![]), &mut baselines);
+        let def = find_skill_definition("vega-chart").expect("definition");
+        let content =
+            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).expect("file");
+        assert_eq!(content, def.render("zh-CN").unwrap());
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        assert!(!dirty, "the locale switch does not rewrite or re-record");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).unwrap(),
+            content,
+            "the zh-CN render survives the en-US window"
+        );
+        assert_eq!(baselines["vega-chart"].locale, "zh-CN");
+    }
+
+    /// The knowledge-only reverse-conflict posture at the reconcile level:
+    /// a user-written vega-chart file defers (no record, bytes preserved
+    /// verbatim) with an EMPTY CLI registry -- the knowledge-only anchor
+    /// opens this window on every scan, unlike the trio's (which needs its
+    /// CLI registered first).
+    #[test]
+    fn reconcile_defers_a_user_written_no_companion_skill() {
+        let root = tempfile::tempdir().expect("root");
+        let user_file = "---\nname: vega-chart\ndescription: mine\n---\nBody.\n";
+        std::fs::create_dir_all(root.path().join("vega-chart")).expect("mkdir");
+        std::fs::write(root.path().join("vega-chart/SKILL.md"), user_file).expect("write");
+        let mut baselines = BTreeMap::new();
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        assert!(
+            !baselines.contains_key("vega-chart"),
+            "no record: the file is not ours"
+        );
+        assert!(!dirty, "a defer is not a side-table change");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).unwrap(),
+            user_file,
+            "the user file is preserved"
+        );
+    }
+
     /// The locked vega-chart trigger copy (curation brief, verbatim -- the
     /// same discipline as the trio above): sentence 1 is capability +
     /// trigger timing, sentence 2 the negative boundary routing flowcharts
@@ -1406,7 +1497,10 @@ mod tests {
             }
             // The data guardrail (Decision 5): SQL-first + the row ceiling.
             assert!(body.contains("SQL"), "{tag} teaches SQL-first aggregation");
-            assert!(body.contains("150"), "{tag} carries the row guardrail");
+            assert!(
+                body.contains("150 rows") || body.contains("150 行"),
+                "{tag} carries the row guardrail"
+            );
             // Every whitelisted mark token appears.
             for m in [
                 "bar", "line", "area", "point", "circle", "square", "arc", "rect",

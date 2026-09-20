@@ -27,8 +27,9 @@
 //!   lists + commits each selected skill as `linked` (symlink / junction) or
 //!   `local` (recursive copy).
 //! - [`builtin`]: the built-in skill marks + baselines (issue #365) -- the
-//!   registry's seed pairs for skills whose bodies ride a companion CLI
-//!   registration.
+//!   registry's seed pairs: a CLI companion rides its companion CLI
+//!   registration, a knowledge-only skill rides the app version (ADR-0120
+//!   Decision 7).
 //! - [`invocation`]: the `invoke_skill` gateway meta-tool (ADR-0119
 //!   Decision 4) -- the mid-turn agent invocation channel + the turn's
 //!   accumulating invocation records.
@@ -210,6 +211,25 @@ mod tests {
         assert_eq!(
             seed_skill_names(&cli, &mark, &disabled(&[]), root.path()),
             vec!["pandoc".to_string()]
+        );
+    }
+
+    #[test]
+    fn seed_admits_a_knowledge_only_builtin_with_no_cli_entry() {
+        // ADR-0120 Decision 7: a knowledge-only skill takes no CLI conjunct
+        // -- an EMPTY CLI registry still seeds it -- while the enablement
+        // axis stays its shutdown axis (a disabled knowledge-only name
+        // drops like any other; it has no CLI entry to disable).
+        let root = tempfile::tempdir().expect("root");
+        put_skill(root.path(), "vega-chart");
+        let mark = BuiltinSkillMark::of(&["vega-chart"]);
+        assert_eq!(
+            seed_skill_names(&[], &mark, &disabled(&[]), root.path()),
+            vec!["vega-chart".to_string()]
+        );
+        assert!(
+            seed_skill_names(&[], &mark, &disabled(&["vega-chart"]), root.path()).is_empty(),
+            "the enablement axis drops the knowledge-only skill"
         );
     }
 

@@ -272,9 +272,11 @@ pub fn create_session(
         // #983): the registry INTERSECT the enablement axis materializes
         // the session's discovery snapshot -- the enabled set at creation,
         // immutable within the session, persisted explicitly in the recipe
-        // header. A materialized builtin additionally requires its
-        // companion CLI entry detected + enabled (the two-axis conjunction);
-        // the materialized gate is the side-table mark (the same anchor the
+        // header. A materialized CLI-companion builtin additionally requires
+        // its companion CLI entry detected + enabled (the #677 two-axis
+        // conjunction); a knowledge-only skill (ADR-0120 Decision 7) rides
+        // the app version and takes no CLI conjunct; the materialized gate
+        // is the side-table mark (the same anchor the
         // frontend's `acquired: builtin` derives from) -- the mark gates the
         // BUILTIN arm only: a reverse-conflict user file reads `acquired:
         // local` and rides the user arm, discoverable like any user skill
