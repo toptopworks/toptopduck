@@ -245,9 +245,8 @@ pub fn update_skill(
         return Err(SkillError::ReadOnly(name.to_string()));
     }
     // A MATERIALIZED builtin skill keeps its name (issue #677): the name is
-    // the locked identity the builtin CLI pairing anchors on (the companion
-    // skill and its CLI registration share the name 1:1). Every other field
-    // is editable.
+    // the locked identity the shipped definition anchors on. Every other
+    // field is editable.
     if current.acquired == Acquired::Builtin && update.name != name {
         return Err(SkillError::BuiltinNameLocked(name.to_string()));
     }
@@ -336,8 +335,9 @@ pub fn update_skill(
 /// directory and everything in it; for a `linked` skill it removes the LINK
 /// ONLY (the external source directory is never touched). A MATERIALIZED
 /// builtin skill is refused (issue #677: builtin skills are undeletable --
-/// they re-materialize on the next scan; the single shutdown axis is
-/// disabling the companion CLI entry). A name outside the spec, or one with
+/// they re-materialize on the next scan; the shutdown axis is the
+/// enablement axis -- disable the skill, or for a CLI companion its CLI
+/// entry). A name outside the spec, or one with
 /// no directory, is `NoSuchSkill`.
 pub fn delete_skill(root: &Path, mark: &BuiltinSkillMark, name: &str) -> Result<(), SkillError> {
     // A non-spec name cannot address a registry skill -- and validating keeps
