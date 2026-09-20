@@ -1,20 +1,26 @@
-// Viz spec decoding + whitelist gate (ADR-0016/0033, issue #26).
+// Viz spec decoding + whitelist gate (ADR-0016/0033, ADR-0120, issue #26).
 //
 // The provider's viz spec is presentation layer (ADR-0033): the Rust orchestrator
 // carries it verbatim and never validates it. This module is the frontend's
 // deterministic, side-effect-free, DOM-free pre-check -- parse the Vega-Lite
-// JSON and confirm its mark is one v1 ships. The ResultView then renders the
-// parsed spec via Vega-Embed and catches any further render failure as a
-// degradation. Keeping the decision in a pure function makes the degradation
-// behavior unit-testable without Vega's canvas-dependent renderer.
+// JSON and confirm its mark is one v1 ships. The renderer (VegaChart) then draws
+// the parsed spec and catches any further render failure as a degradation.
+// Keeping the decision in a pure function makes the degradation behavior
+// unit-testable without Vega's canvas-dependent renderer.
+//
+// Two doors share the parse + whitelist decision (ADR-0120): the result card's
+// wire structure (a VizSpec carrying `kind` + `spec`) and the round-prose
+// vega-lite fence (bare JSON, no `kind`). decodeVizSpec is the shared core;
+// decodeViz is the wire-shaped wrapper over it.
 
 import type { VizSpec } from "../../types/thread";
 
 // The Vega-Lite marks the v1 chart whitelist (ADR-0016) maps onto. v1 ships
-// table / bar / line / scatter / area / pie only; a spec that draws anything
-// else (a heatmap "rect", a "geoshape", a "text") degrades to a table. ChartKind
-// itself is already whitelisted by the closed Rust enum -- this guards a
-// whitelisted kind whose spec nonetheless draws a non-whitelisted chart.
+// table / bar / line / scatter / area / pie only, plus the heatmap drawn with
+// "rect" (ADR-0120 Decision 3); a spec that draws anything else (a "geoshape",
+// a "text") degrades to a table. ChartKind itself is already whitelisted by the
+// closed Rust enum -- this guards a whitelisted kind whose spec nonetheless
+// draws a non-whitelisted chart.
 const WHITELISTED_MARKS: ReadonlySet<string> = new Set([
   "bar", // bar
   "line", // line
@@ -23,6 +29,7 @@ const WHITELISTED_MARKS: ReadonlySet<string> = new Set([
   "circle", // scatter
   "square", // scatter
   "arc", // pie
+  "rect", // heatmap (ADR-0120)
 ]);
 
 /** A typed viz-degradation reason (ADR-0052 i18n closeout, issue #138). The
@@ -52,14 +59,13 @@ export type DecodeResult =
   | { ok: true; spec: object }
   | { ok: false; reason: VizDecodeReason };
 
-/** Parse + whitelist-check a provider viz spec (ADR-0016/0033). A null/missing
- * viz is the default table turn (NOT a degradation) and is handled by the
- * caller -- this function takes an emitted spec and decides whether it is
- * renderable. */
-export function decodeViz(viz: VizSpec): DecodeResult {
+/** Parse + whitelist-check a Vega-Lite spec string (ADR-0016/0033, ADR-0120).
+ * The shared decision core both entry doors call: the result card's wire VizSpec
+ * (decodeViz) and a round-prose vega-lite fence's bare JSON. */
+export function decodeVizSpec(spec: string): DecodeResult {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(viz.spec);
+    parsed = JSON.parse(spec);
   } catch {
     return { ok: false, reason: { kind: "invalidJson" } };
   }
@@ -71,6 +77,15 @@ export function decodeViz(viz: VizSpec): DecodeResult {
     return { ok: false, reason: { kind: "unsupportedMark", mark } };
   }
   return { ok: true, spec: parsed };
+}
+
+/** Parse + whitelist-check a provider viz spec (ADR-0016/0033). A null/missing
+ * viz is the default table turn (NOT a degradation) and is handled by the
+ * caller -- this function takes an emitted spec and decides whether it is
+ * renderable. The wire structure's `kind` is decorative here: the decision
+ * reads only the spec text, exactly as the fence entry does. */
+export function decodeViz(viz: VizSpec): DecodeResult {
+  return decodeVizSpec(viz.spec);
 }
 
 /** Read a Vega-Lite spec's top-level mark type, whether `mark` is a string

@@ -72,7 +72,11 @@ function LiveRoundBlock({
       {hasThinking && (
         <ThinkingFold thinking={thinking} onExpandedChange={reportThinkingExpanded} />
       )}
-      {text !== undefined && <RoundProse text={text} />}
+      {text !== undefined && (
+        // isLive: a vega-lite fence shows the placeholder while the round
+        // streams and decodes only after the settle swap (ADR-0120 Decision 4).
+        <RoundProse text={text} isLive />
+      )}
       {rows.length > 0 && (
         <TraceList>
           {rows.map((row) => (

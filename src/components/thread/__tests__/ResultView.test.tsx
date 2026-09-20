@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { renderI18n as renderI18nBase, withIntl } from "../../common/__tests__/helpers";
+import { renderI18n as renderI18nBase, withIntl, embedOk } from "../../common/__tests__/helpers";
 import { TooltipProvider } from "../../ui/tooltip";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../ResultView";
 import { catalogFor } from "../../../i18n";
@@ -721,9 +721,6 @@ describe("ResultView", () => {
 });
 
 describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
-  // A minimal successful Vega-Embed Result -- ResultView only touches finalize.
-  const embedOk = () =>
-    ({ finalize: vi.fn() }) as unknown as Awaited<ReturnType<typeof embed>>;
   const page = {
     columns: [{ name: "n", canonical_type: "BIGINT" }],
     rows: [["5"]],
@@ -778,9 +775,30 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
   });
 
   it("degrades to the table with a disclosure for a non-whitelisted mark", async () => {
-    // AC2/AC6: a spec that draws a chart v1 does not ship (a heatmap "rect")
-    // degrades. Whitelist = bar/line/area/scatter/pie only.
+    // AC2/AC6: a spec that draws a chart v1 does not ship (a geoshape)
+    // degrades. Whitelist = bar/line/area/scatter/pie + the heatmap rect
+    // (ADR-0120 Decision 3) only.
     renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "geoshape" }) }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(embed).not.toHaveBeenCalled();
+    expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument();
+    expect(screen.getByText(/geoshape/)).toBeInTheDocument();
+  });
+
+  it("renders the heatmap rect spec as a chart (ADR-0120 Decision 3)", async () => {
+    // rect joined the frontend whitelist as the heatmap's mark. The wire kind
+    // stays a ChartKind member (the Rust enum does not grow a heatmap variant,
+    // ADR-0120 Decision 2), and decodeViz reads only the spec anyway.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const { container } = renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -789,10 +807,9 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
         viz={{ kind: "bar", spec: JSON.stringify({ mark: "rect" }) }}
       />,
     );
-    await waitFor(() => expect(readRows).toHaveBeenCalled());
-    expect(embed).not.toHaveBeenCalled();
-    expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument();
-    expect(screen.getByText(/rect/)).toBeInTheDocument();
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(container.querySelector(".viz-chart")).toBeInTheDocument();
+    expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
   });
 
   it("degrades to the underlying table when Vega-Embed render fails", async () => {

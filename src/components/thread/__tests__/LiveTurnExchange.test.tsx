@@ -6,7 +6,7 @@
 // lands); when it lands is useTurnFlow's contract, pinned in its own tests.
 
 import { describe, expect, it } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
@@ -97,5 +97,32 @@ describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5, review I
   it("renders no badge list with an empty staging", () => {
     const { queryByLabelText } = renderExchange(liveTurnWith(undefined));
     expect(queryByLabelText("随此消息调用的技能")).not.toBeInTheDocument();
+  });
+});
+
+// ADR-0120 Decision 4: the live round block threads isLive into RoundProse, so
+// a vega-lite fence decodes only after the settle swap. While the round
+// streams, a half-written fence body must never show as source and must never
+// flash a degradation banner.
+describe("LiveTurnExchange vega-lite fence placeholder (ADR-0120)", () => {
+  it("shows the placeholder for a streaming fence, never the source", () => {
+    const { container } = renderExchange({
+      ...liveTurnWith(undefined),
+      rounds: [{ text: "```vega-lite\n{\"mark\": \"ba", rows: [] }],
+    });
+    expect(screen.getByText("图表生成中…")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("mark");
+    expect(container.querySelector("pre")).toBeNull();
+  });
+
+  it("still streams other fence languages as plain code blocks", () => {
+    // The placeholder rule is vega-lite-only (Decision 6) -- a python fence
+    // keeps its source visible while it streams.
+    const { container } = renderExchange({
+      ...liveTurnWith(undefined),
+      rounds: [{ text: "```python\nprint(1)", rows: [] }],
+    });
+    expect(screen.queryByText("图表生成中…")).not.toBeInTheDocument();
+    expect(container.querySelector("pre")?.textContent).toContain("print(1)");
   });
 });
