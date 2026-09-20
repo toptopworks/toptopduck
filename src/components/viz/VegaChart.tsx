@@ -22,11 +22,13 @@ import type { VizFailureReason } from "./viz";
 //  3. finalize-on-unmount: every embed result is finalized so no Vega view /
 //     canvas leaks across result or theme switches.
 //
-// The decode + whitelist gate (viz.ts) and the degrade-to-table disclosure
-// (ADR-0033) live in the caller (ResultView); this component renders ONE
-// already-decoded spec and reports a render failure via onError so the caller
-// can swap in the degradation. A try/catch here stays internal (ADR-0058 L0) --
-// the ErrorBoundary (L2) is never reached over a Vega failure.
+// The decode + whitelist gate (viz.ts) and the degradation disclosure
+// (ADR-0033) live in the callers (the result card's ResultView and the prose
+// fence's VizFence); this component renders ONE already-decoded spec and
+// reports a render failure via onError so the caller can swap in its own
+// degradation -- the table swap on the result card, a bare disclosure under a
+// fence. A try/catch here stays internal (ADR-0058 L0) -- the ErrorBoundary
+// (L2) is never reached over a Vega failure.
 
 /** Map the derived token config onto a Vega-Lite config object. Single-series
  * marks paint in the teal --primary; multi-series marks draw from the Okabe-Ito

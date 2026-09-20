@@ -13,11 +13,21 @@
 // characters show verbatim -- the safe posture plus honest content, pinned
 // by the component tests.
 //
-// Streaming contract: the plugin list and the components map are MODULE-LEVEL
+// Streaming contract: the plugin list and the components maps are MODULE-LEVEL
 // constants. A fresh array/object identity per render would make
 // react-markdown unmount and remount every custom component on each streamed
 // delta, dropping interaction state (a code block's copy ack). The i18n reads
-// therefore live inside the subcomponents so the map closes over nothing.
+// therefore live inside the subcomponents so the maps close over nothing.
+// There are two maps -- settled and live -- differing only in the `pre` door
+// (the vega-lite fence, ADR-0120 Decision 4); each is its own constant, so a
+// mode switch (the settle swap) is the only thing that ever changes identity,
+// and within a mode streamed deltas reconcile in place.
+//
+// A vega-lite fence renders as a chart on the settled side and as a
+// placeholder on the live side (ADR-0120 Decision 4); the live/settled choice
+// is the `isLive` prop, threaded by the live round block. Every other fence
+// language -- and a language-less fence -- stays a plain code block
+// (Decision 6: no guessing).
 
 import { memo, useState, type MouseEvent, type ReactNode } from "react";
 import Markdown from "react-markdown";
@@ -27,12 +37,17 @@ import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useIntl } from "react-intl";
 import { log } from "../../lib/log";
+import { VizFence, VizFencePending } from "../viz/VizFence";
 import { CopyButton } from "./CopyButton";
 import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
 
 // The hast element type react-markdown itself hands to components -- derived
 // from its own typings so no hast package import is needed.
 type HastElement = NonNullable<ExtraProps["node"]>;
+
+// The one fence language that renders as a chart (ADR-0120 Decision 6). Any
+// other value -- including a language-less fence -- is not a chart intent.
+const VEGA_LITE_FENCE = "vega-lite";
 
 // Module-level constant: see the streaming contract in the file header.
 const REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [remarkGfm, remarkBreaks];
@@ -150,14 +165,37 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
   return <span>{children}</span>;
 }
 
-// Module-level constant: see the streaming contract in the file header.
+// The settled `pre` door (ADR-0120): a vega-lite fence hands its body to the
+// fence renderer (decode -> chart, or an honest disclosure); every other
+// language stays the plain code block. The two doors differ in the vega-lite
+// arm only -- the code-block fallback is the same call on both sides.
+function SettledPre({ node }: { node?: HastElement }) {
+  return codeLanguage(node) === VEGA_LITE_FENCE ? (
+    <VizFence spec={hastTextContent(node)} />
+  ) : (
+    <CodeBlock node={node} />
+  );
+}
+
+// The live `pre` door (ADR-0120 Decision 4): a vega-lite fence renders as a
+// placeholder only -- no parse, no failure judgment, and never the
+// half-streamed source.
+function LivePre({ node }: { node?: HastElement }) {
+  return codeLanguage(node) === VEGA_LITE_FENCE ? (
+    <VizFencePending />
+  ) : (
+    <CodeBlock node={node} />
+  );
+}
+
+// Module-level constants: see the streaming contract in the file header.
 // The block-level entries that land directly under the root carry no margin
 // classes: the root's space-y-4 owns the inter-block rhythm, and Tailwind
 // v4's space-y selector sits inside :where() (zero specificity) -- any
 // m-0 here would outrank it and flatten the rhythm back to flush blocks.
 // (CodeBlock's inner pre keeps a nested m-0, but it sits inside the
 // wrapper div, out of the root's space-y reach.)
-const MARKDOWN_COMPONENTS: Components = {
+const BASE_MARKDOWN_COMPONENTS: Components = {
   // The chat-stream heading ladder: full-size document headings would shout
   // over the discourse in the 320px rail, so markdown headings compress -- h1
   // lands at 17px and each level steps down 1px; h4 and below stay at body
@@ -179,7 +217,10 @@ const MARKDOWN_COMPONENTS: Components = {
       {children}
     </blockquote>
   ),
-  pre: CodeBlock,
+  // No `pre` entry here on purpose: the fence door is the one thing the
+  // settled and live maps differ on (see the file header), so each derived
+  // map supplies its own. A base `pre` would be dead weight that silently
+  // wins if a future map forgets to override it.
   code: ({ children }) => (
     <code className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[13px]">{children}</code>
   ),
@@ -217,7 +258,31 @@ const MARKDOWN_COMPONENTS: Components = {
   hr: () => <hr className="border-0 border-t border-border" />,
 };
 
-export const RoundProse = memo(function RoundProse({ text }: { text: string }) {
+// The two doors over the shared map (see the file header): the settled side
+// renders a vega-lite fence as a chart, the live side as a placeholder. Both
+// are module-level constants so neither identity moves across streamed
+// deltas.
+const SETTLED_MARKDOWN_COMPONENTS: Components = {
+  ...BASE_MARKDOWN_COMPONENTS,
+  pre: SettledPre,
+};
+
+const LIVE_MARKDOWN_COMPONENTS: Components = {
+  ...BASE_MARKDOWN_COMPONENTS,
+  pre: LivePre,
+};
+
+export const RoundProse = memo(function RoundProse({
+  text,
+  isLive = false,
+}: {
+  text: string;
+  /** True while the round streams (the live exchange, issue #610): a
+   * vega-lite fence shows the placeholder instead of decoding (ADR-0120
+   * Decision 4). Settled consumers -- the round block, the textual outcome,
+   * the delegation trace -- leave it false so a fence renders as a chart. */
+  isLive?: boolean;
+}) {
   return (
     // round-text is a cross-module stability hook: this suite's own pins plus
     // TurnCard/Thread's composition selectors (`.turn-outcome.textual
@@ -229,7 +294,10 @@ export const RoundProse = memo(function RoundProse({ text }: { text: string }) {
     // cap's prose twin (issue #860); the other consumers sit inside
     // already-capped containers (.trace-round, .turn-outcome.textual).
     <div className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words">
-      <Markdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
+      <Markdown
+        remarkPlugins={REMARK_PLUGINS}
+        components={isLive ? LIVE_MARKDOWN_COMPONENTS : SETTLED_MARKDOWN_COMPONENTS}
+      >
         {text}
       </Markdown>
     </div>

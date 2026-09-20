@@ -1,8 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { FormattedMessage, useIntl } from "react-intl";
 import { readRows } from "../../api";
 import { toAppError } from "../../lib/error-presentation";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
+import { VizChartSlot } from "../viz/LazyVegaChart";
+import { formatVizFailure } from "../viz/viz-failure";
 import { cn } from "@/lib/utils";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { ResultActions } from "./ResultActions";
@@ -14,16 +16,10 @@ import type { AppError } from "../../types/error";
 import type { ColumnSchema, StaleAnchor } from "../../types/dataset";
 import type { VizSpec } from "../../types/thread";
 
-// VegaChart is lazy-loaded (issue #218): vega-embed + vega-lite are hundred-KB
-// deps only needed when a session turns up a viz result. Deferring them out of
-// the static ResultView -> SessionPane -> main bundle keeps the cold-start hero
-// and plain-table turns off the vega parse/exec path. VegaChart is a named
-// export, so the dynamic import is reshaped to a default for React.lazy. The
-// component's own render / theme-bridge / resize-on-unhide / finalize logic is
-// untouched -- lazy only shifts the module load time, not behavior.
-const VegaChart = lazy(() =>
-  import("../viz/VegaChart").then((m) => ({ default: m.VegaChart })),
-);
+// The chart rides the shared chart slot (issue #218) -- see VizChartSlot for
+// why the lazy door and its Suspense fallback live in one place. The
+// component's own render / theme-bridge / resize-on-unhide / finalize logic
+// is untouched -- lazy only shifts the module load time, not behavior.
 
 const DEFAULT_PAGE_SIZE = 100;
 
@@ -83,46 +79,6 @@ const NUMERIC_TYPES: ReadonlySet<string> = new Set([
 function isNumericType(canonicalType: string): boolean {
   const base = canonicalType.split("(", 1)[0].toUpperCase().trim();
   return NUMERIC_TYPES.has(base);
-}
-
-// Render a typed viz-degradation reason as a locale-catalog string (ADR-0052
-// i18n closeout, issue #138). Both decode failures (from decodeViz) and render
-// failures (from VegaChart) flow through here, so the {reason} interpolated
-// into disclosure.result.vizDegraded is always in the active locale -- no
-// Chinese leaks into an en-US disclosure. The `mark` on unsupportedMark is
-// engine output (layer 4 -- never translated), interpolated verbatim. The
-// `default` arm keeps the switch exhaustive as VizFailureReason grows.
-function formatVizFailure(reason: VizFailureReason, intl: IntlShape): string {
-  switch (reason.kind) {
-    case "invalidJson":
-      return intl.formatMessage({
-        id: "viz.error.invalidJson",
-        defaultMessage: "the spec is not valid JSON",
-      });
-    case "notObject":
-      return intl.formatMessage({
-        id: "viz.error.notObject",
-        defaultMessage: "the spec is not a Vega-Lite object",
-      });
-    case "unsupportedMark":
-      return intl.formatMessage(
-        {
-          id: "viz.error.unsupportedMark",
-          defaultMessage:
-            "the chart type \"{mark}\" is not supported (only bar/line/area/scatter/pie)",
-        },
-        { mark: reason.mark },
-      );
-    case "render":
-      return intl.formatMessage({
-        id: "viz.error.render",
-        defaultMessage: "render error",
-      });
-    default: {
-      const unhandled: never = reason;
-      throw new Error(`unhandled VizFailureReason kind: ${JSON.stringify(unhandled)}`);
-    }
-  }
 }
 
 interface ResultViewProps {
@@ -430,19 +386,10 @@ export function ResultView({
         stacked item). A null viz (plain table turn) renders neither.
       */}
       {showChart && decoded?.ok && (
-        // Suspense boundary (issue #218): the fallback reuses the real chart's
-        // .viz-chart class so the slot's margins match the loaded chart -- the
-        // surrounding result-area layout stays put while the vega chunk loads.
-        // The chart height itself is not reserved (vega-embed injects the
-        // canvas, so the slot grows from 0 to the spec height on resolve; a
-        // brief transient in a desktop app where the chunk is local and cached
-        // after the first view). aria-hidden keeps the empty placeholder out of
-        // the a11y tree. This load state is a separate layer from the
-        // render-failure degrade path below -- a Vega rejection still routes
-        // through onError and swaps in the disclosure.
-        <Suspense fallback={<div className="viz-chart" aria-hidden="true" />}>
-          <VegaChart spec={decoded.spec} onError={setRenderError} />
-        </Suspense>
+        // This load state is a separate layer from the render-failure degrade
+        // path below -- a Vega rejection still routes through onError and
+        // swaps in the disclosure.
+        <VizChartSlot spec={decoded.spec} onError={setRenderError} />
       )}
       {degradedReason && (
         // ADR-0033: an emitted viz that failed to decode/render REPLACES the

@@ -32,3 +32,4 @@ ADR-0009 留 `viz?: spec` 未定义；ADR-0008 留前端框架开放。spec 格�
 - 若未来 CN 市场图表 UX 成优先项，ECharts 是已知重评选项（代价：重引入护栏债）。
 - **被 ADR-0033 校准/延伸**：补 viz 触发（LLM 按意图自决 + 用户 NL 覆盖 + 不设 viz 按钮）与退化披露（emitted viz 渲染失败 → 明示「图表无法渲染，已显示表格」，不论用户是否显式要过）。
 - **被 ADR-0050 延伸**：Vega-Lite 渲染的**主题来源**定为「运行时读 CSS vars 建 Vega config」（单一真相 = 设计 token、随明暗翻转）；本 ADR 的 schema 校验 / 退化路径不变。见 ADR-0050。
+- **被 ADR-0120 校准/延伸**：图表**生产端**定为流内 `vega-lite` fence 渲染（技能教 agent 产出、markdown 管道按本 ADR 白名单门禁渲染）；白名单增 heatmap（`rect` mark）。结果卡 `viz` 槽位与退化披露、主题路径不变，槽位生产者继续留空。见 ADR-0120。

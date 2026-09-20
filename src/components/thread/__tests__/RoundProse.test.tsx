@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import embed from "vega-embed";
 import { TooltipProvider } from "../../ui/tooltip";
+import { embedOk } from "../../common/__tests__/helpers";
 import { catalogFor } from "../../../i18n";
 import { log } from "../../../lib/log";
 import { RoundProse } from "../RoundProse";
@@ -21,14 +23,18 @@ vi.mock("../../../lib/log", () => ({
     error: vi.fn(),
   },
 }));
+// Vega-Embed needs a real canvas; jsdom has none, so a vega-lite fence's chart
+// render is mocked (the fence still drives the real decode gate).
+vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
 // The prose rides the thread's chrome (ADR-0052 react-intl + Radix Tooltip
 // for the code block's CopyButton) -- wrap it the way the thread does.
-function renderProse(text: string) {
+// isLive mirrors the live round block's wiring (ADR-0120 Decision 4).
+function renderProse(text: string, isLive = false) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
-        <RoundProse text={text} />
+        <RoundProse text={text} isLive={isLive} />
       </TooltipProvider>
     </IntlProvider>,
   );
@@ -397,6 +403,114 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       );
       expect(screen.getByRole("button", { name: "已复制" })).toBeInTheDocument();
       expect(view.container.querySelector("pre")?.textContent).toContain("print(2)");
+    });
+  });
+
+  describe("vega-lite fences (ADR-0120)", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.mocked(embed).mockResolvedValue(embedOk());
+    });
+
+    it("renders a settled vega-lite fence as a chart, interleaved with the prose", async () => {
+      // The chart is prose content (Decision 1): the surrounding paragraphs
+      // keep rendering, and the fence body draws through the chart renderer
+      // instead of showing as a code block.
+      const { container } = renderProse(
+        "报告如下\n\n```vega-lite\n{\"mark\": \"bar\", \"data\": {\"values\": [{\"a\": 1}]}}\n```\n\n完",
+      );
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual({
+        mark: "bar",
+        data: { values: [{ a: 1 }] },
+      });
+      expect(container.querySelector(".viz-chart")).toBeInTheDocument();
+      expect(screen.getByText("报告如下")).toBeInTheDocument();
+      expect(screen.getByText("完")).toBeInTheDocument();
+      // The fence body never shows as a code block on the settled side.
+      expect(container.querySelector("pre")).toBeNull();
+    });
+
+    it("degrades a settled fence with a disclosure when the body is not a chart spec", async () => {
+      // ADR-0033 on the fence surface: a corrupt or non-whitelisted body gets
+      // an honest disclosure, never a silent blank and never a raw-JSON dump.
+      const { container } = renderProse("```vega-lite\n{\"mark\": \"geoshape\"}\n```");
+      await waitFor(() => expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument());
+      expect(screen.getByText(/geoshape/)).toBeInTheDocument();
+      expect(embed).not.toHaveBeenCalled();
+      expect(container.querySelector("pre")).toBeNull();
+      expect(container.querySelector(".viz-chart")).toBeNull();
+    });
+
+    it("renders two fences in one answer as two charts (the multi-chart report)", async () => {
+      const { container } = renderProse(
+        "```vega-lite\n{\"mark\": \"bar\"}\n```\n\n分隔\n\n```vega-lite\n{\"mark\": \"line\"}\n```",
+      );
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+      expect(container.querySelectorAll(".viz-chart")).toHaveLength(2);
+      expect(screen.getByText("分隔")).toBeInTheDocument();
+    });
+
+    it("keeps every other fence language a plain code block (Decision 6: no guessing)", async () => {
+      // A chart-shaped body under the `json` language is not a chart intent:
+      // it stays a copyable code block and Vega-Embed never runs.
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+      const { container } = renderProse("```json\n{\"mark\": \"bar\"}\n```");
+      const block = container.querySelector("pre");
+      expect(block).not.toBeNull();
+      expect(block?.textContent).toContain("{\"mark\": \"bar\"}");
+      expect(screen.getByText("json")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "复制代码" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalled());
+      expect(embed).not.toHaveBeenCalled();
+    });
+
+    it("shows a live vega-lite fence as a placeholder -- no source, no decode (Decision 4)", async () => {
+      // While the round streams the fence body is half-written: the
+      // placeholder names the chart without showing the source and without
+      // attempting a parse (which would flash a degradation banner on every
+      // partial delta).
+      const { container } = renderProse("```vega-lite\n{\"mark\": \"ba", true);
+      expect(screen.getByText("图表生成中…")).toBeInTheDocument();
+      expect(container.textContent).not.toContain("mark");
+      expect(container.querySelector("pre")).toBeNull();
+      expect(embed).not.toHaveBeenCalled();
+    });
+
+    it("keeps the live placeholder as the fence body streams in", async () => {
+      // The live map is a module-level constant, so the growing fence
+      // reconciles the placeholder in place instead of remounting per delta.
+      const view = renderProse("```vega-lite\n{\"mark\": \"ba", true);
+      expect(screen.getAllByText("图表生成中…")).toHaveLength(1);
+      view.rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <RoundProse text={"```vega-lite\n{\"mark\": \"bar\"}"} isLive />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      expect(screen.getAllByText("图表生成中…")).toHaveLength(1);
+      expect(view.container.textContent).not.toContain("mark");
+      expect(embed).not.toHaveBeenCalled();
+    });
+
+    it("renders a settled fence after the live stream (the settle swap)", async () => {
+      // The same text that streamed as a placeholder decodes into the chart
+      // once the turn settles.
+      const text = "```vega-lite\n{\"mark\": \"bar\"}\n```";
+      const view = renderProse(text, true);
+      expect(screen.getByText("图表生成中…")).toBeInTheDocument();
+      view.rerender(
+        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+          <TooltipProvider>
+            <RoundProse text={text} />
+          </TooltipProvider>
+        </IntlProvider>,
+      );
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+      expect(screen.queryByText("图表生成中…")).not.toBeInTheDocument();
+      expect(view.container.querySelector(".viz-chart")).toBeInTheDocument();
     });
   });
 });
