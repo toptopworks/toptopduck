@@ -27,8 +27,9 @@
 //!   lists + commits each selected skill as `linked` (symlink / junction) or
 //!   `local` (recursive copy).
 //! - [`builtin`]: the built-in skill marks + baselines (issue #365) -- the
-//!   registry's seed pairs for skills whose bodies ride a companion CLI
-//!   registration.
+//!   registry's seed pairs: a CLI companion rides its companion CLI
+//!   registration, a knowledge-only skill rides the app version (ADR-0120
+//!   Decision 7).
 //! - [`invocation`]: the `invoke_skill` gateway meta-tool (ADR-0119
 //!   Decision 4) -- the mid-turn agent invocation channel + the turn's
 //!   accumulating invocation records.
@@ -60,11 +61,12 @@ pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 /// The new-session discovery-snapshot seed (issue #961, ADR-0118 Decision
 /// 1; carried as the discovery snapshot by ADR-0119 Decision 3): the
 /// registry scan intersected with the enablement axis -- every spec-valid
-/// skill except the disabled names, with a MATERIALIZED builtin additionally
-/// gated on its companion CLI registration (the #677 two-axis conjunction:
-/// skill enabled AND companion CLI entry enabled -- an undetected CLI
-/// registration keeps its skill out of the seed, the pre-existing
-/// semantics verbatim). The seed is computed at session creation and
+/// skill except the disabled names, with a MATERIALIZED builtin
+/// additionally gated by the companion axis (ADR-0120 Decision 7: a CLI
+/// companion needs its companion CLI entry detected + enabled -- the
+/// #677 two-axis conjunction, an undetected CLI registration keeps its
+/// skill out of the seed; a knowledge-only skill rides the app version
+/// and takes no CLI conjunct). The seed is computed at session creation and
 /// MATERIALIZES as the session's discovery snapshot -- persisted
 /// explicitly in the recipe header, immutable for the session's life;
 /// resume adopts it from the header, no re-seed. A registry
@@ -78,9 +80,10 @@ pub fn seed_skill_names(
     disabled: &std::collections::BTreeSet<String>,
     skills_root: &std::path::Path,
 ) -> Vec<String> {
-    // The builtin's CLI-axis gate (issue #677), unchanged: the materialized
-    // builtins whose companion CLI entries are detected + enabled (a Vec:
-    // the shipped builtin set is three members, a set adds ceremony).
+    // The builtin's companion-axis gate (issue #677, ADR-0120 Decision 7):
+    // the materialized builtins whose companion CLI entries are detected +
+    // enabled, plus the knowledge-only ones (a Vec: the shipped builtin set
+    // is a handful of members, a set adds ceremony).
     let auto_builtin = builtin::auto_included_names(cli, mark, skills_root);
     registry::list_skills(skills_root, mark)
         .skills
@@ -208,6 +211,25 @@ mod tests {
         assert_eq!(
             seed_skill_names(&cli, &mark, &disabled(&[]), root.path()),
             vec!["pandoc".to_string()]
+        );
+    }
+
+    #[test]
+    fn seed_admits_a_knowledge_only_builtin_with_no_cli_entry() {
+        // ADR-0120 Decision 7: a knowledge-only skill takes no CLI conjunct
+        // -- an EMPTY CLI registry still seeds it -- while the enablement
+        // axis stays its shutdown axis (a disabled knowledge-only name
+        // drops like any other; it has no CLI entry to disable).
+        let root = tempfile::tempdir().expect("root");
+        put_skill(root.path(), "vega-chart");
+        let mark = BuiltinSkillMark::of(&["vega-chart"]);
+        assert_eq!(
+            seed_skill_names(&[], &mark, &disabled(&[]), root.path()),
+            vec!["vega-chart".to_string()]
+        );
+        assert!(
+            seed_skill_names(&[], &mark, &disabled(&["vega-chart"]), root.path()).is_empty(),
+            "the enablement axis drops the knowledge-only skill"
         );
     }
 

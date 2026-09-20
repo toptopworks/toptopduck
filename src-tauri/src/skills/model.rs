@@ -30,15 +30,16 @@ pub enum Acquired {
     /// A real directory -- authored in-app (`create_skill`) or copied in by a
     /// future import slice. Fully editable.
     Local,
-    /// A materialized builtin skill (issue #677, ADR-0109 Decision 5): the
-    /// app-authored companion of a builtin CLI registration entry, written
-    /// by the scan window. Keyed on the app-config side table
+    /// A materialized builtin skill (issue #677, ADR-0109 Decision 5): an
+    /// app-authored skill the scan window writes -- a CLI companion
+    /// (ADR-0109) or a knowledge-only skill (ADR-0120 Decision 7). Keyed
+    /// on the app-config side table
     /// (`builtin_skill_baselines`) membership -- NOT on the static name set
     /// -- so a user's pre-existing same-named skill keeps its own source
     /// until materialization actually happens. Undeletable; every field
-    /// except `name` is editable (name is the locked identity the builtin
-    /// CLI pairing anchors on -- the companion skill and its CLI
-    /// registration share the name 1:1).
+    /// except `name` is editable (name is the locked identity the shipped
+    /// definition anchors on -- materialization, upgrades, and the
+    /// reserved-name set all address the skill by it).
     Builtin,
 }
 
@@ -193,15 +194,15 @@ pub enum SkillError {
     /// "taken by another skill of yours". Carries the name.
     #[error("skill name is reserved for a built-in skill: {0}")]
     ReservedSkillName(String),
-    /// A rename targeted a MATERIALIZED builtin skill (issue #677): the name
-    /// is the locked identity the builtin CLI pairing anchors on (the
-    /// companion skill and its CLI registration share the name 1:1). Carries
-    /// the name.
+    /// A rename targeted a MATERIALIZED builtin skill (issue #677): the
+    /// name is the locked identity the shipped definition anchors on.
+    /// Carries the name.
     #[error("built-in skill name is locked: {0}")]
     BuiltinNameLocked(String),
     /// A delete targeted a MATERIALIZED builtin skill (issue #677): builtin
     /// skills are undeletable (they re-materialize on the next scan anyway);
-    /// the single shutdown axis is disabling the companion CLI entry.
+    /// the shutdown axis is the enablement axis -- disable the skill, or
+    /// for a CLI companion its CLI entry.
     /// Carries the name.
     #[error("built-in skill cannot be deleted: {0}")]
     BuiltinUndeletable(String),

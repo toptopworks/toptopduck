@@ -1,19 +1,26 @@
-//! Builtin skills (issue #677, ADR-0109 Decisions 5/6): the app-authored
-//! companion skills that ride the app version, one per builtin CLI
-//! registration entry (same name, 1:1).
+//! Builtin skills (issue #677, ADR-0109 Decisions 5/6; the companion axis
+//! made optional by ADR-0120 Decision 7): the app-authored skills that
+//! ride the app version. Most are CLI companions, one per builtin CLI
+//! registration entry (same name, 1:1); a knowledge-only skill (first:
+//! `vega-chart`) ships without a CLI counterpart and anchors on the app
+//! version alone.
 //!
-//! The shipped definition set is a compile-time constant mirroring
-//! [`crate::cli_tools::builtin::BUILTIN_DEFINITIONS`]: each entry pairs 1:1
-//! with its CLI tool by name and carries a per-locale (en-US / zh-CN)
-//! description + body. The prose is app-curated -- a skill
+//! The shipped definition set is a compile-time constant: each CLI
+//! companion pairs 1:1 with its entry in
+//! [`crate::cli_tools::builtin::BUILTIN_DEFINITIONS`] by name, and every
+//! entry carries a per-locale (en-US / zh-CN) description + body. The
+//! prose is app-curated -- a skill
 //! body enters the system prompt, so it is a trust boundary: a third-party
 //! `SKILL.md` is never auto-absorbed (the manual import flow stays the only
 //! path for those; ADR-0109 Decision 5).
 //!
-//! Materialization rides the CLI scan window (issue #677): when the matching
-//! CLI entry is `Builtin`-sourced and the skill file is missing, the skill is
-//! written into the registry under the CURRENT locale and recorded in the
-//! app-config side table `builtin_skill_baselines` (`name -> {hash, locale}`).
+//! Materialization rides the CLI scan window (issue #677): when the
+//! companion CLI entry is `Builtin`-sourced and the skill file is missing,
+//! the skill is written into the registry under the CURRENT locale and
+//! recorded in the app-config side table
+//! `builtin_skill_baselines` (`name -> {hash, locale}`); a knowledge-only
+//! skill materializes in the same window with no CLI condition (ADR-0120
+//! Decision 7).
 //! The baseline judgment is pure derivation -- `edited` iff the current
 //! file's hash differs from the recorded hash -- so the edit path writes
 //! NOTHING to the side table; an unedited skill whose recorded hash left the
@@ -39,11 +46,18 @@ pub(crate) struct BuiltinSkillBody {
     pub body: &'static str,
 }
 
-/// One shipped builtin skill definition. `name` equals the companion CLI
-/// registration's name (the two namespaces are disjoint by construction --
-/// a skill name and a CLI name coincide only through these pairs).
+/// One shipped builtin skill definition. A companioned skill's `name`
+/// equals its companion CLI registration's name (the two namespaces are
+/// disjoint by construction -- a skill name and a CLI name coincide only
+/// through these pairs); a knowledge-only skill has no CLI counterpart.
 pub(crate) struct BuiltinSkillDefinition {
     pub name: &'static str,
+    /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision
+    /// 7). `Some` -- the CLI companions: materialization and auto-include
+    /// gate on the entry. `None` -- a knowledge-only skill (first:
+    /// `vega-chart`): the app version is the anchor, so materialization
+    /// takes no CLI condition and auto-include drops the CLI conjunct.
+    pub companion_cli: Option<&'static str>,
     /// locale tag -> prose. Ordered en-US first (the fallback arm of
     /// [`body_for`] takes the first entry, so the ordering is load-bearing).
     pub locales: &'static [(&'static str, BuiltinSkillBody)],
@@ -57,6 +71,34 @@ impl BuiltinSkillDefinition {
             .find(|(tag, _)| *tag == locale)
             .map(|(_, body)| body)
             .unwrap_or(&self.locales[0].1)
+    }
+
+    /// The materialization anchor: whether a CLI registry anchors this
+    /// definition (ADR-0120 Decision 7). A companioned skill anchors on
+    /// its `Builtin`-sourced entry being registered (a dormant or
+    /// user-sourced entry anchors nothing); a knowledge-only skill is
+    /// anchored by the app version itself.
+    fn cli_anchor(&self, cli: &[crate::cli_tools::config::CliToolConfig]) -> bool {
+        match self.companion_cli {
+            Some(companion) => cli.iter().any(|t| {
+                t.name == companion && t.source == crate::cli_tools::config::CliToolSource::Builtin
+            }),
+            None => true,
+        }
+    }
+
+    /// The auto-include gate: a companioned skill rides the enabled state
+    /// of its `Builtin`-sourced entry; a knowledge-only skill has nothing
+    /// to ride, so the gate is unconditionally open.
+    fn auto_include_gate(&self, cli: &[crate::cli_tools::config::CliToolConfig]) -> bool {
+        match self.companion_cli {
+            Some(companion) => cli.iter().any(|t| {
+                t.name == companion
+                    && t.source == crate::cli_tools::config::CliToolSource::Builtin
+                    && t.enabled
+            }),
+            None => true,
+        }
     }
 
     /// The rendered SKILL.md bytes for a locale: the spec frontmatter
@@ -91,12 +133,14 @@ impl BuiltinSkillDefinition {
     }
 }
 
-/// The v1 companion set, 1:1 with the builtin CLI definitions (pandoc,
-/// python, office-cli). Additive evolution mirrors the CLI set: new entries
-/// pass the same curation screen.
+/// The shipped set: the v1 CLI-companion trio (pandoc, python, office-cli)
+/// plus the knowledge-only `vega-chart` (ADR-0120 Decision 7). Additive
+/// evolution mirrors the CLI set: new entries pass the same curation
+/// screen.
 pub(crate) static BUILTIN_SKILL_DEFINITIONS: &[BuiltinSkillDefinition] = &[
     BuiltinSkillDefinition {
         name: "pandoc",
+        companion_cli: Some("pandoc"),
         locales: &[
             (
                 "en-US",
@@ -136,6 +180,7 @@ standalone）时，在回复中说明，而不是自行拼凑参数。\n",
     },
     BuiltinSkillDefinition {
         name: "python",
+        companion_cli: Some("python"),
         locales: &[
             (
                 "en-US",
@@ -178,6 +223,7 @@ write an output file the next step consumes.\n",
     },
     BuiltinSkillDefinition {
         name: "office-cli",
+        companion_cli: Some("office-cli"),
         locales: &[
             (
                 "en-US",
@@ -212,6 +258,116 @@ DOCX/XLSX/PPTX 内容、抽取文本与表格、填充模板、从零生成 Offi
 子命令及其参数以 `args` 列表传入，一个参数一个元素（不要预先拼成 shell 风格的单一字符\
 串）。子命令名称以 OfficeCLI 自身的帮助输出为准——拿不准子命令形态时说明情况，而不是\
 猜测标志。\n",
+                },
+            ),
+        ],
+    },
+    BuiltinSkillDefinition {
+        name: "vega-chart",
+        companion_cli: None,
+        locales: &[
+            (
+                "en-US",
+                BuiltinSkillBody {
+                    description: "Chart numeric shape — a trend over time, a distribution, \
+                                  a comparison across categories or groups — by emitting a \
+                                  vega-lite fence in the reply. Flowcharts, diagrams, and \
+                                  lone KPI figures are out of scope; they belong to plain \
+                                  prose or a table.",
+                    body: "Produce charts as vega-lite fences written directly into the reply \
+prose: one fence per chart, a self-contained Vega-Lite JSON object with the data \
+inlined, interleaved freely with the surrounding text. The app renders each such \
+fence as a chart; every other code block stays plain text.\n\
+\n\
+When to chart -- the substance is numeric shape:\n\
+- a trend over time (line, area);\n\
+- a distribution or a histogram (bar);\n\
+- a comparison across categories or groups (bar), parts of a whole (arc), a \
+relationship between two measures (point family), or a dense two-axis grid \
+(rect heatmap).\n\
+A couple of numbers, a lone KPI figure, a flowchart, or a diagram is not a \
+chart -- write prose or a table instead.\n\
+\n\
+The fence contract (a broken fence never renders silently: a wrong fence \
+language stays a plain code block, and a spec that fails to decode renders \
+a visible error disclosure):\n\
+- the fence language is exactly `vega-lite` -- never `vega`, never a bare \
+`json` fence;\n\
+- `$schema` is mandatory: `https://vega.github.io/schema/vega-lite/v5.json`;\n\
+- the content is strict JSON: double-quoted keys and strings, no trailing \
+commas, no comments, no JavaScript expressions;\n\
+- the spec's key names are case-sensitive -- top-level `mark` and \
+`encoding`, and `field` and `type` inside each encoding channel, verbatim, \
+and every `field` must match a key of the inlined data;\n\
+- each encoding channel's `type` is one of `quantitative`, `nominal`, \
+`ordinal`, `temporal`.\n\
+\n\
+Marks -- the renderer's whitelist, mapped to intent (anything else degrades):\n\
+- `bar`: category comparison, histogram;\n\
+- `line`: trend over time or an ordered series;\n\
+- `area`: cumulative or stacked volume over time;\n\
+- `point` / `circle` / `square`: scatter, relationship, concentration;\n\
+- `arc`: composition of a small set of categories;\n\
+- `rect`: heatmap over two categorical axes.\n\
+\n\
+Data discipline:\n\
+- aggregate in SQL first, then inline the aggregated rows as the fence's \
+`data.values` array;\n\
+- roughly 150 rows per chart is the ceiling (day-grain lines and mid-size \
+heatmaps sit at the boundary) -- pre-bin, sample, or top-N anything larger.\n\
+\n\
+A minimal fence to imitate (single-line or pretty-printed, both render):\n\
+\n\
+```vega-lite\n\
+{\"$schema\":\"https://vega.github.io/schema/vega-lite/v5.json\",\"mark\":\"bar\",\"data\":{\"values\":[{\"k\":\"A\",\"v\":12},{\"k\":\"B\",\"v\":19}]},\"encoding\":{\"x\":{\"field\":\"k\",\"type\":\"nominal\"},\"y\":{\"field\":\"v\",\"type\":\"quantitative\"}}}\n\
+```\n",
+                },
+            ),
+            (
+                "zh-CN",
+                BuiltinSkillBody {
+                    description: "用 vega-lite fence 表现数值形态——时间趋势、分布、跨类\
+                                  目或分组的对比——在回复中直接产出图表。流程图、示意图\
+                                  与孤立 KPI 数字不在范围，那些属于纯文字或表格。",
+                    body: "把图表作为 vega-lite fence 直接写进回复正文：一条 fence 一张图，\
+是自包含的 Vega-Lite JSON 对象、数据内联，与前后文字自由穿插。app 会把每条这样的 \
+fence 渲染成图表；其余代码块保持纯文本呈现。\n\
+\n\
+何时画图——内容是数值形态时：\n\
+- 时间上的趋势（line、area）；\n\
+- 分布或直方图（bar）；\n\
+- 跨类目或分组的对比（bar）、整体构成（arc）、两个度量间的关系（point \
+族）、双轴密集网格（rect 热力图）。\n\
+寥寥几个数字、孤立的 KPI 数字、流程图或示意图不是图表——改写文字或表格。\n\
+\n\
+fence 契约（坏 fence 不会静默渲染：fence 语言错误保持纯代码块，解析失败的 \
+spec 渲染为可见的错误披露）：\n\
+- fence 语言恒为 `vega-lite`——不是 `vega`，也不是裸 `json` fence；\n\
+- `$schema` 必带：`https://vega.github.io/schema/vega-lite/v5.json`；\n\
+- 内容是严格 JSON：键与字符串双引号、无尾逗号、无注释、无 JS 表达式；\n\
+- spec 键名大小写敏感——顶层 `mark`、`encoding` 与编码通道内的 `field`、\
+`type` 逐字对齐，且每个 `field` 必须匹配内联数据的某个键；\n\
+- 每个编码通道的 `type` 只认 `quantitative`、`nominal`、`ordinal`、\
+`temporal` 四者之一。\n\
+\n\
+mark——渲染端白名单，按意图映射（其余形态降级）：\n\
+- `bar`：类目对比、直方图；\n\
+- `line`：时间趋势或有序序列；\n\
+- `area`：时间上的累计或堆叠体量；\n\
+- `point` / `circle` / `square`：散点、关系、密度；\n\
+- `arc`：少量类目的整体构成；\n\
+- `rect`：两个类目轴上的热力图。\n\
+\n\
+数据纪律：\n\
+- 先用 SQL 聚合，再把聚合后的行内联为 fence 的 `data.values` 数组；\n\
+- 每图内联数据约 150 行封顶（日粒度折线与中型热力图正处边界）——超出的先\
+分箱、采样或取 top-N。\n\
+\n\
+一条最小可仿的 fence（单行与 pretty-print 皆可渲染）：\n\
+\n\
+```vega-lite\n\
+{\"$schema\":\"https://vega.github.io/schema/vega-lite/v5.json\",\"mark\":\"bar\",\"data\":{\"values\":[{\"k\":\"A\",\"v\":12},{\"k\":\"B\",\"v\":19}]},\"encoding\":{\"x\":{\"field\":\"k\",\"type\":\"nominal\"},\"y\":{\"field\":\"v\",\"type\":\"quantitative\"}}}\n\
+```\n",
                 },
             ),
         ],
@@ -326,11 +482,14 @@ impl BuiltinSkillMark {
 /// registry, mutating the side table in place. Returns whether the side
 /// table changed (the caller folds that into its persist decision).
 ///
-/// Per definition: a `Builtin`-sourced CLI entry with a missing skill file
-/// materializes the file at `locale` and records the baseline (a dormant or
-/// conflict-postured entry materializes nothing -- the skill enters the
-/// library only when the tool is registered). An existing file with NO
-/// record is the reverse-conflict posture (a user skill owns the name): the
+/// Per definition: a companioned skill materializes when its
+/// `Builtin`-sourced CLI entry is registered and the skill file is missing
+/// (a dormant or conflict-postured entry materializes nothing -- the skill
+/// enters the library only when the tool is registered); a knowledge-only
+/// skill (no companion, ADR-0120 Decision 7) materializes with no CLI
+/// condition -- nothing to detect, the app version itself is the anchor.
+/// An existing file with NO record is the reverse-conflict posture (a user
+/// skill owns the name): the
 /// scan warns and skips, and the next scan after the user renames or removes
 /// theirs materializes (mirrors the CLI-side `Conflict` semantics). An
 /// existing file WITH a record: hash-different = edited, preserved verbatim;
@@ -348,10 +507,7 @@ pub(crate) fn reconcile(
 ) -> bool {
     let mut dirty = false;
     for def in BUILTIN_SKILL_DEFINITIONS {
-        let entry_is_builtin = cli.tools.iter().any(|t| {
-            t.name == def.name && t.source == crate::cli_tools::config::CliToolSource::Builtin
-        });
-        if !entry_is_builtin {
+        if !def.cli_anchor(&cli.tools) {
             continue;
         }
         let dir = root.join(def.name);
@@ -528,16 +684,18 @@ pub(crate) fn restore(
 // ---------------------------------------------------------------------------
 // Auto-include (ADR-0109 Decision 6: the folded initial set)
 
-/// The builtin skill names a NEW session auto-includes: the companion CLI
-/// entry is `Builtin`-sourced AND enabled, the skill is MATERIALIZED (a
-/// side-table record -- the same anchor the frontend's `acquired: builtin`
-/// derives from, so the chip count and the seeded set agree even in the
-/// reverse-conflict window, where the file exists but is the user's), and
-/// the skill file exists (a materialized skill whose CLI entry went missing
-/// kept its file -- but with no entry there is nothing to detect+enable, so
-/// it stays out). Computed fresh at session creation and at resume (never
-/// persisted, never an event); a disabled tool drops out on the next
-/// recomputation.
+/// The builtin skill names a NEW session auto-includes: a companioned
+/// skill needs its companion CLI entry `Builtin`-sourced AND enabled; a
+/// knowledge-only skill (no companion, ADR-0120 Decision 7) rides the app
+/// version and skips the CLI conjunct. Both paths require the skill to be
+/// MATERIALIZED (a side-table record -- the same anchor the frontend's
+/// `acquired: builtin` derives from, so the chip count and the seeded set
+/// agree even in the reverse-conflict window, where the file exists but
+/// is the user's) and the skill file to exist (a materialized skill whose
+/// CLI entry went missing kept its file -- but with no entry there is
+/// nothing to detect+enable, so it stays out). Computed fresh at session
+/// creation and at resume (never persisted, never an event); a disabled
+/// tool drops out on the next recomputation.
 pub(crate) fn auto_included_names(
     cli: &[crate::cli_tools::config::CliToolConfig],
     mark: &BuiltinSkillMark,
@@ -546,11 +704,8 @@ pub(crate) fn auto_included_names(
     BUILTIN_SKILL_DEFINITIONS
         .iter()
         .filter(|def| {
-            cli.iter().any(|t| {
-                t.name == def.name
-                    && t.source == crate::cli_tools::config::CliToolSource::Builtin
-                    && t.enabled
-            }) && mark.contains(def.name)
+            def.auto_include_gate(cli)
+                && mark.contains(def.name)
                 && skills_root.join(def.name).join("SKILL.md").exists()
         })
         .map(|def| def.name.to_string())
@@ -585,6 +740,21 @@ mod tests {
 
     fn pandoc_def() -> &'static BuiltinSkillDefinition {
         find_skill_definition("pandoc").expect("pandoc skill definition")
+    }
+
+    /// The side-table keys a fresh install settles on: exactly the
+    /// knowledge-only definitions (a companioned skill needs its CLI entry
+    /// detected to materialize). Sorted to match the BTreeMap key order, so
+    /// the exact-set assertions below self-scale as the knowledge-only set
+    /// grows instead of hardcoding today's count.
+    fn knowledge_only_names_sorted() -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = BUILTIN_SKILL_DEFINITIONS
+            .iter()
+            .filter(|def| def.companion_cli.is_none())
+            .map(|def| def.name)
+            .collect();
+        names.sort_unstable();
+        names
     }
 
     // --- shipped set --------------------------------------------------------
@@ -856,6 +1026,11 @@ mod tests {
     fn reconcile_skips_dormant_and_user_sourced_entries() {
         let root = tempfile::tempdir().expect("root");
         let mut baselines = BTreeMap::new();
+        // Let the knowledge-only skill settle FIRST (the drops-test pattern)
+        // so the scenario window itself must stay quiet -- keeping the
+        // not-dirty pin vega-chart's same-window materialization had
+        // masked.
+        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
         let mut user = builtin_pandoc(true);
         user.source = CliToolSource::User;
         let dirty = reconcile(
@@ -864,31 +1039,48 @@ mod tests {
             &registry_with(vec![user]),
             &mut baselines,
         );
+        // The user-sourced entry anchors nothing: no pandoc file, no pandoc
+        // record, and no side-table change at all.
         assert!(!dirty);
         assert!(!root.path().join("pandoc/SKILL.md").exists());
-        assert!(baselines.is_empty());
+        assert_eq!(
+            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
+            knowledge_only_names_sorted(),
+            "only the settled knowledge-only records remain"
+        );
     }
 
     #[test]
     fn reconcile_defers_when_a_user_skill_owns_the_name() {
         // Reverse conflict: a directory we never wrote occupies the name.
         let root = tempfile::tempdir().expect("root");
+        // Let the knowledge-only skill settle FIRST so the defer window
+        // itself must stay quiet (a defer is not a side-table change).
+        let mut baselines = BTreeMap::new();
+        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
         let user_file = "---\nname: pandoc\ndescription: owned\n---\nBody.\n";
         std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
         std::fs::write(root.path().join("pandoc/SKILL.md"), user_file).expect("write");
-        let mut baselines = BTreeMap::new();
         let dirty = reconcile(
             root.path(),
             "en-US",
             &registry_with(vec![builtin_pandoc(true)]),
             &mut baselines,
         );
-        assert!(!dirty);
-        assert!(baselines.is_empty(), "no record: the file is not ours");
+        assert!(
+            !baselines.contains_key("pandoc"),
+            "no record: the file is not ours"
+        );
+        assert!(!dirty, "a defer is not a side-table change");
         assert_eq!(
             std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).unwrap(),
             user_file,
             "the user file is preserved"
+        );
+        assert_eq!(
+            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
+            knowledge_only_names_sorted(),
+            "only the settled knowledge-only records remain"
         );
     }
 
@@ -987,6 +1179,10 @@ mod tests {
     fn reconcile_drops_records_with_no_anchor() {
         let root = tempfile::tempdir().expect("root");
         let mut baselines = BTreeMap::new();
+        // Let the knowledge-only skill settle FIRST so its materialization
+        // cannot mask the dirty pin below: the only side-table change left
+        // must be the drops.
+        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
         baselines.insert(
             "pandoc".to_string(),
             BuiltinSkillBaseline {
@@ -1003,9 +1199,17 @@ mod tests {
         );
         // No file, no Builtin CLI entry -> dropped; unknown name -> dropped.
         // The drops report dirty: a cleanup-only scan still persists (the
-        // skip-write branch must not swallow a side-table shrink).
+        // skip-write branch must not swallow a side-table shrink) -- pinned
+        // against a settled skills side so vega-chart's earlier
+        // materialization cannot be the dirty source.
         let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
-        assert!(baselines.is_empty());
+        assert!(!baselines.contains_key("pandoc"));
+        assert!(!baselines.contains_key("retired-skill"));
+        assert_eq!(
+            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
+            knowledge_only_names_sorted(),
+            "only the settled knowledge-only records remain"
+        );
         assert!(dirty, "a dropped record is a side-table change");
     }
 
@@ -1092,6 +1296,246 @@ mod tests {
         let mut user = builtin_pandoc(true);
         user.source = CliToolSource::User;
         assert!(auto_included_names(&[user], &marked, root.path()).is_empty());
+    }
+
+    // --- the companion axis (issue #1012, ADR-0120 Decision 7) ------------
+
+    /// The declared companion wiring: the v1 trio rides its same-named CLI
+    /// entry; `vega-chart` is the first knowledge-only skill (no CLI to
+    /// detect, nothing to gate on).
+    #[test]
+    fn companioned_definitions_declare_their_cli_and_vega_chart_rides_none() {
+        let trio: &[(&str, &str)] = &[
+            ("pandoc", "pandoc"),
+            ("python", "python"),
+            ("office-cli", "office-cli"),
+        ];
+        for (skill, cli) in trio {
+            assert_eq!(
+                find_skill_definition(skill)
+                    .expect("definition")
+                    .companion_cli,
+                Some(*cli),
+                "{skill} keeps its CLI companion"
+            );
+        }
+        assert_eq!(
+            find_skill_definition("vega-chart")
+                .expect("definition")
+                .companion_cli,
+            None,
+            "vega-chart is knowledge-only"
+        );
+        // The declared companions stay 1:1 with the CLI shipped set, and the
+        // pairing is same-name (the module-doc invariant): every companion
+        // addresses a shipped CLI definition AND equals the skill's own
+        // name -- a divergent pair would desync the anchor (companion-keyed)
+        // from the record-retain arm (name-keyed), and a hand-copied trio
+        // would silently drift as the CLI set grows.
+        for def in BUILTIN_SKILL_DEFINITIONS {
+            if let Some(companion) = def.companion_cli {
+                assert_eq!(
+                    companion, def.name,
+                    "a companioned skill shares its CLI entry's name (the \
+                     two namespaces are disjoint only through these pairs)"
+                );
+                assert!(
+                    crate::cli_tools::builtin::BUILTIN_DEFINITIONS
+                        .iter()
+                        .any(|cli| cli.name == companion),
+                    "{companion} must address a shipped CLI definition"
+                );
+            }
+        }
+    }
+
+    /// The no-companion materialization path: with an EMPTY CLI registry
+    /// (no detection, no registration) the knowledge-only skill still
+    /// materializes and records -- the app version itself is the anchor.
+    /// Removing the dispatch (a no-companion skill falling back to the CLI
+    /// judgment) leaves the file unwritten and this red.
+    #[test]
+    fn reconcile_materializes_a_no_companion_skill_with_no_cli_entry() {
+        let root = tempfile::tempdir().expect("root");
+        let mut baselines = BTreeMap::new();
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        assert!(dirty);
+        let def = find_skill_definition("vega-chart").expect("definition");
+        let content =
+            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).expect("file");
+        assert_eq!(content, def.render("en-US").unwrap());
+        assert_eq!(baselines["vega-chart"].locale, "en-US");
+        assert_eq!(
+            baselines["vega-chart"].hash,
+            crate::util::sha256_hex(content.as_bytes())
+        );
+    }
+
+    /// The no-companion auto-include path: admission without any CLI entry
+    /// (the dispatch's open arm), while materialization and file presence
+    /// keep gating (the closed arms). Falling back to the CLI judgment for
+    /// a knowledge-only skill empties the first assert.
+    #[test]
+    fn auto_included_names_admits_a_no_companion_skill_without_a_cli_entry() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join("vega-chart")).expect("mkdir");
+        std::fs::write(
+            root.path().join("vega-chart/SKILL.md"),
+            "---\nname: vega-chart\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write");
+        let marked = BuiltinSkillMark::of(&["vega-chart"]);
+        assert_eq!(
+            auto_included_names(&[], &marked, root.path()),
+            vec!["vega-chart".to_string()]
+        );
+        // Unmarked (the reverse-conflict window) drops out.
+        assert!(auto_included_names(&[], &BuiltinSkillMark::default(), root.path()).is_empty());
+        // A missing file drops out.
+        std::fs::remove_file(root.path().join("vega-chart/SKILL.md")).expect("delete");
+        assert!(auto_included_names(&[], &marked, root.path()).is_empty());
+    }
+
+    /// The knowledge-only steady state: a vega-chart materialized under one
+    /// locale stays byte-stable and quiet under another. The anchor fires
+    /// EVERY window (no CLI condition), so a non-idempotency bug here would
+    /// churn the config on every startup, unlike the trio's (whose anchor
+    /// needs a detection). Also pins the zh-CN materialization combination.
+    #[test]
+    fn reconcile_keeps_a_no_companion_skill_quiet_across_a_locale_switch() {
+        let root = tempfile::tempdir().expect("root");
+        let mut baselines = BTreeMap::new();
+        reconcile(root.path(), "zh-CN", &registry_with(vec![]), &mut baselines);
+        let def = find_skill_definition("vega-chart").expect("definition");
+        let content =
+            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).expect("file");
+        assert_eq!(content, def.render("zh-CN").unwrap());
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        assert!(!dirty, "the locale switch does not rewrite or re-record");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).unwrap(),
+            content,
+            "the zh-CN render survives the en-US window"
+        );
+        assert_eq!(baselines["vega-chart"].locale, "zh-CN");
+    }
+
+    /// The knowledge-only reverse-conflict posture at the reconcile level:
+    /// a user-written vega-chart file defers (no record, bytes preserved
+    /// verbatim) with an EMPTY CLI registry -- the knowledge-only anchor
+    /// opens this window on every scan, unlike the trio's (which needs its
+    /// CLI registered first).
+    #[test]
+    fn reconcile_defers_a_user_written_no_companion_skill() {
+        let root = tempfile::tempdir().expect("root");
+        let user_file = "---\nname: vega-chart\ndescription: mine\n---\nBody.\n";
+        std::fs::create_dir_all(root.path().join("vega-chart")).expect("mkdir");
+        std::fs::write(root.path().join("vega-chart/SKILL.md"), user_file).expect("write");
+        let mut baselines = BTreeMap::new();
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        assert!(
+            !baselines.contains_key("vega-chart"),
+            "no record: the file is not ours"
+        );
+        assert!(!dirty, "a defer is not a side-table change");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).unwrap(),
+            user_file,
+            "the user file is preserved"
+        );
+    }
+
+    /// The locked vega-chart trigger copy (curation brief, verbatim -- the
+    /// same discipline as the trio above): sentence 1 is capability +
+    /// trigger timing, sentence 2 the negative boundary routing flowcharts
+    /// and KPI figures to prose/tables.
+    #[test]
+    fn vega_chart_description_pins_the_trigger_copy() {
+        let def = find_skill_definition("vega-chart").expect("definition");
+        assert_eq!(
+            def.body_for("en-US").description,
+            "Chart numeric shape — a trend over time, a distribution, a \
+             comparison across categories or groups — by emitting a \
+             vega-lite fence in the reply. Flowcharts, diagrams, and lone \
+             KPI figures are out of scope; they belong to plain prose or \
+             a table."
+        );
+        assert_eq!(
+            def.body_for("zh-CN").description,
+            "用 vega-lite fence 表现数值形态——时间趋势、分布、跨类目或分组\
+             的对比——在回复中直接产出图表。流程图、示意图与孤立 KPI 数字不在\
+             范围，那些属于纯文字或表格。"
+        );
+    }
+
+    /// The vega-chart body must teach the whole render contract (ADR-0120
+    /// Decisions 1/3/5/6): the fence language rule, the four syntax rules,
+    /// the whitelisted mark set (matching the frontend
+    /// `WHITELISTED_MARKS`), the SQL-first + row-cap data guardrail, and
+    /// an imitable minimal fence. Phrase pins, not verbatim: the body is
+    /// teaching prose a re-curation may rewrite; the CONTRACT items are
+    /// what must survive one.
+    #[test]
+    fn vega_chart_body_teaches_the_render_contract() {
+        let def = find_skill_definition("vega-chart").expect("definition");
+        for tag in ["en-US", "zh-CN"] {
+            let body = def.body_for(tag).body;
+            // The fence language rule (Decision 6).
+            assert!(
+                body.contains("`vega-lite`"),
+                "{tag} names the fence language"
+            );
+            // The four syntax rules.
+            assert!(body.contains("$schema"), "{tag} requires $schema");
+            assert!(body.contains("v5.json"), "{tag} pins the v5 schema URL");
+            assert!(
+                body.contains("case-sensitive") || body.contains("大小写敏感"),
+                "{tag} teaches field-name case sensitivity"
+            );
+            for t in ["quantitative", "nominal", "ordinal", "temporal"] {
+                assert!(body.contains(t), "{tag} lists type {t}");
+            }
+            // The data guardrail (Decision 5): SQL-first + the row ceiling.
+            assert!(body.contains("SQL"), "{tag} teaches SQL-first aggregation");
+            assert!(
+                body.contains("150 rows") || body.contains("150 行"),
+                "{tag} carries the row guardrail"
+            );
+            // Every whitelisted mark token appears.
+            for m in [
+                "bar", "line", "area", "point", "circle", "square", "arc", "rect",
+            ] {
+                assert!(body.contains(&format!("`{m}`")), "{tag} whitelists {m}");
+            }
+            // An imitable minimal fence ships in the body, and it is valid
+            // strict JSON with a whitelisted mark -- it is the direct
+            // template the agent imitates, so a re-curation typo must fail
+            // here rather than ship.
+            let example = body
+                .split("```vega-lite\n")
+                .nth(1)
+                .and_then(|rest| rest.split("```").next())
+                .expect("an example fence");
+            let spec: serde_json::Value =
+                serde_json::from_str(example).expect("the example fence is strict JSON");
+            assert!(spec.get("$schema").is_some());
+            assert_eq!(spec["mark"], "bar");
+        }
+    }
+
+    /// The curation budget for the vega-chart body (issue #1012): ~3-4KB.
+    /// The body enters the prompt on every `invoke_skill`, so size is a
+    /// recurring token cost and 4096 bytes is the hard ceiling.
+    #[test]
+    fn vega_chart_body_stays_within_the_curation_budget() {
+        let def = find_skill_definition("vega-chart").expect("definition");
+        for tag in ["en-US", "zh-CN"] {
+            assert!(
+                def.body_for(tag).body.len() <= 4096,
+                "{tag} body is {} bytes (budget 4096)",
+                def.body_for(tag).body.len()
+            );
+        }
     }
 
     // --- the registry mark -------------------------------------------------

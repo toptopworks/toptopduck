@@ -6,7 +6,7 @@
 
 2. **wire 契约与结果卡槽位不动。** 工具调用契约维持无 viz 意图通道，`Materialized.viz` 结果卡槽位维持现状（无生产者），`ChartKind` 闭合枚举不动。fence 路线是纯新增表面（前端 markdown 管道 + 技能侧），不触碰 Rust turn 投影。
 
-3. **mark 白名单扩 `rect`（heatmap）。** 前端 `WHITELISTED_MARKS` 增 `rect`，语义为六类图型名实相符地覆盖 heatmap（`rect` 形态本已可经 `square` 点阵与无顶层 mark 的分层 spec 渗透，排除标准形态的约束力本就不完整）。降级披露的 unsupportedMark catalog 消息同步扩词。
+3. **mark 白名单扩 `rect`（heatmap）。** 前端 `WHITELISTED_MARKS` 增 `rect`，语义为六类图型名实相符地覆盖 heatmap（`rect` 形态本已可经 `square` 点阵与无顶层 mark 的分层 spec 渗透，排除标准形态的约束力本就不完整）。降级披露的 unsupportedMark catalog 消息同步扩词。校准：白名单为双份硬编码——前端 `WHITELISTED_MARKS` 与内置技能 `vega-chart` 教学 body——人工同步，无自动交叉校验；扩词时两处同改。
 
 4. **流式单一规则：live 占位，settled 渲染。** live 轮 prose 中的 vega-lite fence 一律轻量占位（不解析、不判失败、不显示生成中的源码）；轮次 settle 后 fence 才走 decode → 图表或降级。占位渲染遵守 markdown 管道的模块级 components identity 契约。
 

@@ -459,8 +459,9 @@ export function SkillsSection({
                 toggleEnabledMutation.mutate({ name: skill.name, enabled })}
               onOpen={() => openEdit(skill)}
               // A builtin skill is undeletable (issue #677): its delete
-              // button renders disabled -- disabling the companion CLI tool
-              // is the single shutdown axis.
+              // button renders disabled -- the shutdown axis is the
+              // enablement axis: disable the skill, or for a CLI companion
+              // its CLI entry.
               onDelete={
                 skill.acquired === "builtin"
                   ? undefined
@@ -770,9 +771,9 @@ function SkillDrawer({
   const isLinked = draft.acquired === "linked";
   const isBuiltin = draft.acquired === "builtin";
   const readOnly = isLinked;
-  // A builtin skill locks its name (issue #677): the identity the builtin
-  // CLI pairing anchors on (the companion skill and its CLI registration
-  // share the name 1:1). Everything else stays editable.
+  // A builtin skill locks its name (issue #677): the identity the shipped
+  // definition anchors on (materialization, upgrades, and the reserved-name
+  // set address the skill by it). Everything else stays editable.
   const nameLocked = isBuiltin;
   // Local draft state so the user can type before committing. Reset when the
   // draft identity changes (switching skills / opening create).

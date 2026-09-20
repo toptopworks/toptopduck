@@ -429,10 +429,11 @@ impl LiveProviderConfig {
         let config = if nothing_registered && upgraded.is_empty() && !skills_dirty {
             // Nothing to persist: every shipped definition is dormant,
             // already registered, and in agreement with its baseline, and no
-            // builtin skill changed. Skip the rewrite so startup and pane
-            // mounts do not churn the config file (normalize + atomic
-            // write) -- and a fresh install with no hits keeps the lazily
-            // materialized no-config state.
+            // builtin skill changed (a knowledge-only skill materializes on
+            // the first window -- ADR-0120 Decision 7 -- so a no-CLI-hit
+            // install still lands its config once, then stays quiet). Skip
+            // the rewrite so startup and pane mounts do not churn the
+            // config file (normalize + atomic write).
             cfg
         } else {
             self.store_inner(cfg).map_err(CliToolWriteError::Write)?
@@ -1716,10 +1717,12 @@ mod tests {
     }
 
     #[test]
-    fn startup_register_stays_dormant_and_writes_nothing_on_a_full_miss() {
-        // No hits -> no registration AND no config write: the startup scan
-        // on a fresh install with nothing installed keeps the lazily
-        // materialized no-config state (the empty-registration store skip).
+    fn startup_register_on_a_full_miss_registers_no_cli_but_materializes_the_knowledge_skill() {
+        // No CLI hits -> no CLI registration (the dormant posture, CLI
+        // side). The knowledge-only skill is NOT a miss: it materializes in
+        // the same window and the config lands carrying its baseline -- the
+        // store skip now needs BOTH the CLI side and the skills side quiet
+        // (ADR-0120 Decision 7).
         let (dir, live) = live();
         let empty_dir = tempfile::tempdir().expect("tempdir");
         let path_env = std::env::join_paths([empty_dir.path()]).expect("join");
@@ -1727,9 +1730,10 @@ mod tests {
         crate::cli_tools::builtin::startup_register(&live, Some(path_env), skills.path())
             .expect("startup");
         assert!(live.cli_tools().is_empty());
+        assert!(skills.path().join("vega-chart/SKILL.md").exists());
         assert!(
-            !dir.path().join("config.json").exists(),
-            "a full miss must not materialize the config file"
+            dir.path().join("config.json").exists(),
+            "the skill baseline side table persists"
         );
     }
 
