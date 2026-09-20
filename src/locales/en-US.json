@@ -552,6 +552,7 @@
   "thread.approval.pending": "Awaiting approval",
   "thread.approval.viewFiles": "View file values ({count})",
   "thread.approval.hideFiles": "Hide file values",
+  "thread.approval.fileValuesLoadFailed": "Full contents unavailable — showing the capped preview.",
   "thread.approval.resolved.allowOnce": "Allowed",
   "thread.approval.resolved.alwaysAllow": "Always allowed",
   "thread.approval.resolved.deny": "Denied",

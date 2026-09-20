@@ -7,7 +7,8 @@ import { DelegationTraceDialog } from "./DelegationTraceDialog";
 import { OperationBadge, TraceRow } from "./TraceRow";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import { isSettledRow, traceEntryFromRow, type LiveRoundRow } from "../../session/useTurnFlow";
-import type { ApprovalResponse } from "../../types/approval";
+import { log } from "../../lib/log";
+import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 
 // The execution-trace renderers (ADR-0078, issue #297): the expanded tool-call
 // chain of a settled turn (TraceRowList) and the live stream's per-row
@@ -46,6 +47,109 @@ function resolvedLabel(intl: IntlShape, response: ApprovalResponse): string {
   }
 }
 
+// The file-delivery expand-on-demand view (issue #672, ADR-0109 Decision 8;
+// full view issue #1009): collapsed by default, a deliberate low-frequency
+// action. Expanding pulls the FULL pre-truncation contents through the
+// `get_approval_attachments` command (the broadcast snapshot is capped at
+// the 4 KiB budget, not the content boundary); the capped preview renders
+// during the load gap and stays as the fallback when the pull rejects (slot
+// released, IPC failure) with a one-line error note. Without a loader the
+// expand keeps the capped snapshot (the #672 behavior -- tests without the
+// session id).
+function ApprovalFileValues({
+  preview,
+  requestId,
+  onLoad,
+}: {
+  preview: FileAttachment[];
+  requestId: string;
+  onLoad?: (requestId: string) => Promise<FileAttachment[]>;
+}) {
+  const [filesOpen, setFilesOpen] = useState(false);
+  // One fetch per card: idle until the first expand, then the uncut contents
+  // or the fallback posture. The pending-window snapshot is immutable while
+  // the card is up, so re-expanding reuses the settled state.
+  const [fullView, setFullView] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "full"; files: FileAttachment[] }
+    | { kind: "failed" }
+  >({ kind: "idle" });
+
+  const toggleFiles = () => {
+    const next = !filesOpen;
+    setFilesOpen(next);
+    // Fired from the handler (not an effect): one shot, no StrictMode
+    // double-fetch, no refetch on re-expand.
+    if (next && fullView.kind === "idle" && onLoad) {
+      setFullView({ kind: "loading" });
+      void onLoad(requestId).then(
+        (files) => setFullView({ kind: "full", files }),
+        (err) => {
+          // The durable trace the respond-command catch keeps too (ADR-0029):
+          // an expected lifecycle rejection and a real IPC failure are
+          // indistinguishable in the UI, so the log carries the difference.
+          log.warn(
+            "approval",
+            "full-attachments pull rejected; falling back to the capped preview",
+            { requestId, err },
+          );
+          setFullView({ kind: "failed" });
+        },
+      );
+    }
+  };
+
+  // The load gap and the failure both show the capped preview; only a landed
+  // full fetch replaces it.
+  const shown = fullView.kind === "full" ? fullView.files : preview;
+  return (
+    <>
+      <button
+        type="button"
+        className="approval-files-toggle mt-1 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+        aria-expanded={filesOpen}
+        onClick={toggleFiles}
+      >
+        {filesOpen ? (
+          <FormattedMessage id="thread.approval.hideFiles" defaultMessage="Hide file values" />
+        ) : (
+          <FormattedMessage
+            id="thread.approval.viewFiles"
+            defaultMessage="View file values ({count})"
+            values={{ count: preview.length }}
+          />
+        )}
+      </button>
+      {filesOpen && (
+        <>
+          {fullView.kind === "failed" && (
+            // role="status": the note appears asynchronously after the fetch
+            // rejects -- the same live-note semantics the thread's other
+            // async error notes carry.
+            <p role="status" className="approval-file-error m-0 mt-1 text-xs text-destructive">
+              <FormattedMessage
+                id="thread.approval.fileValuesLoadFailed"
+                defaultMessage="Full contents unavailable — showing the capped preview."
+              />
+            </p>
+          )}
+          {shown.map((file) => (
+            <span key={file.param} className="approval-file mt-1 block">
+              <span className="approval-file-param font-mono text-xs text-muted-foreground">
+                {file.param}
+              </span>
+              <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
+                {file.content}
+              </pre>
+            </span>
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
 // One live trace row: a pending approval renders the three-button card
 // (ADR-0083); a resolved approval merges its badge with the call's state;
 // plain built-in calls render as a running spinner or a completed trace row.
@@ -54,15 +158,18 @@ function resolvedLabel(intl: IntlShape, response: ApprovalResponse): string {
 export function LiveRow({
   row,
   onRespond,
+  onLoadAttachments,
 }: {
   row: LiveRoundRow;
   onRespond: (requestId: string, response: ApprovalResponse) => void;
+  /** Pulls the FULL pre-truncation file values for a pending request
+   * (issue #1009): the snapshot the row already holds is the capped
+   * broadcast copy; this fetches the uncut originals while the turn is
+   * suspended on the gate. Optional -- absent loaders keep the #672
+   * capped-snapshot behavior. */
+  onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
 }) {
   const intl = useIntl();
-  // The file-delivery expand (issue #672): collapsed by default, a
-  // deliberate low-frequency action (ADR-0109 Decision 8). Declared before
-  // the pending branch -- hooks cannot sit behind a conditional return.
-  const [filesOpen, setFilesOpen] = useState(false);
   if (row.approval !== null && row.approval.response === null) {
     // The in-flow approval card (ADR-0083): tool name + operation badge +
     // parameter summary + the three answers. The gateway suspends the turn on
@@ -145,38 +252,11 @@ export function LiveRow({
           </span>
         </span>
         {fileValues.length > 0 && (
-          <>
-            <button
-              type="button"
-              className="approval-files-toggle mt-1 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-              aria-expanded={filesOpen}
-              onClick={() => setFilesOpen((open) => !open)}
-            >
-              {filesOpen ? (
-                <FormattedMessage
-                  id="thread.approval.hideFiles"
-                  defaultMessage="Hide file values"
-                />
-              ) : (
-                <FormattedMessage
-                  id="thread.approval.viewFiles"
-                  defaultMessage="View file values ({count})"
-                  values={{ count: fileValues.length }}
-                />
-              )}
-            </button>
-            {filesOpen &&
-              fileValues.map((file) => (
-                <span key={file.param} className="approval-file mt-1 block">
-                  <span className="approval-file-param font-mono text-xs text-muted-foreground">
-                    {file.param}
-                  </span>
-                  <pre className="approval-file-content mt-0.5 max-h-40 overflow-auto rounded-sm bg-background p-1.5 font-mono text-xs whitespace-pre-wrap break-all">
-                    {file.content}
-                  </pre>
-                </span>
-              ))}
-          </>
+          <ApprovalFileValues
+            preview={fileValues}
+            requestId={requestId}
+            onLoad={onLoadAttachments}
+          />
         )}
       </li>
     );

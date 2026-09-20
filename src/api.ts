@@ -45,6 +45,7 @@ import type {
   ApprovalResolvedPayload,
   ApprovalResponse,
   AuthMode,
+  FileAttachment,
   ToolKey,
 } from "./types/approval";
 import type {
@@ -814,6 +815,19 @@ export async function respondToolApproval(
   response: ApprovalResponse,
 ): Promise<void> {
   await invoke<void>("respond_tool_approval", { sessionId, requestId, response });
+}
+
+// Fetch the full (pre-truncation) file-delivery values for the session's
+// in-flight approval request (issue #1009, ADR-0109 Decision 8): the
+// `approval-request` broadcast caps each attachment (a budget, not a content
+// boundary); this command serves the uncut originals while the turn is
+// suspended on the gate. Rejects once the request is answered or cancelled
+// -- callers fall back to the capped broadcast snapshot.
+export async function getApprovalAttachments(
+  sessionId: string,
+  requestId: string,
+): Promise<FileAttachment[]> {
+  return invoke<FileAttachment[]>("get_approval_attachments", { sessionId, requestId });
 }
 
 // Read the session's authorization posture (ADR-0080 Decision 4): `per_call`

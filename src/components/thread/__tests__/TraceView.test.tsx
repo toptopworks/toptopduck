@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { LiveRow } from "../TraceView";
 import type { LiveRoundRow } from "../../../session/useTurnFlow";
+import type { FileAttachment } from "../../../types/approval";
 
 // LiveRow's pending approval card (ADR-0083) + the file-delivery
 // expand-on-demand view (issue #672, ADR-0109 Decision 8): the snapshot
@@ -43,6 +44,10 @@ function rowWith(over: Partial<LiveRoundRow> = {}): LiveRoundRow {
 // The summary in rowWith's default shape: a realistic argv-shaped summary;
 // the same string anchors the fold-recovery assertions.
 const SUMMARY = "/bin/py cli-code-runner-code-tu_7.tmp";
+
+// The uncut full view the loader resolves with (issue #1009): the same
+// literal anchors the replace, refetch, and in-flight assertions.
+const UNCUT_FILES = [{ param: "code", content: "print(1); print(2)" }];
 
 // Fold recovery (issue #826): the WHOLE line is the click target -- one
 // click grows an expand block under the line (whitespace-pre-wrap keeps a
@@ -291,6 +296,76 @@ describe("LiveRow approval card file values", () => {
     expect(
       screen.queryByRole("button", { name: /file values/i }),
     ).not.toBeInTheDocument();
+  });
+
+  // Issue #1009: expanding pulls the FULL pre-truncation contents through
+  // the loader (the broadcast snapshot is a 4 KiB budget, not the content
+  // boundary) and replaces the capped preview in place -- arrival alone is
+  // not replacement, so the capped text must be gone once the full text
+  // lands.
+  it("pulls the uncut contents when expanded and replaces the capped preview", async () => {
+    const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
+    renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expect(onLoad).toHaveBeenCalledWith("req-1");
+    expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
+    expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the capped preview with an error note when the pull rejects", async () => {
+    const onLoad = vi.fn().mockRejectedValue(new Error("slot released"));
+    renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    // The async fallback note is a live note (role="status").
+    const note = await screen.findByRole("status");
+    expect(note).toHaveTextContent(/Full contents unavailable/i);
+    // The capped broadcast snapshot stays visible as the fallback face.
+    expect(screen.getByText("print(1)")).toBeInTheDocument();
+  });
+
+  // One fetch per card: the pending-window snapshot is immutable while the
+  // card is up, so collapsing and re-expanding reuses the settled full view.
+  it("does not refetch when collapsing and re-expanding", async () => {
+    const onLoad = vi.fn().mockResolvedValue(UNCUT_FILES);
+    renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    await screen.findByText("print(1); print(2)");
+    fireEvent.click(screen.getByRole("button", { name: "Hide file values" }));
+    expect(screen.queryByText("print(1); print(2)")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
+    expect(onLoad).toHaveBeenCalledTimes(1);
+  });
+
+  // The loading state is the in-flight dedup guard: collapsing and
+  // re-expanding while the pull is still pending must not fire a second
+  // fetch, and the capped preview stays the load-gap face until the pull
+  // lands.
+  it("keeps the capped preview and one call while the pull is in flight", async () => {
+    let resolvePull!: (files: FileAttachment[]) => void;
+    const onLoad = vi.fn().mockImplementation(
+      () => new Promise<FileAttachment[]>((resolve) => { resolvePull = resolve; }),
+    );
+    renderWithProviders(
+      <LiveRow row={rowWith()} onRespond={vi.fn()} onLoadAttachments={onLoad} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    // Load gap: the capped broadcast snapshot is the visible face.
+    expect(screen.getByText("print(1)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Hide file values" }));
+    fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
+    expect(onLoad).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolvePull(UNCUT_FILES);
+    });
+    expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
+    expect(screen.queryByText("print(1)")).not.toBeInTheDocument();
   });
 });
 

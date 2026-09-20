@@ -1615,6 +1615,53 @@ describe("Thread", () => {
       expect(onRespondApproval).toHaveBeenCalledWith("req-1", "deny");
     });
 
+    // Issue #1009: the file-values expand threads the full-view loader
+    // through to the pending card (Thread -> LiveTurnExchange -> LiveRow) --
+    // expanding pulls the uncut originals, not just the capped broadcast
+    // snapshot the row carries.
+    it("threads the full-view loader to a pending card's file-values expand", async () => {
+      const onLoad = vi.fn().mockResolvedValue([{ param: "code", content: "print(1); print(2)" }]);
+      const liveTurn: LiveTurn = {
+        question: "q",
+        askedAt: ASKED_AT,
+        invocationNames: [],
+        step: 1,
+        rounds: [
+          liveRound({
+            rows: [
+              liveRow({
+                key: "req-1",
+                name: "code-runner",
+                server: "CLI",
+                operationKind: "execute",
+                summary: "run /tmp/x.py",
+                approval: {
+                  requestId: "req-1",
+                  response: null,
+                  fileAttachments: [{ param: "code", content: "print(1)" }],
+                },
+                running: false,
+                success: null,
+                resultExcerpt: "",
+              }),
+            ],
+          }),
+        ],
+      };
+      renderThread(
+        <Thread
+          entries={[]}
+          selectedResult={null}
+          onSelectResult={() => {}}
+          liveTurn={liveTurn}
+          onLoadApprovalAttachments={onLoad}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "查看传值文件（1）" }));
+      expect(onLoad).toHaveBeenCalledWith("req-1");
+      expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
+    });
+
     it("flips an answered approval to its resolved badge in place", () => {
       const liveTurn: LiveTurn = {
         question: "q",
