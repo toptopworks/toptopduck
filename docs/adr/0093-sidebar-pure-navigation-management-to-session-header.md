@@ -8,7 +8,7 @@
 
 2. **行信息从常驻子行改为 HoverCard 浮层。** 移除常驻子行（首源名 + 轮次数），元信息（完整标题 / 数据源 / 轮次数 / 最近修改）经 Radix `HoverCard` 浮层在 hover + focus 时展示——右侧定位、固定宽度、键值对布局。
 
-3. **行状态视觉简化。** `MessageSquare` 行首图标替换为**条件状态圆点**——已打开（绿）/ pending approval（warning）/ 未打开（无，等宽占位保持对齐）；移除所有竖条样式（`shadow-[inset_2px_0_...]`），active 状态仅用 accent 背景表达。
+3. **行状态视觉简化。** `MessageSquare` 行首图标替换为**条件状态圆点**——已打开（绿）/ pending approval（warning）/ 未打开（无，等宽占位保持对齐）；移除所有竖条样式（`shadow-[inset_2px_0_...]`），active 状态仅用 accent 背景表达。校准：条件状态圆点另有第四态——最新已结算回合为 Failed 的会话行标 destructive；优先级 pending approval > turn failed > 已打开，两态并存时行 class 共存、圆点与 sr-only 标签取最高态。
 
 ## Context
 

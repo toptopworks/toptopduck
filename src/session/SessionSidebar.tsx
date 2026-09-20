@@ -100,9 +100,10 @@ interface SessionSidebarProps {
   /** Runtime sids whose latest settled turn is Failed (issue #1005): the
    *  matching entry rows carry the error state -- a destructive status dot +
    *  sr-only label -- so a failed turn stays visible from anywhere in the
-   *  shell. State-style, like the approval tint (ADR-0083): it clears only
-   *  when the session's newest settled turn lands non-Failed, never on
-   *  activation. Keyed by runtime sid, so only OPEN entries match. */
+   *  shell. State-style, like the approval tint (ADR-0083): never cleared on
+   *  activation; it extinguishes with the underlying state -- a newer turn
+   *  landing non-Failed, a close, or a pane-level cache reset. Keyed by
+   *  runtime sid, so only OPEN entries match. */
   turnFailedSids?: ReadonlySet<string>;
   onNew: () => void;
   onOpenDuck: () => void;
@@ -507,8 +508,8 @@ function SidebarRow({
               {displayName}
               {/* Highest priority wins (issue #1005): the approval label
                   outranks the failure label when both states hold. Static
-                  literal ids only -- the extract gate cannot follow a
-                  ternary id. */}
+                  literal ids only -- a ternary id would break the
+                  i18n:check CI gate. */}
               {hasPendingApproval ? (
                 <span className="sr-only">
                   <FormattedMessage

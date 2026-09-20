@@ -12,7 +12,7 @@ import { createQueryClient } from "../../lib/queryClient";
 import { conversation } from "../../api";
 import { sessionKeys } from "../queryKeys";
 import { isLatestTurnFailed, useTurnFailureSids } from "../useTurnFailureSids";
-import { cancelled, failed, materialized, textual } from "./fixtures";
+import { cancelled, failed, materialized, sourceAdded, textual } from "./fixtures";
 import type { ThreadEntry } from "../../types/thread";
 
 vi.mock("../../api", async (importOriginal) => {
@@ -24,15 +24,6 @@ vi.mock("../../api", async (importOriginal) => {
     }),
   };
 });
-
-// A source lifecycle event entry -- never a turn, so it must never displace
-// the predicate's verdict nor light the hook.
-function sourceAdded(referenceName: string): ThreadEntry {
-  return {
-    entry: "Source",
-    data: { kind: "Added", reference_name: referenceName, display_name: referenceName },
-  };
-}
 
 describe("isLatestTurnFailed", () => {
   it("reads false on an empty timeline", () => {

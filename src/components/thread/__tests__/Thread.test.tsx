@@ -4,7 +4,7 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
-import { cancelled, failed } from "../../../session/__tests__/fixtures";
+import { cancelled, failed, sourceAdded } from "../../../session/__tests__/fixtures";
 import { Thread } from "../Thread";
 import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
@@ -2738,13 +2738,6 @@ describe("Thread", () => {
   // sidebar dot derives from. Historical cards and non-Failed landings keep
   // the collapsed default.
   describe("Thread failed-card default-open technical details (issue #1005)", () => {
-    function sourceAdded(name: string): ThreadEntry {
-      return {
-        entry: "Source",
-        data: { kind: "Added", reference_name: name, display_name: name },
-      };
-    }
-
     it("mounts the latest failure card's fold already open", () => {
       const entries: ThreadEntry[] = [
         turnEntry(materializedRecord("result_1", null)),
@@ -2792,7 +2785,7 @@ describe("Thread", () => {
       expect(container.querySelector("details.error-details")?.hasAttribute("open")).toBe(false);
     });
 
-    it("keeps folds collapsed when the latest turn is Cancelled (a user action, not an error)", () => {
+    it("keeps folds collapsed when the latest turn is Cancelled (never an error state, user cancel or watchdog kill)", () => {
       const entries: ThreadEntry[] = [failed("boom"), cancelled("stop")];
       const { container } = renderThread(
         <Thread entries={entries} selectedResult={null} onSelectResult={() => {}} />,

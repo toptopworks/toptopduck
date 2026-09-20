@@ -335,8 +335,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // resetQueries both drops the data and actively refetches.
   // The epoch bump is the second half of the contract: the query observers
   // live OUTSIDE the region boundary, so their change notifications (batched
-  // onto a microtask by TanStack's notifyManager) land AFTER the boundary's
-  // synchronous error-clear re-render -- which would mount the children back
+  // onto a macrotask by TanStack's notifyManager, the systemSetTimeoutZero
+  // default) land AFTER the boundary's synchronous error-clear re-render --
+  // which would mount the children back
   // onto the parent's LAST JSX snapshot (still the stale array) and re-throw
   // straight into the fallback, deadlocking the card. The bump pulls this
   // component into the same React batch as the boundary's setState, and the
@@ -347,8 +348,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // remounts both regions (their local state resets with it, per ADR-0058's
   // region-local posture); a per-region epoch is the narrowing lever if that
   // cross-region loss ever matters. Do not remove the keys on green tests
-  // alone -- act() flattens the microtask ordering they defend against, so
-  // jsdom cannot distinguish keyed from unkeyed (ADR-0058 calibration).
+  // alone -- the notify macrotask fires between the test's act and its
+  // assertions, so jsdom cannot distinguish keyed from unkeyed (ADR-0058
+  // calibration).
   const [regionRetryEpoch, setRegionRetryEpoch] = useState(0);
   const resetSessionCache = () => {
     void queryClient.resetQueries({ queryKey: sessionKeys.all(sessionId) });

@@ -257,6 +257,20 @@ describe("TurnCard failed-card default-open technical details (issue #1005)", ()
     view.rerender(cardEl(failedRecord(), true));
     expect(details!.open).toBe(false);
   });
+
+  it("collapses the fold again when the flag flips back (the turn stops being latest)", () => {
+    const view = renderCard(failedRecord(), true);
+    const details = view.container.querySelector<HTMLDetailsElement>("details.error-details");
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute("open")).toBe(true);
+    // A newer turn settles non-Failed: Thread recomputes the flag to
+    // undefined, the prop VALUE changes, and React removes the open
+    // attribute -- the documented state-style extinguish (the flip back
+    // returns the fold to the collapsed posture, not the manual-toggle
+    // no-op of the steady-value case above).
+    view.rerender(cardEl(failedRecord(), undefined));
+    expect(details?.hasAttribute("open")).toBe(false);
+  });
 });
 
 describe("TurnCard cancelled reason split (issue #883)", () => {
