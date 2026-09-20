@@ -3,9 +3,9 @@
 // edit for every typed call site instead of another sweep across the test
 // tree (the tax already paid for content_hash #381, enabled_agents #932,
 // enabled + disabled_skills #966). Per-test variants go through the
-// `overrides` parameter (spread AFTER the baseline). The two vi.mock-hoisted
-// config literals (App.i18n / App.theme) cannot import this module and stay
-// hand-rolled there.
+// `overrides` parameter (spread AFTER the baseline). The vi.mock-hoisted
+// config literals (App.i18n / App.theme / App.sidebarWiring) cannot import
+// this module and stay hand-rolled there.
 import type { AppConfig } from "./types/app-config";
 import type { SkillEntry } from "./types/skills";
 
