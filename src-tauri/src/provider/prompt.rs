@@ -1118,7 +1118,8 @@ mod tests {
     #[test]
     fn short_descriptions_render_verbatim_beside_the_clamp() {
         // The guardrail, not the norm: a curated description under the cap
-        // renders byte-identically -- the clamp only ever trims.
+        // renders byte-identically -- the clamp only ever trims (and, since
+        // #1019, folds `\r`/`\n`/`\t` to spaces).
         let skills = [fragment("pdf-tools", "Read PDFs.", "Body.\n")];
         let prompt = render_skill_disclosure(&skills);
         assert!(prompt.contains("- `pdf-tools` — Read PDFs.\n"));

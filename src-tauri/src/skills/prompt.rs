@@ -7,9 +7,10 @@
 //! the registry root to produce a [`SkillPromptFragment`] carrying (a) the
 //! frontmatter `description` that rides the built-in prompt's metadata
 //! index (L1 -- the snapshot lists every enabled name uniformly), (b) the
-//! verbatim Markdown body that enters the context at the name's invocation
-//! (L2 -- a turn-scoped single expansion pinned to the invocation-time
-//! bytes), and (c) the SHA-256 of the WHOLE `SKILL.md` bytes that anchors
+//! Markdown body that enters the context at the name's invocation (L2 --
+//! a turn-scoped single expansion pinned to the invocation-time bytes;
+//! verbatim except over [`SKILL_BODY_MAX_BYTES`]), and (c) the SHA-256 of
+//! the WHOLE `SKILL.md` bytes that anchors
 //! the drift check. A name that left the registry (or whose `SKILL.md` is
 //! unreadable) degrades honestly -- empty description, empty body, empty
 //! hash, a warn log -- so the turn still proceeds. Provenance follows the
@@ -41,8 +42,9 @@ const SKILL_BODY_MAX_BYTES: usize = 100 * 1024;
 
 /// One named skill resolved for prompt injection or invocation (issue #364,
 /// ADR-0086; calibrated by ADR-0119). Carries the spec `name` (stable
-/// identity), the verbatim Markdown
-/// body (frontmatter stripped -- the prompt fragment), and the SHA-256 of the
+/// identity), the Markdown
+/// body (frontmatter stripped -- the prompt fragment; verbatim except over
+/// [`SKILL_BODY_MAX_BYTES`]), and the SHA-256 of the
 /// WHOLE `SKILL.md` bytes (frontmatter + body) at the resolve site's pin
 /// time.
 ///
@@ -139,14 +141,15 @@ fn cap_body(name: &str, body: String) -> String {
     log::warn!(
         target: "skills",
         "skill `{name}` body is {actual} bytes, over the {SKILL_BODY_MAX_BYTES}-byte \
-         injection cap -- truncating (the hash still covers the whole file)",
+         injection cap -- truncating (the hash still covers the whole file; \
+         shrink or split `SKILL.md` to serve the body whole)",
     );
     let mut capped = body[..end].trim_end().to_string();
     capped.push_str(&format!(
         "\n\n[Truncated: this skill's body is {actual} bytes, over the \
          {SKILL_BODY_MAX_BYTES}-byte injection cap. Only the leading part was \
-         loaded. Ask the user to shrink or split `SKILL.md` to see the full \
-         content.]\n"
+         loaded. Ask the user to shrink or split `SKILL.md`, or read the \
+         whole file via `read_skill_file` (it serves up to 1 MiB).]\n"
     ));
     capped
 }
@@ -512,6 +515,22 @@ mod tests {
             f.body.contains(&format!("{SKILL_BODY_MAX_BYTES}-byte")),
             "the marker names the cap for the model to relay"
         );
+        // The marker also reports the actual size and both self-heal paths:
+        // the user-relay remedy and the model's own full-read channel
+        // (ADR-0111 Decision 3 gates `read_skill_file` on the activated
+        // set -- a truncated skill is by definition in it, same turn).
+        assert!(
+            f.body.contains(&format!("is {} bytes", body.len())),
+            "the marker reports the actual size"
+        );
+        assert!(
+            f.body.contains("shrink or split"),
+            "the marker keeps the user-relay remedy"
+        );
+        assert!(
+            f.body.contains("read_skill_file"),
+            "the marker names the model's own full-read channel"
+        );
         // ...and the run of x's was cut at the cap.
         assert!(
             !f.body.contains(&"x".repeat(SKILL_BODY_MAX_BYTES + 1)),
@@ -524,6 +543,44 @@ mod tests {
         // The hash still covers the whole file (ADR-0086 Decision 2 unchanged).
         let raw = std::fs::read(root.join("huge").join(SKILL_MD)).unwrap();
         assert_eq!(f.content_hash, sha256_hex(&raw));
+        // The capped state pins into the invocation record and renders in
+        // the turn preamble -- the replay face shows the truncation too
+        // (the `cap_body` doc's both-faces claim).
+        let record = crate::model::SkillInvocation::from_fragment(
+            f,
+            crate::model::SkillLifecycleActor::User,
+        );
+        let preamble = crate::provider::prompt::render_invocation_preamble(&[record]);
+        assert!(preamble.contains("[Truncated"));
+        assert!(!preamble.contains(&"x".repeat(SKILL_BODY_MAX_BYTES + 1)));
+    }
+
+    /// A cut point landing inside a whitespace run hands the marker a clean
+    /// attachment: `trim_end` strips the dangling whitespace so the marker
+    /// follows the last non-blank byte. The x-run and CJK fixtures never
+    /// cut on whitespace, so this fixture is the only one that can tell a
+    /// dropped `trim_end` from the real shape.
+    #[test]
+    fn cut_point_on_a_whitespace_run_trims_to_the_last_content_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // x*(cap-10), then a whitespace run the cut lands inside, then
+        // trailing content pushing the file over the cap.
+        let body = format!(
+            "{}{}{}",
+            "x".repeat(SKILL_BODY_MAX_BYTES - 10),
+            " \t\n \t\n".repeat(8),
+            "y".repeat(64),
+        );
+        put_skill(root, "padcut", &body);
+        let fragments = resolve_prompt_fragments(root, &["padcut".to_string()]);
+        assert!(
+            fragments[0].body.contains(&format!(
+                "{}\n\n[Truncated",
+                "x".repeat(SKILL_BODY_MAX_BYTES - 10)
+            )),
+            "the marker attaches right after the last non-blank byte"
+        );
     }
 
     /// A cap position falling INSIDE a multi-byte code point steps back to
