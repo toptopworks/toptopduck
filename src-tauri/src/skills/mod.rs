@@ -58,6 +58,27 @@ pub use model::{
 };
 pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 
+/// Decode SKILL.md bytes lossy with the shared non-UTF-8 observability
+/// warn (issue #1025): a corrupt file stays loadable (U+FFFD stand-ins
+/// keep it prompt-usable), but the replacement is silent by default while
+/// the caller's `content_hash` still anchors the ORIGINAL bytes -- an
+/// invisible divergence between what rides the prompts and the drift
+/// anchor. One ladder-shaped warn makes the divergence observable; shared
+/// by the resolve face (`prompt::resolve_one`) and the assemble face
+/// (`registry::assemble_skill_parts`) so the signal cannot drift between
+/// channels.
+fn decode_skill_md_lossy(bytes: &[u8], name: &str) -> String {
+    if std::str::from_utf8(bytes).is_err() {
+        log::warn!(
+            target: "skills",
+            "skill `{name}` SKILL.md holds non-UTF-8 bytes -- the body rides \
+             lossy U+FFFD replacements while the content hash anchors the \
+             original bytes; re-save the file as UTF-8 to reconcile them",
+        );
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// The new-session discovery-snapshot seed (issue #961, ADR-0118 Decision
 /// 1; carried as the discovery snapshot by ADR-0119 Decision 3): the
 /// registry scan intersected with the enablement axis -- every spec-valid

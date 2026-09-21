@@ -224,6 +224,20 @@ fn serve_file(name: &str, path: &str, resolved: &Path, anchor: &Path) -> SkillRe
     if bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0) {
         return SkillReadOutcome::Refused(binary_failure(name, path));
     }
+    // Lossy-decoded on serve (the doc posture above), but the replacement
+    // is silent by default -- and this face is the remedy the injection
+    // cap's marker itself prescribes, so it must not hand back quiet
+    // U+FFFD content either. One ladder-shaped warn makes the divergence
+    // observable (issue #1025) -- the parity signal for the resolve-time
+    // and assemble-time warns.
+    if std::str::from_utf8(&bytes).is_err() {
+        log::warn!(
+            target: "skills",
+            "skill `{name}` file `{path}` holds non-UTF-8 bytes -- the served \
+             text rides lossy U+FFFD replacements; re-save the file as UTF-8 \
+             to reconcile it",
+        );
+    }
     SkillReadOutcome::Local {
         summary: format!("{name}: {path}"),
         payload: Value::String(String::from_utf8_lossy(&bytes).into_owned()),
@@ -602,6 +616,31 @@ mod tests {
             SkillReadOutcome::Local { summary, payload } => {
                 assert_eq!(summary, "sql-coach: references/notes.md");
                 assert_eq!(payload, Value::String("Use CTEs.\n".to_string()));
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
+    /// A non-UTF-8 file still serves its text lossy (U+FFFD stand-ins) --
+    /// the divergence the serve-time warn makes observable (issue #1025),
+    /// on the very face the injection cap's own marker prescribes as the
+    /// whole-file remedy. Pins the lossy posture so the warn's arrival
+    /// cannot regress the serve itself.
+    #[test]
+    fn non_utf8_file_serves_lossy() {
+        let fx = Fixture::new();
+        fx.put_skill("sql-coach");
+        fx.put_file(
+            "sql-coach",
+            "references/notes.md",
+            b"Use CTEs with \xFF inside.\n",
+        );
+        match read(&fx, "references/notes.md") {
+            SkillReadOutcome::Local { payload, .. } => {
+                assert_eq!(
+                    payload,
+                    Value::String("Use CTEs with \u{FFFD} inside.\n".to_string())
+                );
             }
             other => panic!("expected Local, got {other:?}"),
         }

@@ -4,7 +4,9 @@
 //! here is assembly-time and side-effect-free -- the command boundary
 //! snapshots the enabled entries into [`DelegationSpec`]s once per turn
 //! (degradation facts flow back as return values: `from_entry` reports
-//! skipped bindings for the caller to record, never logs them itself),
+//! skipped bindings for the caller to record, never logs them itself --
+//! the shared body cap is the one logging seam, its truncation warn
+//! firing inside `cap_body`, issue #1025),
 //! the session direct-lists each spec's [`DelegationSpec::tool_definition`]
 //! into the tool table, and the loop runtime constructs the sub-agent from
 //! the spec's [`subagent_preamble`] / [`subagent_tool_face`] when the main
@@ -26,6 +28,7 @@ use std::collections::BTreeSet;
 use serde_json::json;
 
 use crate::provider::tool_calling::ToolDefinition;
+use crate::skills::prompt::{cap_body, InjectionFace};
 
 use super::model::AgentEntry;
 
@@ -42,11 +45,13 @@ pub const SUBAGENT_STEP_CAP: usize = 10;
 pub const DELEGATION_BATCH_CAP: usize = 8;
 
 /// One resolved skill binding (ADR-0117 Decision 2): the skill's registry
-/// name and its verbatim body, assembled once and carried in `skill_refs`
-/// mark order -- the order IS the injection order, pinned by test (the
-/// sub-agent's preamble renders each body once, in this order); the named
-/// fields keep the construction, render, and assertion sites
-/// self-describing where the positional tuple forced `.0`/`.1`.
+/// name and its body -- verbatim under the shared injection cap
+/// ([`crate::skills::prompt::SKILL_BODY_MAX_BYTES`], issue #1025), over it
+/// truncated with an honest-degrade marker -- assembled once and carried
+/// in `skill_refs` mark order (the order IS the injection order, pinned
+/// by test: the sub-agent's preamble renders each body once, in this
+/// order). The named fields keep the construction, render, and assertion
+/// sites self-describing where the positional tuple forced `.0`/`.1`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInjection {
     pub name: String,
@@ -95,7 +100,11 @@ impl DelegationSpec {
             .filter_map(|name| match bodies.get(name) {
                 Some(body) => Some(SkillInjection {
                     name: name.clone(),
-                    body: body.clone(),
+                    // The shared body cap (issue #1025): the delegation face
+                    // injects unconditionally into the sub-agent's preamble,
+                    // so it rides the same byte cap as the activation face --
+                    // truncating with the delegation marker, never refusing.
+                    body: cap_body(name, body.clone(), InjectionFace::Delegation),
                 }),
                 None => {
                     skipped.push(name.clone());
@@ -191,6 +200,7 @@ pub fn subagent_tool_face(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::prompt::SKILL_BODY_MAX_BYTES;
 
     fn definition(name: &str) -> ToolDefinition {
         ToolDefinition {
@@ -313,6 +323,82 @@ mod tests {
                 name: "sql".to_string(),
                 body: "Prefer CTEs.".to_string(),
             }]
+        );
+    }
+
+    /// AC #1 (issue #1025): an over-cap bound body truncates with the
+    /// delegation marker -- never refuses -- and the marker stays honest
+    /// for the sub-face: it keeps the user-relay remedy but names no
+    /// `read_skill_file` read-back (the tool survives on the sub-face, but
+    /// its gate is the MAIN turn's invoked set, which a mere binding never
+    /// enters -- a read-back referral would be a dead end).
+    #[test]
+    fn from_entry_caps_an_over_cap_body_with_the_delegation_marker() {
+        let body = format!("{}\n", "x".repeat(SKILL_BODY_MAX_BYTES + 4096));
+        let (spec, skipped) = DelegationSpec::from_entry(
+            &entry("analyst", &["huge"]),
+            &bodies(&[("huge", body.as_str())]),
+        );
+        assert_eq!(skipped, Vec::<String>::new());
+        let injection = &spec.skill_injections[0];
+        assert_eq!(injection.name, "huge");
+        assert!(
+            injection.body.ends_with("]\n"),
+            "the truncated body ends with the marker"
+        );
+        assert!(
+            injection
+                .body
+                .contains(&format!("{SKILL_BODY_MAX_BYTES}-byte")),
+            "the marker names the shared cap"
+        );
+        assert!(
+            injection.body.contains(&format!("is {} bytes", body.len())),
+            "the marker reports the actual size"
+        );
+        assert!(
+            injection.body.contains("shrink or split"),
+            "the marker keeps the user-relay remedy"
+        );
+        assert!(
+            !injection.body.contains("read_skill_file"),
+            "the delegation marker names no read-back path"
+        );
+        assert!(
+            !injection
+                .body
+                .contains(&"x".repeat(SKILL_BODY_MAX_BYTES + 1)),
+            "no over-cap run survived into the injection"
+        );
+        assert!(
+            injection.body.len() < SKILL_BODY_MAX_BYTES + 512,
+            "the capped body stays near the cap"
+        );
+    }
+
+    /// The shared truncation core steps back to a char boundary (the
+    /// activation channel's boundary pin, riding the delegation face): a
+    /// cap position falling inside a multi-byte code point cuts BEFORE it,
+    /// so the injection never splits a character.
+    #[test]
+    fn from_entry_cap_steps_back_to_a_char_boundary() {
+        // The cap position lands inside the first CJK code point (3 bytes).
+        let body = format!("{}你好世界", "a".repeat(SKILL_BODY_MAX_BYTES - 1));
+        let (spec, _) = DelegationSpec::from_entry(
+            &entry("analyst", &["wide"]),
+            &bodies(&[("wide", body.as_str())]),
+        );
+        let capped = &spec.skill_injections[0].body;
+        // The marker opens on its own line, so the pre-marker segment ends
+        // with the separator blank line -- trim it to read the cut itself.
+        let before_marker = capped.split("[Truncated:").next().expect("marker present");
+        assert!(
+            before_marker.trim_end().ends_with('a'),
+            "the cut stepped back to before the partial code point"
+        );
+        assert!(
+            !before_marker.contains('你'),
+            "the straddling code point was dropped whole, not split"
         );
     }
 

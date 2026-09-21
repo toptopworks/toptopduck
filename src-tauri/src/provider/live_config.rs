@@ -525,9 +525,11 @@ impl LiveProviderConfig {
         let mut specs = Vec::new();
         for entry in listing.agents.iter().filter(|entry| entry.enabled) {
             let (spec, skipped) = crate::agents::DelegationSpec::from_entry(entry, &bodies);
-            // The single degradation record (issue #945): `from_entry` is
-            // pure, so the dangling-binding skips report back here and log
-            // beside the registry's own faults above.
+            // The single degradation record (issue #945): `from_entry`
+            // stays side-effect-free for the bindings (the dangling skips
+            // report back here and log beside the registry's own faults
+            // above); the shared body cap's truncation warn fires inside
+            // `cap_body` itself (issue #1025).
             for name in skipped {
                 log::warn!(
                     target: "agents",
@@ -3316,6 +3318,50 @@ mod tests {
                 name: "sql".to_string(),
                 body: "Prefer CTEs.\n".to_string(),
             }]
+        );
+    }
+
+    /// AC #1 wiring (issue #1025): an over-cap registered skill bound by a
+    /// definition truncates through the real scan + assembly chain -- the
+    /// spec's injection, and the preamble the sub-agent runs on, carry the
+    /// delegation marker instead of the whole body.
+    #[test]
+    fn delegation_specs_caps_an_over_cap_bound_skill_body() {
+        use crate::skills::prompt::SKILL_BODY_MAX_BYTES;
+        let (_dir, live) = live();
+        let agents = tempfile::tempdir().expect("agents root");
+        let skills = tempfile::tempdir().expect("skills root");
+        let skill_dir = skills.path().join("huge");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        let body = format!("{}\n", "x".repeat(SKILL_BODY_MAX_BYTES + 4096));
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: huge\ndescription: Big skill.\n---\n{body}"),
+        )
+        .expect("skill file");
+        live.create_agent(
+            agents.path(),
+            skills.path(),
+            "analyst",
+            "Open-ended analysis.",
+            "You analyze. Use `huge` when helpful.\n",
+        )
+        .expect("create analyst");
+        let specs = live.delegation_specs(agents.path(), skills.path());
+        assert_eq!(specs.len(), 1);
+        let injection = &specs[0].skill_injections[0];
+        assert_eq!(injection.name, "huge");
+        assert!(
+            injection.body.contains("[Truncated:"),
+            "the over-cap body arrives capped through the real chain"
+        );
+        assert!(
+            injection.body.len() < SKILL_BODY_MAX_BYTES + 512,
+            "the capped body stays near the cap"
+        );
+        assert!(
+            crate::agents::delegation::subagent_preamble(&specs[0]).contains("[Truncated:"),
+            "the sub-agent's preamble rides the capped injection"
         );
     }
 
