@@ -238,14 +238,12 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     ).toBeNull();
   });
 
-  it("does not stand in beside a real row for the same name (#1022)", async () => {
-    // A blocked retirement delete leaves the subtree on disk, so the
-    // listing still merges the real builtin row -- the lane stands in
-    // only for names with NO row of their own. vega-chart (no row) is
-    // the proof the rescan landed; the same payload's pandoc (a real
-    // row) must not reappear as a stand-in beside it, and the row is
-    // what shows the skill instead (its write-failure hint would
-    // misdiagnose a failed delete).
+  it("stands in beside a real row for the same name (#1016, #1022)", async () => {
+    // A failed write leaves the row on disk stale or absent -- the lane
+    // always renders the stand-in, so the write-failure hint stays
+    // visible beside a stale pre-upgrade row. (The #1022 ruling: a
+    // blocked retirement is warn-only backend-side and never rides this
+    // lane, so a name in the lane is always a write failure.)
     vi.mocked(listSkills).mockResolvedValue({
       skills: [builtinSkill],
       ignored: [],
@@ -257,8 +255,8 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     renderSection();
     await screen.findByTestId("skill-materialize-failure-row-vega-chart");
     expect(
-      screen.queryByTestId("skill-materialize-failure-row-pandoc"),
-    ).toBeNull();
+      screen.getByTestId("skill-materialize-failure-row-pandoc"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("skill-row")).toHaveTextContent("pandoc");
   });
 
