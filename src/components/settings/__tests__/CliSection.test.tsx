@@ -650,7 +650,7 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
 });
 
 describe("CliSection baseline lifecycle (issue #676)", () => {
-  it("gates the row actions by source and baseline", () => {
+  it("gates the row actions by source and baseline", async () => {
     // A builtin row's delete renders disabled while it follows the baseline
     // (undeletable -- disabling is the single shutdown axis) and no restore
     // shows; a user row keeps its delete rendered.
@@ -666,9 +666,12 @@ describe("CliSection baseline lifecycle (issue #676)", () => {
         onCliToolsChanged={vi.fn()}
       />,
     );
+    // The builtin delete renders inert via aria-disabled -- the hoverable
+    // form, since a natively disabled button fires no pointer events and
+    // the shutdown tooltip below would never open.
     expect(
       screen.getByRole("button", { name: "Delete tool pandoc" }),
-    ).toBeDisabled();
+    ).toHaveAttribute("aria-disabled", "true");
     expect(
       screen.queryByRole("button", {
         name: "Restore built-in definition for tool pandoc",
@@ -676,6 +679,24 @@ describe("CliSection baseline lifecycle (issue #676)", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Delete tool my-pandoc" }),
+    ).toBeInTheDocument();
+    // The guidance rides only the builtin row: the user row's delete is a
+    // plain action with no tooltip over it.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Delete tool my-pandoc" }),
+    );
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    // The shutdown guidance (#1015): the inert builtin delete explains
+    // itself -- the reachable off-action is the row's enablement toggle.
+    // Radix Tooltip opens on pointermove (no pointerenter open path);
+    // delayDuration is 0 under the test's TooltipProvider.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Delete tool pandoc" }),
+    );
+    expect(
+      await screen.findByText(
+        "Built-in tools cannot be deleted; disable the tool instead",
+      ),
     ).toBeInTheDocument();
   });
 

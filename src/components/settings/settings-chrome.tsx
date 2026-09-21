@@ -172,22 +172,32 @@ export function PaneBackLink({
   );
 }
 
-/** A row-level icon action: the small bare ghost (no tooltip) on list rows,
- *  the in-row counterpart of the pane-header posture -- Edit / Test /
- *  Restore hover to the foreground, Delete to destructive (issue #958).
- *  `spinning` swaps the icon for a rotating Loader2 (the in-flight Test
- *  button); `onClick` is the plain zero-arg action handler -- the settings
- *  rows are not whole-row click targets, so no stopPropagation duty rides
- *  on it (the #958 zero-arg contract). A DISABLED action restores
- *  hit-testing to show the not-allowed cursor: the base's
- *  pointer-events-none would strip that hint and leave a dead-looking
- *  control (a disabled control fires no click either way). */
+/** A row-level icon action: the small bare ghost on list rows, the in-row
+ *  counterpart of the pane-header posture -- Edit / Test / Restore hover to
+ *  the foreground, Delete to destructive (issue #958). `spinning` swaps the
+ *  icon for a rotating Loader2 (the in-flight Test button); `onClick` is
+ *  the plain zero-arg action handler -- the settings rows are not
+ *  whole-row click targets, so no stopPropagation duty rides on it (the
+ *  #958 zero-arg contract). A DISABLED action without a tooltip keeps the
+ *  native attribute with restored hit-testing for the not-allowed cursor:
+ *  the base's pointer-events-none would strip that hint and leave a
+ *  dead-looking control. A natively disabled control fires no pointer
+ *  events either, which is exactly why the tooltip path avoids it: a
+ *  disabled action that also sets `tooltip` takes the hoverable-inert
+ *  posture instead (the LocalCliTab idiom) -- aria-disabled plus an absent
+ *  onClick keeps the control inert while staying hoverable and focusable,
+ *  so the tooltip's pointermove open path, and its keyboard focus path,
+ *  can actually fire (#1015). The tooltip is set only where the state
+ *  needs explaining -- the builtin rows' disabled-delete shutdown
+ *  guidance in the skills, CLI, and agents panes -- absent everywhere
+ *  else. */
 export function RowActionButton({
   label,
   icon: Icon,
   destructive,
   spinning,
   disabled,
+  tooltip,
   onClick,
 }: {
   label: string;
@@ -196,21 +206,33 @@ export function RowActionButton({
   destructive?: boolean;
   spinning?: boolean;
   disabled?: boolean;
+  /** Hover guidance over the bare ghost (#1015); the SETTINGS_TOOLTIP_CLASS
+   *  single source (issue #554). A disabled action carrying one renders
+   *  hoverable-inert (aria-disabled) so the hover can reach it. */
+  tooltip?: string;
   onClick?: () => void;
 }) {
-  return (
+  // The hoverable-inert posture (#1015): a natively disabled button fires
+  // no pointer events, so the disabled-and-explained action switches to
+  // aria-disabled -- hoverable, focusable, and click-inert through the
+  // absent handler.
+  const hoverableInert = !!disabled && !!tooltip;
+  const button = (
     <Button
       type="button"
       size="sm"
       variant="ghost"
       className={cn(
         "text-muted-foreground shrink-0",
-        "disabled:pointer-events-auto disabled:cursor-not-allowed",
+        hoverableInert
+          ? "aria-disabled:opacity-50 aria-disabled:cursor-not-allowed"
+          : "disabled:pointer-events-auto disabled:cursor-not-allowed",
         destructive ? "hover:text-destructive" : "hover:text-foreground",
       )}
       aria-label={label}
-      disabled={disabled}
-      onClick={onClick}
+      disabled={hoverableInert ? undefined : disabled}
+      aria-disabled={hoverableInert || undefined}
+      onClick={hoverableInert ? undefined : onClick}
     >
       {spinning ? (
         <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -218,6 +240,18 @@ export function RowActionButton({
         <Icon className="size-4" aria-hidden />
       )}
     </Button>
+  );
+  if (!tooltip) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent
+        side="top"
+        className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+      >
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

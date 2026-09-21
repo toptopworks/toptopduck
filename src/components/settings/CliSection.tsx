@@ -657,6 +657,18 @@ function CliToolRow({
             )}
             icon={Trash2}
             onClick={onDelete}
+            // The shutdown guidance at the same touchpoint as the skills
+            // rows (#1015): the reachable off-action is the row's
+            // enablement toggle (ADR-0106).
+            tooltip={
+              tool.source === "builtin"
+                ? intl.formatMessage({
+                    id: "settings.cli.deleteDisabledHint",
+                    defaultMessage:
+                      "Built-in tools cannot be deleted; disable the tool instead",
+                  })
+                : undefined
+            }
           />
         )}
       </div>

@@ -333,7 +333,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
       return intl.formatMessage(
         {
           id: "error.skill.undeletable",
-          defaultMessage: "Built-in skill \"{name}\" cannot be deleted; disable its tool instead",
+          defaultMessage: "Built-in skill \"{name}\" cannot be deleted; disable it instead",
         },
         { name: e.data },
       );

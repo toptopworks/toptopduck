@@ -425,6 +425,7 @@
   "settings.agents.confirmDeleteTitle": "Delete agent {name}?",
   "settings.agents.createTitle": "New agent",
   "settings.agents.deleteLabel": "Delete agent {name}",
+  "settings.agents.deleteDisabledHint": "Built-in agents cannot be deleted; disable the agent instead",
   "settings.agents.descriptionLabel": "Description",
   "settings.agents.descriptionPlaceholder": "What the main agent should delegate to it",
   "settings.agents.danglingRefs": "Unknown skill reference: {refs}",
@@ -465,6 +466,7 @@
   "settings.skills.confirmDeleteCancel": "Cancel",
   "settings.skills.confirmDeleteTitle": "Delete skill {name}?",
   "settings.skills.deleteLabel": "Delete skill {name}",
+  "settings.skills.deleteDisabledHint": "System skills cannot be deleted; disable the skill instead",
   "settings.skills.enabledLabel": "Enable skill {name}",
   "settings.skills.description": "Skills add capabilities to your agent. Create your own or import them from other apps.",
   "settings.skills.drawerCreateTitle": "New skill",
@@ -653,6 +655,7 @@
   "settings.cli.enableToggleLabel": "Toggle tool {name}",
   "settings.cli.editLabel": "Edit tool {name}",
   "settings.cli.deleteLabel": "Delete tool {name}",
+  "settings.cli.deleteDisabledHint": "Built-in tools cannot be deleted; disable the tool instead",
   "settings.cli.form.backToList": "Back to CLI list",
   "settings.cli.form.addTitle": "Register CLI tool",
   "settings.cli.form.editTitle": "Edit CLI tool",
@@ -707,5 +710,5 @@
   "settings.skills.restoreLabel": "Restore System definition for skill {name}",
   "error.skill.reservedName": "The name \"{name}\" is reserved for a system skill",
   "error.skill.nameLocked": "System skill \"{name}\" cannot be renamed",
-  "error.skill.undeletable": "System skill \"{name}\" cannot be deleted; disable its tool instead"
+  "error.skill.undeletable": "System skill \"{name}\" cannot be deleted; disable it instead"
 }

@@ -68,15 +68,16 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     });
   });
 
-  it("shows the system badge and a disabled delete button on a builtin row", async () => {
+  it("shows the system badge and an inert delete on a builtin row", async () => {
     renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
     const row = await screen.findByTestId("skill-row");
     expect(row).toHaveTextContent("system");
-    // Undeletable (issue #677): the trash renders disabled so the row action
+    // Undeletable (issue #677): the trash renders inert via aria-disabled --
+    // the hoverable form a tooltip can ride (#1015) -- so the row action
     // column stays aligned with deletable rows.
     expect(
       screen.getByRole("button", { name: "Delete skill pandoc" }),
-    ).toBeDisabled();
+    ).toHaveAttribute("aria-disabled", "true");
   });
 
   it("keeps a click on the builtin row's disabled delete from opening the edit drawer", async () => {
@@ -88,6 +89,26 @@ describe("SkillsSection builtin rows (issue #677)", () => {
       screen.getByRole("button", { name: "Delete skill pandoc" }),
     );
     expect(screen.queryByLabelText("Name")).toBeNull();
+  });
+
+  it("explains the disabled delete through the shutdown tooltip (#1015)", async () => {
+    renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
+    const del = await screen.findByRole("button", {
+      name: "Delete skill pandoc",
+    });
+    // The inert form is what makes the hover reachable: not natively
+    // disabled, aria-disabled instead (the agents/CLI panes pin the same
+    // pair inside their row tests).
+    expect(del).toHaveAttribute("aria-disabled", "true");
+    expect(del).not.toBeDisabled();
+    // Radix Tooltip opens on pointermove (the trigger has no pointerenter
+    // open path); delayDuration is 0 under the test's TooltipProvider.
+    fireEvent.pointerMove(del);
+    expect(
+      await screen.findByText(
+        "System skills cannot be deleted; disable the skill instead",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows no Edited badge on a row agreeing with its recorded baseline", async () => {

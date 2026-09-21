@@ -98,15 +98,35 @@ describe("AgentsSection (issue #932)", () => {
     expect(await screen.findByText("data-cleaner")).toBeVisible();
     expect(screen.getByText("Custom")).toBeVisible();
     expect(screen.getByText("Built-in")).toBeVisible();
-    // A builtin row's delete affordance renders disabled (disabling is the
-    // single shutdown axis; the button keeps every row's columns aligned);
-    // a user row's delete stays visible.
+    // A builtin row's delete affordance renders inert via aria-disabled --
+    // the hoverable form, since a natively disabled button fires no
+    // pointer events and the shutdown tooltip below would never open
+    // (disabling is the single shutdown axis; the button keeps every
+    // row's columns aligned); a user row's delete stays visible.
     expect(
       screen.getByRole("button", { name: "Delete agent general-purpose" }),
-    ).toBeDisabled();
+    ).toHaveAttribute("aria-disabled", "true");
     expect(
       screen.getByRole("button", { name: "Delete agent data-cleaner" }),
     ).toBeVisible();
+    // The guidance rides only the builtin row: the user row's delete is a
+    // plain action with no tooltip over it.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Delete agent data-cleaner" }),
+    );
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    // The shutdown guidance (#1015): the inert builtin delete explains
+    // itself -- the reachable off-action is the row's enablement switch.
+    // Radix Tooltip opens on pointermove (no pointerenter open path);
+    // delayDuration is 0 under the test's TooltipProvider.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Delete agent general-purpose" }),
+    );
+    expect(
+      await screen.findByText(
+        "Built-in agents cannot be deleted; disable the agent instead",
+      ),
+    ).toBeInTheDocument();
     // The Disabled badge rides the disabled row and its name dims (the
     // legibility pair); the enabled row carries neither.
     expect(screen.getByText("Disabled")).toBeVisible();
