@@ -497,6 +497,8 @@
   "settings.skills.importModeLinkHint": "Uses the skill in its original folder. Changes there apply automatically, but the skill stops working if the folder moves or is deleted.",
   "settings.skills.importModeLink": "Link",
   "settings.skills.importPartialFailure": "{error} (+{count} more)",
+  "settings.skills.materializeFailureBadge": "Write failed",
+  "settings.skills.materializeFailureHint": "Couldn't write this built-in skill to disk. Check that the skills folder is writable and has disk space; the next scan retries.",
   "settings.skills.importRefresh": "Refresh sources",
   "settings.skills.importSelectAll": "Select all",
   "settings.skills.importSelectedCount": "Selected {selected} / {total}",

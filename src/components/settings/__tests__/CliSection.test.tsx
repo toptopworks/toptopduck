@@ -107,6 +107,7 @@ beforeEach(() => {
   vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
     config: makeAppConfig([]),
     scan: [],
+    skill_materialize_failures: [],
   });
 });
 
@@ -282,6 +283,7 @@ describe("CliSection", () => {
     vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
       config: next,
       scan: [],
+      skill_materialize_failures: [],
     });
     const onCliToolsChanged = vi.fn();
     renderWithProviders(
@@ -337,6 +339,7 @@ describe("CliSection builtin panel (issue #675)", () => {
     vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
       config: makeAppConfig([]),
       scan,
+      skill_materialize_failures: [],
     });
     const onCliToolsChanged = vi.fn();
     renderWithProviders(
@@ -389,6 +392,7 @@ describe("CliSection builtin panel (issue #675)", () => {
     vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
       config: makeAppConfig([]),
       scan: [makeScanEntry({ name: "python", state: "dormant" })],
+      skill_materialize_failures: [],
     });
     const next = {
       config: makeAppConfig([]),
@@ -399,6 +403,7 @@ describe("CliSection builtin panel (issue #675)", () => {
           executable: "python3",
         }),
       ],
+      skill_materialize_failures: [],
     };
     vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce(next);
     const onCliToolsChanged = vi.fn();
@@ -447,6 +452,7 @@ describe("CliSection builtin panel (issue #675)", () => {
         makeScanEntry({ name: "pandoc", state: "conflict" }),
         makeScanEntry({ name: "python", state: "dormant" }),
       ],
+      skill_materialize_failures: [],
     });
     renderWithProviders(
       <CliSection
@@ -495,6 +501,7 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
     resolveMount({
       config: staleConfig,
       scan: [makeScanEntry({ name: "python", state: "dormant" })],
+      skill_materialize_failures: [],
     });
     // The snapshot applies (the panel fills), the stale sync does not.
     expect(
@@ -542,6 +549,7 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
           executable: "python3",
         }),
       ],
+      skill_materialize_failures: [],
     });
     // The refreshed snapshot renders; the stale sync never fires.
     expect(
@@ -587,6 +595,7 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
       scan: [
         makeScanEntry({ name: "python", state: "detected", executable: "python3" }),
       ],
+      skill_materialize_failures: [],
     });
     fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
     expect(
@@ -615,7 +624,7 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
     // In flight: the button is disabled and swaps its label.
     expect(screen.getByRole("button", { name: "Scanning…" })).toBeDisabled();
-    resolveRescan({ config: makeAppConfig([]), scan: [] });
+    resolveRescan({ config: makeAppConfig([]), scan: [], skill_materialize_failures: [] });
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
     });

@@ -12,6 +12,7 @@ import {
   deleteSkill,
   listSkills,
   listSkillSources,
+  rescanBuiltinCliTools,
   setSkillEnabled,
   updateSkill,
 } from "../../../api";
@@ -31,6 +32,7 @@ vi.mock("../../../api", () => ({
   listSkillSources: vi.fn(),
   importSkills: vi.fn(),
   setSkillEnabled: vi.fn(),
+  rescanBuiltinCliTools: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
@@ -81,6 +83,13 @@ describe("SkillsSection (issue #362)", () => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(listSkillSources).mockResolvedValue([]);
+    // The pane's mount rescan (issue #1016) resolves quietly by default:
+    // no failure lane, no config churn beyond the wholesale sync.
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
+      config: baseAppConfig(),
+      scan: [],
+      skill_materialize_failures: [],
+    });
   });
 
   it("flips a row's enablement through setSkillEnabled and syncs the config", async () => {
@@ -126,6 +135,13 @@ describe("SkillsSection (issue #362)", () => {
     // toggling it must not open the drawer.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     // The refetch half: the listing is queried again and the row grays.
+    // Two calls despite the mount rescan's invalidate (issue #1016): under
+    // jsdom both mocks resolve on the same microtask flush, so the
+    // invalidate dedupes into the still-in-flight mount fetch (TanStack's
+    // in-flight dedupe) and only the toggle's refetch lands as a second
+    // call -- the post-rescan refetch is pinned separately in
+    // skills-builtin.test.tsx, where the rescan resolves late enough to
+    // observe it.
     await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
     await waitFor(() =>
       expect(screen.getByTestId("skill-row")).toHaveAttribute(

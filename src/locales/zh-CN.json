@@ -497,6 +497,8 @@
   "settings.skills.importModeLinkHint": "直接使用原文件夹中的技能。原文件夹的更改会自动生效；如果文件夹被移动或删除，技能将不可用。",
   "settings.skills.importModeLink": "链接",
   "settings.skills.importPartialFailure": "{error}（还有 {count} 项）",
+  "settings.skills.materializeFailureBadge": "写入失败",
+  "settings.skills.materializeFailureHint": "内置技能写入磁盘失败。请检查技能目录是否可写、磁盘是否有空间；下次扫描将自动重试。",
   "settings.skills.importRefresh": "刷新源",
   "settings.skills.importSelectAll": "全选",
   "settings.skills.importSelectedCount": "已选 {selected} / {total}",

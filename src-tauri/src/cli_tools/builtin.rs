@@ -297,6 +297,12 @@ impl BuiltinScanEntry {
 pub struct BuiltinScanResult {
     pub config: AppConfig,
     pub scan: Vec<BuiltinScanEntry>,
+    /// The builtin skills the window could not materialize (issue #1016):
+    /// one name per skill whose write failed. A computed snapshot like
+    /// the scan rows (never persisted) -- the Skills panel renders the
+    /// missing rows' warnings from it, and the next successful window
+    /// clears the lane (the Conflict-lane surfacing precedent, #937).
+    pub skill_materialize_failures: Vec<String>,
 }
 
 /// Classify every shipped definition ([`BUILTIN_DEFINITIONS`], read

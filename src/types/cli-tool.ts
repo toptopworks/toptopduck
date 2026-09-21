@@ -108,8 +108,12 @@ export type BuiltinScanEntry =
 
 // The rescan command's return: the updated full config (the ADR-0109
 // Decision 9 sync contract -- commit wholesale, no re-fetch) plus the
-// detection snapshot for the built-in panel.
+// detection snapshot for the built-in panel, and the builtin skills the
+// window could not materialize (issue #1016: the Skills panel's warning
+// lane; a computed snapshot like the scan rows, cleared by the next
+// successful window).
 export interface BuiltinScanResult {
   config: AppConfig;
   scan: BuiltinScanEntry[];
+  skill_materialize_failures: string[];
 }
