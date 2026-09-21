@@ -29,6 +29,16 @@ use crate::util::sha256_hex;
 /// `pub(crate)` leak).
 const SKILL_MD: &str = "SKILL.md";
 
+/// The byte cap for an activated skill body (issue #1019): unlike the 1 MiB
+/// `read_skill_file` cap (ADR-0111 Decision 6 -- an agent-initiated read
+/// that can be REFUSED), the activation channel injects UNCONDITIONALLY
+/// into the turn, so the cap sits at the largest body a turn survives
+/// whole. Over the cap the body truncates -- never refuses (ADR-0110: a
+/// degraded skill never silently disappears) -- on a char boundary, with an
+/// explicit self-heal marker the model can relay. Body caliber only: the
+/// hash below still covers the WHOLE file, so the drift anchor stays exact.
+const SKILL_BODY_MAX_BYTES: usize = 100 * 1024;
+
 /// One named skill resolved for prompt injection or invocation (issue #364,
 /// ADR-0086; calibrated by ADR-0119). Carries the spec `name` (stable
 /// identity), the verbatim Markdown
@@ -53,7 +63,10 @@ pub struct SkillPromptFragment {
     /// from the discoverable set.
     pub description: String,
     /// The Markdown body after the frontmatter -- verbatim, the prompt fragment
-    /// injected on activation (ADR-0110 Decision 2). Empty when the `SKILL.md`
+    /// injected on activation (ADR-0110 Decision 2), except over
+    /// [`SKILL_BODY_MAX_BYTES`]: an oversized body rides char-boundary-
+    /// truncated with an explicit marker (issue #1019) while the hash below
+    /// still covers the whole file. Empty when the `SKILL.md`
     /// was unreadable at turn time, or the name failed the spec check so the
     /// file was never read (honest degrade -- nothing to inject).
     pub body: String,
@@ -104,6 +117,38 @@ fn empty_fragment(name: &str) -> SkillPromptFragment {
         body: String::new(),
         content_hash: String::new(),
     }
+}
+
+/// Cap an activated body at [`SKILL_BODY_MAX_BYTES`] (issue #1019): step
+/// back to a char boundary, then append the honest-degrade marker on its
+/// own line. Single seam, both faces -- the capped body rides the tool
+/// result and the turn preamble through the same fragment, and
+/// `from_fragment` pins it into the invocation record so historical
+/// replays render the truncated state.
+fn cap_body(name: &str, body: String) -> String {
+    if body.len() <= SKILL_BODY_MAX_BYTES {
+        return body;
+    }
+    let actual = body.len();
+    // The cap position may fall inside a multi-byte code point -- step back
+    // to the boundary before it so no character is split.
+    let mut end = SKILL_BODY_MAX_BYTES;
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    log::warn!(
+        target: "skills",
+        "skill `{name}` body is {actual} bytes, over the {SKILL_BODY_MAX_BYTES}-byte \
+         injection cap -- truncating (the hash still covers the whole file)",
+    );
+    let mut capped = body[..end].trim_end().to_string();
+    capped.push_str(&format!(
+        "\n\n[Truncated: this skill's body is {actual} bytes, over the \
+         {SKILL_BODY_MAX_BYTES}-byte injection cap. Only the leading part was \
+         loaded. Ask the user to shrink or split `SKILL.md` to see the full \
+         content.]\n"
+    ));
+    capped
 }
 
 pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
@@ -198,7 +243,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     SkillPromptFragment {
         name: name.to_string(),
         description,
-        body,
+        body: cap_body(name, body),
         content_hash,
     }
 }
@@ -442,6 +487,78 @@ mod tests {
             "unparseable body is not injected"
         );
         assert_eq!(fragments[0].content_hash, sha256_hex(raw.as_bytes()));
+    }
+
+    /// A body over the injection cap truncates -- never refuses (ADR-0110: a
+    /// degraded skill never silently disappears) -- with an explicit
+    /// self-heal marker the model can relay, while the drift anchor still
+    /// hashes the WHOLE file (issue #1019).
+    #[test]
+    fn over_cap_body_truncates_with_marker_and_keeps_whole_file_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let body = format!("{}\n", "x".repeat(SKILL_BODY_MAX_BYTES + 4096));
+        put_skill(root, "huge", &body);
+        let fragments = resolve_prompt_fragments(root, &["huge".to_string()]);
+        let f = &fragments[0];
+        // The index row is untouched -- only the body degrades.
+        assert_eq!(f.description, "Test skill huge.");
+        // The marker closes the body on its own line, naming the cap...
+        assert!(
+            f.body.ends_with("]\n"),
+            "the truncated body ends with the marker"
+        );
+        assert!(
+            f.body.contains(&format!("{SKILL_BODY_MAX_BYTES}-byte")),
+            "the marker names the cap for the model to relay"
+        );
+        // ...and the run of x's was cut at the cap.
+        assert!(
+            !f.body.contains(&"x".repeat(SKILL_BODY_MAX_BYTES + 1)),
+            "no over-cap run survived into the injection"
+        );
+        assert!(
+            f.body.len() < SKILL_BODY_MAX_BYTES + 512,
+            "the capped body stays near the cap"
+        );
+        // The hash still covers the whole file (ADR-0086 Decision 2 unchanged).
+        let raw = std::fs::read(root.join("huge").join(SKILL_MD)).unwrap();
+        assert_eq!(f.content_hash, sha256_hex(&raw));
+    }
+
+    /// A cap position falling INSIDE a multi-byte code point steps back to
+    /// the boundary before it -- the truncation never splits a character.
+    #[test]
+    fn truncation_steps_back_to_a_char_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // cap-1 ASCII bytes then CJK (3 bytes/char): byte #cap falls inside
+        // the first CJK char, so the cut must step back to `cap-1`.
+        let body = format!("{}{}", "a".repeat(SKILL_BODY_MAX_BYTES - 1), "你好世界");
+        put_skill(root, "wide", &body);
+        let fragments = resolve_prompt_fragments(root, &["wide".to_string()]);
+        let capped = &fragments[0].body;
+        assert_eq!(
+            capped.chars().take_while(|c| *c == 'a').count(),
+            SKILL_BODY_MAX_BYTES - 1,
+            "the cut steps back to the char boundary"
+        );
+        // The char after the ASCII run is the marker's leading newline, not
+        // a split code point.
+        assert_eq!(capped.chars().nth(SKILL_BODY_MAX_BYTES - 1), Some('\n'));
+    }
+
+    /// The cap truncates only strictly over-cap bodies: at exactly the cap
+    /// the body rides verbatim with no marker -- the `<=` boundary pin
+    /// (twin of the `read_skill_file` cap's exactly-cap test).
+    #[test]
+    fn exactly_cap_body_serves_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let body = "y".repeat(SKILL_BODY_MAX_BYTES);
+        put_skill(root, "exact", &body);
+        let fragments = resolve_prompt_fragments(root, &["exact".to_string()]);
+        assert_eq!(fragments[0].body, body);
     }
 
     #[test]
