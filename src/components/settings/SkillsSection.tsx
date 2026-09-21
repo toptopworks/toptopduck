@@ -323,13 +323,20 @@ export function SkillsSection({
   // landed on disk, so the listing has no row for it -- these stand in,
   // visible under the "all" and "builtin" filters and matched by name
   // (regular rows also match their description; the lane shows no
-  // description to match).
+  // description to match). A name the listing DOES carry is a blocked
+  // retirement cleanup (issue #1022): the real row already shows the
+  // skill (still on disk, still invokable until the next window reclaims
+  // it), so a stand-in would double the name and its write-failure hint
+  // would misdiagnose a failed delete.
   const failedNames = useMemo(
     () =>
       (materializeFailures ?? []).filter(
-        (name) => matchesAcquired(filter, "builtin") && matchesSearch(name, search),
+        (name) =>
+          matchesAcquired(filter, "builtin") &&
+          matchesSearch(name, search) &&
+          !allSkills.some((s) => s.name === name),
       ),
-    [materializeFailures, filter, search],
+    [materializeFailures, filter, search, allSkills],
   );
 
   function openEdit(skill: SkillEntry) {

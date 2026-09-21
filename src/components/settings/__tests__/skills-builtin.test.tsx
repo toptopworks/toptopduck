@@ -238,6 +238,30 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     ).toBeNull();
   });
 
+  it("does not stand in beside a real row for the same name (#1022)", async () => {
+    // A blocked retirement delete leaves the subtree on disk, so the
+    // listing still merges the real builtin row -- the lane stands in
+    // only for names with NO row of their own. vega-chart (no row) is
+    // the proof the rescan landed; the same payload's pandoc (a real
+    // row) must not reappear as a stand-in beside it, and the row is
+    // what shows the skill instead (its write-failure hint would
+    // misdiagnose a failed delete).
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [builtinSkill],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(
+      scanResult({ skill_materialize_failures: ["pandoc", "vega-chart"] }),
+    );
+    renderSection();
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    expect(
+      screen.queryByTestId("skill-materialize-failure-row-pandoc"),
+    ).toBeNull();
+    expect(screen.getByTestId("skill-row")).toHaveTextContent("pandoc");
+  });
+
   it("lets a matching failure row carry the frame without the no-matches caption", async () => {
     // The contradiction guard: with a skill on disk, a failed vega-chart,
     // and a search for "vega", the lane row matches while the listing
