@@ -666,9 +666,12 @@ describe("CliSection baseline lifecycle (issue #676)", () => {
         onCliToolsChanged={vi.fn()}
       />,
     );
+    // The builtin delete renders inert via aria-disabled -- the hoverable
+    // form, since a natively disabled button fires no pointer events and
+    // the shutdown tooltip below would never open.
     expect(
       screen.getByRole("button", { name: "Delete tool pandoc" }),
-    ).toBeDisabled();
+    ).toHaveAttribute("aria-disabled", "true");
     expect(
       screen.queryByRole("button", {
         name: "Restore built-in definition for tool pandoc",
@@ -677,8 +680,16 @@ describe("CliSection baseline lifecycle (issue #676)", () => {
     expect(
       screen.getByRole("button", { name: "Delete tool my-pandoc" }),
     ).toBeInTheDocument();
-    // The shutdown guidance (#1015): the disabled builtin delete explains
+    // The guidance rides only the builtin row: the user row's delete is a
+    // plain action with no tooltip over it.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Delete tool my-pandoc" }),
+    );
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    // The shutdown guidance (#1015): the inert builtin delete explains
     // itself -- the reachable off-action is the row's enablement toggle.
+    // Radix Tooltip opens on pointermove (no pointerenter open path);
+    // delayDuration is 0 under the test's TooltipProvider.
     fireEvent.pointerMove(
       screen.getByRole("button", { name: "Delete tool pandoc" }),
     );

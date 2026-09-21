@@ -137,6 +137,41 @@ describe("RowActionButton", () => {
     expect(button.querySelector("svg")).toHaveClass("animate-spin");
     expect(button.querySelector("svg")).toHaveClass("lucide-loader-circle");
   });
+
+  it("stays bare without a tooltip and takes the hoverable-inert form with one", async () => {
+    // No tooltip: a disabled action keeps the native attribute and renders
+    // bare -- no Tooltip wrapper ever mounts over it.
+    const { unmount } = renderSettings(
+      <RowActionButton label="Test server demo" icon={Zap} disabled />,
+    );
+    const bare = screen.getByRole("button", { name: "Test server demo" });
+    expect(bare).toBeDisabled();
+    expect(bare).not.toHaveAttribute("aria-disabled");
+    fireEvent.pointerEnter(bare, { pointerType: "mouse" });
+    fireEvent.pointerMove(bare, { pointerType: "mouse" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    unmount();
+
+    // With a tooltip (#1015): a natively disabled button fires no pointer
+    // events, so the disabled-and-explained action switches to aria-disabled
+    // -- hoverable, focusable, click-inert through the absent handler -- and
+    // the hover opens the guidance.
+    renderSettings(
+      <RowActionButton
+        label="Delete skill pandoc"
+        icon={Trash2}
+        disabled
+        tooltip="System skills cannot be deleted; disable the skill instead"
+      />,
+    );
+    const inert = screen.getByRole("button", { name: "Delete skill pandoc" });
+    expect(inert).not.toBeDisabled();
+    expect(inert).toHaveAttribute("aria-disabled", "true");
+    const tooltip = await hoverOpenTooltip(inert);
+    expect(tooltip.textContent).toBe(
+      "System skills cannot be deleted; disable the skill instead",
+    );
+  });
 });
 
 describe("RowRemoveButton", () => {
