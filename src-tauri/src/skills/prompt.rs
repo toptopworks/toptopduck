@@ -129,11 +129,12 @@ fn empty_fragment(name: &str) -> SkillPromptFragment {
 /// core below is shared, only the honest-degrade tail is face-specific --
 /// the activation channel anchors a whole-file hash and gates
 /// `read_skill_file` on the invoked set (a truncated skill is in it by
-/// definition, same turn), while the delegation channel has neither: the
-/// bound skill is typically NOT in the main turn's invoked set, so a
-/// read-back referral would be a dead end and the user-relay remedy is the
-/// only honest one.
-#[derive(Clone, Copy, Debug)]
+/// definition -- its invocation record has landed, though a mid-turn
+/// invocation joins the turn-start snapshot the next turn), while the
+/// delegation channel has neither: the bound skill is typically NOT in
+/// the main turn's invoked set, so a read-back referral would be a dead
+/// end and the user-relay remedy is the only honest one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InjectionFace {
     /// The activation channel (`resolve_one`): tool result + turn preamble.
     Activation,
@@ -553,7 +554,8 @@ mod tests {
         // The marker also reports the actual size and both self-heal paths:
         // the user-relay remedy and the model's own full-read channel
         // (ADR-0111 Decision 3 gates `read_skill_file` on the activated
-        // set -- a truncated skill is by definition in it, same turn).
+        // set -- a truncated skill is by definition in it once its
+        // invocation record lands in the turn-start snapshot).
         assert!(
             f.body.contains(&format!("is {} bytes", body.len())),
             "the marker reports the actual size"
@@ -565,6 +567,14 @@ mod tests {
         assert!(
             f.body.contains("read_skill_file"),
             "the marker names the model's own full-read channel"
+        );
+        assert!(
+            f.body.contains("Only the leading part was loaded"),
+            "the marker states the partial load"
+        );
+        assert!(
+            f.body.contains("(it serves up to 1 MiB)"),
+            "the marker keeps the read-back channel's size"
         );
         // ...and the run of x's was cut at the cap.
         assert!(

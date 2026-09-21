@@ -526,10 +526,10 @@ impl LiveProviderConfig {
         for entry in listing.agents.iter().filter(|entry| entry.enabled) {
             let (spec, skipped) = crate::agents::DelegationSpec::from_entry(entry, &bodies);
             // The single degradation record (issue #945): `from_entry`
-            // stays side-effect-free for the bindings (the dangling skips
-            // report back here and log beside the registry's own faults
-            // above); the shared body cap's truncation warn fires inside
-            // `cap_body` itself (issue #1025).
+            // reports the dangling skips back as values (logged here,
+            // beside the registry's own faults above); its one side
+            // effect is the shared body cap's truncation warn, firing
+            // inside `cap_body` itself (issue #1025).
             for name in skipped {
                 log::warn!(
                     target: "agents",

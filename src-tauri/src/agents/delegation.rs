@@ -391,10 +391,15 @@ mod tests {
         let capped = &spec.skill_injections[0].body;
         // The marker opens on its own line, so the pre-marker segment ends
         // with the separator blank line -- trim it to read the cut itself.
-        let before_marker = capped.split("[Truncated:").next().expect("marker present");
+        let before_marker = capped.split_once("[Truncated:").expect("marker present").0;
         assert!(
             before_marker.trim_end().ends_with('a'),
             "the cut stepped back to before the partial code point"
+        );
+        assert_eq!(
+            before_marker.trim_end().len(),
+            SKILL_BODY_MAX_BYTES - 1,
+            "the cut lands exactly before the straddling code point"
         );
         assert!(
             !before_marker.contains('你'),

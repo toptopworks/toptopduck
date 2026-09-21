@@ -225,9 +225,10 @@ fn serve_file(name: &str, path: &str, resolved: &Path, anchor: &Path) -> SkillRe
         return SkillReadOutcome::Refused(binary_failure(name, path));
     }
     // Lossy-decoded on serve (the doc posture above), but the replacement
-    // is silent by default -- and this face is the remedy the injection
-    // cap's marker itself prescribes, so it must not hand back quiet
-    // U+FFFD content either. One ladder-shaped warn makes the divergence
+    // is silent by default -- and this face is the remedy the activation
+    // marker itself prescribes (the delegation marker deliberately names
+    // no read-back), so it must not hand back quiet U+FFFD content
+    // either. One ladder-shaped warn makes the divergence
     // observable (issue #1025) -- the parity signal for the resolve-time
     // and assemble-time warns.
     if std::str::from_utf8(&bytes).is_err() {
@@ -235,7 +236,7 @@ fn serve_file(name: &str, path: &str, resolved: &Path, anchor: &Path) -> SkillRe
             target: "skills",
             "skill `{name}` file `{path}` holds non-UTF-8 bytes -- the served \
              text rides lossy U+FFFD replacements; re-save the file as UTF-8 \
-             to reconcile it",
+             in an external editor to reconcile it",
         );
     }
     SkillReadOutcome::Local {
@@ -623,7 +624,7 @@ mod tests {
 
     /// A non-UTF-8 file still serves its text lossy (U+FFFD stand-ins) --
     /// the divergence the serve-time warn makes observable (issue #1025),
-    /// on the very face the injection cap's own marker prescribes as the
+    /// on the very face the activation marker prescribes as the
     /// whole-file remedy. Pins the lossy posture so the warn's arrival
     /// cannot regress the serve itself.
     #[test]
