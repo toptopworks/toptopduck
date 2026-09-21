@@ -478,9 +478,23 @@ impl BuiltinSkillMark {
 // ---------------------------------------------------------------------------
 // Reconciliation (rides the CLI scan window, issue #677)
 
+/// The reconcile outcome: the persist bit plus the names of the builtin
+/// skills whose SKILL.md the window could not CREATE (issue #1016). A
+/// failure keeps the degraded posture -- warn, no side-table record, not
+/// dirty -- but now surfaces by name so the scan payload can render the
+/// missing row's warning in the Skills panel. Only fresh creates ride
+/// this list, in `BUILTIN_SKILL_DEFINITIONS` order: a skill whose file
+/// already exists never appears here (its row is the listing's own), and
+/// upgrade / hash-read failures stay warn-only.
+pub(crate) struct ReconcileOutcome {
+    pub(crate) dirty: bool,
+    pub(crate) materialize_failures: Vec<String>,
+}
+
 /// Materialize / upgrade / clean the builtin skills against the CURRENT CLI
-/// registry, mutating the side table in place. Returns whether the side
-/// table changed (the caller folds that into its persist decision).
+/// registry, mutating the side table in place. Returns the outcome
+/// ([`ReconcileOutcome`]; the caller folds the dirty bit into its persist
+/// decision).
 ///
 /// Per definition: a companioned skill materializes when its
 /// `Builtin`-sourced CLI entry is registered and the skill file is missing
@@ -498,14 +512,18 @@ impl BuiltinSkillMark {
 /// shipped set, or whose file AND CLI entry are both gone, are dropped.
 ///
 /// Filesystem failures degrade per-skill with a warn (the scan window must
-/// not fail the whole read-modify-write); the settings-page rescan retries.
+/// not fail the whole read-modify-write); a failed CREATE's name rides the
+/// outcome for the scan payload (issue #1016) while upgrade and hash-read
+/// failures stay warn-only (their rows already exist in the listing); the
+/// settings-page rescan retries.
 pub(crate) fn reconcile(
     root: &Path,
     locale: &str,
     cli: &crate::cli_tools::config::CliToolRegistry,
     baselines: &mut BTreeMap<String, BuiltinSkillBaseline>,
-) -> bool {
+) -> ReconcileOutcome {
     let mut dirty = false;
+    let mut materialize_failures = Vec::new();
     for def in BUILTIN_SKILL_DEFINITIONS {
         if !def.cli_anchor(&cli.tools) {
             continue;
@@ -523,6 +541,7 @@ pub(crate) fn reconcile(
                     );
                 }
                 Err(e) => {
+                    materialize_failures.push(def.name.to_string());
                     log::warn!(
                         target: "skills",
                         "builtin skill `{}` failed to materialize (the next scan retries): {e}",
@@ -632,7 +651,10 @@ pub(crate) fn reconcile(
     // forever -- pinning the user's same-named skill into the undeletable
     // builtin posture with no self-service exit.
     dirty |= baselines.len() != before;
-    dirty
+    ReconcileOutcome {
+        dirty,
+        materialize_failures,
+    }
 }
 
 /// Write the definition's SKILL.md at `locale` and produce the record for
@@ -1001,7 +1023,8 @@ mod tests {
             "en-US",
             &registry_with(vec![builtin_pandoc(true)]),
             &mut baselines,
-        );
+        )
+        .dirty;
         assert!(dirty);
         let content = std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).expect("file");
         assert_eq!(content, pandoc_def().render("en-US").unwrap());
@@ -1011,12 +1034,60 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_reports_a_materialize_failure_by_name() {
+        // A plain FILE occupying the skill's directory path makes
+        // create_dir_all fail on every platform -- the deterministic
+        // stand-in for the real failure classes (read-only skills root,
+        // full disk, antivirus interference; issue #1016).
+        let root = tempfile::tempdir().expect("root");
+        std::fs::write(root.path().join("pandoc"), b"not a directory").expect("blocker");
+        std::fs::write(root.path().join("vega-chart"), b"not a directory").expect("blocker");
+        let mut baselines = BTreeMap::new();
+        let outcome = reconcile(
+            root.path(),
+            "en-US",
+            &registry_with(vec![builtin_pandoc(true)]),
+            &mut baselines,
+        );
+        // The degraded posture is unchanged (warn, no record, not dirty):
+        // the window must not persist anything for a skill it could not
+        // write...
+        assert!(!outcome.dirty);
+        assert!(baselines.is_empty());
+        // ...but the failure surfaces by name for the scan payload, in
+        // definition order: the companion trio and the knowledge-only
+        // skill share the one failure lane (issue #1016).
+        assert_eq!(
+            outcome.materialize_failures,
+            vec!["pandoc".to_string(), "vega-chart".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_recovered_materialization_leaves_the_failure_lane() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::write(root.path().join("vega-chart"), b"not a directory").expect("blocker");
+        let cli = registry_with(vec![]);
+        let mut baselines = BTreeMap::new();
+        let failed = reconcile(root.path(), "en-US", &cli, &mut baselines);
+        assert_eq!(failed.materialize_failures, vec!["vega-chart".to_string()]);
+        // The condition clears (the user freed the path): the next window
+        // materializes and the failure lane is empty -- the warning must
+        // not outlive the failure it reported (issue #1016 self-heal).
+        std::fs::remove_file(root.path().join("vega-chart")).expect("unblock");
+        let recovered = reconcile(root.path(), "en-US", &cli, &mut baselines);
+        assert!(recovered.dirty);
+        assert!(recovered.materialize_failures.is_empty());
+        assert!(baselines.contains_key("vega-chart"));
+    }
+
+    #[test]
     fn reconcile_is_idempotent_when_the_file_agrees_with_the_record() {
         let root = tempfile::tempdir().expect("root");
         let mut baselines = BTreeMap::new();
         let cli = registry_with(vec![builtin_pandoc(true)]);
         reconcile(root.path(), "en-US", &cli, &mut baselines);
-        let dirty = reconcile(root.path(), "zh-CN", &cli, &mut baselines);
+        let dirty = reconcile(root.path(), "zh-CN", &cli, &mut baselines).dirty;
         assert!(!dirty, "an agreeing file is not rewritten (locale switch)");
         // The recorded locale survives a switch: no rewrite, no re-record.
         assert_eq!(baselines["pandoc"].locale, "en-US");
@@ -1038,7 +1109,8 @@ mod tests {
             "en-US",
             &registry_with(vec![user]),
             &mut baselines,
-        );
+        )
+        .dirty;
         // The user-sourced entry anchors nothing: no pandoc file, no pandoc
         // record, and no side-table change at all.
         assert!(!dirty);
@@ -1066,7 +1138,8 @@ mod tests {
             "en-US",
             &registry_with(vec![builtin_pandoc(true)]),
             &mut baselines,
-        );
+        )
+        .dirty;
         assert!(
             !baselines.contains_key("pandoc"),
             "no record: the file is not ours"
@@ -1103,7 +1176,8 @@ mod tests {
             "en-US",
             &registry_with(vec![builtin_pandoc(true)]),
             &mut baselines,
-        );
+        )
+        .dirty;
         assert!(dirty);
         assert_eq!(
             std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).unwrap(),
@@ -1130,7 +1204,7 @@ mod tests {
         let file = root.path().join("pandoc/SKILL.md");
         let edited = "---\nname: pandoc\ndescription: edited\n---\nEdited body.\n";
         std::fs::write(&file, edited).expect("edit");
-        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines);
+        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines).dirty;
         assert!(!dirty);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), edited);
     }
@@ -1152,7 +1226,7 @@ mod tests {
         );
         std::fs::write(&file, &stale).expect("write stale body");
         baselines.get_mut("pandoc").unwrap().hash = crate::util::sha256_hex(stale.as_bytes());
-        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines);
+        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines).dirty;
         assert!(dirty);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
@@ -1169,7 +1243,7 @@ mod tests {
         let cli = registry_with(vec![builtin_pandoc(true)]);
         reconcile(root.path(), "en-US", &cli, &mut baselines);
         std::fs::remove_file(root.path().join("pandoc/SKILL.md")).expect("delete");
-        let dirty = reconcile(root.path(), "zh-CN", &cli, &mut baselines);
+        let dirty = reconcile(root.path(), "zh-CN", &cli, &mut baselines).dirty;
         assert!(dirty, "the re-materialization re-records");
         assert!(root.path().join("pandoc/SKILL.md").exists());
         assert_eq!(baselines["pandoc"].locale, "zh-CN");
@@ -1202,7 +1276,7 @@ mod tests {
         // skip-write branch must not swallow a side-table shrink) -- pinned
         // against a settled skills side so vega-chart's earlier
         // materialization cannot be the dirty source.
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
         assert!(!baselines.contains_key("pandoc"));
         assert!(!baselines.contains_key("retired-skill"));
         assert_eq!(
@@ -1222,7 +1296,7 @@ mod tests {
         let mut baselines = BTreeMap::new();
         let cli = registry_with(vec![builtin_pandoc(true)]);
         reconcile(root.path(), "en-US", &cli, &mut baselines);
-        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines);
+        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines).dirty;
         assert!(!dirty);
         assert!(baselines.contains_key("pandoc"));
     }
@@ -1358,7 +1432,7 @@ mod tests {
     fn reconcile_materializes_a_no_companion_skill_with_no_cli_entry() {
         let root = tempfile::tempdir().expect("root");
         let mut baselines = BTreeMap::new();
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
         assert!(dirty);
         let def = find_skill_definition("vega-chart").expect("definition");
         let content =
@@ -1410,7 +1484,7 @@ mod tests {
         let content =
             std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).expect("file");
         assert_eq!(content, def.render("zh-CN").unwrap());
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
         assert!(!dirty, "the locale switch does not rewrite or re-record");
         assert_eq!(
             std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).unwrap(),
@@ -1432,7 +1506,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join("vega-chart")).expect("mkdir");
         std::fs::write(root.path().join("vega-chart/SKILL.md"), user_file).expect("write");
         let mut baselines = BTreeMap::new();
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
+        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
         assert!(
             !baselines.contains_key("vega-chart"),
             "no record: the file is not ours"

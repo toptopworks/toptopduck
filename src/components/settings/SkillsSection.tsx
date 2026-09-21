@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -17,12 +17,14 @@ import {
   createSkill,
   deleteSkill,
   listSkills,
+  rescanBuiltinCliTools,
   restoreBuiltinSkill,
   updateSkill,
   setSkillEnabled,
 } from "../../api";
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
 import { fmtError } from "../../lib/error-presentation";
+import { log } from "../../lib/log";
 import { skillKeys } from "../../session/queryKeys";
 import {
   AlertDialog,
@@ -115,8 +117,17 @@ const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
 // affordance is scoped to the row's text block -- never the action cluster.
 const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
 
+/** One filter-axis half shared by the rows and the failure lane: "all"
+ *  passes everything; otherwise the value must match the axis. The lane
+ *  calls it with the literal "builtin" -- a failed skill never landed on
+ *  disk, so it has no acquired value to compare; the literal is its
+ *  declared stand-in. */
+function matchesAcquired(filter: AcquiredFilter, acquired: SkillAcquired): boolean {
+  return filter === "all" || filter === acquired;
+}
+
 function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
-  return filter === "all" || skill.acquired === filter;
+  return matchesAcquired(filter, skill.acquired);
 }
 
 export function SkillsSection({
@@ -140,6 +151,74 @@ export function SkillsSection({
     queryFn: listSkills,
   });
 
+  // The materialization-failure lane (issue #1016): the names of the
+  // builtin skills the scan window could not write, refreshed by the same
+  // mount rescan the CLI pane rides. Null = no scan answer (mount rescan
+  // failed): no lane renders, the CLI pane's null-scan posture.
+  const [materializeFailures, setMaterializeFailures] = useState<
+    string[] | null
+  >(null);
+
+  // The write-generation guard (the CliSection #683 contract): advances
+  // with every APPLIED user write, so a mount-rescan response arriving
+  // after a user write landed skips its config sync instead of rolling
+  // the write back.
+  const writeGenRef = useRef(0);
+
+  /** Apply a user write's returned config: the sync advances the write
+   *  generation, so a mount rescan still in flight skips its (stale)
+   *  config sync. */
+  function applyUserWrite(next: AppConfig) {
+    writeGenRef.current += 1;
+    onAppConfigSync(next);
+  }
+
+  /** One cache-scope invalidate of the skills keys (the listing plus
+   *  every observer on the family -- the picker and rail ride the same
+   *  keys): fire-and-forget, used by the mount rescan and the writes. */
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: skillKeys.all() });
+  };
+
+  /** Opening the pane refreshes the materialization snapshot (issue
+   *  #1016): the same one read-modify-write IPC the CLI pane rides on
+   *  mount. A success in this window can materialize missing skills, so
+   *  the config syncs (guarded) and the listing refetches to show the
+   *  fresh rows, while the failures render as the warning lane below the
+   *  toolbar. A mount failure leaves no visible UI state -- it lands one
+   *  log.warn so a persistently failing scan is diagnosable (the CLI
+   *  pane's silent-mount contract). */
+  useEffect(() => {
+    let cancelled = false;
+    const gen = writeGenRef.current;
+    rescanBuiltinCliTools()
+      .then((result) => {
+        if (!cancelled) {
+          setMaterializeFailures(result.skill_materialize_failures);
+          if (writeGenRef.current === gen) onAppConfigSync(result.config);
+        }
+        // The scan may have materialized a skill in this window: the
+        // listing refetches so the new row appears beside the lane that
+        // would have warned about its absence. Cache-scoped and
+        // unmount-safe, so it runs even when the pane closed mid-flight
+        // (the picker / rail observers outlive this pane and need the
+        // refreshed cache).
+        invalidate();
+      })
+      .catch((e) => {
+        // Silent in the UI on mount; the failure lane stays absent.
+        log.warn("SkillsSection", "builtin-skill mount rescan failed", e);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `invalidate` closes over the pane-lifetime `queryClient` (stable
+    // for the provider's life) and `onAppConfigSync` is a stable
+    // pass-through from the settings view (the same mount-once contract
+    // as the other settings panes).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<AcquiredFilter>("all");
   const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
@@ -147,10 +226,6 @@ export function SkillsSection({
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: skillKeys.all() });
-  };
 
   const createMutation = useMutation({
     mutationFn: (draft: SkillCreate) =>
@@ -198,7 +273,7 @@ export function SkillsSection({
   const restoreMutation = useMutation({
     mutationFn: (name: string) => restoreBuiltinSkill(name),
     onSuccess: (cfg) => {
-      onAppConfigSync(cfg);
+      applyUserWrite(cfg);
       invalidate();
       setConfirmRestore(null);
     },
@@ -218,7 +293,7 @@ export function SkillsSection({
       setSkillEnabled(name, enabled),
     onSuccess: (cfg) => {
       setError(null);
-      onAppConfigSync(cfg);
+      applyUserWrite(cfg);
       invalidate();
     },
     onError: (e) => setError(fmtError(e, intl)),
@@ -261,6 +336,19 @@ export function SkillsSection({
           matchesFilter(s, filter),
       ),
     [allSkills, search, filter],
+  );
+
+  // The failure lane's visible rows (issue #1016): a failed skill never
+  // landed on disk, so the listing has no row for it -- these stand in,
+  // visible under the "all" and "builtin" filters and matched by name
+  // (regular rows also match their description; the lane shows no
+  // description to match).
+  const failedNames = useMemo(
+    () =>
+      (materializeFailures ?? []).filter(
+        (name) => matchesAcquired(filter, "builtin") && matchesSearch(name, search),
+      ),
+    [materializeFailures, filter, search],
   );
 
   function openEdit(skill: SkillEntry) {
@@ -429,7 +517,14 @@ export function SkillsSection({
       </div>
 
       <SettingsCard>
-        {visible.length === 0 ? (
+        {/* The lane rides above the listing; when a lane row matches the
+         * search / filter, it carries the frame alone -- an empty-state
+         * caption under a matching row would contradict the row right
+         * above it. */}
+        {failedNames.map((name) => (
+          <SkillMaterializeFailureRow key={name} name={name} />
+        ))}
+        {visible.length === 0 && failedNames.length === 0 ? (
           <div className="text-muted-foreground px-4 py-8 text-center text-sm">
             {allSkills.length === 0 ? (
               <FormattedMessage
@@ -1089,5 +1184,40 @@ function IgnoredDirectoriesSection({ skipped }: IgnoredDirectoriesSectionProps) 
         </ul>
       </div>
     </details>
+  );
+}
+
+/** One materialization-failure row (issue #1016): the CLI pane's
+ * conflict-row shape (issue #675) carried over as the skills pane's
+ * warning lane -- the #937 agents-pane precedent for surfacing
+ * materialization failures. The skill never landed on disk, so the
+ * listing has no row for it -- this one stands in with the failure
+ * category and the self-heal hint. No open/edit affordance: there is
+ * nothing on disk to edit. */
+function SkillMaterializeFailureRow({ name }: { name: string }) {
+  return (
+    <div
+      data-testid={`skill-materialize-failure-row-${name}`}
+      className={ROW_CLASS}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium truncate">{name}</div>
+        <p className="text-destructive mt-1 text-xs">
+          <FormattedMessage
+            id="settings.skills.materializeFailureHint"
+            defaultMessage="Couldn't write this built-in skill to disk. Check that the skills folder is writable and has disk space; the next scan retries."
+          />
+        </p>
+      </div>
+      {/* The DESIGN.md badge token (the CLI conflict row's shape):
+       * typography.badge on rounded.md, the destructive coloring marking
+       * the failed write. */}
+      <span className="bg-muted text-destructive shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+        <FormattedMessage
+          id="settings.skills.materializeFailureBadge"
+          defaultMessage="Write failed"
+        />
+      </span>
+    </div>
   );
 }

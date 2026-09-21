@@ -420,13 +420,13 @@ impl LiveProviderConfig {
         // companion skill in this same window. The side-table mutation
         // folds into the persist decision below.
         let locale = crate::skills::builtin::resolve_materialization_locale(cfg.locale);
-        let skills_dirty = crate::skills::builtin::reconcile(
+        let skills = crate::skills::builtin::reconcile(
             skills_root,
             locale,
             &cfg.cli_tools,
             &mut cfg.builtin_skill_baselines,
         );
-        let config = if nothing_registered && upgraded.is_empty() && !skills_dirty {
+        let config = if nothing_registered && upgraded.is_empty() && !skills.dirty {
             // Nothing to persist: every shipped definition is dormant,
             // already registered, and in agreement with its baseline, and no
             // builtin skill changed (a knowledge-only skill materializes on
@@ -444,7 +444,11 @@ impl LiveProviderConfig {
                 "builtin CLI entry `{name}` upgraded to the shipped definition (unedited)"
             );
         }
-        Ok(crate::cli_tools::builtin::BuiltinScanResult { config, scan })
+        Ok(crate::cli_tools::builtin::BuiltinScanResult {
+            config,
+            scan,
+            skill_materialize_failures: skills.materialize_failures,
+        })
     }
 
     /// Restore one builtin skill's SKILL.md to the shipped baseline
@@ -1570,6 +1574,44 @@ mod tests {
                 e,
                 crate::cli_tools::builtin::BuiltinScanEntry::Dormant { .. }
             )));
+    }
+
+    #[test]
+    fn scan_and_register_surfaces_skill_materialize_failures() {
+        // A blocked skills root (issue #1016): the vega-chart directory
+        // path is occupied by a plain file, so materialization fails while
+        // the CLI scan itself is untouched -- the failure rides the same
+        // payload as the detection snapshot, for the Skills panel's
+        // warning lane.
+        let (_dir, live) = live();
+        let skills = tempfile::tempdir().expect("skills root");
+        std::fs::write(skills.path().join("vega-chart"), b"not a directory").expect("blocker");
+        let path_dir = controlled_path(&[]);
+        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
+        let result = live
+            .scan_and_register(Some(path_env.clone()), skills.path())
+            .expect("scan");
+        assert_eq!(
+            result.skill_materialize_failures,
+            vec!["vega-chart".to_string()]
+        );
+        // The degraded posture: nothing persisted for the failed skill
+        // (no baseline record in the returned config)...
+        assert!(!result
+            .config
+            .builtin_skill_baselines
+            .contains_key("vega-chart"));
+        // ...and the next window over a cleared path heals the lane (the
+        // warning must not outlive the failure).
+        std::fs::remove_file(skills.path().join("vega-chart")).expect("unblock");
+        let healed = live
+            .scan_and_register(Some(path_env), skills.path())
+            .expect("rescan");
+        assert!(healed.skill_materialize_failures.is_empty());
+        assert!(healed
+            .config
+            .builtin_skill_baselines
+            .contains_key("vega-chart"));
     }
 
     #[test]

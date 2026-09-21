@@ -501,6 +501,8 @@
   "settings.skills.importSelectAll": "Select all",
   "settings.skills.importSelectedCount": "Selected {selected} / {total}",
   "settings.skills.importTitle": "Import skills",
+  "settings.skills.materializeFailureBadge": "Write failed",
+  "settings.skills.materializeFailureHint": "Couldn't write this built-in skill to disk. Check that the skills folder is writable and has disk space; the next scan retries.",
   "settings.skills.new": "New",
   "settings.skills.noMatches": "No skills match your search.",
   "settings.skills.openSource": "Open original folder",

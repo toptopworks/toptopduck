@@ -6,8 +6,8 @@ import { IntlProvider } from "react-intl";
 import { SkillsSection } from "../SkillsSection";
 import { chooseOption, openSelect } from "./helpers";
 import { TooltipProvider } from "../../ui/tooltip";
-import { listSkills, restoreBuiltinSkill } from "../../../api";
-import { baseAppConfig, skillEntry } from "../../../test-fixtures";
+import { listSkills, rescanBuiltinCliTools, restoreBuiltinSkill } from "../../../api";
+import { baseAppConfig, scanResult, skillEntry } from "../../../test-fixtures";
 
 // The builtin-skill surface of the settings pane (issue #677): the built-in
 // badge + the disabled delete entry, the Edited derivation off the baseline
@@ -21,6 +21,7 @@ vi.mock("../../../api", () => ({
   restoreBuiltinSkill: vi.fn(),
   listSkillSources: vi.fn(),
   importSkills: vi.fn(),
+  rescanBuiltinCliTools: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
@@ -43,7 +44,7 @@ function renderSection(baselines: Record<string, { hash: string; locale: string 
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
@@ -55,7 +56,7 @@ function renderSection(baselines: Record<string, { hash: string; locale: string 
       </IntlProvider>
     </QueryClientProvider>,
   );
-  return onSync;
+  return { onSync, unmount: view.unmount };
 }
 
 describe("SkillsSection builtin rows (issue #677)", () => {
@@ -66,6 +67,9 @@ describe("SkillsSection builtin rows (issue #677)", () => {
       ignored: [],
       root_error: null,
     });
+    // The pane's mount rescan (issue #1016) resolves quietly by default:
+    // no failure lane, no config churn beyond the wholesale sync.
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
   });
 
   it("shows the system badge and an inert delete on a builtin row", async () => {
@@ -118,7 +122,7 @@ describe("SkillsSection builtin rows (issue #677)", () => {
   });
 
   it("shows Edited + restore on a drifted hash and restores through the confirm lane", async () => {
-    const onSync = renderSection({
+    const { onSync } = renderSection({
       pandoc: { hash: "an-older-recorded-hash", locale: "en-US" },
     });
     const row = await screen.findByTestId("skill-row");
@@ -170,5 +174,153 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     openSelect(filter);
     chooseOption("Local");
     expect(screen.queryByTestId("skill-row")).toBeNull();
+  });
+});
+
+describe("SkillsSection materialization-failure lane (issue #1016)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(
+      scanResult({ skill_materialize_failures: ["vega-chart"] }),
+    );
+  });
+
+  it("renders a row-level warning for a skill the window could not write", async () => {
+    renderSection({});
+    const row = await screen.findByTestId(
+      "skill-materialize-failure-row-vega-chart",
+    );
+    // The row carries the skill name (the identity the user would look
+    // for), the failure category, and the self-heal contract.
+    expect(row).toHaveTextContent("vega-chart");
+    expect(row).toHaveTextContent("Write failed");
+    expect(row).toHaveTextContent("next scan retries");
+  });
+
+  it("rides the acquired filter like the rows it stands in for", async () => {
+    renderSection({});
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    const filter = screen.getByLabelText("Filter by skill type");
+    // A failed skill is (would-be) builtin: the lane shows under "System"
+    // and hides under "Local".
+    openSelect(filter);
+    chooseOption("System");
+    expect(
+      screen.getByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeInTheDocument();
+    openSelect(filter);
+    chooseOption("Local");
+    expect(
+      screen.queryByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeNull();
+  });
+
+  it("matches the lane against the search box", async () => {
+    renderSection({});
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "vega" },
+    });
+    expect(
+      screen.getByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "pandoc" },
+    });
+    expect(
+      screen.queryByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeNull();
+  });
+
+  it("lets a matching failure row carry the frame without the no-matches caption", async () => {
+    // The contradiction guard: with a skill on disk, a failed vega-chart,
+    // and a search for "vega", the lane row matches while the listing
+    // does not -- a "no matches" caption under the matching row would
+    // deny the row right above it.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [builtinSkill],
+      ignored: [],
+      root_error: null,
+    });
+    renderSection({});
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "vega" },
+    });
+    expect(
+      screen.getByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No skills match your search.")).toBeNull();
+  });
+
+  it("leaves no lane once a healed window reports no failures", async () => {
+    const { unmount } = renderSection({});
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    // The lane is a per-window snapshot, never persisted: a remount over
+    // a healed machine (the rescan reports no failures) renders nothing
+    // -- the warning must not outlive the failure (issue #1016 AC).
+    unmount();
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
+    renderSection({});
+    await screen.findByText("No skills yet. Click New to create one.");
+    expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
+    // The second window really ran (not just an unrendered lane): the
+    // remount issued its own mount rescan.
+    expect(rescanBuiltinCliTools).toHaveBeenCalledTimes(2);
+  });
+
+  it("refetches the listing after the mount rescan lands (issue #1016)", async () => {
+    // The recovery path's listing freshness: the mount rescan can
+    // materialize a skill in its window, and the listing query was
+    // already in flight before that write -- the rescan's response
+    // invalidates the listing so the fresh row appears. The rescan
+    // resolves on a macrotask here (the production ordering: the IPC
+    // round-trip outlasts the local fs scan), because under jsdom's
+    // same-flush microtask timing the invalidation would dedupe into
+    // the still-in-flight mount fetch instead of refetching.
+    vi.mocked(listSkills)
+      .mockResolvedValueOnce({ skills: [], ignored: [], root_error: null })
+      .mockResolvedValue({
+        skills: [builtinSkill],
+        ignored: [],
+        root_error: null,
+      });
+    vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve(scanResult()),
+            50,
+          ),
+        ),
+    );
+    renderSection({});
+    // The first listing (pre-rescan) shows nothing.
+    await screen.findByText("No skills yet. Click New to create one.");
+    // The lane is structurally absent before any scan answer lands (the
+    // null snapshot holds until the rescan resolves).
+    expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
+    // The rescan lands, the listing refetches, the materialized row
+    // appears -- no failure lane (the window succeeded).
+    const row = await screen.findByTestId("skill-row", undefined, { timeout: 2000 });
+    expect(row).toHaveTextContent("pandoc");
+    expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
+  });
+
+  it("stays silent on a mount-rescan IPC failure", async () => {
+    vi.mocked(rescanBuiltinCliTools).mockRejectedValueOnce(
+      new Error("ipc down"),
+    );
+    renderSection({});
+    // The CLI pane's silent-mount contract: a failed mount rescan leaves
+    // no visible UI state (one log.warn), and the empty listing renders.
+    await screen.findByText("No skills yet. Click New to create one.");
+    expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
   });
 });
