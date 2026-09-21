@@ -201,9 +201,10 @@ pub(crate) struct AlignOutcome {
 /// Align the reserved subtree against the embedded tree and the CURRENT CLI
 /// registry: per anchored manifest entry, the on-disk `.system/<name>/` tree
 /// is brought to byte-agreement with the embedded one (skip when the
-/// fingerprint already agrees; delete + rewrite otherwise). Filesystem
-/// failures degrade per-skill with a warn and the name rides the outcome
-/// (issue #1016); the settings-page rescan retries. Shadowing is NOT
+/// fingerprint already agrees; delete + rewrite otherwise), then the
+/// retirement sweep reclaims leftovers of names that left the manifest.
+/// Filesystem failures degrade per-skill with a warn and the name rides the
+/// outcome (issue #1016); the settings-page rescan retries. Shadowing is NOT
 /// consulted here (ADR-0121 Decision 5): materialization always runs; the
 /// deference happens only at the registry-scan merge.
 pub(crate) fn align(root: &Path, cli: &crate::cli_tools::config::CliToolRegistry) -> AlignOutcome {
@@ -221,8 +222,49 @@ pub(crate) fn align(root: &Path, cli: &crate::cli_tools::config::CliToolRegistry
             );
         }
     }
+    retire_orphaned_subtrees(root, &mut materialize_failures);
     AlignOutcome {
         materialize_failures,
+    }
+}
+
+/// The retirement sweep (issue #1022): a first-level `.system/` directory
+/// whose name is not in the manifest is a retired skill's leftover cache --
+/// `.system` is an app-owned cache, not user files (ADR-0121 Decision 3), so
+/// it is deleted wholesale instead of merging as an undeletable orphan
+/// builtin row. A blocked delete rides the same failure lane as a blocked
+/// materialization (the name surfaces, the next window retries); a missing
+/// `.system/` is the quiet nothing-to-clean. Non-directories (loose files,
+/// hand-placed links) are left alone: only the shapes the write path itself
+/// creates are the sweep's business.
+fn retire_orphaned_subtrees(root: &Path, materialize_failures: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(root.join(SYSTEM_SUBTREE)) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            log::warn!(
+                target: "skills",
+                "builtin retirement sweep could not read `{}` (the next scan retries): {e}",
+                root.join(SYSTEM_SUBTREE).display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if find_manifest_entry(&name).is_some() {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+            materialize_failures.push(name.clone());
+            log::warn!(
+                target: "skills",
+                "retired builtin skill `{name}` failed to clean up (the next scan retries): {e}"
+            );
+        }
     }
 }
 
@@ -942,6 +984,97 @@ mod tests {
             root.path().join(".system/vega-chart/SKILL.md").exists(),
             "the reserved subtree is written regardless of the shadow"
         );
+    }
+
+    /// The retirement sweep (issue #1022): a first-level `.system/`
+    /// directory whose name is not in the manifest is a retired skill's
+    /// leftover cache, deleted wholesale. This is the runtime companion of
+    /// the manifest/asset agreement test's both-sides-shrunk shape -- that
+    /// test pins the shipped set agrees, this one pins the residue a shrink
+    /// leaves behind is reclaimed, so the panel never shows an orphaned
+    /// builtin row. Anchored names are never the sweep's business.
+    #[test]
+    fn align_retires_a_subtree_whose_name_left_the_manifest() {
+        let root = tempfile::tempdir().expect("root");
+        let leftover = root.path().join(".system/legacy-chart");
+        std::fs::create_dir_all(&leftover).expect("mkdir");
+        std::fs::write(
+            leftover.join("SKILL.md"),
+            "---\nname: legacy-chart\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write");
+        let outcome = align(root.path(), &registry_with(vec![]));
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(!leftover.exists(), "the retired subtree is reclaimed");
+        // The sweep never touches anchored names: the knowledge-only skill
+        // still aligns alongside the cleanup.
+        assert!(root.path().join(".system/vega-chart/SKILL.md").exists());
+    }
+
+    /// A blocked retirement delete rides the same failure lane as a blocked
+    /// materialization (the #1016 semantics): the retired name surfaces, and
+    /// the next window retries. The blockers are platform stand-ins for the
+    /// real failure classes (read-only skills root, antivirus interference)
+    /// -- Windows: a no-share handle on an in-tree file (the one blocker
+    /// std's POSIX-semantics subtree delete cannot open around); Unix: a
+    /// write-stripped directory blocking the unlinks inside it.
+    #[test]
+    fn a_blocked_retirement_delete_rides_the_failure_lane() {
+        let root = tempfile::tempdir().expect("root");
+        let leftover = root.path().join(".system/legacy-chart");
+        std::fs::create_dir_all(&leftover).expect("mkdir");
+        let held = leftover.join("SKILL.md");
+        std::fs::write(&held, "body\n").expect("write");
+        #[cfg(windows)]
+        use std::os::windows::ffi::OsStrExt;
+        #[cfg(windows)]
+        let held_handle = {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::Foundation::GENERIC_READ;
+            use windows_sys::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+            };
+            let path_w: Vec<u16> = held.as_os_str().encode_wide().chain([0]).collect();
+            let raw = unsafe {
+                CreateFileW(
+                    path_w.as_ptr(),
+                    GENERIC_READ,
+                    0, // share nothing
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(raw as isize != -1, "open the held file");
+            // File's Drop closes the handle on scope exit.
+            unsafe { std::fs::File::from_raw_handle(raw) }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o555))
+                .expect("chmod");
+        }
+        let outcome = align(root.path(), &registry_with(vec![]));
+        assert_eq!(
+            outcome.materialize_failures,
+            vec!["legacy-chart".to_string()],
+            "the blocked retirement surfaces by name"
+        );
+        // Unblock: the next window reclaims the subtree (the warning must
+        // not outlive the failure it reported).
+        #[cfg(windows)]
+        drop(held_handle);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        let healed = align(root.path(), &registry_with(vec![]));
+        assert!(healed.materialize_failures.is_empty());
+        assert!(!leftover.exists(), "the healed sweep reclaims the subtree");
     }
 
     // --- auto-include -------------------------------------------------------

@@ -326,6 +326,16 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 
+# Exclusive-handle fixture for the blocked-delete lane (issue #1022):
+# `CreateFileW` with zero sharing is the one std-side unbeatable blocker
+# against the POSIX-semantics subtree delete.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
