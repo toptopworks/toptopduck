@@ -321,11 +321,12 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
         },
         { name: e.data },
       );
-    case "BuiltinNameLocked":
+    case "BuiltinReadOnly":
       return intl.formatMessage(
         {
-          id: "error.skill.nameLocked",
-          defaultMessage: "Built-in skill \"{name}\" cannot be renamed",
+          id: "error.skill.builtinReadOnly",
+          defaultMessage:
+            "Built-in skill \"{name}\" is read-only; copy its folder to the skills root to make an editable version",
         },
         { name: e.data },
       );

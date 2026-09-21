@@ -2,29 +2,34 @@
 //!
 //! The registry is the directory itself: every `<root>/<name>/` holding a
 //! spec-valid `SKILL.md` IS one skill (directory scan = registry, no sidecar,
-//! no app-config entry). The loader derives `acquired` from the filesystem
-//! nature of the directory (symlink / junction -> `linked`, real directory ->
-//! `local`). Every function takes the root as a parameter -- pure of Tauri
-//! state, so the whole surface is black-box testable against a tempdir.
+//! no app-config entry), PLUS the reserved `.system/` subtree's children --
+//! the builtin rows, merged with the shadowing rule (ADR-0121 Decision 5):
+//! a local directory owning a builtin's name suppresses the builtin row, so
+//! the name resolves to ONE row everywhere. The loader derives `acquired`
+//! from location (`linked` = symlink / junction onto an external source,
+//! `local` = real directory, `builtin` = under the reserved subtree). Every
+//! function takes the root as a parameter -- pure of Tauri state, so the
+//! whole surface is black-box testable against a tempdir.
 //!
 //! Read-back downgrade wiring: the two write sites (`create_skill` /
 //! `update_skill`) thread `read_back_or_derive` over the fresh load
 //! parts, and that wiring is an ACCEPTED unguarded face (issue #940): the
-//! pure half (the structural judgement both ways, the builtin-mark hit,
-//! the derived-entry equivalence) is pinned by direct tests, but a
-//! call-site revert to the bare pre-#936 `load_skill`, or an
-//! argument-threading slip, is observable only when the real read-back IO
-//! fails -- which never happens in tests. Closing the gap needs a
-//! fault-injection seam at the call sites, which the repo's
-//! no-fabricated-seams precedent counsels against; land one when a second
-//! consumer of the wiring justifies it.
+//! pure half (the structural judgement both ways, the derived-entry
+//! equivalence) is pinned by direct tests, but a call-site revert to the
+//! bare pre-#936 `load_skill`, or an argument-threading slip, is
+//! observable only when the real read-back IO fails -- which never happens
+//! in tests. Closing the gap needs a fault-injection seam at the call
+//! sites, which the repo's no-fabricated-seams precedent counsels against;
+//! land one when a second consumer of the wiring justifies it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
-use super::builtin::BuiltinSkillMark;
+use super::builtin::{
+    is_reserved_skill_name, is_shadowed_by_local, resolve_skill_dir, SYSTEM_SUBTREE,
+};
 use super::frontmatter;
 use super::model::{
     validate_body, validate_description, validate_skill_name, Acquired, SkillEntry, SkillError,
@@ -54,7 +59,12 @@ const TMP_SUFFIX: &str = ".tmp";
 /// A directory entry the OS itself could not read (concurrent modification,
 /// entry-level permission) is also pushed to `ignored` rather than silently
 /// dropped by `flatten()`.
-pub fn list_skills(root: &Path, mark: &BuiltinSkillMark) -> SkillListing {
+///
+/// Hidden directories (dot-prefixed) are skipped by the root scan -- the
+/// reserved `.system/` subtree is merged explicitly below (the codex hidden
+/// convention, ADR-0121 Decision 3), and other hidden directories are not
+/// spec-shaped skill names anyway.
+pub fn list_skills(root: &Path) -> SkillListing {
     let mut skills = Vec::new();
     let mut ignored = Vec::new();
     let mut root_error = None;
@@ -73,7 +83,18 @@ pub fn list_skills(root: &Path, mark: &BuiltinSkillMark) -> SkillListing {
                         if !is_dir {
                             continue;
                         }
-                        match load_skill(&path, mark) {
+                        // Hidden directories are not skill candidates: the
+                        // reserved `.system/` subtree merges explicitly below,
+                        // any other dot-directory is internal layout noise
+                        // (the import-side convention, issue #418).
+                        if path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with('.'))
+                        {
+                            continue;
+                        }
+                        match load_skill(&path) {
                             Ok(skill) => skills.push(skill),
                             Err(e) => {
                                 log::warn!(
@@ -135,6 +156,52 @@ pub fn list_skills(root: &Path, mark: &BuiltinSkillMark) -> SkillListing {
         }
     }
 
+    // The reserved-subtree merge (ADR-0121 Decisions 3/5): the `.system/`
+    // children are the builtin rows -- `acquired` by location, whatever
+    // spec-valid directory lives there. A same-named local directory
+    // SHADOWS the builtin (the row resolves to the fork; the builtin
+    // returns on the next scan after the fork is deleted). A missing or
+    // unreadable subtree degrades to a warn -- never a listing failure
+    // (nothing materialized yet is the fresh-install state).
+    if let Ok(entries) = fs::read_dir(root.join(SYSTEM_SUBTREE)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Follow the link for the directory check, same as the root scan.
+            let is_dir = fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+            if !is_dir {
+                continue;
+            }
+            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Hidden children of the reserved subtree stay internal (the
+            // alignment marker and any future bookkeeping).
+            if dir_name.starts_with('.') {
+                continue;
+            }
+            // Shadowing: a local directory owning the name suppresses the
+            // builtin row entirely -- the name resolves to the fork (the
+            // shared shadowing rule, ADR-0121 Decision 5).
+            if is_shadowed_by_local(root, dir_name) {
+                continue;
+            }
+            match load_builtin_skill(&path) {
+                Ok(skill) => skills.push(skill),
+                Err(e) => {
+                    log::warn!(
+                        target: "skills",
+                        "skipping non-spec reserved-subtree directory `{}`: {e}",
+                        path.display()
+                    );
+                    ignored.push(SkippedSkill {
+                        dir: format!("{SYSTEM_SUBTREE}/{dir_name}"),
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     ignored.sort_by(|a, b| a.dir.cmp(&b.dir));
     SkillListing {
@@ -157,7 +224,7 @@ pub fn create_skill(
     body: &str,
 ) -> Result<SkillEntry, SkillError> {
     validate_skill_name(name)?;
-    if super::builtin::is_reserved_skill_name(name) {
+    if is_reserved_skill_name(name) {
         return Err(SkillError::ReservedSkillName(name.to_string()));
     }
     validate_description(description)?;
@@ -188,8 +255,7 @@ pub fn create_skill(
     // deadlock a retry on NameTaken. A semantic read-back failure
     // (render/parse drift) stays `Err`, and the mint is removed below so
     // the retry succeeds anyway.
-    let mark = BuiltinSkillMark::default();
-    let result = read_back_or_derive(load_skill_parts(&dir, &mark), &content, name, &mark);
+    let result = read_back_or_derive(load_skill_parts(&dir), &content, name);
     // Same cleanup contract as the write branch above: a failed mint leaves
     // no directory behind (it would surface as NameTaken on the user's
     // retry).
@@ -230,30 +296,29 @@ impl Drop for RenameGuard {
 /// WRITE -- a different value renames the directory first (refusing a taken
 /// target), with a compensating rename-back when the subsequent write fails,
 /// so a partial failure never strands a name / directory mismatch. Refuses a
-/// `linked` skill (the app never writes through an external link). Unknown
-/// frontmatter keys survive the edit verbatim (the write mutates the PARSED
-/// mapping, see `frontmatter::set_*`).
+/// `linked` skill (the app never writes through an external link) and a
+/// `builtin` skill (readonly app cache, ADR-0121 -- the editable variant is
+/// a filesystem copy). Unknown frontmatter keys survive the edit verbatim
+/// (the write mutates the PARSED mapping, see `frontmatter::set_*`).
 pub fn update_skill(
     root: &Path,
-    mark: &BuiltinSkillMark,
     name: &str,
     update: SkillUpdate,
 ) -> Result<SkillEntry, SkillError> {
-    let dir = existing_skill_dir(root, name)?;
-    let current = load_skill(&dir, mark)?;
-    if current.acquired == Acquired::Linked {
+    let (dir, acquired) = existing_skill_dir(root, name)?;
+    if acquired == Acquired::Linked {
         return Err(SkillError::ReadOnly(name.to_string()));
     }
-    // A MATERIALIZED builtin skill keeps its name (issue #677): the name is
-    // the locked identity the shipped definition anchors on. Every other
-    // field is editable.
-    if current.acquired == Acquired::Builtin && update.name != name {
-        return Err(SkillError::BuiltinNameLocked(name.to_string()));
+    // A builtin skill is readonly (ADR-0121): the reserved-subtree files
+    // re-align on the next scan, so an edit cannot stick -- refuse with the
+    // variant whose guidance names the fork channel.
+    if acquired == Acquired::Builtin {
+        return Err(SkillError::BuiltinReadOnly(name.to_string()));
     }
     validate_skill_name(&update.name)?;
     // Any rename INTO the builtin reserved set is refused statically
     // (issue #677) -- same full-set membership the create path checks.
-    if update.name != name && super::builtin::is_reserved_skill_name(&update.name) {
+    if update.name != name && is_reserved_skill_name(&update.name) {
         return Err(SkillError::ReservedSkillName(update.name.clone()));
     }
     validate_description(&update.description)?;
@@ -301,12 +366,7 @@ pub fn update_skill(
         write_skill_md(&work_dir, &content)?;
         // The write has landed; reconcile a failed read-back against it
         // (issue #936) instead of reporting an edit failure that is on disk.
-        read_back_or_derive(
-            load_skill_parts(&work_dir, mark),
-            &content,
-            &update.name,
-            mark,
-        )
+        read_back_or_derive(load_skill_parts(&work_dir), &content, &update.name)
     })();
     match result {
         Ok(entry) => {
@@ -333,81 +393,112 @@ pub fn update_skill(
 
 /// Delete one skill from the registry. For a `local` skill this removes the
 /// directory and everything in it; for a `linked` skill it removes the LINK
-/// ONLY (the external source directory is never touched). A MATERIALIZED
-/// builtin skill is refused (issue #677: builtin skills are undeletable --
-/// they re-materialize on the next scan; the shutdown axis is the
-/// enablement axis -- disable the skill, or for a CLI companion its CLI
-/// entry). A name outside the spec, or one with
-/// no directory, is `NoSuchSkill`.
-pub fn delete_skill(root: &Path, mark: &BuiltinSkillMark, name: &str) -> Result<(), SkillError> {
+/// ONLY (the external source directory is never touched). A builtin skill
+/// (the reserved-subtree copy) is refused (issue #677: builtins are
+/// undeletable -- the subtree re-aligns on the next scan; the shutdown axis
+/// is the enablement axis). Shadowing note (ADR-0121 Decision 5): a local
+/// fork owning a builtin's name deletes normally -- disposing of the fork is
+/// how the builtin's row returns. A name outside the spec, or one with
+/// no directory anywhere, is `NoSuchSkill`.
+pub fn delete_skill(root: &Path, name: &str) -> Result<(), SkillError> {
     // A non-spec name cannot address a registry skill -- and validating keeps
     // the path join traversal-safe (the name is IPC-supplied).
     if !super::model::is_valid_skill_name(name) {
         return Err(SkillError::NoSuchSkill(name.to_string()));
     }
-    let dir = root.join(name);
-    let meta = match fs::symlink_metadata(&dir) {
-        Ok(m) => m,
-        Err(_) => return Err(SkillError::NoSuchSkill(name.to_string())),
-    };
-    if mark.contains(name) {
+    // The local directory first: present, it owns the name (a fork deletes
+    // normally even while the reserved subtree holds the builtin copy).
+    let local = root.join(name);
+    if let Ok(meta) = fs::symlink_metadata(&local) {
+        if is_linked(&meta) {
+            // Remove the reparse point / link itself. Windows: RemoveDirectoryW
+            // deletes a junction / directory-symlink without following it. Unix:
+            // unlink removes the symlink itself (remove_dir_all would follow it
+            // into the external source -- never).
+            #[cfg(target_os = "windows")]
+            let result = fs::remove_dir(&local);
+            #[cfg(not(target_os = "windows"))]
+            let result = fs::remove_file(&local);
+            return result.map_err(|e| fs_err("remove skill link", &local, e));
+        }
+        if !meta.is_dir() {
+            return Err(SkillError::NoSuchSkill(name.to_string()));
+        }
+        return fs::remove_dir_all(&local).map_err(|e| fs_err("delete skill directory", &local, e));
+    }
+    // The reserved-subtree copy: the builtin posture.
+    let system = root.join(SYSTEM_SUBTREE).join(name);
+    if fs::symlink_metadata(&system)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
         return Err(SkillError::BuiltinUndeletable(name.to_string()));
     }
-    if is_linked(&meta) {
-        // Remove the reparse point / link itself. Windows: RemoveDirectoryW
-        // deletes a junction / directory-symlink without following it. Unix:
-        // unlink removes the symlink itself (remove_dir_all would follow it
-        // into the external source -- never).
-        #[cfg(target_os = "windows")]
-        let result = fs::remove_dir(&dir);
-        #[cfg(not(target_os = "windows"))]
-        let result = fs::remove_file(&dir);
-        return result.map_err(|e| fs_err("remove skill link", &dir, e));
-    }
-    if !meta.is_dir() {
-        return Err(SkillError::NoSuchSkill(name.to_string()));
-    }
-    fs::remove_dir_all(&dir).map_err(|e| fs_err("delete skill directory", &dir, e))
+    Err(SkillError::NoSuchSkill(name.to_string()))
 }
 
 // --- internals ---------------------------------------------------------------
 
-/// Resolve an IPC-supplied name to an existing skill directory: the name must
-/// be spec-shaped (kebab-case keeps the join traversal-safe) AND the directory
-/// must exist.
-fn existing_skill_dir(root: &Path, name: &str) -> Result<PathBuf, SkillError> {
+/// Resolve an IPC-supplied name to an existing skill directory and its
+/// posture, in the shadowing order (ADR-0121 Decision 5): the name must be
+/// spec-shaped (kebab-case keeps the join traversal-safe); the LOCAL
+/// directory wins when present (linked or real), the reserved-subtree copy
+/// reads as `Builtin`, and neither existing is `NoSuchSkill`.
+fn existing_skill_dir(root: &Path, name: &str) -> Result<(PathBuf, Acquired), SkillError> {
     if !super::model::is_valid_skill_name(name) {
         return Err(SkillError::NoSuchSkill(name.to_string()));
     }
-    let dir = root.join(name);
-    // Follow the link: a junction onto a directory is a skill directory.
-    let is_dir = fs::metadata(&dir).map(|m| m.is_dir()).unwrap_or(false);
-    if !is_dir {
+    // The shadowing order lives in one place (ADR-0121 Decision 5): the
+    // local directory first (linked or real -- a junction onto a directory
+    // is a skill directory), the reserved-subtree copy reads as `Builtin`.
+    let Some(dir) = resolve_skill_dir(root, name) else {
         return Err(SkillError::NoSuchSkill(name.to_string()));
-    }
-    Ok(dir)
+    };
+    let acquired = if dir.starts_with(root.join(SYSTEM_SUBTREE)) {
+        Acquired::Builtin
+    } else {
+        let is_link = fs::symlink_metadata(&dir)
+            .map(|m| is_linked(&m))
+            .unwrap_or(false);
+        if is_link {
+            Acquired::Linked
+        } else {
+            Acquired::Local
+        }
+    };
+    Ok((dir, acquired))
 }
 
 /// The IO half of [`load_skill`] (see there for the full contract): raw
 /// SKILL.md bytes + the directory's fs-derived posture.
 type SkillParts = (Vec<u8>, String, Acquired, Option<String>);
 
-/// Load + validate one skill directory into its wire entry. `mark` carries
-/// the materialized-builtin names (the side-table keys) so a materialized
-/// skill's `acquired` reads `Builtin` while a user's pre-existing same-named
-/// skill keeps its own source (issue #677).
-pub(crate) fn load_skill(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillEntry, SkillError> {
-    let (bytes, dir_name, acquired, link_target) = load_skill_parts(dir, mark)?;
+/// Load + validate one skill directory into its wire entry, with the
+/// loader-derived posture (symlink / junction -> `linked`, real directory ->
+/// `local`).
+pub(crate) fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
+    let (bytes, dir_name, acquired, link_target) = load_skill_parts(dir)?;
     assemble_skill_parts(&bytes, &dir_name, acquired, link_target)
 }
 
-/// The IO half of [`load_skill`]: read the SKILL.md bytes and derive the
+/// Load + validate one RESERVED-SUBTREE directory into its wire entry: the
+/// builtin posture by location (ADR-0121 -- whatever spec-valid directory
+/// lives under `.system/` is a builtin row), with the subtree directory as
+/// the reveal anchor (the "open location" affordance that supports the fork
+/// channel).
+fn load_builtin_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
+    let (bytes, dir_name, _, _) = load_skill_parts(dir)?;
+    let reveal = Some(dir.to_string_lossy().into_owned());
+    assemble_skill_parts(&bytes, &dir_name, Acquired::Builtin, reveal)
+}
+
+/// The IO half of the loaders: read the SKILL.md bytes and derive the
 /// directory's posture. Split out so [`read_back_or_derive`] can tell a
 /// transient read failure apart from a parse/validation failure BY STRUCTURE,
 /// not by matching the error payload (issue #936) -- a read failure maps to
 /// `InvalidSkill` here, and that mapping is the scan surface's documented
 /// contract (`SkippedSkill::reason`), so it stays untouched.
-fn load_skill_parts(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillParts, SkillError> {
+fn load_skill_parts(dir: &Path) -> Result<SkillParts, SkillError> {
     let dir_name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -434,12 +525,11 @@ fn load_skill_parts(dir: &Path, mark: &BuiltinSkillMark) -> Result<SkillParts, S
     } else {
         Acquired::Local
     };
-    let acquired = mark.acquired(&dir_name, fs_acquired);
     let link_target = if is_link { link_target_of(dir) } else { None };
-    Ok((bytes, dir_name, acquired, link_target))
+    Ok((bytes, dir_name, fs_acquired, link_target))
 }
 
-/// The assembly half of [`load_skill`]: raw bytes -> wire entry.
+/// The assembly half of the loaders: raw bytes -> wire entry.
 fn assemble_skill_parts(
     bytes: &[u8],
     dir_name: &str,
@@ -495,6 +585,9 @@ fn skill_from_str(
         // overlays the disabled-name set before the rows cross IPC.
         enabled: true,
         content_hash,
+        // The shadowing badge derivation (ADR-0121 Decision 5): a non-builtin
+        // row whose name sits in the builtin manifest covers the builtin.
+        covers_builtin: acquired != Acquired::Builtin && is_reserved_skill_name(dir_name),
     })
 }
 
@@ -506,29 +599,25 @@ fn skill_from_str(
 /// disk. A parse/validation failure of the freshly written content is
 /// render/parse drift: it stays `Err` and walks the existing rollback -- the
 /// file on disk is genuinely bad, and the next scan's ignored pane surfaces
-/// it.
+/// it. The write paths never target a linked or builtin skill (both are
+/// refused up front), so the degraded posture derives as `local`.
 fn read_back_or_derive(
     parts: Result<SkillParts, SkillError>,
     content: &str,
     name: &str,
-    mark: &BuiltinSkillMark,
 ) -> Result<SkillEntry, SkillError> {
     match parts {
         Ok((bytes, dir_name, acquired, link_target)) => {
             assemble_skill_parts(&bytes, &dir_name, acquired, link_target)
         }
         Err(e) => {
-            // A skill the app just wrote is never a link (update and create
-            // refuse the linked posture up front), so the posture derives
-            // from the mark alone.
-            let acquired = mark.acquired(name, Acquired::Local);
             // Log after the derivation so the line states the outcome; the
             // underlying error carries the OS detail (the scan warns fold
             // their error in the same way).
             match skill_from_str(
                 content,
                 name,
-                acquired,
+                Acquired::Local,
                 None,
                 sha256_hex(content.as_bytes()),
             ) {
@@ -566,7 +655,7 @@ fn link_target_of(dir: &Path) -> Option<String> {
 
 /// Atomic SKILL.md write: temp file in the same directory + rename, so a
 /// crash mid-write leaves either the old complete file or the new one.
-/// Shared by the edit paths and the builtin materializer (issue #677).
+/// Shared by the edit paths (issue #362).
 pub(crate) fn write_skill_md(dir: &Path, content: &str) -> Result<(), SkillError> {
     let target = dir.join(SKILL_MD);
     let tmp = dir.join(format!("{SKILL_MD}{TMP_SUFFIX}"));
@@ -620,6 +709,19 @@ mod tests {
         dir
     }
 
+    /// Write one skill directory into the RESERVED SUBTREE (the builtin
+    /// posture by location, ADR-0121).
+    fn put_system_skill(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join(SYSTEM_SUBTREE).join(name);
+        fs::create_dir_all(&dir).expect("create .system skill dir");
+        fs::write(
+            dir.join(SKILL_MD),
+            format!("---\nname: {name}\ndescription: Shipped {name}.\n---\nShipped body.\n"),
+        )
+        .expect("write SKILL.md");
+        dir
+    }
+
     fn update_payload(name: &str) -> SkillUpdate {
         SkillUpdate {
             name: name.into(),
@@ -646,8 +748,8 @@ mod tests {
             }
             // No symlink privilege: fall back to a directory junction
             // (`mklink /J` needs no elevation). `is_linked` treats both forms
-            // as `linked` via the reparse tag (a junction is NOT reported as a
-            // symlink by `FileType::is_symlink`), and `delete_skill` removes
+            // as `linked` via the reparse tag (a junction is NOT reported as
+            // a symlink by `FileType::is_symlink`), and `delete_skill` removes
             // the junction itself without following it into the source.
             std::process::Command::new("cmd")
                 .args(["/C", "mklink", "/J"])
@@ -677,7 +779,7 @@ mod tests {
     fn list_empty_when_root_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("skills");
-        let listing = list_skills(&missing, &Default::default());
+        let listing = list_skills(&missing);
         assert!(listing.skills.is_empty());
         assert!(listing.ignored.is_empty());
         // NotFound is the legitimate "never-created registry" state -- no
@@ -697,7 +799,7 @@ mod tests {
         let not_a_dir = tmp.path().join("not-a-dir.txt");
         fs::write(&not_a_dir, "x").unwrap();
 
-        let listing = list_skills(&not_a_dir, &Default::default());
+        let listing = list_skills(&not_a_dir);
         assert!(listing.skills.is_empty());
         assert!(listing.ignored.is_empty());
         let root_error = listing
@@ -727,7 +829,7 @@ mod tests {
         )
         .unwrap();
 
-        let listing = list_skills(root, &Default::default());
+        let listing = list_skills(root);
         let names: Vec<_> = listing.skills.iter().map(|s| s.name.clone()).collect();
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
         // Plain files never enter the directory scan, so only the two real
@@ -736,6 +838,111 @@ mod tests {
         assert_eq!(
             ignored,
             vec!["mismatch".to_string(), "no-skill-md".to_string()]
+        );
+    }
+
+    /// Hidden directories are skipped by the root scan (ADR-0121 Decision 3):
+    /// the reserved `.system/` subtree merges explicitly, and any other
+    /// dot-directory stays internal noise -- never a row, never an ignored
+    /// entry.
+    #[test]
+    fn list_skips_hidden_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_skill(root, "alpha", "", "Body.\n");
+        let hidden = root.join(".staging");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(
+            hidden.join(SKILL_MD),
+            "---\nname: x\ndescription: d\n---\nb\n",
+        )
+        .unwrap();
+        let listing = list_skills(root);
+        assert_eq!(listing.skills.len(), 1);
+        assert_eq!(listing.skills[0].name, "alpha");
+        assert!(
+            listing.ignored.is_empty(),
+            "hidden dirs are not ignored rows"
+        );
+    }
+
+    /// The reserved-subtree merge (ADR-0121 Decision 3): a `.system/<name>`
+    /// directory lists as a BUILTIN row (acquired by location), with the
+    /// subtree directory as the reveal anchor and no covers badge.
+    #[test]
+    fn list_merges_the_reserved_subtree_as_builtin_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_skill(root, "my-tool", "", "Body.\n");
+        let dir = put_system_skill(root, "pandoc");
+        let listing = list_skills(root);
+        let mine = listing.skills.iter().find(|s| s.name == "my-tool").unwrap();
+        assert_eq!(mine.acquired, Acquired::Local);
+        assert!(!mine.covers_builtin);
+        let builtin = listing.skills.iter().find(|s| s.name == "pandoc").unwrap();
+        assert_eq!(builtin.acquired, Acquired::Builtin);
+        assert!(!builtin.covers_builtin);
+        assert_eq!(
+            builtin.link_target.as_deref(),
+            Some(dir.to_string_lossy().as_ref()),
+            "the builtin row's reveal anchor is its subtree directory"
+        );
+        assert_eq!(builtin.body, "Shipped body.\n");
+    }
+
+    /// Shadowing (ADR-0121 Decision 5) -- the mutation pin for the
+    /// shadowing family: a local fork owning a builtin's name suppresses the
+    /// builtin row (ONE local row, covers badge on), and deleting the fork
+    /// restores the builtin row on the next scan. Dropping either half of
+    /// the resolution order dies here.
+    #[test]
+    fn a_local_fork_shadows_the_builtin_and_deleting_it_restores_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_system_skill(root, "vega-chart");
+        // The fork: a local copy at the registry root owns the name.
+        put_skill(root, "vega-chart", "", "My fork.\n");
+        let listing = list_skills(root);
+        let rows: Vec<&SkillEntry> = listing
+            .skills
+            .iter()
+            .filter(|s| s.name == "vega-chart")
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one row under shadowing");
+        assert_eq!(rows[0].acquired, Acquired::Local);
+        assert!(rows[0].covers_builtin, "the fork carries the covers badge");
+        assert_eq!(rows[0].body, "My fork.\n");
+        // The fork is disposed of: the builtin's row returns.
+        fs::remove_dir_all(root.join("vega-chart")).unwrap();
+        let restored = list_skills(root);
+        let row = &restored.skills[0];
+        assert_eq!(row.acquired, Acquired::Builtin);
+        assert!(!row.covers_builtin);
+        assert_eq!(row.body, "Shipped body.\n");
+    }
+
+    /// A broken reserved-subtree child surfaces in the ignored lane under
+    /// its `.system/`-prefixed handle (the diagnostic fold, parallel to the
+    /// root scan).
+    #[test]
+    fn a_non_spec_reserved_subtree_child_is_ignored_with_the_prefixed_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join(SYSTEM_SUBTREE).join("broken");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(SKILL_MD),
+            "---\nname: other\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        let listing = list_skills(root);
+        assert!(listing.skills.is_empty());
+        assert_eq!(listing.ignored.len(), 1);
+        assert_eq!(listing.ignored[0].dir, ".system/broken");
+        assert!(
+            listing.ignored[0].reason.contains("broken"),
+            "reason names the directory: {}",
+            listing.ignored[0].reason
         );
     }
 
@@ -758,7 +965,7 @@ mod tests {
         .unwrap();
         fs::create_dir(root.join("no-skill-md")).unwrap();
 
-        let listing = list_skills(root, &Default::default());
+        let listing = list_skills(root);
         let by_dir: std::collections::HashMap<&str, &str> = listing
             .ignored
             .iter()
@@ -785,7 +992,7 @@ mod tests {
     fn list_derives_local_for_real_directories() {
         let tmp = tempfile::tempdir().unwrap();
         put_skill(tmp.path(), "mine", "", "Body.\n");
-        let entry = &list_skills(tmp.path(), &Default::default()).skills[0];
+        let entry = &list_skills(tmp.path()).skills[0];
         assert_eq!(entry.acquired, Acquired::Local);
         assert_eq!(entry.link_target, None);
         assert_eq!(entry.description, "Test skill mine.");
@@ -799,7 +1006,7 @@ mod tests {
             eprintln!("skipping: platform refused symlink creation");
             return;
         };
-        let skills = list_skills(&registry, &Default::default()).skills;
+        let skills = list_skills(&registry).skills;
         let linked = skills.iter().find(|s| s.name == "external-skill").unwrap();
         assert_eq!(linked.acquired, Acquired::Linked);
         assert!(linked.link_target.is_some());
@@ -840,7 +1047,7 @@ mod tests {
             return;
         }
 
-        let skills = list_skills(&registry, &Default::default()).skills;
+        let skills = list_skills(&registry).skills;
         let linked = skills
             .iter()
             .find(|s| s.name == "external-skill")
@@ -851,8 +1058,7 @@ mod tests {
             "junction misclassified as Local"
         );
 
-        delete_skill(&registry, &Default::default(), "external-skill")
-            .expect("delete linked skill");
+        delete_skill(&registry, "external-skill").expect("delete linked skill");
         assert!(
             source_dir.join("marker").exists(),
             "junction delete followed into the external source"
@@ -873,7 +1079,7 @@ mod tests {
         // The minted file is on disk + spec-valid (list reads it back).
         let raw = fs::read_to_string(root.join("pdf-tools").join(SKILL_MD)).unwrap();
         assert!(raw.starts_with("---\nname: pdf-tools\n"));
-        let listed = list_skills(&root, &Default::default()).skills;
+        let listed = list_skills(&root).skills;
         assert_eq!(listed.len(), 1);
     }
 
@@ -887,7 +1093,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let dir = put_skill(root, "sql-coach", "", "Body text.\n");
-        let entry = load_skill(&dir, &Default::default()).expect("load_skill succeeds");
+        let entry = load_skill(&dir).expect("load_skill succeeds");
         let bytes = fs::read(dir.join(SKILL_MD)).expect("read SKILL.md bytes");
         assert_eq!(entry.content_hash, sha256_hex(&bytes));
         assert_eq!(entry.content_hash.len(), 64);
@@ -931,7 +1137,7 @@ mod tests {
         let mut payload = update_payload("keeper");
         payload.license = Some("Apache-2.0".into());
         payload.compatibility = Some("requires network".into());
-        let entry = update_skill(root, &Default::default(), "keeper", payload).unwrap();
+        let entry = update_skill(root, "keeper", payload).unwrap();
 
         assert_eq!(entry.description, "Updated description.");
         assert_eq!(entry.license.as_deref(), Some("Apache-2.0"));
@@ -962,13 +1168,7 @@ mod tests {
         )
         .unwrap();
 
-        let entry = update_skill(
-            root,
-            &Default::default(),
-            "legacy",
-            update_payload("legacy"),
-        )
-        .unwrap();
+        let entry = update_skill(root, "legacy", update_payload("legacy")).unwrap();
         assert_eq!(entry.body, "Updated body.\n");
 
         let raw = fs::read_to_string(dir.join(SKILL_MD)).unwrap();
@@ -992,13 +1192,7 @@ mod tests {
         let root = tmp.path();
         put_skill(root, "clearer", "\nlicense: MIT", "Body.\n");
         // None license -> the key disappears from the frontmatter.
-        let entry = update_skill(
-            root,
-            &Default::default(),
-            "clearer",
-            update_payload("clearer"),
-        )
-        .unwrap();
+        let entry = update_skill(root, "clearer", update_payload("clearer")).unwrap();
         assert_eq!(entry.license, None);
         let raw = fs::read_to_string(root.join("clearer").join(SKILL_MD)).unwrap();
         assert!(!raw.contains("license:"), "cleared key must be gone: {raw}");
@@ -1011,7 +1205,7 @@ mod tests {
         put_skill(root, "old-name", "", "Body.\n");
         let mut payload = update_payload("new-name");
         payload.body = "Renamed body.\n".into();
-        let entry = update_skill(root, &Default::default(), "old-name", payload).unwrap();
+        let entry = update_skill(root, "old-name", payload).unwrap();
         assert_eq!(entry.name, "new-name");
         assert!(!root.join("old-name").exists());
         let raw = fs::read_to_string(root.join("new-name").join(SKILL_MD)).unwrap();
@@ -1035,28 +1229,12 @@ mod tests {
             )),
             &written_skill_payload(),
             "cleaner",
-            &Default::default(),
         )
         .unwrap();
         assert_eq!(entry.name, "cleaner");
         assert_eq!(entry.description, "New.");
         assert_eq!(entry.body, "New body.\n");
         assert_eq!(entry.acquired, Acquired::Local);
-    }
-
-    #[test]
-    fn read_back_or_derive_degrade_honors_a_builtin_mark_hit() {
-        // A materialized builtin edited under its own name must degrade to
-        // the Builtin acquired posture (issue #677's identity anchoring).
-        let mark = BuiltinSkillMark::of(&["cleaner"]);
-        let entry = read_back_or_derive(
-            Err(SkillError::InvalidSkill("injected read failure".into())),
-            &written_skill_payload(),
-            "cleaner",
-            &mark,
-        )
-        .unwrap();
-        assert_eq!(entry.acquired, Acquired::Builtin);
     }
 
     #[test]
@@ -1069,10 +1247,9 @@ mod tests {
             Err(SkillError::InvalidSkill("injected read failure".into())),
             &written_skill_payload(),
             "cleaner",
-            &Default::default(),
         )
         .unwrap();
-        let loaded = load_skill(&dir, &Default::default()).unwrap();
+        let loaded = load_skill(&dir).unwrap();
         assert_eq!(degraded, loaded);
     }
 
@@ -1089,7 +1266,6 @@ mod tests {
             )),
             &written_skill_payload(),
             "cleaner",
-            &Default::default(),
         )
         .unwrap_err();
         assert!(matches!(err, SkillError::InvalidSkill(_)));
@@ -1102,7 +1278,7 @@ mod tests {
         put_skill(root, "source-skill", "", "Body.\n");
         put_skill(root, "occupied", "", "Body.\n");
         let payload = update_payload("occupied");
-        let err = update_skill(root, &Default::default(), "source-skill", payload).unwrap_err();
+        let err = update_skill(root, "source-skill", payload).unwrap_err();
         assert_eq!(err, SkillError::NameTaken("occupied".into()));
         assert!(root.join("source-skill").exists(), "original must survive");
     }
@@ -1148,12 +1324,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         assert!(matches!(
-            update_skill(root, &Default::default(), "ghost", update_payload("ghost")),
+            update_skill(root, "ghost", update_payload("ghost")),
             Err(SkillError::NoSuchSkill(_))
         ));
         // A non-spec addressing name cannot exist in the registry.
         assert!(matches!(
-            update_skill(root, &Default::default(), "../escape", update_payload("x")),
+            update_skill(root, "../escape", update_payload("x")),
             Err(SkillError::NoSuchSkill(_))
         ));
 
@@ -1163,7 +1339,6 @@ mod tests {
         };
         let err = update_skill(
             &registry,
-            &Default::default(),
             "external-skill",
             update_payload("external-skill"),
         )
@@ -1181,7 +1356,7 @@ mod tests {
         put_skill(root, "valid-target", "", "Body.\n");
         let bad_name = update_payload("Bad_Name");
         assert!(matches!(
-            update_skill(root, &Default::default(), "valid-target", bad_name),
+            update_skill(root, "valid-target", bad_name),
             Err(SkillError::InvalidName(_))
         ));
         let blank_body = SkillUpdate {
@@ -1189,7 +1364,7 @@ mod tests {
             ..update_payload("valid-target")
         };
         assert!(matches!(
-            update_skill(root, &Default::default(), "valid-target", blank_body),
+            update_skill(root, "valid-target", blank_body),
             Err(SkillError::InvalidSkill(_))
         ));
     }
@@ -1200,15 +1375,15 @@ mod tests {
         let root = tmp.path();
         let dir = put_skill(root, "doomed", "", "Body.\n");
         fs::write(dir.join("extra-asset.txt"), "x").unwrap();
-        delete_skill(root, &Default::default(), "doomed").unwrap();
+        delete_skill(root, "doomed").unwrap();
         assert!(!dir.exists());
         assert!(matches!(
-            delete_skill(root, &Default::default(), "doomed"),
+            delete_skill(root, "doomed"),
             Err(SkillError::NoSuchSkill(_))
         ));
         // A non-spec name is NoSuchSkill (and keeps the join traversal-safe).
         assert!(matches!(
-            delete_skill(root, &Default::default(), "../escape"),
+            delete_skill(root, "../escape"),
             Err(SkillError::NoSuchSkill(_))
         ));
     }
@@ -1224,13 +1399,13 @@ mod tests {
         let link = registry.join("external-skill");
         let source_dir = root.join("outside").join("external-skill");
 
-        delete_skill(&registry, &Default::default(), "external-skill").unwrap();
+        delete_skill(&registry, "external-skill").unwrap();
         assert!(!link.exists(), "the link must be gone");
         assert!(source_dir.exists(), "the external source must survive");
         assert!(source_dir.join(SKILL_MD).exists());
     }
 
-    // --- builtin guards (issue #677) ---------------------------------------
+    // --- builtin guards (issue #677; readonly posture ADR-0121) -------------
 
     #[test]
     fn create_skill_refuses_a_reserved_builtin_name() {
@@ -1243,31 +1418,28 @@ mod tests {
         assert!(!root.path().join("pandoc").exists());
     }
 
+    /// A builtin skill is readonly (ADR-0121 Decision 3): the edit and the
+    /// rename are both refused with the dedicated variant -- the reserved
+    /// subtree re-aligns on the next scan, so an edit cannot stick.
     #[test]
-    fn update_skill_locks_a_builtin_name_but_edits_the_body() {
+    fn update_skill_refuses_a_builtin_readonly() {
         let root = tempfile::tempdir().expect("root");
-        // A materialized pandoc: file on disk + the mark carrying the name.
-        let def = super::super::builtin::find_skill_definition("pandoc").unwrap();
-        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
-        let content = def.render("en-US").expect("render");
-        std::fs::write(root.path().join("pandoc/SKILL.md"), &content).expect("write");
-        let mark = BuiltinSkillMark::of(&["pandoc"]);
-
-        // The rename is refused with the dedicated variant.
+        put_system_skill(root.path(), "pandoc");
+        // A plain edit is refused (the readonly posture).
+        assert_eq!(
+            update_skill(root.path(), "pandoc", update_payload("pandoc")).unwrap_err(),
+            SkillError::BuiltinReadOnly("pandoc".to_string())
+        );
+        // The rename is refused the same way.
         let mut rename = update_payload("pandoc");
         rename.name = "my-pandoc".to_string();
         assert_eq!(
-            update_skill(root.path(), &mark, "pandoc", rename).unwrap_err(),
-            SkillError::BuiltinNameLocked("pandoc".to_string())
+            update_skill(root.path(), "pandoc", rename).unwrap_err(),
+            SkillError::BuiltinReadOnly("pandoc".to_string())
         );
-
-        // A body edit goes through and the read-back keeps the Builtin mark.
-        let mut edit = update_payload("pandoc");
-        edit.description = "Edited description.".to_string();
-        edit.body = "Edited body.\n".to_string();
-        let entry = update_skill(root.path(), &mark, "pandoc", edit).expect("edit");
-        assert_eq!(entry.acquired, Acquired::Builtin);
-        assert_eq!(entry.description, "Edited description.");
+        // The shipped bytes were never touched.
+        let raw = fs::read_to_string(root.path().join(".system/pandoc/SKILL.md")).unwrap();
+        assert!(raw.contains("Shipped body."));
     }
 
     #[test]
@@ -1277,54 +1449,27 @@ mod tests {
         let mut rename = update_payload("my-tool");
         rename.name = "office-cli".to_string();
         assert_eq!(
-            update_skill(root.path(), &Default::default(), "my-tool", rename).unwrap_err(),
+            update_skill(root.path(), "my-tool", rename).unwrap_err(),
             SkillError::ReservedSkillName("office-cli".to_string())
         );
     }
 
+    /// The fork channel guards: a LOCAL copy owning a builtin's name deletes
+    /// normally (disposing of the fork is how the builtin returns), while
+    /// the reserved-subtree copy is undeletable.
     #[test]
-    fn delete_skill_refuses_a_builtin_and_allows_the_same_unmarked_name() {
+    fn delete_allows_a_fork_but_refuses_the_reserved_subtree_copy() {
         let root = tempfile::tempdir().expect("root");
-        // The reverse-conflict window: a user skill named pandoc with NO
-        // record deletes normally.
-        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
-        std::fs::write(
-            root.path().join("pandoc/SKILL.md"),
-            "---\nname: pandoc\ndescription: owned\n---\nBody.\n",
-        )
-        .expect("write");
-        delete_skill(root.path(), &Default::default(), "pandoc").expect("user skill deletes");
-
-        // The materialized posture: the mark carries the name -> refused.
-        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
-        std::fs::write(
-            root.path().join("pandoc/SKILL.md"),
-            "---\nname: pandoc\ndescription: owned\n---\nBody.\n",
-        )
-        .expect("write");
-        let mark = BuiltinSkillMark::of(&["pandoc"]);
+        put_system_skill(root.path(), "pandoc");
+        put_skill(root.path(), "pandoc", "", "My fork.\n");
+        // The fork (local, owns the name by shadowing) deletes normally.
+        delete_skill(root.path(), "pandoc").expect("the fork deletes");
+        assert!(!root.path().join("pandoc").exists());
+        assert!(root.path().join(".system/pandoc").exists());
+        // The builtin copy is refused.
         assert_eq!(
-            delete_skill(root.path(), &mark, "pandoc").unwrap_err(),
+            delete_skill(root.path(), "pandoc").unwrap_err(),
             SkillError::BuiltinUndeletable("pandoc".to_string())
         );
-    }
-
-    #[test]
-    fn list_skills_marks_materialized_names_as_builtin() {
-        let root = tempfile::tempdir().expect("root");
-        create_skill(root.path(), "my-tool", "desc", "b").expect("create");
-        let def = super::super::builtin::find_skill_definition("python").unwrap();
-        std::fs::create_dir_all(root.path().join("python")).expect("mkdir");
-        std::fs::write(
-            root.path().join("python/SKILL.md"),
-            def.render("en-US").unwrap(),
-        )
-        .expect("write");
-        let mark = BuiltinSkillMark::of(&["python"]);
-        let skills = list_skills(root.path(), &mark).skills;
-        let mine = skills.iter().find(|s| s.name == "my-tool").expect("mine");
-        assert_eq!(mine.acquired, Acquired::Local);
-        let builtin = skills.iter().find(|s| s.name == "python").expect("builtin");
-        assert_eq!(builtin.acquired, Acquired::Builtin);
     }
 }

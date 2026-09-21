@@ -704,13 +704,10 @@
   "settings.cli.conflictBadge": "Holds built-in name",
   "settings.skills.filterBuiltin": "System",
   "settings.skills.acquiredBuiltin": "system",
-  "settings.skills.editedBadge": "Edited",
-  "settings.skills.fieldNameLockedHint": "System skill names are locked",
-  "settings.skills.confirmRestoreTitle": "Restore System definition for {name}?",
-  "settings.skills.confirmRestoreBody": "This discards your edits to {name} and returns it to the definition shipped with the app. This cannot be undone.",
-  "settings.skills.restoreAction": "Restore",
-  "settings.skills.restoreLabel": "Restore System definition for skill {name}",
+  "settings.skills.coversBuiltin": "covers built-in",
+  "settings.skills.builtinReadOnlyHint": "This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version.",
+  "settings.skills.openBuiltinFolder": "Open folder",
   "error.skill.reservedName": "The name \"{name}\" is reserved for a system skill",
-  "error.skill.nameLocked": "System skill \"{name}\" cannot be renamed",
+  "error.skill.builtinReadOnly": "System skill \"{name}\" is read-only; copy its folder to the skills root to make an editable version",
   "error.skill.undeletable": "System skill \"{name}\" cannot be deleted; disable it instead"
 }

@@ -460,8 +460,9 @@ fn skill_entry_serializes_with_snake_case_acquired() {
             link_target: Some("/src/pdf-tools".into()),
             enabled: true,
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            covers_builtin: false,
         },
-        r#"{"name":"pdf-tools","description":"Work with PDF files.","acquired":"linked","license":null,"compatibility":null,"body":"Body.\n","link_target":"/src/pdf-tools","enabled":true,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        r#"{"name":"pdf-tools","description":"Work with PDF files.","acquired":"linked","license":null,"compatibility":null,"body":"Body.\n","link_target":"/src/pdf-tools","enabled":true,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","covers_builtin":false}"#,
     );
     assert_wire(
         &SkillEntry {
@@ -474,8 +475,9 @@ fn skill_entry_serializes_with_snake_case_acquired() {
             link_target: None,
             enabled: false,
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            covers_builtin: false,
         },
-        r#"{"name":"mine","description":"Authored in-app.","acquired":"local","license":"MIT","compatibility":"requires network","body":"Body.\n","link_target":null,"enabled":false,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        r#"{"name":"mine","description":"Authored in-app.","acquired":"local","license":"MIT","compatibility":"requires network","body":"Body.\n","link_target":null,"enabled":false,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","covers_builtin":false}"#,
     );
 }
 
@@ -529,6 +531,7 @@ fn skill_listing_wraps_skills_and_ignored() {
                 enabled: true,
                 content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                     .into(),
+                covers_builtin: false,
             }],
             ignored: vec![SkippedSkill {
                 dir: "mismatch-dir".into(),
@@ -537,7 +540,7 @@ fn skill_listing_wraps_skills_and_ignored() {
             }],
             root_error: None,
         },
-        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"body":"Body.\n","link_target":null,"enabled":true,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}],"root_error":null}"#,
+        r#"{"skills":[{"name":"pdf-tools","description":"Work with PDF files.","acquired":"local","license":null,"compatibility":null,"body":"Body.\n","link_target":null,"enabled":true,"content_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","covers_builtin":false}],"ignored":[{"dir":"mismatch-dir","reason":"frontmatter name `other` does not match its directory name `mismatch-dir`"}],"root_error":null}"#,
     );
     assert_wire(
         &SkillListing {

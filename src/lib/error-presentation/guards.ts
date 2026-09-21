@@ -341,7 +341,7 @@ export function isSkillError(e: unknown): e is SkillError {
     case "NoSuchSkill":
     case "NameTaken":
     case "ReservedSkillName":
-    case "BuiltinNameLocked":
+    case "BuiltinReadOnly":
     case "BuiltinUndeletable":
     case "ReadOnly":
     case "FsFailure":

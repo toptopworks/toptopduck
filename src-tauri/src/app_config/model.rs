@@ -20,7 +20,6 @@ use crate::guardrail::{
 };
 use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
-use crate::skills::BuiltinSkillBaseline;
 use crate::window::WINDOW_TURNS;
 
 /// App-config schema version (ADR-0038 -- separate domain from the `.duck`
@@ -338,18 +337,6 @@ pub struct AppConfig {
     /// read-time secret-name scan backstops hand-edits, as for MCP env).
     #[serde(default)]
     pub cli_tools: CliToolRegistry,
-    /// The builtin skills' baseline side table (issue #677, ADR-0109
-    /// Decision 5): materialized skill name -> the recorded baseline
-    /// (rendered-content hash + the locale it was rendered in). Pure
-    /// derivation anchor -- `edited` iff the current file's hash differs
-    /// from the record -- so the edit path never writes here; the scan
-    /// window (materialize / upgrade / cleanup) and the explicit restore
-    /// are the only writers, both under the config write lock.
-    /// Forward-compat: a pre-#677 file has no `builtin_skill_baselines`
-    /// key, so serde(default) fills an empty table rather than rejecting
-    /// the whole document (the additive-field pattern of `cli_tools`).
-    #[serde(default)]
-    pub builtin_skill_baselines: BTreeMap<String, BuiltinSkillBaseline>,
     /// Managed sessions directory override (issue #452, ADR-0089 Decision 2).
     /// None = runtime-computed default (`<Documents>/toptopduck/sessions/`).
     /// Some(path) = user-chosen directory. Forward-compat: a pre-#452 file has
@@ -391,9 +378,9 @@ pub struct AppConfig {
     /// Decision 3): which shipped builtin definitions were written into the
     /// registry by the startup window. This is the builtin-identity anchor --
     /// NOT the static shipped set (which lives in code) -- so a user's
-    /// pre-existing same-named file keeps its own source (the
-    /// `builtin_skill_baselines` posture, minus the baseline hash: agent
-    /// definitions carry no version-following in v1). Forward-compat: a
+    /// pre-existing same-named file keeps its own source (the skills side
+    /// retired its side-table posture with ADR-0121; agent definitions carry
+    /// no version-following in v1). Forward-compat: a
     /// pre-#932 file has no key, so serde(default) fills an empty set.
     #[serde(default)]
     pub materialized_builtin_agents: BTreeSet<String>,
@@ -431,7 +418,6 @@ impl AppConfig {
             shell: ShellPrefs::default(),
             mcp_servers: McpServerRegistry::default(),
             cli_tools: CliToolRegistry::default(),
-            builtin_skill_baselines: BTreeMap::new(),
             sessions_dir: None,
             default_runtime: DefaultRuntime::default(),
             last_model_postures: BTreeMap::new(),

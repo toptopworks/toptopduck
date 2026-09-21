@@ -109,7 +109,22 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
             content_hash: String::new(),
         };
     }
-    let path = root.join(name).join(SKILL_MD);
+    let path = match crate::skills::builtin::resolve_skill_dir(root, name) {
+        Some(dir) => dir.join(SKILL_MD),
+        None => {
+            log::warn!(
+                target: "skills",
+                "skill `{name}` has no registry directory at resolve time \
+                 -- injecting no body, recording empty hash",
+            );
+            return SkillPromptFragment {
+                name: name.to_string(),
+                description: String::new(),
+                body: String::new(),
+                content_hash: String::new(),
+            };
+        }
+    };
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {

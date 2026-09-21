@@ -18,6 +18,7 @@ describe("test-fixtures factory contract (issue #967)", () => {
       link_target: null,
       content_hash: "ab".repeat(32),
       enabled: true,
+      covers_builtin: false,
     });
   });
 

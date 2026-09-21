@@ -41,6 +41,13 @@ export interface SkillEntry {
   // compares each turn's SkillProvenance.content_hash against to surface
   // a "modified" drift badge when a skill changed after a recorded turn.
   content_hash: string;
+  // A local or linked row whose name sits in the builtin manifest
+  // (ADR-0121 Decision 5): the row SHADOWS a builtin skill (listing,
+  // invocation, and auto-include all resolve to it), and the settings row
+  // renders the "covers built-in" badge -- the standing reminder that the
+  // app-side curation is invisible to this fork until it is deleted.
+  // Always false for builtin rows themselves.
+  covers_builtin: boolean;
 }
 
 // One spec-invalid skill directory the registry scan skipped (issue #373).
@@ -117,7 +124,7 @@ export type SkillError =
   | { kind: "NoSuchSkill"; data: string }
   | { kind: "NameTaken"; data: string }
   | { kind: "ReservedSkillName"; data: string }
-  | { kind: "BuiltinNameLocked"; data: string }
+  | { kind: "BuiltinReadOnly"; data: string }
   | { kind: "BuiltinUndeletable"; data: string }
   | { kind: "ReadOnly"; data: string }
   | { kind: "FsFailure"; data: string };
@@ -239,13 +246,6 @@ export interface ImportItem {
 
 // The per-item outcome of an import batch (issue #367). Mirrors the Rust
 // ImportOutcome as an adjacently-tagged union. `failed` nests the typed
-// One builtin_skill_baselines record (issue #677): the recorded baseline of
-// a materialized builtin skill. Mirrors the Rust BuiltinSkillBaseline.
-export interface BuiltinSkillBaseline {
-  hash: string;
-  locale: string;
-}
-
 // SkillError (already adjacently tagged) as its `data`, so the frontend
 // reaches the reject detail through `data.kind` + `data.data`.
 export type ImportOutcome =

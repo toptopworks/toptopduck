@@ -371,8 +371,11 @@ fn lexical_reject(raw: &str) -> bool {
         .any(|comp| comp == ".." || comp.as_bytes().get(1).is_some_and(|&b| b == b':'))
 }
 
-/// The anchor (Decision 2, piece 1): the canonicalized registry entry root.
-/// A linked import's symlink / junction resolves to the external directory --
+/// The anchor (Decision 2, piece 1): the canonicalized registry entry root,
+/// resolved through the shadowing order (ADR-0121 Decision 5) -- a local
+/// directory owning the name wins, the reserved-subtree copy is the
+/// fallback, so invocation and reads resolve to the fork under shadowing. A
+/// linked import's symlink / junction resolves to the external directory --
 /// that IS the skill body. `None` when the name is not spec-shaped (defense
 /// in depth -- the mount API does not validate, mirroring
 /// [`crate::skills::prompt`]) or the entry no longer resolves on disk.
@@ -387,7 +390,7 @@ pub(crate) fn canonical_anchor(root: &Path, name: &str) -> Option<PathBuf> {
     if !crate::skills::model::is_valid_skill_name(name) {
         return None;
     }
-    std::fs::canonicalize(root.join(name)).ok()
+    std::fs::canonicalize(crate::skills::builtin::resolve_skill_dir(root, name)?).ok()
 }
 
 /// Canonicalize a target and report whether it is a regular file: `None` when
@@ -463,6 +466,14 @@ fn walk_tree(
         } else if ft.is_dir() {
             complete &= walk_tree(anchor, &path, visited, out);
         } else if ft.is_file() {
+            // The builtin alignment marker (ADR-0121) is bookkeeping, never
+            // skill content: absent from the readable listing of a builtin
+            // skill's tree.
+            if path.file_name().and_then(|n| n.to_str())
+                == Some(crate::skills::builtin::FINGERPRINT_FILE)
+            {
+                continue;
+            }
             push_relative(anchor, &path, out);
         }
     }

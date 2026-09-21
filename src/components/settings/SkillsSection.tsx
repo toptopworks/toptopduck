@@ -2,10 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Download, Plus, Puzzle, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { Download, Plus, Puzzle, RefreshCw, Trash2 } from "lucide-react";
 
 import type {
-  BuiltinSkillBaseline,
   SkillAcquired,
   SkillCreate,
   SkillEntry,
@@ -18,7 +17,6 @@ import {
   deleteSkill,
   listSkills,
   rescanBuiltinCliTools,
-  restoreBuiltinSkill,
   updateSkill,
   setSkillEnabled,
 } from "../../api";
@@ -131,14 +129,9 @@ function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
 }
 
 export function SkillsSection({
-  builtinSkillBaselines,
   onAppConfigSync,
 }: {
-  /** The builtin-skill baseline side table (issue #677): the anchor the
-   *  Edited derivation on builtin rows compares each skill's
-   *  `content_hash` against. */
-  builtinSkillBaselines: Record<string, BuiltinSkillBaseline>;
-  /** Sync the shell's app-config wholesale after a restore command (the
+  /** Sync the shell's app-config wholesale after a write command (the
    *  command already persisted and returned the updated full config -- the
    *  same state-only-sync contract the CLI pane's writes use). */
   onAppConfigSync: (cfg: AppConfig) => void;
@@ -223,7 +216,6 @@ export function SkillsSection({
   const [filter, setFilter] = useState<AcquiredFilter>("all");
   const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -267,24 +259,13 @@ export function SkillsSection({
     },
   });
 
-  // The explicit builtin-skill restore (issue #677): the command returns the
-  // updated full config (synced wholesale) and the skills query refetches so
-  // the row's content_hash -- and with it the Edited derivation -- follows.
-  const restoreMutation = useMutation({
-    mutationFn: (name: string) => restoreBuiltinSkill(name),
-    onSuccess: (cfg) => {
-      applyUserWrite(cfg);
-      invalidate();
-      setConfirmRestore(null);
-    },
-    onError: (e) => {
-      setError(fmtError(e, intl));
-      setConfirmRestore(null);
-    },
-  });
+  // The explicit builtin-skill restore (issue #677) retired with ADR-0121:
+  // builtin skills are a read-only app cache that re-aligns on every scan,
+  // so there is no edited state to restore -- the editable variant is a
+  // filesystem copy of the reserved-subtree folder (the fork channel).
 
   // The enablement-axis row Switch (issue #961): the command returns the
-  // updated FULL config (synced wholesale, the restore contract) and the
+  // updated FULL config (synced wholesale, the set-contract) and the
   // listing refetches so each row's `enabled` follows. A success also drops
   // a stale reject (the create/update precedent) -- the banner must not
   // outlive the failure it reported.
@@ -357,18 +338,6 @@ export function SkillsSection({
     // unrelated edit drawer.
     setError(null);
     setDrawer({ mode: "edit", name: skill.name });
-  }
-
-  // The Edited derivation on builtin rows (issue #677): pure comparison of
-  // the listing's whole-file hash against the side table's recorded hash --
-  // an external editor's change reads as edited exactly like an in-app edit.
-  // A builtin row with no record (config lag) reads as edited: the safer
-  // display, and the restore reconciles it.
-  function isEditedBuiltin(skill: SkillEntry): boolean {
-    return (
-      skill.acquired === "builtin" &&
-      builtinSkillBaselines[skill.name]?.hash !== skill.content_hash
-    );
   }
 
   async function openSource(target: string | null) {
@@ -543,7 +512,6 @@ export function SkillsSection({
             <SkillRow
               key={skill.name}
               skill={skill}
-              edited={isEditedBuiltin(skill)}
               // Per-row gate (the AgentsSection #932 precedent): only the
               // row whose toggle is in flight locks its switch.
               busy={
@@ -561,14 +529,6 @@ export function SkillsSection({
                 skill.acquired === "builtin"
                   ? undefined
                   : () => setConfirmDelete(skill.name)
-              }
-              // The restore shows only on an EDITED builtin row, taking the
-              // row-end slot in place of the delete -- an unedited row already
-              // agrees with the shipped baseline.
-              onRestore={
-                skill.acquired === "builtin" && isEditedBuiltin(skill)
-                  ? () => setConfirmRestore(skill.name)
-                  : undefined
               }
             />
           ))
@@ -642,56 +602,6 @@ export function SkillsSection({
         </AlertDialog>
       )}
 
-      {confirmRestore && (
-        <AlertDialog
-          defaultOpen
-          onOpenChange={(open) => {
-            if (!open && !restoreMutation.isPending) setConfirmRestore(null);
-          }}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>
-                <FormattedMessage
-                  id="settings.skills.confirmRestoreTitle"
-                  defaultMessage="Restore built-in definition for {name}?"
-                  values={{ name: confirmRestore }}
-                />
-              </AlertDialogTitle>
-              <AlertDialogDescription>
-                <FormattedMessage
-                  id="settings.skills.confirmRestoreBody"
-                  defaultMessage="This discards your edits to {name} and returns it to the definition shipped with the app. This cannot be undone."
-                  values={{ name: confirmRestore }}
-                />
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={restoreMutation.isPending}>
-                <FormattedMessage
-                  id="common.cancel"
-                  defaultMessage="Cancel"
-                />
-              </AlertDialogCancel>
-              <AlertDialogAction
-                disabled={restoreMutation.isPending}
-                onClick={(e) => {
-                  // Prevent Radix AlertDialog auto-close so the busy state
-                  // can render while the IPC runs (the CLI pane pattern).
-                  e.preventDefault();
-                  restoreMutation.mutate(confirmRestore);
-                }}
-              >
-                <FormattedMessage
-                  id="settings.skills.restoreAction"
-                  defaultMessage="Restore"
-                />
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      )}
-
       {importOpen && (
         <ImportSkillsDialog
           onClose={() => setImportOpen(false)}
@@ -703,8 +613,6 @@ export function SkillsSection({
 
 type SkillRowProps = {
   skill: SkillEntry;
-  /** The Edited derivation (builtin rows only, issue #677). */
-  edited: boolean;
   /** The enablement switch is mid-flight on this row: gate this row's
    *  switch (the per-row gate, the AgentsSection #932 precedent). */
   busy?: boolean;
@@ -714,19 +622,14 @@ type SkillRowProps = {
   /** Undefined on builtin rows (issue #677): the delete button then renders
    *  disabled, keeping every row's action column aligned. */
   onDelete?: () => void;
-  /** Present only on an EDITED builtin row (issue #677): the explicit
-   *  restore, taking the row-end action slot in place of the delete. */
-  onRestore?: () => void;
 };
 
 function SkillRow({
   skill,
-  edited,
   busy = false,
   onToggleEnabled,
   onOpen,
   onDelete,
-  onRestore,
 }: SkillRowProps) {
   const intl = useIntl();
   return (
@@ -775,11 +678,11 @@ function SkillRow({
               />
             )}
           </NameBadge>
-          {edited && (
+          {skill.covers_builtin && (
             <NameBadge>
               <FormattedMessage
-                id="settings.skills.editedBadge"
-                defaultMessage="Edited"
+                id="settings.skills.coversBuiltin"
+                defaultMessage="covers built-in"
               />
             </NameBadge>
           )}
@@ -802,52 +705,37 @@ function SkillRow({
             { name: skill.name },
           )}
         />
-        {/* The row-end slot is exactly ONE button wide in every state --
-            restore on an EDITED builtin (it takes the delete's place), else
-            the delete (disabled on builtin, issue #677) -- so the switch
+        {/* The row-end slot is exactly ONE button wide in every state (the
+            delete -- disabled on builtin, issue #677) -- so the switch
             column never shifts across rows. Clicks are the action cluster's
             business (see the container above), never the row's. */}
-        {onRestore ? (
-          <RowActionButton
-            label={intl.formatMessage(
-              {
-                id: "settings.skills.restoreLabel",
-                defaultMessage: "Restore built-in definition for skill {name}",
-              },
-              { name: skill.name },
-            )}
-            icon={RotateCcw}
-            onClick={onRestore}
-          />
-        ) : (
-          <RowActionButton
-            destructive
-            disabled={!onDelete}
-            label={intl.formatMessage(
-              {
-                id: "settings.skills.deleteLabel",
-                defaultMessage: "Delete skill {name}",
-              },
-              { name: skill.name },
-            )}
-            icon={Trash2}
-            onClick={onDelete}
-            // The shutdown guidance at the real touchpoint (#1015): the
-            // disabled delete explains itself instead of dead-ending --
-            // the reachable off-action is the enablement-axis switch on
-            // this row (ADR-0118), true for every builtin (knowledge-only
-            // skills like vega-chart have no companion CLI to point at).
-            tooltip={
-              skill.acquired === "builtin"
-                ? intl.formatMessage({
-                    id: "settings.skills.deleteDisabledHint",
-                    defaultMessage:
-                      "System skills cannot be deleted; disable the skill instead",
-                  })
-                : undefined
-            }
-          />
-        )}
+        <RowActionButton
+          destructive
+          disabled={!onDelete}
+          label={intl.formatMessage(
+            {
+              id: "settings.skills.deleteLabel",
+              defaultMessage: "Delete skill {name}",
+            },
+            { name: skill.name },
+          )}
+          icon={Trash2}
+          onClick={onDelete}
+          // The shutdown guidance at the real touchpoint (#1015): the
+          // disabled delete explains itself instead of dead-ending --
+          // the reachable off-action is the enablement-axis switch on
+          // this row (ADR-0118), true for every builtin (knowledge-only
+          // skills like vega-chart have no companion CLI to point at).
+          tooltip={
+            skill.acquired === "builtin"
+              ? intl.formatMessage({
+                  id: "settings.skills.deleteDisabledHint",
+                  defaultMessage:
+                    "System skills cannot be deleted; disable the skill instead",
+                })
+              : undefined
+          }
+        />
       </div>
     </div>
   );
@@ -879,11 +767,11 @@ function SkillDrawer({
   const isCreate = draft.currentName === "";
   const isLinked = draft.acquired === "linked";
   const isBuiltin = draft.acquired === "builtin";
-  const readOnly = isLinked;
-  // A builtin skill locks its name (issue #677): the identity the shipped
-  // definition anchors on (materialization, upgrades, and the reserved-name
-  // set address the skill by it). Everything else stays editable.
-  const nameLocked = isBuiltin;
+  // Read-only postures: a linked skill (the app never writes through an
+  // external link) and a builtin skill (ADR-0121: the reserved-subtree
+  // files are an app cache that re-aligns on the next scan -- the editable
+  // variant is a filesystem copy of the folder, never an in-app edit).
+  const readOnly = isLinked || isBuiltin;
   // Local draft state so the user can type before committing. Reset when the
   // draft identity changes (switching skills / opening create).
   const [name, setName] = useState(draft.name);
@@ -909,10 +797,9 @@ function SkillDrawer({
   // the feedback earlier.
   const trimmedName = name.trim();
   const nameInvalid =
-    !nameLocked &&
-    (trimmedName === "" ||
-      trimmedName.length > SKILL_NAME_MAX ||
-      !SKILL_NAME_PATTERN.test(trimmedName));
+    trimmedName === "" ||
+    trimmedName.length > SKILL_NAME_MAX ||
+    !SKILL_NAME_PATTERN.test(trimmedName);
   const descriptionInvalid = description.trim() === "";
   const bodyInvalid = body.trim() === "";
   const formInvalid = nameInvalid || descriptionInvalid || bodyInvalid;
@@ -976,6 +863,11 @@ function SkillDrawer({
               id="settings.skills.readOnlyHint"
               defaultMessage="This skill is linked to another folder and can't be edited here."
             />
+          ) : isBuiltin ? (
+            <FormattedMessage
+              id="settings.skills.builtinReadOnlyHint"
+              defaultMessage="This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version."
+            />
           ) : (
             <FormattedMessage
               id="settings.skills.drawerDescription"
@@ -999,18 +891,11 @@ function SkillDrawer({
               onBlur={() => {
                 if (name !== draft.name) setNameTouched(true);
               }}
-              disabled={readOnly || nameLocked}
+              disabled={readOnly}
               placeholder="pdf-tools"
               maxLength={SKILL_NAME_MAX}
             />
-            {nameLocked ? (
-              <p className="text-muted-foreground text-xs">
-                <FormattedMessage
-                  id="settings.skills.fieldNameLockedHint"
-                  defaultMessage="Built-in skill names are locked"
-                />
-              </p>
-            ) : nameTouched && nameInvalid ? (
+            {nameTouched && nameInvalid ? (
               <p className="text-destructive text-xs">
                 <FormattedMessage
                   id="settings.skills.fieldNameInvalid"
@@ -1077,12 +962,19 @@ function SkillDrawer({
           </div>
         </div>
 
-        {isLinked && (
+        {readOnly && (
           <p className="text-muted-foreground text-xs">
-            <FormattedMessage
-              id="settings.skills.readOnlyHint"
-              defaultMessage="This skill is linked to another folder and can't be edited here."
-            />
+            {isLinked ? (
+              <FormattedMessage
+                id="settings.skills.readOnlyHint"
+                defaultMessage="This skill is linked to another folder and can't be edited here."
+              />
+            ) : (
+              <FormattedMessage
+                id="settings.skills.builtinReadOnlyHint"
+                defaultMessage="This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version."
+              />
+            )}
           </p>
         )}
 
@@ -1097,23 +989,30 @@ function SkillDrawer({
         )}
 
         <DialogFooter>
-          {isLinked && (
+          {readOnly && (
             <Button
               type="button"
               variant="outline"
               onClick={() => onOpenSource(draft.linkTarget)}
               disabled={!draft.linkTarget}
             >
-              <FormattedMessage
-                id="settings.skills.openSource"
-                defaultMessage="Open original folder"
-              />
+              {isLinked ? (
+                <FormattedMessage
+                  id="settings.skills.openSource"
+                  defaultMessage="Open original folder"
+                />
+              ) : (
+                <FormattedMessage
+                  id="settings.skills.openBuiltinFolder"
+                  defaultMessage="Open folder"
+                />
+              )}
             </Button>
           )}
           <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>
             <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
-          {!isLinked && (
+          {!readOnly && (
             <Button type="button" onClick={handleSave} disabled={saving || formInvalid}>
               {saving ? (
                 <FormattedMessage
