@@ -356,11 +356,13 @@ export function isSkillError(e: unknown): e is SkillError {
 // update / delete / set_agent_enabled do). Every variant carries a string
 // under data (the English technical detail / the offending name). Same L1
 // defensive shape as the other guards. The kind set is disjoint from
-// SkillError and every other typed error lane -- the six shapes SkillError
-// also uses (invalid name / taken / name-locked / undeletable / read-only /
-// fs) carry an Agent-prefixed wire name (InvalidAgentName / AgentNameTaken /
-// AgentBuiltinNameLocked / AgentBuiltinUndeletable / AgentReadOnly /
-// AgentFsFailure) so fmtError's kind dispatch stays unambiguous even though
+// SkillError and every other typed error lane -- the five shapes SkillError
+// also uses (invalid name / taken / undeletable / read-only / fs) carry an
+// Agent-prefixed wire name (InvalidAgentName / AgentNameTaken /
+// AgentBuiltinUndeletable / AgentReadOnly / AgentFsFailure), the agent-only
+// name-locked shape rides its own AgentBuiltinNameLocked kind (the skills
+// side retired its name-locked variant with ADR-0121 and now carries two
+// read-only forms), so fmtError's kind dispatch stays unambiguous even though
 // both lanes share the reject surface shape (ADR-0069 invariant).
 export function isAgentError(e: unknown): e is AgentError {
   if (typeof e !== "object" || e === null) return false;

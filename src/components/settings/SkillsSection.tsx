@@ -772,6 +772,20 @@ function SkillDrawer({
   // files are an app cache that re-aligns on the next scan -- the editable
   // variant is a filesystem copy of the folder, never an in-app edit).
   const readOnly = isLinked || isBuiltin;
+  // The read-only hint sentence, shared by the sr-only dialog description
+  // and the visible paragraph under the form -- rendered twice by design so
+  // the a11y description and the visual hint agree.
+  const readOnlyHint = isLinked ? (
+    <FormattedMessage
+      id="settings.skills.readOnlyHint"
+      defaultMessage="This skill is linked to another folder and can't be edited here."
+    />
+  ) : (
+    <FormattedMessage
+      id="settings.skills.builtinReadOnlyHint"
+      defaultMessage="This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version."
+    />
+  );
   // Local draft state so the user can type before committing. Reset when the
   // draft identity changes (switching skills / opening create).
   const [name, setName] = useState(draft.name);
@@ -858,16 +872,8 @@ function SkillDrawer({
           </DialogTitle>
         </DialogHeader>
         <DialogDescription className="sr-only">
-          {isLinked ? (
-            <FormattedMessage
-              id="settings.skills.readOnlyHint"
-              defaultMessage="This skill is linked to another folder and can't be edited here."
-            />
-          ) : isBuiltin ? (
-            <FormattedMessage
-              id="settings.skills.builtinReadOnlyHint"
-              defaultMessage="This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version."
-            />
+          {readOnly ? (
+            readOnlyHint
           ) : (
             <FormattedMessage
               id="settings.skills.drawerDescription"
@@ -963,19 +969,7 @@ function SkillDrawer({
         </div>
 
         {readOnly && (
-          <p className="text-muted-foreground text-xs">
-            {isLinked ? (
-              <FormattedMessage
-                id="settings.skills.readOnlyHint"
-                defaultMessage="This skill is linked to another folder and can't be edited here."
-              />
-            ) : (
-              <FormattedMessage
-                id="settings.skills.builtinReadOnlyHint"
-                defaultMessage="This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version."
-              />
-            )}
-          </p>
+          <p className="text-muted-foreground text-xs">{readOnlyHint}</p>
         )}
 
         {/* The in-drawer error face: while the modal is open it covers the

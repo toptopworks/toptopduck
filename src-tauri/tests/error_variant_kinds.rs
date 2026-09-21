@@ -179,7 +179,10 @@ fn skill_error() -> Vec<SkillError> {
         SkillError::InvalidSkill(String::new()),
         SkillError::NoSuchSkill(String::new()),
         SkillError::NameTaken(String::new()),
+        SkillError::ReservedSkillName(String::new()),
         SkillError::ReadOnly(String::new()),
+        SkillError::BuiltinReadOnly(String::new()),
+        SkillError::BuiltinUndeletable(String::new()),
         SkillError::FsFailure(String::new()),
     ]
 }

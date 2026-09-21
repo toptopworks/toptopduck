@@ -160,44 +160,84 @@ pub fn list_skills(root: &Path) -> SkillListing {
     // children are the builtin rows -- `acquired` by location, whatever
     // spec-valid directory lives there. A same-named local directory
     // SHADOWS the builtin (the row resolves to the fork; the builtin
-    // returns on the next scan after the fork is deleted). A missing or
-    // unreadable subtree degrades to a warn -- never a listing failure
-    // (nothing materialized yet is the fresh-install state).
-    if let Ok(entries) = fs::read_dir(root.join(SYSTEM_SUBTREE)) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Follow the link for the directory check, same as the root scan.
-            let is_dir = fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
-            if !is_dir {
-                continue;
-            }
-            let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            // Hidden children of the reserved subtree stay internal (the
-            // alignment marker and any future bookkeeping).
-            if dir_name.starts_with('.') {
-                continue;
-            }
-            // Shadowing: a local directory owning the name suppresses the
-            // builtin row entirely -- the name resolves to the fork (the
-            // shared shadowing rule, ADR-0121 Decision 5).
-            if is_shadowed_by_local(root, dir_name) {
-                continue;
-            }
-            match load_builtin_skill(&path) {
-                Ok(skill) => skills.push(skill),
-                Err(e) => {
-                    log::warn!(
-                        target: "skills",
-                        "skipping non-spec reserved-subtree directory `{}`: {e}",
-                        path.display()
-                    );
-                    ignored.push(SkippedSkill {
-                        dir: format!("{SYSTEM_SUBTREE}/{dir_name}"),
-                        reason: e.to_string(),
-                    });
+    // returns on the next scan after the fork is deleted). A missing
+    // subtree is the fresh-install state and reads as empty; an unreadable
+    // one degrades to a warn plus an ignored entry -- never a listing
+    // failure (the root scan's shape, issue #375).
+    match fs::read_dir(root.join(SYSTEM_SUBTREE)) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    // The OS could not read one directory entry -- surface
+                    // it in `ignored` so the row does not disappear
+                    // silently (the root scan's #375 shape).
+                    Err(e) => {
+                        log::warn!(
+                            target: "skills",
+                            "error reading a reserved-subtree entry: {e}"
+                        );
+                        ignored.push(SkippedSkill {
+                            dir: format!("{SYSTEM_SUBTREE}/<unreadable-entry-{}>", ignored.len()),
+                            reason: e.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                // Follow the link for the directory check, same as the root scan.
+                let is_dir = fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+                if !is_dir {
+                    continue;
                 }
+                let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                // Hidden children of the reserved subtree stay internal (the
+                // alignment marker and any future bookkeeping).
+                if dir_name.starts_with('.') {
+                    continue;
+                }
+                // Shadowing: a local directory owning the name suppresses the
+                // builtin row entirely -- the name resolves to the fork (the
+                // shared shadowing rule, ADR-0121 Decision 5).
+                if is_shadowed_by_local(root, dir_name) {
+                    continue;
+                }
+                match load_builtin_skill(&path) {
+                    Ok(skill) => skills.push(skill),
+                    Err(e) => {
+                        log::warn!(
+                            target: "skills",
+                            "skipping non-spec reserved-subtree directory `{}`: {e}",
+                            path.display()
+                        );
+                        ignored.push(SkippedSkill {
+                            dir: format!("{SYSTEM_SUBTREE}/{dir_name}"),
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        // Nothing materialized yet is the fresh-install state -- not an
+        // error (mirroring the root scan's NotFound arm, issue #375).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            // The root scan's own failure (root_error) already carries the
+            // diagnosis -- a subtree read failing the same way is the echo
+            // of that fault, not a second one, so it stays silent and one
+            // fault reads as one signal.
+            if root_error.is_none() {
+                log::warn!(
+                    target: "skills",
+                    "failed to read the reserved subtree `{}`: {e}",
+                    root.join(SYSTEM_SUBTREE).display()
+                );
+                ignored.push(SkippedSkill {
+                    dir: SYSTEM_SUBTREE.to_string(),
+                    reason: format!("read reserved subtree failed: {e}"),
+                });
             }
         }
     }
@@ -439,6 +479,21 @@ pub fn delete_skill(root: &Path, name: &str) -> Result<(), SkillError> {
 
 // --- internals ---------------------------------------------------------------
 
+/// The directory's own-metadata posture (never following the link):
+/// `Linked` for a symlink / junction onto a directory, `Local` otherwise.
+/// Shared by [`existing_skill_dir`] and the loader's fs half
+/// ([`load_skill_parts`]).
+fn fs_posture(dir: &Path) -> Acquired {
+    if fs::symlink_metadata(dir)
+        .map(|m| is_linked(&m))
+        .unwrap_or(false)
+    {
+        Acquired::Linked
+    } else {
+        Acquired::Local
+    }
+}
+
 /// Resolve an IPC-supplied name to an existing skill directory and its
 /// posture, in the shadowing order (ADR-0121 Decision 5): the name must be
 /// spec-shaped (kebab-case keeps the join traversal-safe); the LOCAL
@@ -457,14 +512,7 @@ fn existing_skill_dir(root: &Path, name: &str) -> Result<(PathBuf, Acquired), Sk
     let acquired = if dir.starts_with(root.join(SYSTEM_SUBTREE)) {
         Acquired::Builtin
     } else {
-        let is_link = fs::symlink_metadata(&dir)
-            .map(|m| is_linked(&m))
-            .unwrap_or(false);
-        if is_link {
-            Acquired::Linked
-        } else {
-            Acquired::Local
-        }
+        fs_posture(&dir)
     };
     Ok((dir, acquired))
 }
@@ -517,15 +565,12 @@ fn load_skill_parts(dir: &Path) -> Result<SkillParts, SkillError> {
     })?;
     // Derive acquired off the directory's own metadata (never following the
     // link), and resolve the target for the "open source location" anchor.
-    let is_link = fs::symlink_metadata(dir)
-        .map(|m| is_linked(&m))
-        .unwrap_or(false);
-    let fs_acquired = if is_link {
-        Acquired::Linked
+    let fs_acquired = fs_posture(dir);
+    let link_target = if matches!(fs_acquired, Acquired::Linked) {
+        link_target_of(dir)
     } else {
-        Acquired::Local
+        None
     };
-    let link_target = if is_link { link_target_of(dir) } else { None };
     Ok((bytes, dir_name, fs_acquired, link_target))
 }
 

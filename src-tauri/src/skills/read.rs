@@ -467,10 +467,13 @@ fn walk_tree(
             complete &= walk_tree(anchor, &path, visited, out);
         } else if ft.is_file() {
             // The builtin alignment marker (ADR-0121) is bookkeeping, never
-            // skill content: absent from the readable listing of a builtin
-            // skill's tree.
-            if path.file_name().and_then(|n| n.to_str())
-                == Some(crate::skills::builtin::FINGERPRINT_FILE)
+            // skill content. It sits at the subtree top, so only a TOP-LEVEL
+            // file of that name is excluded -- mirroring the fingerprint
+            // input's own top-level-only exclusion -- while a deeper file of
+            // the same name is an ordinary attachment.
+            if path.parent() == Some(anchor)
+                && path.file_name().and_then(|n| n.to_str())
+                    == Some(crate::skills::builtin::FINGERPRINT_FILE)
             {
                 continue;
             }
@@ -531,6 +534,25 @@ mod tests {
             std::fs::write(path, bytes).unwrap();
         }
 
+        /// The builtin posture's on-disk shape (ADR-0121): a spec-valid
+        /// skill tree living ONLY under the reserved subtree, nothing at
+        /// the registry root.
+        fn put_system_skill(&self, name: &str) {
+            let dir = self.root.path().join(".system").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\n---\nBody.\n"),
+            )
+            .unwrap();
+        }
+
+        fn put_system_file(&self, name: &str, rel: &str, bytes: &[u8]) {
+            let path = self.root.path().join(".system").join(name).join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
         fn gate<'a>(&'a self, invoked: &'a [String]) -> SkillReadGate<'a> {
             SkillReadGate {
                 invoked,
@@ -583,6 +605,49 @@ mod tests {
             }
             other => panic!("expected Local, got {other:?}"),
         }
+    }
+
+    /// The restricted read face over a reserved-subtree tree (issue #1020's
+    /// AC 8): a skill existing only under `.system/` resolves through the
+    /// shadowing order's fallback arm -- its attachments read and the skill
+    /// stays invokable. A resolver joining `root/<name>` directly finds
+    /// nothing here (the review-pass wiring mutant).
+    #[test]
+    fn a_builtin_tree_under_the_reserved_subtree_serves_attachments() {
+        let fx = Fixture::new();
+        fx.put_system_skill("sql-coach");
+        fx.put_system_file("sql-coach", "scripts/run.py", b"print('ok')\n");
+        match read(&fx, "scripts/run.py") {
+            SkillReadOutcome::Local { summary, payload } => {
+                assert_eq!(summary, "sql-coach: scripts/run.py");
+                assert_eq!(payload, Value::String("print('ok')\n".to_string()));
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
+    /// The alignment marker is bookkeeping, hidden from the readable
+    /// listing ONLY at the tree top (mirroring the fingerprint input's own
+    /// top-level-only exclusion); a deeper `.fingerprint` is an ordinary
+    /// attachment (ADR-0121).
+    #[test]
+    fn the_listing_hides_the_top_level_marker_and_keeps_deeper_namesakes() {
+        let fx = Fixture::new();
+        fx.put_system_skill("sql-coach");
+        fx.put_system_file("sql-coach", ".fingerprint", b"marker\n");
+        fx.put_system_file("sql-coach", "references/.fingerprint", b"notes\n");
+        let anchor = fx.root.path().join(".system").join("sql-coach");
+        let (listing, incomplete) = readable_listing(&anchor);
+        assert!(!incomplete);
+        assert!(
+            !listing.contains(&".fingerprint".to_string()),
+            "the marker stays hidden: {listing:?}"
+        );
+        assert!(
+            listing.contains(&"references/.fingerprint".to_string()),
+            "a deeper namesake is an attachment: {listing:?}"
+        );
+        assert!(listing.contains(&"SKILL.md".to_string()));
     }
 
     /// `SKILL.md` itself and `scripts/` are readable -- no subdirectory is

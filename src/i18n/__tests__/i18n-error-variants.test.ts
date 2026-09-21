@@ -116,7 +116,10 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     InvalidSkill: "error.skill.invalidSkill",
     NoSuchSkill: "error.skill.notFound",
     NameTaken: "error.skill.nameTaken",
+    ReservedSkillName: "error.skill.reservedName",
     ReadOnly: "error.skill.readOnly",
+    BuiltinReadOnly: "error.skill.builtinReadOnly",
+    BuiltinUndeletable: "error.skill.undeletable",
     FsFailure: "error.skill.fsFailure",
   },
   RenameSessionError: {

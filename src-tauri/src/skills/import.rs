@@ -81,9 +81,9 @@ pub fn import_skill(
     source_dir: &Path,
     mode: ImportMode,
 ) -> Result<SkillEntry, SkillError> {
-    // External sources are never registry material: the source load runs
-    // with an empty builtin mark (marking keys on registry side-table
-    // membership, and a same-named external dir is not ours to claim).
+    // External sources are never registry material: the source load reads
+    // as a plain local entry (posture is location-derived since ADR-0121;
+    // a same-named external dir is not ours to claim).
     let entry = load_skill(source_dir)?;
     // The builtin reserved set is refused statically (issue #677) -- a
     // third-party skill that happens to carry a curated name cannot take it.

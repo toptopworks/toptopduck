@@ -321,6 +321,16 @@ fn embedded_files(name: &str) -> Vec<(String, Vec<u8>)> {
     files
 }
 
+/// Join one component onto a '/'-separated relative prefix (the shared
+/// spelling of the embedded and disk collectors).
+fn join_rel(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
 fn collect_embedded(dir: &Dir, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
     for file in dir.files() {
         let name = file
@@ -328,12 +338,7 @@ fn collect_embedded(dir: &Dir, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let rel = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
-        out.push((rel, file.contents().to_vec()));
+        out.push((join_rel(prefix, &name), file.contents().to_vec()));
     }
     for sub in dir.dirs() {
         let name = sub
@@ -341,11 +346,7 @@ fn collect_embedded(dir: &Dir, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let prefix = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let prefix = join_rel(prefix, &name);
         collect_embedded(sub, &prefix, out);
     }
 }
@@ -388,11 +389,7 @@ fn collect_disk(
         })?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        let rel = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let rel = join_rel(prefix, &name);
         // The alignment marker is bookkeeping, never fingerprint input.
         if prefix.is_empty() && name == FINGERPRINT_FILE {
             continue;
@@ -401,9 +398,13 @@ fn collect_disk(
             continue;
         };
         // Real directories recurse (links never do -- the subtree is
-        // app-owned and the write path only ever creates real directories;
-        // a hand-placed link is absent from the fingerprint input, so it
-        // rides until some mismatch rewrites the subtree around it).
+        // app-owned and the write path only ever creates real directories).
+        // A hand-placed DIRECTORY link never reaches this arm and so is
+        // absent from the fingerprint input -- it rides until some mismatch
+        // rewrites the subtree around it. A hand-placed FILE link is
+        // followed below and enters the input as (link path, target bytes)
+        // -- itself a mismatch against the embedded tree, so the next
+        // window deletes and rewrites the subtree around it.
         if ft.is_dir() {
             collect_disk(&path, &rel, out)?;
         } else if std::fs::metadata(&path)

@@ -29,7 +29,8 @@ export interface SkillEntry {
   // The Markdown body after the frontmatter -- the prompt fragment.
   body: string;
   // The resolved link target for `linked` skills (the "open source location"
-  // anchor); null for `local`.
+  // anchor); the reserved-subtree directory (the reveal / fork anchor) for
+  // `builtin` rows; null for `local`.
   link_target: string | null;
   // The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
   // in the new-session seed's reach; disabled = dormant (grayed row, the
@@ -42,8 +43,9 @@ export interface SkillEntry {
   // a "modified" drift badge when a skill changed after a recorded turn.
   content_hash: string;
   // A local or linked row whose name sits in the builtin manifest
-  // (ADR-0121 Decision 5): the row SHADOWS a builtin skill (listing,
-  // invocation, and auto-include all resolve to it), and the settings row
+  // (ADR-0121 Decision 5): the row SHADOWS a builtin skill (when the
+  // builtin is materialized, listing, invocation, and auto-include all
+  // resolve to this row), and the settings row
   // renders the "covers built-in" badge -- the standing reminder that the
   // app-side curation is invisible to this fork until it is deleted.
   // Always false for builtin rows themselves.

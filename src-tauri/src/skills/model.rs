@@ -44,7 +44,9 @@ pub enum Acquired {
 /// One registry skill as it crosses IPC (issue #362). The declaration face
 /// (ADR-0086 Decision 1): the prompt fragment (`body`). `link_target` is the
 /// resolved symlink / junction target for `linked` skills (the "open source
-/// location" anchor); `null` for `local`. Option fields mirror the Rust
+/// location" anchor), the reserved-subtree directory for `builtin` rows
+/// (the reveal / fork anchor, ADR-0121), and `null` for `local`. Option
+/// fields mirror the Rust
 /// `Option<String>` + bare serde convention (None serializes as JSON null,
 /// same shape as `AppConfig.last_dir`), so they are `| null` on the wire,
 /// not optional.
@@ -64,7 +66,9 @@ pub struct SkillEntry {
     /// on mount (a later #303 slice; carried here so the settings drawer edits
     /// it verbatim).
     pub body: String,
-    /// The resolved link target for `linked` skills; `null` for `local`.
+    /// The resolved link target for `linked` skills; the reserved-subtree
+    /// directory (the reveal / fork anchor) for `builtin` rows; `null` for
+    /// `local`.
     pub link_target: Option<String>,
     /// The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
     /// in the session seed's reach + rendered normally in the settings pane;
@@ -82,8 +86,9 @@ pub struct SkillEntry {
     /// both places and the drift signal is exact, not approximate.
     pub content_hash: String,
     /// A local or linked row whose name sits in the builtin manifest
-    /// (ADR-0121 Decision 5): the row SHADOWS a builtin skill (listing,
-    /// invocation, and auto-include all resolve to it), and the frontend
+    /// (ADR-0121 Decision 5): the row SHADOWS a builtin skill (when the
+    /// builtin is materialized, listing, invocation, and auto-include all
+    /// resolve to this row), and the frontend
     /// renders the "covers built-in" badge -- the standing reminder that
     /// the app-side curation is invisible to this fork until it is deleted.
     /// Always `false` for builtin rows themselves.
