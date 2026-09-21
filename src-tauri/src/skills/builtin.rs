@@ -192,8 +192,10 @@ fn auto_include_gate(
 /// the whole-tree write). A failure keeps the degraded posture -- warn, no
 /// marker, nothing persisted -- but surfaces by name so the scan payload can
 /// render the missing row's warning in the Skills panel; the next scan
-/// retries. Alignment writes NOTHING to app-config (the side table is
-/// retired), so there is no dirty bit.
+/// retries. The retirement sweep's own failures (a blocked delete) are
+/// warn-only -- the leftover is app-owned cache, the next window retries,
+/// and no row rides the lane for it. Alignment writes NOTHING to app-config
+/// (the side table is retired), so there is no dirty bit.
 pub(crate) struct AlignOutcome {
     pub(crate) materialize_failures: Vec<String>,
 }
@@ -201,11 +203,14 @@ pub(crate) struct AlignOutcome {
 /// Align the reserved subtree against the embedded tree and the CURRENT CLI
 /// registry: per anchored manifest entry, the on-disk `.system/<name>/` tree
 /// is brought to byte-agreement with the embedded one (skip when the
-/// fingerprint already agrees; delete + rewrite otherwise). Filesystem
-/// failures degrade per-skill with a warn and the name rides the outcome
-/// (issue #1016); the settings-page rescan retries. Shadowing is NOT
-/// consulted here (ADR-0121 Decision 5): materialization always runs; the
-/// deference happens only at the registry-scan merge.
+/// fingerprint already agrees; delete + rewrite otherwise), then the
+/// retirement sweep reclaims leftovers of names that left the manifest.
+/// Per-skill write failures degrade with a warn and the name rides the
+/// lane (issue #1016); a blocked retirement delete or a failure reading
+/// the reserved subtree itself is warn-only, no name (the next window
+/// retries). Shadowing is NOT consulted here (ADR-0121 Decision 5):
+/// materialization always runs; the deference happens only at the
+/// registry-scan merge.
 pub(crate) fn align(root: &Path, cli: &crate::cli_tools::config::CliToolRegistry) -> AlignOutcome {
     let mut materialize_failures = Vec::new();
     for entry in BUILTIN_SKILL_MANIFEST {
@@ -221,8 +226,60 @@ pub(crate) fn align(root: &Path, cli: &crate::cli_tools::config::CliToolRegistry
             );
         }
     }
+    retire_orphaned_subtrees(root);
     AlignOutcome {
         materialize_failures,
+    }
+}
+
+/// The retirement sweep (issue #1022): a first-level `.system/` directory
+/// whose name is not in the manifest is a retired skill's leftover cache --
+/// `.system` is an app-owned cache, not user files (ADR-0121 Decision 3),
+/// so it is deleted wholesale instead of merging as an undeletable orphan
+/// builtin row. A blocked delete is warn-only: the leftover is app-owned
+/// cache, the next window retries, and no name rides the materialize lane
+/// for it. A missing `.system/` is the quiet nothing-to-clean.
+/// Non-directories (loose files, hand-placed links) are left alone: only
+/// the shapes the write path itself creates are the sweep's business.
+fn retire_orphaned_subtrees(root: &Path) {
+    let entries = match std::fs::read_dir(root.join(SYSTEM_SUBTREE)) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            log::warn!(
+                target: "skills",
+                "builtin retirement sweep could not read `{}` (the next scan retries): {e}",
+                root.join(SYSTEM_SUBTREE).display()
+            );
+            return;
+        }
+    };
+    for entry in entries {
+        // A failed enumeration warns and skips rather than being silently
+        // dropped by flatten() (the registry scan's own rule).
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log::warn!(
+                    target: "skills",
+                    "builtin retirement sweep could not read an entry (skipped; the next scan retries): {e}"
+                );
+                continue;
+            }
+        };
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if find_manifest_entry(&name).is_some() {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+            log::warn!(
+                target: "skills",
+                "retired builtin skill `{name}` failed to clean up (the next scan retries): {e}"
+            );
+        }
     }
 }
 
@@ -942,6 +999,142 @@ mod tests {
             root.path().join(".system/vega-chart/SKILL.md").exists(),
             "the reserved subtree is written regardless of the shadow"
         );
+    }
+
+    /// The retirement sweep (issue #1022): a first-level `.system/`
+    /// directory whose name is not in the manifest is a retired skill's
+    /// leftover cache, deleted wholesale. This is the runtime companion of
+    /// the manifest/asset agreement test's both-sides-shrunk shape -- that
+    /// test pins the shipped set agrees, this one pins the residue a shrink
+    /// leaves behind is reclaimed, so the panel shows no orphaned builtin
+    /// row in the settled state (a blocked delete rides the retire-failure
+    /// lane until the next window reclaims it). Manifest names are never
+    /// the sweep's business -- membership, not anchored-ness, is the skip
+    /// rule (a dormant skill's cache survives).
+    #[test]
+    fn align_retires_a_subtree_whose_name_left_the_manifest() {
+        let root = tempfile::tempdir().expect("root");
+        let leftover = root.path().join(".system/legacy-chart");
+        std::fs::create_dir_all(&leftover).expect("mkdir");
+        std::fs::write(
+            leftover.join("SKILL.md"),
+            "---\nname: legacy-chart\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write");
+        let outcome = align(root.path(), &registry_with(vec![]));
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(!leftover.exists(), "the retired subtree is reclaimed");
+        // The sweep never touches manifest names: the knowledge-only skill
+        // still aligns alongside the cleanup.
+        assert!(root.path().join(".system/vega-chart/SKILL.md").exists());
+    }
+
+    /// A blocked retirement delete is warn-only: the leftover is app-owned
+    /// cache, so nothing rides the materialize lane for it -- the subtree
+    /// simply stays until the next window reclaims it. The blockers are
+    /// platform stand-ins for the real failure classes (read-only skills
+    /// root, antivirus interference) -- Windows: a no-share handle on an
+    /// in-tree file (the one open-time sharing-violation blocker std's
+    /// POSIX-semantics subtree delete cannot open around; a read-only
+    /// attribute is the other defeat class std never clears); Unix: a
+    /// write-stripped directory blocking the unlinks inside it.
+    #[test]
+    fn a_blocked_retirement_delete_stays_off_the_failure_lane() {
+        let root = tempfile::tempdir().expect("root");
+        let leftover = root.path().join(".system/legacy-chart");
+        std::fs::create_dir_all(&leftover).expect("mkdir");
+        let held = leftover.join("SKILL.md");
+        std::fs::write(&held, "body\n").expect("write");
+        #[cfg(windows)]
+        use std::os::windows::ffi::OsStrExt;
+        #[cfg(windows)]
+        let held_handle = {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::Foundation::GENERIC_READ;
+            use windows_sys::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+            };
+            let path_w: Vec<u16> = held.as_os_str().encode_wide().chain([0]).collect();
+            let raw = unsafe {
+                CreateFileW(
+                    path_w.as_ptr(),
+                    GENERIC_READ,
+                    0, // share nothing
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(raw as isize != -1, "open the held file");
+            // File's Drop closes the handle on scope exit.
+            unsafe { std::fs::File::from_raw_handle(raw) }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o555))
+                .expect("chmod");
+        }
+        let outcome = align(root.path(), &registry_with(vec![]));
+        assert!(
+            outcome.materialize_failures.is_empty(),
+            "a blocked retirement stays off the materialize lane"
+        );
+        assert!(leftover.join("SKILL.md").exists(), "the subtree stays");
+        // Unblock: the next window reclaims the subtree (the warning must
+        // not outlive the failure it reported).
+        #[cfg(windows)]
+        drop(held_handle);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        let healed = align(root.path(), &registry_with(vec![]));
+        assert!(healed.materialize_failures.is_empty());
+        assert!(!leftover.exists(), "the healed sweep reclaims the subtree");
+    }
+
+    /// A loose file under `.system/` is not a retired skill's cache: the
+    /// sweep leaves non-directories alone (hand-placed links ride the same
+    /// arm -- file_type() does not follow them).
+    #[test]
+    fn sweep_leaves_loose_files_under_the_reserved_subtree_alone() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir(root.path().join(".system")).expect("mkdir");
+        let loose = root.path().join(".system/notes.txt");
+        std::fs::write(&loose, b"notes").expect("write");
+        let outcome = align(root.path(), &registry_with(vec![]));
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(loose.exists(), "the sweep never touches a non-directory");
+    }
+
+    /// The skip rule is manifest membership, not anchored-ness: a skill
+    /// that left the anchored set while staying in the manifest keeps its
+    /// cache (materialized in an earlier window, dormant now) -- the sweep
+    /// must not eat a dormant builtin's subtree.
+    #[test]
+    fn sweep_preserves_a_dormant_manifest_subtree() {
+        let root = tempfile::tempdir().expect("root");
+        let dormant = root.path().join(".system/pandoc");
+        std::fs::create_dir_all(&dormant).expect("mkdir");
+        std::fs::write(
+            dormant.join("SKILL.md"),
+            "---\nname: pandoc\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write");
+        let mut user = builtin_pandoc(true);
+        user.source = CliToolSource::User;
+        let outcome = align(root.path(), &registry_with(vec![user]));
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(
+            dormant.join("SKILL.md").exists(),
+            "the dormant manifest cache survives"
+        );
+        // The knowledge-only skill still aligns alongside the skip.
+        assert!(root.path().join(".system/vega-chart/SKILL.md").exists());
     }
 
     // --- auto-include -------------------------------------------------------

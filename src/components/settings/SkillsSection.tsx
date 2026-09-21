@@ -319,15 +319,18 @@ export function SkillsSection({
     [allSkills, search, filter],
   );
 
-  // The failure lane's visible rows (issue #1016): a failed skill never
-  // landed on disk, so the listing has no row for it -- these stand in,
-  // visible under the "all" and "builtin" filters and matched by name
-  // (regular rows also match their description; the lane shows no
-  // description to match).
+  // The materialization lane's visible rows (issue #1016): a failed write
+  // leaves the row on disk stale or absent, so the stand-in ALWAYS renders
+  // beside any real row -- the write really did fail, and hiding the hint
+  // (e.g. behind a stale pre-upgrade row) would report a healthy skill
+  // while the model keeps resolving old bytes. Visible under the "all"
+  // and "builtin" filters and matched by name (regular rows also match
+  // their description; the lane shows no description to match).
   const failedNames = useMemo(
     () =>
       (materializeFailures ?? []).filter(
-        (name) => matchesAcquired(filter, "builtin") && matchesSearch(name, search),
+        (name) =>
+          matchesAcquired(filter, "builtin") && matchesSearch(name, search),
       ),
     [materializeFailures, filter, search],
   );

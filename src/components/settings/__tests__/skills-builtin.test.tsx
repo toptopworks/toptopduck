@@ -238,6 +238,28 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     ).toBeNull();
   });
 
+  it("stands in beside a real row for the same name (#1016, #1022)", async () => {
+    // A failed write leaves the row on disk stale or absent -- the lane
+    // always renders the stand-in, so the write-failure hint stays
+    // visible beside a stale pre-upgrade row. (The #1022 ruling: a
+    // blocked retirement is warn-only backend-side and never rides this
+    // lane, so a name in the lane is always a write failure.)
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [builtinSkill],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(
+      scanResult({ skill_materialize_failures: ["pandoc", "vega-chart"] }),
+    );
+    renderSection();
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    expect(
+      screen.getByTestId("skill-materialize-failure-row-pandoc"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("skill-row")).toHaveTextContent("pandoc");
+  });
+
   it("lets a matching failure row carry the frame without the no-matches caption", async () => {
     // The contradiction guard: with a skill on disk, a failed vega-chart,
     // and a search for "vega", the lane row matches while the listing
