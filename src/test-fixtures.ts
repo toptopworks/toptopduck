@@ -7,6 +7,7 @@
 // config literals (App.i18n / App.theme / App.sidebarWiring) cannot import
 // this module and stay hand-rolled there.
 import type { AppConfig } from "./types/app-config";
+import type { BuiltinScanResult } from "./types/cli-tool";
 import type { SkillEntry } from "./types/skills";
 
 // The default SkillEntry: a minimal-but-real registry row (all required wire
@@ -63,6 +64,19 @@ export function baseAppConfig(overrides?: Partial<AppConfig>): AppConfig {
     enabled_agents: [],
     materialized_builtin_agents: [],
     disabled_skills: [],
+    ...overrides,
+  };
+}
+
+// The default BuiltinScanResult: the rescan IPC's quiet answer (the shared
+// config baseline, no detections, no skill materialize failures). The
+// widened wire type landed mid-chain (#1016) and paid a fifteen-site sweep
+// the factory exists to absorb; later schema fields land here instead.
+export function scanResult(overrides?: Partial<BuiltinScanResult>): BuiltinScanResult {
+  return {
+    config: baseAppConfig(),
+    scan: [],
+    skill_materialize_failures: [],
     ...overrides,
   };
 }

@@ -15,7 +15,7 @@ import { log } from "../../../lib/log";
 import { blankCliTool } from "../../../types/cli-tool";
 import type { BuiltinScanEntry, BuiltinScanResult, CliToolConfig } from "../../../types/cli-tool";
 import type { AppConfig } from "../../../types/app-config";
-import { baseAppConfig } from "../../../test-fixtures";
+import { baseAppConfig, scanResult } from "../../../test-fixtures";
 
 // The section drives everything through IPC; mock the API so the test never
 // touches Tauri (the McpServerForm.test harness pattern).
@@ -104,11 +104,7 @@ function makeScanEntry(
 // override this with mockResolvedValueOnce / mockImplementationOnce.
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-    config: makeAppConfig([]),
-    scan: [],
-    skill_materialize_failures: [],
-  });
+  vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
 });
 
 describe("CliSection", () => {
@@ -280,11 +276,7 @@ describe("CliSection", () => {
     vi.mocked(upsertCliTool).mockResolvedValue(next);
     // The mount rescan also syncs `next` so the reference-equality assertion
     // below holds whichever call landed first (mount vs toggle).
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: next,
-      scan: [],
-      skill_materialize_failures: [],
-    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult({ config: next }));
     const onCliToolsChanged = vi.fn();
     renderWithProviders(
       <CliSection
@@ -336,11 +328,7 @@ describe("CliSection builtin panel (issue #675)", () => {
       makeScanEntry({ name: "python", state: "dormant" }),
       makeScanEntry({ name: "office-cli", state: "conflict" }),
     ];
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
-      config: makeAppConfig([]),
-      scan,
-      skill_materialize_failures: [],
-    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce(scanResult({ scan }));
     const onCliToolsChanged = vi.fn();
     renderWithProviders(
       <CliSection
@@ -389,13 +377,10 @@ describe("CliSection builtin panel (issue #675)", () => {
   });
 
   it("refreshes the snapshot and syncs the config on the Rescan button", async () => {
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
-      config: makeAppConfig([]),
-      scan: [makeScanEntry({ name: "python", state: "dormant" })],
-      skill_materialize_failures: [],
-    });
-    const next = {
-      config: makeAppConfig([]),
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce(
+      scanResult({ scan: [makeScanEntry({ name: "python", state: "dormant" })] }),
+    );
+    const next = scanResult({
       scan: [
         makeScanEntry({
           name: "python",
@@ -403,8 +388,7 @@ describe("CliSection builtin panel (issue #675)", () => {
           executable: "python3",
         }),
       ],
-      skill_materialize_failures: [],
-    };
+    });
     vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce(next);
     const onCliToolsChanged = vi.fn();
     renderWithProviders(
@@ -446,14 +430,14 @@ describe("CliSection builtin panel (issue #675)", () => {
     // The registration-list mirror of the builtin panel's conflict row: the
     // user entry owning a shipped name gets the annotation, derived from the
     // same snapshot; other user rows stay unbadged.
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
-      config: makeAppConfig([]),
-      scan: [
-        makeScanEntry({ name: "pandoc", state: "conflict" }),
-        makeScanEntry({ name: "python", state: "dormant" }),
-      ],
-      skill_materialize_failures: [],
-    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce(
+      scanResult({
+        scan: [
+          makeScanEntry({ name: "pandoc", state: "conflict" }),
+          makeScanEntry({ name: "python", state: "dormant" }),
+        ],
+      }),
+    );
     renderWithProviders(
       <CliSection
         appConfig={makeAppConfig([
@@ -498,11 +482,12 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
     await waitFor(() => {
       expect(onCliToolsChanged).toHaveBeenCalledWith(next);
     });
-    resolveMount({
-      config: staleConfig,
-      scan: [makeScanEntry({ name: "python", state: "dormant" })],
-      skill_materialize_failures: [],
-    });
+    resolveMount(
+      scanResult({
+        config: staleConfig,
+        scan: [makeScanEntry({ name: "python", state: "dormant" })],
+      }),
+    );
     // The snapshot applies (the panel fills), the stale sync does not.
     expect(
       await screen.findByTestId("builtin-cli-row-python"),
@@ -540,17 +525,18 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
     await waitFor(() => {
       expect(onCliToolsChanged).toHaveBeenCalledWith(next);
     });
-    resolveRescan({
-      config: staleConfig,
-      scan: [
-        makeScanEntry({
-          name: "python",
-          state: "detected",
-          executable: "python3",
-        }),
-      ],
-      skill_materialize_failures: [],
-    });
+    resolveRescan(
+      scanResult({
+        config: staleConfig,
+        scan: [
+          makeScanEntry({
+            name: "python",
+            state: "detected",
+            executable: "python3",
+          }),
+        ],
+      }),
+    );
     // The refreshed snapshot renders; the stale sync never fires.
     expect(
       await screen.findByTestId("builtin-cli-row-python"),
@@ -590,13 +576,14 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
     await waitFor(() => {
       expect(onCliToolsChanged).toHaveBeenCalledWith(postWrite);
     });
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce({
-      config: rescanned,
-      scan: [
-        makeScanEntry({ name: "python", state: "detected", executable: "python3" }),
-      ],
-      skill_materialize_failures: [],
-    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValueOnce(
+      scanResult({
+        config: rescanned,
+        scan: [
+          makeScanEntry({ name: "python", state: "detected", executable: "python3" }),
+        ],
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
     expect(
       await screen.findByTestId("builtin-cli-row-python"),
@@ -624,7 +611,7 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
     // In flight: the button is disabled and swaps its label.
     expect(screen.getByRole("button", { name: "Scanning…" })).toBeDisabled();
-    resolveRescan({ config: makeAppConfig([]), scan: [], skill_materialize_failures: [] });
+    resolveRescan(scanResult());
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
     });

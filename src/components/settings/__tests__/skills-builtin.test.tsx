@@ -7,7 +7,7 @@ import { SkillsSection } from "../SkillsSection";
 import { chooseOption, openSelect } from "./helpers";
 import { TooltipProvider } from "../../ui/tooltip";
 import { listSkills, rescanBuiltinCliTools, restoreBuiltinSkill } from "../../../api";
-import { baseAppConfig, skillEntry } from "../../../test-fixtures";
+import { baseAppConfig, scanResult, skillEntry } from "../../../test-fixtures";
 
 // The builtin-skill surface of the settings pane (issue #677): the built-in
 // badge + the disabled delete entry, the Edited derivation off the baseline
@@ -69,11 +69,7 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     });
     // The pane's mount rescan (issue #1016) resolves quietly by default:
     // no failure lane, no config churn beyond the wholesale sync.
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: baseAppConfig(),
-      scan: [],
-      skill_materialize_failures: [],
-    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
   });
 
   it("shows the system badge and an inert delete on a builtin row", async () => {
@@ -189,11 +185,9 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
       ignored: [],
       root_error: null,
     });
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: baseAppConfig(),
-      scan: [],
-      skill_materialize_failures: ["vega-chart"],
-    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(
+      scanResult({ skill_materialize_failures: ["vega-chart"] }),
+    );
   });
 
   it("renders a row-level warning for a skill the window could not write", async () => {
@@ -243,6 +237,27 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     ).toBeNull();
   });
 
+  it("lets a matching failure row carry the frame without the no-matches caption", async () => {
+    // The contradiction guard: with a skill on disk, a failed vega-chart,
+    // and a search for "vega", the lane row matches while the listing
+    // does not -- a "no matches" caption under the matching row would
+    // deny the row right above it.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [builtinSkill],
+      ignored: [],
+      root_error: null,
+    });
+    renderSection({});
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "vega" },
+    });
+    expect(
+      screen.getByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No skills match your search.")).toBeNull();
+  });
+
   it("leaves no lane once a healed window reports no failures", async () => {
     const { unmount } = renderSection({});
     await screen.findByTestId("skill-materialize-failure-row-vega-chart");
@@ -250,14 +265,13 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     // a healed machine (the rescan reports no failures) renders nothing
     // -- the warning must not outlive the failure (issue #1016 AC).
     unmount();
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: baseAppConfig(),
-      scan: [],
-      skill_materialize_failures: [],
-    });
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
     renderSection({});
     await screen.findByText("No skills yet. Click New to create one.");
     expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
+    // The second window really ran (not just an unrendered lane): the
+    // remount issued its own mount rescan.
+    expect(rescanBuiltinCliTools).toHaveBeenCalledTimes(2);
   });
 
   it("refetches the listing after the mount rescan lands (issue #1016)", async () => {
@@ -281,11 +295,7 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
         new Promise((resolve) =>
           setTimeout(
             () =>
-              resolve({
-                config: baseAppConfig(),
-                scan: [],
-                skill_materialize_failures: [],
-              }),
+              resolve(scanResult()),
             50,
           ),
         ),
@@ -293,6 +303,9 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     renderSection({});
     // The first listing (pre-rescan) shows nothing.
     await screen.findByText("No skills yet. Click New to create one.");
+    // The lane is structurally absent before any scan answer lands (the
+    // null snapshot holds until the rescan resolves).
+    expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
     // The rescan lands, the listing refetches, the materialized row
     // appears -- no failure lane (the window succeeded).
     const row = await screen.findByTestId("skill-row", undefined, { timeout: 2000 });

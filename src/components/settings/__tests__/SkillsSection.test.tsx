@@ -18,7 +18,8 @@ import {
 } from "../../../api";
 import type { SkillEntry } from "../../../types/skills";
 import type { AppConfig } from "../../../types/app-config";
-import { baseAppConfig, skillEntry } from "../../../test-fixtures";
+import { baseAppConfig, scanResult, skillEntry } from "../../../test-fixtures";
+import type { BuiltinScanResult } from "../../../types/cli-tool";
 
 // The pane drives everything through IPC + the opener plugin; mock both so the
 // test never touches Tauri. revealItemInDir is the "open source location" call
@@ -85,11 +86,51 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([]);
     // The pane's mount rescan (issue #1016) resolves quietly by default:
     // no failure lane, no config churn beyond the wholesale sync.
-    vi.mocked(rescanBuiltinCliTools).mockResolvedValue({
-      config: baseAppConfig(),
-      scan: [],
-      skill_materialize_failures: [],
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
+  });
+
+  it("skips the stale config sync when the mount rescan lands after a user write", async () => {
+    // The write-generation guard (the CliSection #683 contract) on this
+    // pane: the mount rescan read the config BEFORE the toggle's write,
+    // so its late response would roll the user's change back. The stale
+    // sync is skipped; the cache-scoped listing invalidate still runs.
+    const staleConfig = baseAppConfig();
+    const next = baseAppConfig({ disabled_skills: ["pdf-tools"] });
+    let resolveMount: (result: BuiltinScanResult) => void = () => {};
+    vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
+      () =>
+        new Promise<BuiltinScanResult>((resolve) => {
+          resolveMount = resolve;
+        }),
+    );
+    vi.mocked(setSkillEnabled).mockResolvedValue(next);
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill],
+      ignored: [],
+      root_error: null,
     });
+    const onAppConfigSync = vi.fn();
+    renderWithProviders(
+      <SkillsSection
+        builtinSkillBaselines={{}}
+        onAppConfigSync={onAppConfigSync}
+      />,
+    );
+    // The user write lands while the mount rescan is still in flight.
+    await screen.findByTestId("skill-row");
+    fireEvent.click(screen.getByRole("switch", { name: "Enable skill pdf-tools" }));
+    await waitFor(() =>
+      expect(onAppConfigSync).toHaveBeenCalledWith(
+        expect.objectContaining({ disabled_skills: ["pdf-tools"] }),
+      ),
+    );
+    resolveMount(scanResult({ config: staleConfig }));
+    // Only the user write's config ever syncs; the listing still
+    // refetches (mount fetch + the toggle's invalidate + the rescan's
+    // cache-scoped invalidate landing last).
+    await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(3));
+    expect(onAppConfigSync).toHaveBeenCalledTimes(1);
+    expect(onAppConfigSync).not.toHaveBeenCalledWith(staleConfig);
   });
 
   it("flips a row's enablement through setSkillEnabled and syncs the config", async () => {

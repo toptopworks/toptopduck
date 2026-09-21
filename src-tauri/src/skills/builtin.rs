@@ -479,10 +479,13 @@ impl BuiltinSkillMark {
 // Reconciliation (rides the CLI scan window, issue #677)
 
 /// The reconcile outcome: the persist bit plus the names of the builtin
-/// skills the window could not materialize (issue #1016). A failure keeps
-/// the degraded posture -- warn, no side-table record, not dirty -- but
-/// now surfaces by name so the scan payload can render the missing row's
-/// warning in the Skills panel.
+/// skills whose SKILL.md the window could not CREATE (issue #1016). A
+/// failure keeps the degraded posture -- warn, no side-table record, not
+/// dirty -- but now surfaces by name so the scan payload can render the
+/// missing row's warning in the Skills panel. Only fresh creates ride
+/// this list, in `BUILTIN_SKILL_DEFINITIONS` order: a skill whose file
+/// already exists never appears here (its row is the listing's own), and
+/// upgrade / hash-read failures stay warn-only.
 pub(crate) struct ReconcileOutcome {
     pub(crate) dirty: bool,
     pub(crate) materialize_failures: Vec<String>,
@@ -509,9 +512,10 @@ pub(crate) struct ReconcileOutcome {
 /// shipped set, or whose file AND CLI entry are both gone, are dropped.
 ///
 /// Filesystem failures degrade per-skill with a warn (the scan window must
-/// not fail the whole read-modify-write) and the failed names ride the
-/// outcome for the scan payload (issue #1016); the settings-page rescan
-/// retries.
+/// not fail the whole read-modify-write); a failed CREATE's name rides the
+/// outcome for the scan payload (issue #1016) while upgrade and hash-read
+/// failures stay warn-only (their rows already exist in the listing); the
+/// settings-page rescan retries.
 pub(crate) fn reconcile(
     root: &Path,
     locale: &str,
