@@ -737,6 +737,20 @@ function SkillRow({
             )}
             icon={Trash2}
             onClick={onDelete}
+            // The shutdown guidance at the real touchpoint (#1015): the
+            // disabled delete explains itself instead of dead-ending --
+            // the reachable off-action is the enablement-axis switch on
+            // this row (ADR-0118), true for every builtin (knowledge-only
+            // skills like vega-chart have no companion CLI to point at).
+            tooltip={
+              skill.acquired === "builtin"
+                ? intl.formatMessage({
+                    id: "settings.skills.deleteDisabledHint",
+                    defaultMessage:
+                      "System skills cannot be deleted; disable the skill instead",
+                  })
+                : undefined
+            }
           />
         )}
       </div>

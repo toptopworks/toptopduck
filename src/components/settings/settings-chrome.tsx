@@ -172,22 +172,27 @@ export function PaneBackLink({
   );
 }
 
-/** A row-level icon action: the small bare ghost (no tooltip) on list rows,
- *  the in-row counterpart of the pane-header posture -- Edit / Test /
- *  Restore hover to the foreground, Delete to destructive (issue #958).
- *  `spinning` swaps the icon for a rotating Loader2 (the in-flight Test
- *  button); `onClick` is the plain zero-arg action handler -- the settings
- *  rows are not whole-row click targets, so no stopPropagation duty rides
- *  on it (the #958 zero-arg contract). A DISABLED action restores
- *  hit-testing to show the not-allowed cursor: the base's
- *  pointer-events-none would strip that hint and leave a dead-looking
- *  control (a disabled control fires no click either way). */
+/** A row-level icon action: the small bare ghost on list rows, the in-row
+ *  counterpart of the pane-header posture -- Edit / Test / Restore hover to
+ *  the foreground, Delete to destructive (issue #958). `spinning` swaps the
+ *  icon for a rotating Loader2 (the in-flight Test button); `onClick` is
+ *  the plain zero-arg action handler -- the settings rows are not
+ *  whole-row click targets, so no stopPropagation duty rides on it (the
+ *  #958 zero-arg contract). A DISABLED action restores hit-testing to show
+ *  the not-allowed cursor: the base's pointer-events-none would strip that
+ *  hint and leave a dead-looking control (a disabled control fires no
+ *  click either way -- and the restored hit-testing is also what lets a
+ *  tooltip hover the disabled control). An optional `tooltip` lifts the
+ *  bare no-tooltip posture (#1015): set only where the state needs
+ *  explaining (the builtin-skill delete's shutdown guidance), absent
+ *  everywhere else. */
 export function RowActionButton({
   label,
   icon: Icon,
   destructive,
   spinning,
   disabled,
+  tooltip,
   onClick,
 }: {
   label: string;
@@ -196,9 +201,12 @@ export function RowActionButton({
   destructive?: boolean;
   spinning?: boolean;
   disabled?: boolean;
+  /** Hover guidance over the bare ghost (#1015); the SETTINGS_TOOLTIP_CLASS
+   *  single source (issue #554). */
+  tooltip?: string;
   onClick?: () => void;
 }) {
-  return (
+  const button = (
     <Button
       type="button"
       size="sm"
@@ -218,6 +226,18 @@ export function RowActionButton({
         <Icon className="size-4" aria-hidden />
       )}
     </Button>
+  );
+  if (!tooltip) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent
+        side="top"
+        className={cn(SETTINGS_TOOLTIP_CLASS, "max-w-[15rem]")}
+      >
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

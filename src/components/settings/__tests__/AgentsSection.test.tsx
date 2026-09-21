@@ -107,6 +107,16 @@ describe("AgentsSection (issue #932)", () => {
     expect(
       screen.getByRole("button", { name: "Delete agent data-cleaner" }),
     ).toBeVisible();
+    // The shutdown guidance (#1015): the disabled builtin delete explains
+    // itself -- the reachable off-action is the row's enablement switch.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Delete agent general-purpose" }),
+    );
+    expect(
+      await screen.findByText(
+        "Built-in agents cannot be deleted; disable the agent instead",
+      ),
+    ).toBeInTheDocument();
     // The Disabled badge rides the disabled row and its name dims (the
     // legibility pair); the enabled row carries neither.
     expect(screen.getByText("Disabled")).toBeVisible();

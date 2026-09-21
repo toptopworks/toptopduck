@@ -616,6 +616,18 @@ function AgentRow({
           )}
           icon={Trash2}
           onClick={onDelete}
+          // The shutdown guidance at the same touchpoint as the skills
+          // rows (#1015): the reachable off-action is the row's
+          // enablement switch.
+          tooltip={
+            agent.source === "builtin"
+              ? intl.formatMessage({
+                  id: "settings.agents.deleteDisabledHint",
+                  defaultMessage:
+                    "Built-in agents cannot be deleted; disable the agent instead",
+                })
+              : undefined
+          }
         />
       </div>
     </div>

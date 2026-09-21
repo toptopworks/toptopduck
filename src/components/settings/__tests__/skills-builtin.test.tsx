@@ -90,6 +90,21 @@ describe("SkillsSection builtin rows (issue #677)", () => {
     expect(screen.queryByLabelText("Name")).toBeNull();
   });
 
+  it("explains the disabled delete through the shutdown tooltip (#1015)", async () => {
+    renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
+    const del = await screen.findByRole("button", {
+      name: "Delete skill pandoc",
+    });
+    // Radix Tooltip opens on pointermove (the trigger has no pointerenter
+    // open path); delayDuration is 0 under the test's TooltipProvider.
+    fireEvent.pointerMove(del);
+    expect(
+      await screen.findByText(
+        "System skills cannot be deleted; disable the skill instead",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("shows no Edited badge on a row agreeing with its recorded baseline", async () => {
     renderSection({ pandoc: { hash: "hash-of-shipped-body", locale: "en-US" } });
     const row = await screen.findByTestId("skill-row");

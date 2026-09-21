@@ -650,7 +650,7 @@ describe("CliSection rescan write guard and failure lanes (issue #683)", () => {
 });
 
 describe("CliSection baseline lifecycle (issue #676)", () => {
-  it("gates the row actions by source and baseline", () => {
+  it("gates the row actions by source and baseline", async () => {
     // A builtin row's delete renders disabled while it follows the baseline
     // (undeletable -- disabling is the single shutdown axis) and no restore
     // shows; a user row keeps its delete rendered.
@@ -676,6 +676,16 @@ describe("CliSection baseline lifecycle (issue #676)", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Delete tool my-pandoc" }),
+    ).toBeInTheDocument();
+    // The shutdown guidance (#1015): the disabled builtin delete explains
+    // itself -- the reachable off-action is the row's enablement toggle.
+    fireEvent.pointerMove(
+      screen.getByRole("button", { name: "Delete tool pandoc" }),
+    );
+    expect(
+      await screen.findByText(
+        "Built-in tools cannot be deleted; disable the tool instead",
+      ),
     ).toBeInTheDocument();
   });
 

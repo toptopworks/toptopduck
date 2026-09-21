@@ -425,6 +425,7 @@
   "settings.agents.confirmDeleteTitle": "删除子智能体 {name}？",
   "settings.agents.createTitle": "新建子智能体",
   "settings.agents.deleteLabel": "删除子智能体 {name}",
+  "settings.agents.deleteDisabledHint": "内置子智能体不能删除；可改为禁用",
   "settings.agents.descriptionLabel": "描述",
   "settings.agents.descriptionPlaceholder": "主智能体应把什么任务委派给它",
   "settings.agents.danglingRefs": "未知技能引用：{refs}",
@@ -465,6 +466,7 @@
   "settings.skills.confirmDeleteCancel": "取消",
   "settings.skills.confirmDeleteTitle": "删除技能 {name}？",
   "settings.skills.deleteLabel": "删除技能 {name}",
+  "settings.skills.deleteDisabledHint": "系统技能不能删除；可改为禁用",
   "settings.skills.enabledLabel": "启用技能 {name}",
   "settings.skills.description": "技能为智能体添加能力。你可以新建技能，也可以从其他应用导入。",
   "settings.skills.drawerCreateTitle": "新建技能",
@@ -653,6 +655,7 @@
   "settings.cli.enableToggleLabel": "切换工具 {name}",
   "settings.cli.editLabel": "编辑工具 {name}",
   "settings.cli.deleteLabel": "删除工具 {name}",
+  "settings.cli.deleteDisabledHint": "内置工具不能删除；可改为禁用",
   "settings.cli.form.backToList": "返回 CLI 列表",
   "settings.cli.form.addTitle": "注册 CLI 工具",
   "settings.cli.form.editTitle": "编辑 CLI 工具",
@@ -707,5 +710,5 @@
   "settings.skills.restoreLabel": "恢复技能 {name} 的内置定义",
   "error.skill.reservedName": "名称「{name}」为系统技能保留",
   "error.skill.nameLocked": "系统技能「{name}」不能重命名",
-  "error.skill.undeletable": "系统技能「{name}」不能删除；请改为禁用对应工具"
+  "error.skill.undeletable": "系统技能「{name}」不能删除；可改为禁用"
 }
