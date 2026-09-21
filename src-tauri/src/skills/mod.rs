@@ -4,16 +4,17 @@
 //! directory -- `<root>/<name>/SKILL.md` (YAML frontmatter + Markdown body) --
 //! under the single registry root `<app_data_dir>/skills`. The DIRECTORY SCAN
 //! is the registry (no sidecar, no app-config entry): whatever spec-valid
-//! directory lives there shows up in `list_skills`. Identity is the spec
-//! `name` (kebab-case, <= 64 chars, equal to the directory name -- ADR-0086
-//! Decision 2); the loader derives `acquired` from the directory's filesystem
-//! nature (`linked` = symlink / junction onto an external source, `local` =
-//! real directory). v1 declares one thing per skill: the prompt fragment
-//! (the SKILL.md body); attachment files across the whole tree (no
-//! privileged subdirectory) read
-//! through the `read_skill_file` restricted surface, and script execution
-//! rides registered CLI tools as text relay (ADR-0086 Decision 1, calibrated
-//! by ADR-0111).
+//! directory lives there shows up in `list_skills`, plus the reserved
+//! `.system/` subtree's children (the builtin rows; ADR-0121). Identity is
+//! the spec `name` (kebab-case, <= 64 chars, equal to the directory name --
+//! ADR-0086 Decision 2); the loader derives `acquired` from location and the
+//! directory's filesystem nature (`linked` = symlink / junction onto an
+//! external source, `local` = real directory, `builtin` = under the reserved
+//! subtree). v1 declares one thing per skill: the prompt fragment (the
+//! SKILL.md body); attachment files across the whole tree (no privileged
+//! subdirectory) read through the `read_skill_file` restricted surface, and
+//! script execution rides registered CLI tools as text relay (ADR-0086
+//! Decision 1, calibrated by ADR-0111).
 //!
 //! Submodules:
 //! - [`model`]: the wire types (`SkillEntry` / `SkillUpdate` / `Acquired`),
@@ -26,10 +27,10 @@
 //!   (issue #367) -- projects candidate source dirs onto importable skill
 //!   lists + commits each selected skill as `linked` (symlink / junction) or
 //!   `local` (recursive copy).
-//! - [`builtin`]: the built-in skill marks + baselines (issue #365) -- the
-//!   registry's seed pairs: a CLI companion rides its companion CLI
-//!   registration, a knowledge-only skill rides the app version (ADR-0120
-//!   Decision 7).
+//! - [`builtin`]: the builtin skills (ADR-0121) -- the embedded asset tree,
+//!   the manifest, the reserved-subtree alignment window, and the shadowing
+//!   resolver: a CLI companion rides its companion CLI registration, a
+//!   knowledge-only skill rides the app version (ADR-0120 Decision 7).
 //! - [`invocation`]: the `invoke_skill` gateway meta-tool (ADR-0119
 //!   Decision 4) -- the mid-turn agent invocation channel + the turn's
 //!   accumulating invocation records.
@@ -49,7 +50,6 @@ pub mod prompt;
 pub mod read;
 pub mod registry;
 
-pub use builtin::{BuiltinSkillBaseline, BuiltinSkillMark};
 pub use import::{discover_skill_sources, import_skill, import_skills};
 pub use model::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
@@ -61,31 +61,31 @@ pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 /// The new-session discovery-snapshot seed (issue #961, ADR-0118 Decision
 /// 1; carried as the discovery snapshot by ADR-0119 Decision 3): the
 /// registry scan intersected with the enablement axis -- every spec-valid
-/// skill except the disabled names, with a MATERIALIZED builtin
-/// additionally gated by the companion axis (ADR-0120 Decision 7: a CLI
-/// companion needs its companion CLI entry detected + enabled -- the
-/// #677 two-axis conjunction, an undetected CLI registration keeps its
-/// skill out of the seed; a knowledge-only skill rides the app version
-/// and takes no CLI conjunct). The seed is computed at session creation and
-/// MATERIALIZES as the session's discovery snapshot -- persisted
-/// explicitly in the recipe header, immutable for the session's life;
-/// resume adopts it from the header, no re-seed. A registry
+/// skill except the disabled names, with a BUILTIN row additionally gated by
+/// the companion axis (ADR-0120 Decision 7: a CLI companion needs its
+/// companion CLI entry detected + enabled -- the #677 two-axis conjunction,
+/// an undetected CLI registration keeps its skill out of the seed; a
+/// knowledge-only skill rides the app version and takes no CLI conjunct).
+/// Under shadowing (ADR-0121 Decision 5) the row resolves to the local
+/// fork, which seeds through the user arm like any local skill. The seed is
+/// computed at session creation and MATERIALIZES as the session's discovery
+/// snapshot -- persisted explicitly in the recipe header, immutable for the
+/// session's life; resume adopts it from the header, no re-seed. A registry
 /// root that fails to read seeds an EMPTY set: the listing degrades with
 /// `root_error` (surfaced by the settings pane's root banner), and the
 /// session is created silently skill-less rather than refused -- the
 /// degradation is visible in settings, not in the session.
 pub fn seed_skill_names(
     cli: &[crate::cli_tools::config::CliToolConfig],
-    mark: &BuiltinSkillMark,
     disabled: &std::collections::BTreeSet<String>,
     skills_root: &std::path::Path,
 ) -> Vec<String> {
     // The builtin's companion-axis gate (issue #677, ADR-0120 Decision 7):
-    // the materialized builtins whose companion CLI entries are detected +
-    // enabled, plus the knowledge-only ones (a Vec: the shipped builtin set
-    // is a handful of members, a set adds ceremony).
-    let auto_builtin = builtin::auto_included_names(cli, mark, skills_root);
-    registry::list_skills(skills_root, mark)
+    // the builtins whose companion CLI entries are detected + enabled, plus
+    // the knowledge-only ones (a Vec: the shipped builtin set is a handful
+    // of members, a set adds ceremony).
+    let auto_builtin = builtin::auto_included_names(cli, skills_root);
+    registry::list_skills(skills_root)
         .skills
         .into_iter()
         .filter(|s| !disabled.contains(&s.name))
@@ -108,36 +108,26 @@ pub fn apply_enablement(
     listing
 }
 
-/// Config-bound seed assembly (issue #961): the mark and the enablement
-/// axis read off ONE config snapshot, so a torn read cannot mix two eras
-/// and the command's glue is a single argument -- the wiring this replaces
-/// (separately-threaded config reads at the command boundary) was an
-/// unobserved seam; this form is testable end to end.
+/// Config-bound seed assembly (issue #961): the enablement axis reads off
+/// ONE config snapshot, so a torn read cannot mix two eras and the
+/// command's glue is a single argument -- testable end to end.
 pub fn seed_from_config(
     cfg: &crate::app_config::AppConfig,
     cli: &[crate::cli_tools::config::CliToolConfig],
     skills_root: &std::path::Path,
 ) -> Vec<String> {
-    seed_skill_names(
-        cli,
-        &BuiltinSkillMark::from_config(cfg),
-        &cfg.disabled_skills,
-        skills_root,
-    )
+    seed_skill_names(cli, &cfg.disabled_skills, skills_root)
 }
 
-/// Config-bound listing assembly (issue #961): the mark and the enablement
-/// overlay read off ONE config snapshot -- the command-boundary form of the
-/// registry scan + overlay, testable end to end.
+/// Config-bound listing assembly (issue #961): the enablement overlay reads
+/// off ONE config snapshot -- the command-boundary form of the registry
+/// scan + overlay, testable end to end. The builtin posture needs no config
+/// input since ADR-0121 (it is location-derived in the scan itself).
 pub fn list_with_enablement(
     cfg: &crate::app_config::AppConfig,
     skills_root: &std::path::Path,
 ) -> SkillListing {
-    let mark = BuiltinSkillMark::from_config(cfg);
-    apply_enablement(
-        registry::list_skills(skills_root, &mark),
-        &cfg.disabled_skills,
-    )
+    apply_enablement(registry::list_skills(skills_root), &cfg.disabled_skills)
 }
 
 #[cfg(test)]
@@ -150,6 +140,18 @@ mod tests {
         std::fs::write(
             dir.join("SKILL.md"),
             format!("---\nname: {name}\ndescription: Does things.\n---\nBody.\n"),
+        )
+        .expect("SKILL.md");
+    }
+
+    /// A skill directory in the reserved subtree (the builtin posture by
+    /// location, ADR-0121).
+    fn put_system_skill(root: &std::path::Path, name: &str) {
+        let dir = root.join(".system").join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Shipped.\n---\nShipped.\n"),
         )
         .expect("SKILL.md");
     }
@@ -183,9 +185,8 @@ mod tests {
         put_skill(root.path(), "pdf-tools");
         put_skill(root.path(), "sql-coach");
         let cli = vec![builtin_cli("pandoc", true)];
-        let mark = BuiltinSkillMark::of(&["pandoc"]);
-        put_skill(root.path(), "pandoc");
-        let names = seed_skill_names(&cli, &mark, &disabled(&["sql-coach"]), root.path());
+        put_system_skill(root.path(), "pandoc");
+        let names = seed_skill_names(&cli, &disabled(&["sql-coach"]), root.path());
         assert_eq!(names, vec!["pandoc".to_string(), "pdf-tools".to_string()]);
     }
 
@@ -196,20 +197,19 @@ mod tests {
         // missing companion CLI entry keeps it out even with the skill axis
         // on -- the #677 semantics, now the builtin half of the general rule.
         let root = tempfile::tempdir().expect("root");
-        put_skill(root.path(), "pandoc");
-        let mark = BuiltinSkillMark::of(&["pandoc"]);
+        put_system_skill(root.path(), "pandoc");
         // Skill axis off.
         let cli = vec![builtin_cli("pandoc", true)];
-        assert!(seed_skill_names(&cli, &mark, &disabled(&["pandoc"]), root.path()).is_empty());
+        assert!(seed_skill_names(&cli, &disabled(&["pandoc"]), root.path()).is_empty());
         // CLI axis off.
         let cli = vec![builtin_cli("pandoc", false)];
-        assert!(seed_skill_names(&cli, &mark, &disabled(&[]), root.path()).is_empty());
+        assert!(seed_skill_names(&cli, &disabled(&[]), root.path()).is_empty());
         // CLI entry absent entirely (undetected).
-        assert!(seed_skill_names(&[], &mark, &disabled(&[]), root.path()).is_empty());
+        assert!(seed_skill_names(&[], &disabled(&[]), root.path()).is_empty());
         // Both axes on: in.
         let cli = vec![builtin_cli("pandoc", true)];
         assert_eq!(
-            seed_skill_names(&cli, &mark, &disabled(&[]), root.path()),
+            seed_skill_names(&cli, &disabled(&[]), root.path()),
             vec!["pandoc".to_string()]
         );
     }
@@ -221,14 +221,13 @@ mod tests {
         // axis stays its shutdown axis (a disabled knowledge-only name
         // drops like any other; it has no CLI entry to disable).
         let root = tempfile::tempdir().expect("root");
-        put_skill(root.path(), "vega-chart");
-        let mark = BuiltinSkillMark::of(&["vega-chart"]);
+        put_system_skill(root.path(), "vega-chart");
         assert_eq!(
-            seed_skill_names(&[], &mark, &disabled(&[]), root.path()),
+            seed_skill_names(&[], &disabled(&[]), root.path()),
             vec!["vega-chart".to_string()]
         );
         assert!(
-            seed_skill_names(&[], &mark, &disabled(&["vega-chart"]), root.path()).is_empty(),
+            seed_skill_names(&[], &disabled(&["vega-chart"]), root.path()).is_empty(),
             "the enablement axis drops the knowledge-only skill"
         );
     }
@@ -236,13 +235,7 @@ mod tests {
     #[test]
     fn seed_on_an_empty_registry_is_empty() {
         let root = tempfile::tempdir().expect("root");
-        assert!(seed_skill_names(
-            &[],
-            &BuiltinSkillMark::default(),
-            &disabled(&[]),
-            root.path()
-        )
-        .is_empty());
+        assert!(seed_skill_names(&[], &disabled(&[]), root.path()).is_empty());
     }
 
     #[test]
@@ -261,6 +254,7 @@ mod tests {
             link_target: None,
             content_hash: "h".to_string(),
             enabled: true,
+            covers_builtin: false,
         };
         let listing = SkillListing {
             skills: vec![entry("pdf-tools"), entry("sql-coach")],
@@ -272,43 +266,30 @@ mod tests {
         assert!(!overlaid.skills[1].enabled, "disabled name: dormant");
     }
 
+    /// Shadowing (ADR-0121 Decision 5) at the seed level: a local fork
+    /// owning a builtin's name seeds through the USER arm (ADR-0118
+    /// Decision 1: user skills join with zero bookkeeping) even with the
+    /// companion CLI gate closed -- the row is local, the builtin gate
+    /// excludes only builtin rows.
     #[test]
-    fn seed_rides_the_user_arm_for_a_reverse_conflict_file() {
-        // The reverse-conflict window (issue #677): the user's same-named
-        // file owns the directory, the baselines side table has no record,
-        // so `acquired` reads `local` and the file seeds through the USER
-        // arm (ADR-0118 Decision 1: user skills join with zero bookkeeping)
-        // -- the mark gate excludes it from the BUILTIN arm only.
+    fn seed_rides_the_user_arm_for_a_shadowing_fork() {
         let root = tempfile::tempdir().expect("root");
         put_skill(root.path(), "pandoc");
-        let cli = vec![builtin_cli("pandoc", true)];
-        let names = seed_skill_names(
-            &cli,
-            &BuiltinSkillMark::default(),
-            &disabled(&[]),
-            root.path(),
-        );
+        let cli = vec![builtin_cli("pandoc", false)];
+        let names = seed_skill_names(&cli, &disabled(&[]), root.path());
         assert_eq!(names, vec!["pandoc".to_string()]);
     }
 
     #[test]
-    fn seed_from_config_reads_the_mark_and_the_axis_off_one_snapshot() {
-        // The config-bound wiring pin (issue #961): the mark (off the
-        // baselines side table) and the disabled-name axis both read off
-        // the ONE config -- a dropped-axis or stale-mark revert at the
-        // command boundary dies here.
+    fn seed_from_config_reads_the_axis_off_one_snapshot() {
+        // The config-bound wiring pin (issue #961): the disabled-name axis
+        // reads off the ONE config -- a dropped-axis revert at the command
+        // boundary dies here.
         let root = tempfile::tempdir().expect("root");
-        put_skill(root.path(), "pandoc");
+        put_system_skill(root.path(), "pandoc");
         put_skill(root.path(), "pdf-tools");
         put_skill(root.path(), "sql-coach");
         let mut cfg = crate::app_config::AppConfig::defaults();
-        cfg.builtin_skill_baselines.insert(
-            "pandoc".to_string(),
-            BuiltinSkillBaseline {
-                hash: "h".to_string(),
-                locale: "en-US".to_string(),
-            },
-        );
         cfg.disabled_skills.insert("sql-coach".to_string());
         let cli = vec![builtin_cli("pandoc", true)];
         let names = seed_from_config(&cfg, &cli, root.path());

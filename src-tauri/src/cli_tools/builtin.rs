@@ -297,10 +297,10 @@ impl BuiltinScanEntry {
 pub struct BuiltinScanResult {
     pub config: AppConfig,
     pub scan: Vec<BuiltinScanEntry>,
-    /// The builtin skills whose SKILL.md the window could not create
-    /// (issue #1016): one name per failed fresh materialization, in
-    /// `BUILTIN_SKILL_DEFINITIONS` order (a skill whose file already
-    /// exists never appears here -- its row is the listing's own). A
+    /// The builtin skills whose reserved-subtree alignment the window
+    /// could not complete (issue #1016; whole-tree lane since ADR-0121):
+    /// one name per failed subtree write, in manifest order (an aligned
+    /// skill never appears here -- its row is the listing's own). A
     /// computed snapshot like the scan rows (never persisted) -- the
     /// Skills panel renders the missing rows' warnings from it (the #937
     /// agents-pane warning-lane precedent), and the next successful

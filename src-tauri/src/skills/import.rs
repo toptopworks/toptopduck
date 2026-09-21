@@ -81,10 +81,10 @@ pub fn import_skill(
     source_dir: &Path,
     mode: ImportMode,
 ) -> Result<SkillEntry, SkillError> {
-    // External sources are never registry material: the source load runs
-    // with an empty builtin mark (marking keys on registry side-table
-    // membership, and a same-named external dir is not ours to claim).
-    let entry = load_skill(source_dir, &Default::default())?;
+    // External sources are never registry material: the source load reads
+    // as a plain local entry (posture is location-derived since ADR-0121;
+    // a same-named external dir is not ours to claim).
+    let entry = load_skill(source_dir)?;
     // The builtin reserved set is refused statically (issue #677) -- a
     // third-party skill that happens to carry a curated name cannot take it.
     if super::builtin::is_reserved_skill_name(&entry.name) {
@@ -116,7 +116,7 @@ pub fn import_skill(
     // `acquired` variant + the link target the drawer's "open source location"
     // reveals. The reserved-set refusal above keeps the name out of the
     // builtin namespace, so the read-back cannot be a builtin skill.
-    load_skill(&target, &Default::default())
+    load_skill(&target)
 }
 
 /// Run a batch of imports, collecting each outcome so a per-item failure never
@@ -170,7 +170,7 @@ fn scan_source_children(source: &Path, existing_names: &HashSet<String>) -> Vec<
         {
             continue;
         }
-        match load_skill(&path, &Default::default()) {
+        match load_skill(&path) {
             Ok(loaded) => {
                 let status = if existing_names.contains(&loaded.name) {
                     DiscoveredSkillStatus::AlreadyExists

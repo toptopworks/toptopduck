@@ -80,11 +80,9 @@ pub enum CliToolWriteError {
 /// consumers ride the same listing, so they cannot disagree on which
 /// skills count as registered.
 fn scan_registered_skills(
-    cfg: &AppConfig,
     skills_root: &Path,
 ) -> (BTreeSet<String>, std::collections::BTreeMap<String, String>) {
-    let skill_mark = crate::skills::BuiltinSkillMark::from_config(cfg);
-    let skills = crate::skills::registry::list_skills(skills_root, &skill_mark).skills;
+    let skills = crate::skills::registry::list_skills(skills_root).skills;
     let mut names = BTreeSet::new();
     let mut bodies = std::collections::BTreeMap::new();
     for skill in skills {
@@ -414,26 +412,20 @@ impl LiveProviderConfig {
                 .upsert(tool)
                 .map_err(CliToolWriteError::Invalid)?;
         }
-        // Builtin-skill materialization rides the same write (issue #677,
-        // ADR-0109 Decision 5): the freshly-registered entries are already
-        // in `cfg.cli_tools`, so a first detection materializes its
-        // companion skill in this same window. The side-table mutation
-        // folds into the persist decision below.
-        let locale = crate::skills::builtin::resolve_materialization_locale(cfg.locale);
-        let skills = crate::skills::builtin::reconcile(
-            skills_root,
-            locale,
-            &cfg.cli_tools,
-            &mut cfg.builtin_skill_baselines,
-        );
-        let config = if nothing_registered && upgraded.is_empty() && !skills.dirty {
-            // Nothing to persist: every shipped definition is dormant,
-            // already registered, and in agreement with its baseline, and no
-            // builtin skill changed (a knowledge-only skill materializes on
-            // the first window -- ADR-0120 Decision 7 -- so a no-CLI-hit
-            // install still lands its config once, then stays quiet). Skip
-            // the rewrite so startup and pane mounts do not churn the
-            // config file (normalize + atomic write).
+        // Builtin-skill alignment rides the same window (issue #677;
+        // ADR-0121 Decision 3): the reserved `.system/` subtree is brought
+        // to fingerprint agreement with the embedded tree, per anchored
+        // manifest entry -- the freshly-registered entries are already in
+        // `cfg.cli_tools`, so a first detection materializes its companion
+        // skill in this same window. Alignment writes NOTHING to app-config
+        // (the baseline side table is retired), so the persist decision is
+        // the CLI's alone.
+        let skills = crate::skills::builtin::align(skills_root, &cfg.cli_tools);
+        let config = if nothing_registered && upgraded.is_empty() {
+            // Nothing to persist: every shipped CLI definition is dormant
+            // or already registered, and the baseline reconciliation found
+            // no drift. Skip the rewrite so startup and pane mounts do not
+            // churn the config file (normalize + atomic write).
             cfg
         } else {
             self.store_inner(cfg).map_err(CliToolWriteError::Write)?
@@ -451,40 +443,12 @@ impl LiveProviderConfig {
         })
     }
 
-    /// Restore one builtin skill's SKILL.md to the shipped baseline
-    /// (issue #677): the file is rewritten at the CURRENT locale and the
-    /// side table re-recorded, so future version upgrades follow the
-    /// baseline again. Refuses anything that is not a materialized builtin
-    /// skill. Returns the updated full config (ADR-0109 Decision 9).
-    pub fn restore_builtin_skill(
-        &self,
-        skills_root: &std::path::Path,
-        name: &str,
-    ) -> Result<AppConfig, crate::skills::SkillError> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .expect("app-config write_lock poisoned");
-        let mut cfg = self
-            .load_for_write()
-            .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))?;
-        let locale = crate::skills::builtin::resolve_materialization_locale(cfg.locale);
-        crate::skills::builtin::restore(
-            skills_root,
-            locale,
-            name,
-            &mut cfg.builtin_skill_baselines,
-        )?;
-        self.store_inner(cfg)
-            .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))
-    }
-
     /// The registered-skills name set the agent preamble marks partition
     /// against (issue #932): the spec-valid listing off the same scan the
     /// Skills pane reads. One derivation shared by every agents command, so
     /// the two panes cannot disagree on which skills count as registered.
-    fn registered_skill_names(cfg: &AppConfig, skills_root: &Path) -> BTreeSet<String> {
-        scan_registered_skills(cfg, skills_root).0
+    fn registered_skill_names(skills_root: &Path) -> BTreeSet<String> {
+        scan_registered_skills(skills_root).0
     }
 
     /// List the agent-definitions registry (issue #932): the directory scan
@@ -498,7 +462,7 @@ impl LiveProviderConfig {
     ) -> crate::agents::AgentListing {
         let cfg = self.load();
         let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
-        let skill_names = Self::registered_skill_names(&cfg, skills_root);
+        let skill_names = Self::registered_skill_names(skills_root);
         crate::agents::registry::list_agents(agents_root, &mark, &cfg.enabled_agents, &skill_names)
     }
 
@@ -533,7 +497,7 @@ impl LiveProviderConfig {
             return Vec::new();
         }
         let cfg = self.load();
-        let (skill_names, bodies) = scan_registered_skills(&cfg, skills_root);
+        let (skill_names, bodies) = scan_registered_skills(skills_root);
         let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
         let listing = crate::agents::registry::list_agents(
             agents_root,
@@ -598,7 +562,7 @@ impl LiveProviderConfig {
             description,
             preamble,
             &cfg.enabled_agents,
-            &Self::registered_skill_names(&cfg, skills_root),
+            &Self::registered_skill_names(skills_root),
         )?;
         if let Err(e) = self.set_agent_enabled(name, true) {
             log::warn!(
@@ -631,7 +595,7 @@ impl LiveProviderConfig {
     ) -> Result<crate::agents::AgentEntry, crate::agents::AgentError> {
         let cfg = self.load();
         let mark = crate::agents::BuiltinAgentMark::from_config(&cfg);
-        let skill_names = Self::registered_skill_names(&cfg, skills_root);
+        let skill_names = Self::registered_skill_names(skills_root);
         let mut updated = crate::agents::registry::update_agent(
             agents_root,
             &mark,
@@ -843,8 +807,7 @@ impl LiveProviderConfig {
         name: &str,
         update: crate::skills::SkillUpdate,
     ) -> Result<crate::skills::SkillEntry, crate::skills::SkillError> {
-        let mark = crate::skills::BuiltinSkillMark::from_config(&self.load());
-        let mut updated = crate::skills::registry::update_skill(skills_root, &mark, name, update)?;
+        let mut updated = crate::skills::registry::update_skill(skills_root, name, update)?;
         if updated.name != name {
             match self.rename_skill_disabled(name, &updated.name) {
                 Ok(cfg) => {
@@ -875,8 +838,7 @@ impl LiveProviderConfig {
         skills_root: &std::path::Path,
         name: &str,
     ) -> Result<(), crate::skills::SkillError> {
-        let mark = crate::skills::BuiltinSkillMark::from_config(&self.load());
-        crate::skills::registry::delete_skill(skills_root, &mark, name)?;
+        crate::skills::registry::delete_skill(skills_root, name)?;
         if let Err(e) = self.set_skill_enabled(name, true) {
             log::warn!(
                 "deleted skill `{name}` but failed to drop its disabled entry (the stale \
@@ -1578,14 +1540,16 @@ mod tests {
 
     #[test]
     fn scan_and_register_surfaces_skill_materialize_failures() {
-        // A blocked skills root (issue #1016): the vega-chart directory
-        // path is occupied by a plain file, so materialization fails while
-        // the CLI scan itself is untouched -- the failure rides the same
-        // payload as the detection snapshot, for the Skills panel's
-        // warning lane.
+        // A blocked skills root (issue #1016, whole-tree lane since
+        // ADR-0121): the reserved-subtree path for vega-chart is occupied
+        // by a plain file, so alignment fails while the CLI scan itself is
+        // untouched -- the failure rides the same payload as the detection
+        // snapshot, for the Skills panel's warning lane.
         let (_dir, live) = live();
         let skills = tempfile::tempdir().expect("skills root");
-        std::fs::write(skills.path().join("vega-chart"), b"not a directory").expect("blocker");
+        std::fs::create_dir(skills.path().join(".system")).expect("reserved subtree");
+        std::fs::write(skills.path().join(".system/vega-chart"), b"not a directory")
+            .expect("blocker");
         let path_dir = controlled_path(&[]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
         let result = live
@@ -1595,23 +1559,16 @@ mod tests {
             result.skill_materialize_failures,
             vec!["vega-chart".to_string()]
         );
-        // The degraded posture: nothing persisted for the failed skill
-        // (no baseline record in the returned config)...
-        assert!(!result
-            .config
-            .builtin_skill_baselines
-            .contains_key("vega-chart"));
+        // The degraded posture: nothing written for the failed skill...
+        assert!(!skills.path().join(".system/vega-chart/SKILL.md").exists());
         // ...and the next window over a cleared path heals the lane (the
-        // warning must not outlive the failure).
-        std::fs::remove_file(skills.path().join("vega-chart")).expect("unblock");
+        // warning must not outlive the failure it reported).
+        std::fs::remove_file(skills.path().join(".system/vega-chart")).expect("unblock");
         let healed = live
             .scan_and_register(Some(path_env), skills.path())
             .expect("rescan");
         assert!(healed.skill_materialize_failures.is_empty());
-        assert!(healed
-            .config
-            .builtin_skill_baselines
-            .contains_key("vega-chart"));
+        assert!(skills.path().join(".system/vega-chart/SKILL.md").exists());
     }
 
     #[test]
@@ -1761,10 +1718,10 @@ mod tests {
     #[test]
     fn startup_register_on_a_full_miss_registers_no_cli_but_materializes_the_knowledge_skill() {
         // No CLI hits -> no CLI registration (the dormant posture, CLI
-        // side). The knowledge-only skill is NOT a miss: it materializes in
-        // the same window and the config lands carrying its baseline -- the
-        // store skip now needs BOTH the CLI side and the skills side quiet
-        // (ADR-0120 Decision 7).
+        // side). The knowledge-only skill is NOT a miss: it aligns in the
+        // same window into the reserved subtree (ADR-0120 Decision 7) --
+        // and since alignment writes no config, a no-CLI-hit install stays
+        // config-silent too (the ADR-0121 posture: no side table).
         let (dir, live) = live();
         let empty_dir = tempfile::tempdir().expect("tempdir");
         let path_env = std::env::join_paths([empty_dir.path()]).expect("join");
@@ -1772,10 +1729,10 @@ mod tests {
         crate::cli_tools::builtin::startup_register(&live, Some(path_env), skills.path())
             .expect("startup");
         assert!(live.cli_tools().is_empty());
-        assert!(skills.path().join("vega-chart/SKILL.md").exists());
+        assert!(skills.path().join(".system/vega-chart/SKILL.md").exists());
         assert!(
-            dir.path().join("config.json").exists(),
-            "the skill baseline side table persists"
+            !dir.path().join("config.json").exists(),
+            "nothing to persist: alignment is config-silent"
         );
     }
 
@@ -2028,73 +1985,25 @@ mod tests {
     #[test]
     fn scan_and_register_materializes_the_companion_skill_in_the_same_window() {
         // The wiring pin (issue #677): a first detection registers the CLI
-        // entry AND materializes the companion SKILL.md in the same write
-        // window -- the file lands in the skills root and the side table
-        // reaches the PERSISTED config, not just the returned view.
-        let (_dir, live) = live();
-        let skills = tempfile::tempdir().expect("skills root");
-        let path_dir = controlled_path(&["pandoc"]);
-        let path_env = std::env::join_paths([path_dir.path()]).expect("join");
-        let result = live
-            .scan_and_register(Some(path_env), skills.path())
-            .expect("scan");
-        let md = skills.path().join("pandoc").join("SKILL.md");
-        assert!(md.exists(), "the companion skill file materialized");
-        assert!(
-            result.config.builtin_skill_baselines.contains_key("pandoc"),
-            "the side table is in the returned config"
-        );
-        // Persisted, not just the returned view (the mark re-reads through
-        // the live provider).
-        assert!(crate::skills::BuiltinSkillMark::from_config(&live.load()).contains("pandoc"));
-    }
-
-    #[test]
-    fn restore_builtin_skill_rewrites_at_the_config_locale_and_persists() {
-        // The wrapper-layer pin (issue #677): the IPC path resolves the
-        // materialization locale off the CURRENT config, rewrites the file
-        // through the shared atomic write, and persists the re-recorded side
-        // table in the same read-modify-write.
+        // entry AND aligns the companion skill's reserved subtree in the
+        // same window -- the file lands under `.system/`, byte-identical
+        // to the embedded asset, with the alignment marker beside it.
         let (_dir, live) = live();
         let skills = tempfile::tempdir().expect("skills root");
         let path_dir = controlled_path(&["pandoc"]);
         let path_env = std::env::join_paths([path_dir.path()]).expect("join");
         live.scan_and_register(Some(path_env), skills.path())
             .expect("scan");
-        std::fs::write(
-            skills.path().join("pandoc/SKILL.md"),
-            "---\nname: pandoc\ndescription: edited\n---\nEdited.\n",
-        )
-        .expect("edit");
-        let cfg = live
-            .restore_builtin_skill(skills.path(), "pandoc")
-            .expect("restore");
-        let def = crate::skills::builtin::find_skill_definition("pandoc").expect("definition");
-        let locale = crate::skills::builtin::resolve_materialization_locale(cfg.locale);
-        assert_eq!(
-            std::fs::read_to_string(skills.path().join("pandoc/SKILL.md")).unwrap(),
-            def.render(locale).unwrap(),
-            "rewritten at the current config locale"
-        );
-        // Persisted, not just the returned view.
-        assert!(crate::skills::BuiltinSkillMark::from_config(&live.load()).contains("pandoc"));
-    }
-
-    #[test]
-    fn restore_builtin_skill_refuses_and_writes_nothing() {
-        // Unknown names and curated-but-unmaterialized names (the
-        // reverse-conflict window) are refusals, and a refused restore
-        // leaves neither a file nor a side-table record behind.
-        let (_dir, live) = live();
-        let skills = tempfile::tempdir().expect("skills root");
-        for name in ["no-such-skill", "pandoc"] {
-            assert!(matches!(
-                live.restore_builtin_skill(skills.path(), name),
-                Err(crate::skills::SkillError::NoSuchSkill(_))
-            ));
-        }
-        assert!(!skills.path().join("pandoc/SKILL.md").exists());
-        assert!(live.load().builtin_skill_baselines.is_empty());
+        let md = skills.path().join(".system/pandoc/SKILL.md");
+        assert!(md.exists(), "the companion skill file materialized");
+        let embedded = std::fs::read(md).expect("read");
+        let asset = include_bytes!("../skills/assets/builtin/pandoc/SKILL.md");
+        assert_eq!(embedded, asset, "byte-identical to the embedded asset");
+        assert!(skills.path().join(".system/pandoc/.fingerprint").exists());
+        // The un-anchored companions stay out of the subtree; the
+        // knowledge-only skill rides the app version and lands too.
+        assert!(!skills.path().join(".system/python").exists());
+        assert!(skills.path().join(".system/vega-chart/SKILL.md").exists());
     }
 
     #[test]

@@ -272,15 +272,15 @@ pub fn create_session(
         // #983): the registry INTERSECT the enablement axis materializes
         // the session's discovery snapshot -- the enabled set at creation,
         // immutable within the session, persisted explicitly in the recipe
-        // header. A materialized CLI-companion builtin additionally requires
-        // its companion CLI entry detected + enabled (the #677 two-axis
+        // header. A CLI-companion builtin additionally requires its
+        // companion CLI entry detected + enabled (the #677 two-axis
         // conjunction); a knowledge-only skill (ADR-0120 Decision 7) rides
-        // the app version and takes no CLI conjunct; the materialized gate
-        // is the side-table mark (the same anchor the
-        // frontend's `acquired: builtin` derives from) -- the mark gates the
-        // BUILTIN arm only: a reverse-conflict user file reads `acquired:
-        // local` and rides the user arm, discoverable like any user skill
-        // unless disabled (ADR-0118 Decision 1).
+        // the app version and takes no CLI conjunct. The builtin gate rides
+        // the BUILTIN arm only (ADR-0121: the reserved-subtree row,
+        // location-derived): a local fork owning the name shadows the
+        // builtin -- it reads `acquired: local` and rides the user arm,
+        // discoverable like any user skill unless disabled (ADR-0118
+        // Decision 1).
         let cfg = live.load();
         let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
         s.set_discovery_snapshot(seed);
@@ -3458,25 +3458,10 @@ pub fn delete_skill(
     live.delete_skill(&root.0, &name)
 }
 
-/// Restore one builtin skill's SKILL.md to the shipped baseline (issue #677,
-/// ADR-0109 Decision 5): the file is rewritten at the CURRENT locale and the
-/// side table re-recorded (future version upgrades follow again). Refuses
-/// anything that is not a materialized builtin skill. Returns the updated
-/// full config (the ADR-0109 Decision 9 sync contract -- commit wholesale,
-/// no re-fetch).
-#[tauri::command]
-pub fn restore_builtin_skill(
-    live: State<'_, LiveProviderConfig>,
-    skills_root: State<'_, SkillsRoot>,
-    name: String,
-) -> Result<crate::app_config::AppConfig, SkillError> {
-    live.restore_builtin_skill(&skills_root.0, &name)
-}
-
 // The agent-definitions commands (issue #932, ADR-0117) are thin shells:
 // every composite -- the read-merge, the create-lands-enabled pair, the
 // rename carry, the delete stale-entry drop -- lives on LiveProviderConfig
-// (the restore_builtin_skill / cli_tools precedent: the config layer is the
+// (the cli_tools precedent: the config layer is the
 // testable seam, and Tauri commands are not).
 
 /// List the agent-definitions registry (issue #932): the scan merged with
@@ -3584,12 +3569,11 @@ pub fn list_skill_sources(
     // that lands between this call and the subsequent `import_skills` is
     // reflected (import re-checks at commit too -- the snapshot is for the
     // dialog's PREVIEW only, never an authority).
-    let existing: std::collections::HashSet<String> =
-        crate::skills::registry::list_skills(&root.0, &Default::default())
-            .skills
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
+    let existing: std::collections::HashSet<String> = crate::skills::registry::list_skills(&root.0)
+        .skills
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     let candidates = build_skill_source_candidates(&app, &custom_paths);
     discover_skill_sources(&candidates, &existing)
 }

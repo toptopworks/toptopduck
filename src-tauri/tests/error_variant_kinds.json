@@ -57,12 +57,15 @@
     "Turn"
   ],
   "SkillError": [
+    "BuiltinReadOnly",
+    "BuiltinUndeletable",
     "FsFailure",
     "InvalidName",
     "InvalidSkill",
     "NameTaken",
     "NoSuchSkill",
-    "ReadOnly"
+    "ReadOnly",
+    "ReservedSkillName"
   ],
   "StoreCommandError": [
     "BlankName",

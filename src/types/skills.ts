@@ -29,7 +29,8 @@ export interface SkillEntry {
   // The Markdown body after the frontmatter -- the prompt fragment.
   body: string;
   // The resolved link target for `linked` skills (the "open source location"
-  // anchor); null for `local`.
+  // anchor); the reserved-subtree directory (the reveal / fork anchor) for
+  // `builtin` rows; null for `local`.
   link_target: string | null;
   // The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
   // in the new-session seed's reach; disabled = dormant (grayed row, the
@@ -41,6 +42,14 @@ export interface SkillEntry {
   // compares each turn's SkillProvenance.content_hash against to surface
   // a "modified" drift badge when a skill changed after a recorded turn.
   content_hash: string;
+  // A local or linked row whose name sits in the builtin manifest
+  // (ADR-0121 Decision 5): the row SHADOWS a builtin skill (when the
+  // builtin is materialized, listing, invocation, and auto-include all
+  // resolve to this row), and the settings row
+  // renders the "covers built-in" badge -- the standing reminder that the
+  // app-side curation is invisible to this fork until it is deleted.
+  // Always false for builtin rows themselves.
+  covers_builtin: boolean;
 }
 
 // One spec-invalid skill directory the registry scan skipped (issue #373).
@@ -117,7 +126,7 @@ export type SkillError =
   | { kind: "NoSuchSkill"; data: string }
   | { kind: "NameTaken"; data: string }
   | { kind: "ReservedSkillName"; data: string }
-  | { kind: "BuiltinNameLocked"; data: string }
+  | { kind: "BuiltinReadOnly"; data: string }
   | { kind: "BuiltinUndeletable"; data: string }
   | { kind: "ReadOnly"; data: string }
   | { kind: "FsFailure"; data: string };
@@ -239,13 +248,6 @@ export interface ImportItem {
 
 // The per-item outcome of an import batch (issue #367). Mirrors the Rust
 // ImportOutcome as an adjacently-tagged union. `failed` nests the typed
-// One builtin_skill_baselines record (issue #677): the recorded baseline of
-// a materialized builtin skill. Mirrors the Rust BuiltinSkillBaseline.
-export interface BuiltinSkillBaseline {
-  hash: string;
-  locale: string;
-}
-
 // SkillError (already adjacently tagged) as its `data`, so the frontend
 // reaches the reject detail through `data.kind` + `data.data`.
 export type ImportOutcome =

@@ -70,13 +70,17 @@ pub struct SkillPromptFragment {
 /// the session's mounted set in first-mount insertion order; the returned
 /// fragments preserve that order so the assembled prompt reads deterministically.
 ///
-/// Each name resolves against `<root>/<name>/SKILL.md`. A name that is not
-/// spec-shaped (the mount API does not validate, so a direct IPC could land a
-/// non-spec name) is treated as unreadable -- it never reaches the filesystem
-/// (the join stays traversal-safe). A spec-shaped name whose `SKILL.md` is
-/// missing or unreadable (deleted after mounting, permissions, IO error)
-/// degrades honestly: empty description + empty body + empty hash + a warn
-/// log. The body, when readable, is split out of the frontmatter verbatim --
+/// Each name resolves through the shadowing order (ADR-0121 Decision 5): a
+/// directory at `<root>/<name>` wins, the reserved-subtree copy
+/// `<root>/.system/<name>` is the fallback, so a mounted builtin serves from
+/// the reserved subtree and a shadowing fork serves its own body. A name
+/// that is not spec-shaped (the mount API does not validate, so a direct
+/// IPC could land a non-spec name) is treated as unreadable -- it never
+/// reaches the filesystem (the join stays traversal-safe). A spec-shaped
+/// name that no longer resolves on disk (deleted after mounting -- neither
+/// arm of the shadowing order exists) or whose `SKILL.md` is unreadable
+/// (permissions, IO error) degrades honestly: empty description + empty
+/// body + empty hash + a warn log. The body, when readable, is split out of the frontmatter verbatim --
 /// a malformed YAML mapping still yields its body (the fence split is
 /// structural, not semantic), so an externally corrupted skill keeps injecting
 /// its prose until the user repairs or unmounts it; only its description
@@ -91,6 +95,17 @@ pub fn resolve_prompt_fragments(root: &Path, mounted: &[String]) -> Vec<SkillPro
 /// materialization. Kept separate so the per-skill failure mode is explicit
 /// and the `?` operator stays out of the map closure (a single unreadable
 /// skill never fails the whole turn).
+/// The degrade shape shared by every failure arm of [`resolve_one`]: the
+/// skill keeps its name in the disclosure while contributing no body.
+fn empty_fragment(name: &str) -> SkillPromptFragment {
+    SkillPromptFragment {
+        name: name.to_string(),
+        description: String::new(),
+        body: String::new(),
+        content_hash: String::new(),
+    }
+}
+
 pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     // Defense in depth: the mount API does not validate names, so a non-spec
     // name could reach here via direct IPC. Refuse to join it onto the root --
@@ -102,14 +117,19 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
             "skill `{name}` is not a spec-shaped name -- \
              injecting no body, recording empty hash",
         );
-        return SkillPromptFragment {
-            name: name.to_string(),
-            description: String::new(),
-            body: String::new(),
-            content_hash: String::new(),
-        };
+        return empty_fragment(name);
     }
-    let path = root.join(name).join(SKILL_MD);
+    let path = match crate::skills::builtin::resolve_skill_dir(root, name) {
+        Some(dir) => dir.join(SKILL_MD),
+        None => {
+            log::warn!(
+                target: "skills",
+                "skill `{name}` has no registry directory at resolve time \
+                 -- injecting no body, recording empty hash",
+            );
+            return empty_fragment(name);
+        }
+    };
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
@@ -119,12 +139,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
                  (`{}`: {e}) -- injecting no body, recording empty hash",
                 path.display(),
             );
-            return SkillPromptFragment {
-                name: name.to_string(),
-                description: String::new(),
-                body: String::new(),
-                content_hash: String::new(),
-            };
+            return empty_fragment(name);
         }
     };
     // SHA-256 of the WHOLE file bytes (frontmatter + body + trailing newline)
@@ -220,6 +235,48 @@ mod tests {
         std::fs::create_dir_all(root.join(name)).unwrap();
         let content = format!("---\nname: {name}\ndescription: Test skill {name}.\n---\n{body}");
         std::fs::write(root.join(name).join(SKILL_MD), content).unwrap();
+    }
+
+    /// The builtin posture's on-disk shape (ADR-0121): a spec-valid skill
+    /// tree living ONLY under the reserved subtree, nothing at the registry
+    /// root -- so a resolver must take the shadowing order's fallback arm
+    /// to serve it at all.
+    fn put_system_skill(root: &Path, name: &str, body: &str) {
+        let dir = root.join(".system").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = format!("---\nname: {name}\ndescription: Test skill {name}.\n---\n{body}");
+        std::fs::write(dir.join(SKILL_MD), content).unwrap();
+    }
+
+    /// A skill present only under the reserved subtree serves its body and
+    /// its real hash -- the production default posture for a builtin. A
+    /// resolver that joins `root/<name>` directly finds nothing and
+    /// silently degrades to the empty fragment (the review-pass wiring
+    /// mutant).
+    #[test]
+    fn a_builtin_tree_under_the_reserved_subtree_serves_its_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_system_skill(root, "pandoc", "Embedded body.\n");
+        let fragments = resolve_prompt_fragments(root, &["pandoc".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].name, "pandoc");
+        assert_eq!(fragments[0].body, "Embedded body.\n");
+        let raw = std::fs::read(root.join(".system").join("pandoc").join(SKILL_MD)).unwrap();
+        assert_eq!(fragments[0].content_hash, sha256_hex(&raw));
+    }
+
+    /// Under shadowing (ADR-0121 Decision 5) a local directory owning the
+    /// name wins: the fragment carries the fork's body, not the reserved
+    /// subtree's.
+    #[test]
+    fn a_shadowing_fork_wins_over_the_reserved_subtree_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_system_skill(root, "pandoc", "Embedded body.\n");
+        put_skill(root, "pandoc", "Fork body.\n");
+        let fragments = resolve_prompt_fragments(root, &["pandoc".to_string()]);
+        assert_eq!(fragments[0].body, "Fork body.\n");
     }
 
     #[test]

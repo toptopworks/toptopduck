@@ -30,23 +30,23 @@ pub enum Acquired {
     /// A real directory -- authored in-app (`create_skill`) or copied in by a
     /// future import slice. Fully editable.
     Local,
-    /// A materialized builtin skill (issue #677, ADR-0109 Decision 5): an
-    /// app-authored skill the scan window writes -- a CLI companion
-    /// (ADR-0109) or a knowledge-only skill (ADR-0120 Decision 7). Keyed
-    /// on the app-config side table
-    /// (`builtin_skill_baselines`) membership -- NOT on the static name set
-    /// -- so a user's pre-existing same-named skill keeps its own source
-    /// until materialization actually happens. Undeletable; every field
-    /// except `name` is editable (name is the locked identity the shipped
-    /// definition anchors on -- materialization, upgrades, and the
-    /// reserved-name set all address the skill by it).
+    /// A builtin skill (issue #677; readonly posture since ADR-0121): an
+    /// app-authored skill materialized into the registry's reserved
+    /// `.system/` subtree -- a CLI companion (ADR-0109) or a knowledge-only
+    /// skill (ADR-0120 Decision 7). Keyed on LOCATION (the reserved-subtree
+    /// scan), not on any side table: whatever spec-valid directory lives
+    /// under `.system/` IS a builtin row. Read-only and undeletable (the
+    /// subtree is an app cache that re-aligns on the next scan); a
+    /// same-named local directory shadows it (ADR-0121 Decision 5).
     Builtin,
 }
 
 /// One registry skill as it crosses IPC (issue #362). The declaration face
 /// (ADR-0086 Decision 1): the prompt fragment (`body`). `link_target` is the
 /// resolved symlink / junction target for `linked` skills (the "open source
-/// location" anchor); `null` for `local`. Option fields mirror the Rust
+/// location" anchor), the reserved-subtree directory for `builtin` rows
+/// (the reveal / fork anchor, ADR-0121), and `null` for `local`. Option
+/// fields mirror the Rust
 /// `Option<String>` + bare serde convention (None serializes as JSON null,
 /// same shape as `AppConfig.last_dir`), so they are `| null` on the wire,
 /// not optional.
@@ -66,7 +66,9 @@ pub struct SkillEntry {
     /// on mount (a later #303 slice; carried here so the settings drawer edits
     /// it verbatim).
     pub body: String,
-    /// The resolved link target for `linked` skills; `null` for `local`.
+    /// The resolved link target for `linked` skills; the reserved-subtree
+    /// directory (the reveal / fork anchor) for `builtin` rows; `null` for
+    /// `local`.
     pub link_target: Option<String>,
     /// The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
     /// in the session seed's reach + rendered normally in the settings pane;
@@ -83,6 +85,14 @@ pub struct SkillEntry {
     /// path uses (issue #364), so an unedited skill yields the identical hash
     /// both places and the drift signal is exact, not approximate.
     pub content_hash: String,
+    /// A local or linked row whose name sits in the builtin manifest
+    /// (ADR-0121 Decision 5): the row SHADOWS a builtin skill (when the
+    /// builtin is materialized, listing, invocation, and auto-include all
+    /// resolve to this row), and the frontend
+    /// renders the "covers built-in" badge -- the standing reminder that
+    /// the app-side curation is invisible to this fork until it is deleted.
+    /// Always `false` for builtin rows themselves.
+    pub covers_builtin: bool,
 }
 
 /// One spec-invalid skill directory the registry scan skipped, with the
@@ -194,11 +204,13 @@ pub enum SkillError {
     /// "taken by another skill of yours". Carries the name.
     #[error("skill name is reserved for a built-in skill: {0}")]
     ReservedSkillName(String),
-    /// A rename targeted a MATERIALIZED builtin skill (issue #677): the
-    /// name is the locked identity the shipped definition anchors on.
+    /// A mutating call targeted a builtin skill (readonly posture,
+    /// ADR-0121): the reserved-subtree files are an app cache that
+    /// re-aligns on the next scan, so edits cannot stick -- the editable
+    /// variant is a filesystem copy of the subtree (the fork channel).
     /// Carries the name.
-    #[error("built-in skill name is locked: {0}")]
-    BuiltinNameLocked(String),
+    #[error("built-in skill is read-only: {0}")]
+    BuiltinReadOnly(String),
     /// A delete targeted a MATERIALIZED builtin skill (issue #677): builtin
     /// skills are undeletable (they re-materialize on the next scan anyway);
     /// the shutdown axis is the enablement axis -- disable the skill, or
@@ -502,6 +514,7 @@ mod tests {
             link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
             enabled: true,
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            covers_builtin: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: SkillEntry = serde_json::from_str(&json).unwrap();
@@ -526,6 +539,7 @@ mod tests {
             link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
             enabled: true,
             content_hash: "abc".into(),
+            covers_builtin: false,
         };
         let imported = ImportOutcome::Imported(entry.clone());
         let json = serde_json::to_value(&imported).unwrap();

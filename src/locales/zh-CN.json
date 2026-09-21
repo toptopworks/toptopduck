@@ -704,13 +704,10 @@
   "settings.cli.conflictBadge": "占用内置名",
   "settings.skills.filterBuiltin": "系统",
   "settings.skills.acquiredBuiltin": "系统",
-  "settings.skills.editedBadge": "已编辑",
-  "settings.skills.fieldNameLockedHint": "系统技能的名称不可更改",
-  "settings.skills.confirmRestoreTitle": "恢复 {name} 的系统定义？",
-  "settings.skills.confirmRestoreBody": "这会丢弃你对 {name} 的修改，将其恢复为随应用发行的系统定义。此操作无法撤销。",
-  "settings.skills.restoreAction": "恢复",
-  "settings.skills.restoreLabel": "恢复技能 {name} 的内置定义",
+  "settings.skills.coversBuiltin": "覆盖内置",
+  "settings.skills.builtinReadOnlyHint": "该技能随应用内置，为只读；把它的文件夹复制到技能库根目录即可保留你自己的版本。",
+  "settings.skills.openBuiltinFolder": "打开文件夹",
   "error.skill.reservedName": "名称「{name}」为系统技能保留",
-  "error.skill.nameLocked": "系统技能「{name}」不能重命名",
+  "error.skill.builtinReadOnly": "系统技能「{name}」为只读；把它的文件夹复制到技能库根目录即可创建可编辑的版本",
   "error.skill.undeletable": "系统技能「{name}」不能删除；可改为禁用"
 }

@@ -112,7 +112,6 @@ describe("SkillsSection (issue #362)", () => {
     const onAppConfigSync = vi.fn();
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={onAppConfigSync}
       />,
     );
@@ -157,7 +156,6 @@ describe("SkillsSection (issue #362)", () => {
       });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={onAppConfigSync}
       />,
     );
@@ -204,7 +202,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -223,7 +220,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -244,7 +240,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -264,7 +259,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -307,7 +301,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -336,7 +329,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -365,7 +357,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -393,7 +384,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -425,7 +415,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(createSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -460,7 +449,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -501,7 +489,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -527,7 +514,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(updateSkill).mockResolvedValue(localSkill);
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -565,7 +551,6 @@ describe("SkillsSection (issue #362)", () => {
     );
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -595,7 +580,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill, linkedSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -621,7 +605,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -638,7 +621,6 @@ describe("SkillsSection (issue #362)", () => {
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -663,7 +645,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -689,7 +670,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -729,7 +709,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkillSources).mockResolvedValue([]);
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -748,7 +727,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -775,7 +753,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -803,7 +780,6 @@ describe("SkillsSection (issue #362)", () => {
     vi.mocked(listSkills).mockRejectedValue("IPC transport error");
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );
@@ -823,7 +799,6 @@ describe("SkillsSection (issue #362)", () => {
     });
     renderWithProviders(
       <SkillsSection
-        builtinSkillBaselines={{}}
         onAppConfigSync={() => {}}
       />,
     );

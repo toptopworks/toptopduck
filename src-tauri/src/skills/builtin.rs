@@ -1,736 +1,448 @@
-//! Builtin skills (issue #677, ADR-0109 Decisions 5/6; the companion axis
-//! made optional by ADR-0120 Decision 7): the app-authored skills that
-//! ride the app version. Most are CLI companions, one per builtin CLI
-//! registration entry (same name, 1:1); a knowledge-only skill (first:
-//! `vega-chart`) ships without a CLI counterpart and anchors on the app
-//! version alone.
+//! Builtin skills (ADR-0121): the app-authored skills that ride the app
+//! version. Most are CLI companions, one per builtin CLI registration entry
+//! (same name, 1:1); a knowledge-only skill (first: `vega-chart`) ships
+//! without a CLI counterpart and anchors on the app version alone.
 //!
-//! The shipped definition set is a compile-time constant: each CLI
-//! companion pairs 1:1 with its entry in
-//! [`crate::cli_tools::builtin::BUILTIN_DEFINITIONS`] by name, and every
-//! entry carries a per-locale (en-US / zh-CN) description + body. The
-//! prose is app-curated -- a skill
-//! body enters the system prompt, so it is a trust boundary: a third-party
-//! `SKILL.md` is never auto-absorbed (the manual import flow stays the only
-//! path for those; ADR-0109 Decision 5).
+//! The definition body is a compile-time-embedded FILE TREE
+//! (`src/skills/assets/builtin/<name>/`, `include_dir!`): `SKILL.md` plus any
+//! `scripts/` / `references/` assets, English-only (the body's consumer is
+//! the model; ADR-0121 Decision 2). The code side keeps only the MANIFEST --
+//! names, CLI companion wiring -- and the alignment engine.
 //!
-//! Materialization rides the CLI scan window (issue #677): when the
-//! companion CLI entry is `Builtin`-sourced and the skill file is missing,
-//! the skill is written into the registry under the CURRENT locale and
-//! recorded in the app-config side table
-//! `builtin_skill_baselines` (`name -> {hash, locale}`); a knowledge-only
-//! skill materializes in the same window with no CLI condition (ADR-0120
-//! Decision 7).
-//! The baseline judgment is pure derivation -- `edited` iff the current
-//! file's hash differs from the recorded hash -- so the edit path writes
-//! NOTHING to the side table; an unedited skill whose recorded hash left the
-//! shipped hash set upgrades silently at the recorded locale, and the
-//! explicit restore rewrites at the current locale. A locale switch never
-//! rewrites an already-materialized file.
+//! Materialization is a READ-ONLY CACHE in the registry's reserved subtree
+//! `<skills-root>/.system/` (ADR-0121 Decision 3): the alignment window
+//! (still riding the CLI scan, issue #677) writes the whole embedded tree per
+//! anchored skill and records a fingerprint marker (sorted paths + content
+//! hashes + a version salt) inside the subtree. A matching fingerprint skips
+//! with zero writes; any mismatch (missing, external edit, retired file,
+//! app-version bump) deletes the subtree and rewrites it -- the files are app
+//! deployment assets, not user content, so there is no edit detection, no
+//! edit preservation, and no restore action. A same-named LOCAL skill at the
+//! registry root shadows the builtin (Decision 5): the merge-side deference
+//! lives in the registry scan ([`super::registry`]), never here --
+//! materialization always runs.
+//!
+//! A skill body enters the system prompt, so the shipped set is a trust
+//! boundary: a third-party `SKILL.md` is never auto-absorbed (the manual
+//! import flow stays the only path for those; ADR-0109 Decision 5).
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use include_dir::{include_dir, Dir};
 
-use crate::app_config::{AppConfig, LocalePreference};
+use super::model::SkillError;
 
-use super::frontmatter;
-use super::model::{Acquired, SkillError};
-use super::registry;
+/// The registry's reserved subtree (ADR-0121 Decision 3): where the builtin
+/// skills' read-only cache lives. Dot-prefixed, so the generic registry scan
+/// skips it (the codex `.system` convention) and merges it explicitly
+/// instead; the app-side create / import / rename refuse the subtree's skill
+/// names, while the filesystem stays free (the fork channel: copy
+/// `.system/<name>/` to the registry root for an editable variant).
+pub(crate) const SYSTEM_SUBTREE: &str = ".system";
 
-/// One locale's shipped prose: the spec `description` + the Markdown body
-/// (the prompt fragment).
-pub(crate) struct BuiltinSkillBody {
-    pub description: &'static str,
-    pub body: &'static str,
-}
+/// The alignment marker's file name inside each skill's subtree: holds the
+/// embedded-tree fingerprint the last alignment wrote. Bookkeeping, not skill
+/// content -- excluded from the fingerprint input and from the attachment
+/// read surface.
+pub(crate) const FINGERPRINT_FILE: &str = ".fingerprint";
 
-/// One shipped builtin skill definition. A companioned skill's `name`
-/// equals its companion CLI registration's name (the two namespaces are
-/// disjoint by construction -- a skill name and a CLI name coincide only
-/// through these pairs); a knowledge-only skill has no CLI counterpart.
-pub(crate) struct BuiltinSkillDefinition {
+/// The tree fingerprint's version salt (ADR-0121 Decision 3): folded into
+/// every fingerprint, so an app-version bump can never compare equal to a
+/// marker an older build wrote -- each release re-aligns the subtree once,
+/// cleanly, even when the embedded bytes did not change.
+const VERSION_SALT: &str = env!("CARGO_PKG_VERSION");
+
+/// The embedded builtin-skill asset tree (ADR-0121 Decision 1): one
+/// directory per skill, `SKILL.md` + any attachment assets. The build script
+/// declares the recursive rerun-if-changed so an edited or newly added asset
+/// rebuilds the binary.
+static BUILTIN_SKILL_ASSETS: Dir = include_dir!("src/skills/assets/builtin");
+
+/// One manifest entry: the code-side residue of a shipped skill (ADR-0121
+/// Decision 1). A companioned skill's `name` equals its companion CLI
+/// registration's name (the two namespaces are disjoint by construction);
+/// a knowledge-only skill has no CLI counterpart.
+pub(crate) struct BuiltinSkillManifest {
     pub name: &'static str,
-    /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision
-    /// 7). `Some` -- the CLI companions: materialization and auto-include
-    /// gate on the entry. `None` -- a knowledge-only skill (first:
-    /// `vega-chart`): the app version is the anchor, so materialization
-    /// takes no CLI condition and auto-include drops the CLI conjunct.
+    /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision 7).
+    /// `Some` -- the CLI companions: alignment and auto-include gate on the
+    /// entry. `None` -- a knowledge-only skill (first: `vega-chart`): the
+    /// app version is the anchor, so alignment takes no CLI condition and
+    /// auto-include drops the CLI conjunct.
     pub companion_cli: Option<&'static str>,
-    /// locale tag -> prose. Ordered en-US first (the fallback arm of
-    /// [`body_for`] takes the first entry, so the ordering is load-bearing).
-    pub locales: &'static [(&'static str, BuiltinSkillBody)],
-}
-
-impl BuiltinSkillDefinition {
-    /// The prose for a locale tag: exact match, else the en-US fallback.
-    pub(crate) fn body_for(&self, locale: &str) -> &'static BuiltinSkillBody {
-        self.locales
-            .iter()
-            .find(|(tag, _)| *tag == locale)
-            .map(|(_, body)| body)
-            .unwrap_or(&self.locales[0].1)
-    }
-
-    /// The materialization anchor: whether a CLI registry anchors this
-    /// definition (ADR-0120 Decision 7). A companioned skill anchors on
-    /// its `Builtin`-sourced entry being registered (a dormant or
-    /// user-sourced entry anchors nothing); a knowledge-only skill is
-    /// anchored by the app version itself.
-    fn cli_anchor(&self, cli: &[crate::cli_tools::config::CliToolConfig]) -> bool {
-        match self.companion_cli {
-            Some(companion) => cli.iter().any(|t| {
-                t.name == companion && t.source == crate::cli_tools::config::CliToolSource::Builtin
-            }),
-            None => true,
-        }
-    }
-
-    /// The auto-include gate: a companioned skill rides the enabled state
-    /// of its `Builtin`-sourced entry; a knowledge-only skill has nothing
-    /// to ride, so the gate is unconditionally open.
-    fn auto_include_gate(&self, cli: &[crate::cli_tools::config::CliToolConfig]) -> bool {
-        match self.companion_cli {
-            Some(companion) => cli.iter().any(|t| {
-                t.name == companion
-                    && t.source == crate::cli_tools::config::CliToolSource::Builtin
-                    && t.enabled
-            }),
-            None => true,
-        }
-    }
-
-    /// The rendered SKILL.md bytes for a locale: the spec frontmatter
-    /// (`name` + `description`) + the body.
-    /// Deterministic by construction (the mapping is built in a fixed order
-    /// and serde_yaml preserves insertion order), so hashing the output is
-    /// the baseline anchor.
-    pub(crate) fn render(&self, locale: &str) -> Result<String, SkillError> {
-        let prose = self.body_for(locale);
-        let mut fm = serde_yaml::Mapping::new();
-        fm.insert(
-            serde_yaml::Value::String("name".into()),
-            serde_yaml::Value::String(self.name.into()),
-        );
-        fm.insert(
-            serde_yaml::Value::String("description".into()),
-            serde_yaml::Value::String(prose.description.into()),
-        );
-        frontmatter::render_skill_md(&fm, prose.body)
-    }
-
-    /// The hash set of every locale's rendered form -- the current shipped
-    /// baseline set. A recorded hash inside this set means "agrees with some
-    /// shipped body"; outside it means the app version moved the baseline
-    /// (upgrade material).
-    pub(crate) fn shipped_hashes(&self) -> Vec<String> {
-        self.locales
-            .iter()
-            .filter_map(|(tag, _)| self.render(tag).ok())
-            .map(|content| crate::util::sha256_hex(content.as_bytes()))
-            .collect()
-    }
 }
 
 /// The shipped set: the v1 CLI-companion trio (pandoc, python, office-cli)
-/// plus the knowledge-only `vega-chart` (ADR-0120 Decision 7). Additive
-/// evolution mirrors the CLI set: new entries pass the same curation
-/// screen.
-pub(crate) static BUILTIN_SKILL_DEFINITIONS: &[BuiltinSkillDefinition] = &[
-    BuiltinSkillDefinition {
+/// plus the knowledge-only `vega-chart`. Additive evolution mirrors the CLI
+/// set: new entries pass the same curation screen.
+pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
+    BuiltinSkillManifest {
         name: "pandoc",
         companion_cli: Some("pandoc"),
-        locales: &[
-            (
-                "en-US",
-                BuiltinSkillBody {
-                    description: "Convert existing documents between formats with the local \
-                                  pandoc — render Markdown to DOCX/HTML/PDF for delivery, or \
-                                  read DOCX/EPUB into Markdown for analysis. Authoring or \
-                                  manipulating Office-file content (tables, templates, \
-                                  reports) belongs to office-cli.",
-                    body: "Use the `pandoc` tool whenever a task needs a document converted \
-between formats -- rendering Markdown as DOCX/HTML/PDF for delivery, or reading a \
-DOCX/EPUB source into Markdown for analysis.\n\
-\n\
-Call `pandoc` with `input` (path to the source document) and `output` (path to write \
-the converted document to); the extension of each path selects the format. Pandoc's \
-own options are NOT part of the tool's parameter table -- when a conversion needs \
-flags (e.g. a template or a standalone flag), say so in the reply instead of \
-improvising arguments.\n",
-                },
-            ),
-            (
-                "zh-CN",
-                BuiltinSkillBody {
-                    description: "用本机 pandoc 在格式之间转换既有文档——把 Markdown 渲染为 \
-                                  DOCX/HTML/PDF 交付，或把 DOCX/EPUB 整篇读成 Markdown 分析。\
-                                  撰写或操作 Office 文件内容（表格、模板、报告）属于 \
-                                  office-cli。",
-                    body: "任务需要在文档格式之间转换时使用 `pandoc` 工具——把 Markdown 渲染成 \
-DOCX/HTML/PDF 交付，或把 DOCX/EPUB 源读成 Markdown 分析。\n\
-\n\
-调用 `pandoc` 时给出 `input`（源文档路径）与 `output`（转换后写入的路径），两个路径的\
-扩展名决定格式。pandoc 自身的选项不在该工具的参数表内——转换需要额外标志（如模板或 \
-standalone）时，在回复中说明，而不是自行拼凑参数。\n",
-                },
-            ),
-        ],
     },
-    BuiltinSkillDefinition {
+    BuiltinSkillManifest {
         name: "python",
         companion_cli: Some("python"),
-        locales: &[
-            (
-                "en-US",
-                BuiltinSkillBody {
-                    description: "Clean and transform data with a Python script on the local \
-                                  interpreter (stdlib always; user-installed packages usable) \
-                                  — reach for it when the logic is procedural: reshaping, \
-                                  regex massaging, unit fixing, multi-step row logic. Plain \
-                                  projection, filtering, and aggregation belong to SQL.",
-                    body: "Use the `python` tool for data cleaning and transformation that SQL \
-alone makes awkward -- melting/pivoting, regex massaging, unit fixing, multi-step \
-row logic. Prefer SQL for plain projection/filter/aggregation; reach for Python \
-when the logic is genuinely procedural.\n\
-\n\
-Pass the full script source as `script`; it runs against the interpreter installed \
-on this machine; the stdlib is always available, and packages the user has \
-installed themselves import normally -- nothing is bundled with the app, so do \
-not assume a package exists without checking or asking. Read inputs and write \
-outputs through files the script can address by path, and print results or \
-write an output file the next step consumes.\n",
-                },
-            ),
-            (
-                "zh-CN",
-                BuiltinSkillBody {
-                    description: "用本机解释器运行 Python 脚本做数据清洗与转换（标准库恒可\
-                                  用；用户自装的包也可导入）——逻辑过程化时用它：重塑、正则\
-                                  整理、单位修正、多步行级处理。单纯的投影、过滤、聚合属于 \
-                                  SQL。",
-                    body: "SQL 表达起来别扭的数据清洗与转换用 `python` 工具——逆透视/透视、正则\
-批量整理、单位修正、多步行级逻辑。单纯的投影/过滤/聚合仍优先 SQL；逻辑真正过程化时才\
-用 Python。\n\
-\n\
-把完整脚本源码作为 `script` 传入；脚本在本机已安装的解释器上运行，标准库恒可用，用户\
-自行安装的包也能正常导入——app 不随版捆绑任何库生态，因此不要未经确认就假设某个包存\
-在。输入输出都通过脚本可按路径寻址的文件读写，打印结果或写出供下一步消费的输出文件。\n",
-                },
-            ),
-        ],
     },
-    BuiltinSkillDefinition {
+    BuiltinSkillManifest {
         name: "office-cli",
         companion_cli: Some("office-cli"),
-        locales: &[
-            (
-                "en-US",
-                BuiltinSkillBody {
-                    description: "Work directly on Office-file content with the local \
-                                  OfficeCLI (Word, Excel, PowerPoint): extract text and \
-                                  tables, edit, fill templates, or author a document from \
-                                  scratch. Converting a document that already exists between \
-                                  formats belongs to pandoc.",
-                    body: "Use the `office-cli` tool for direct Office document work -- reading \
-or editing DOCX/XLSX/PPTX content, extracting text and tables, filling templates, or \
-generating Office files from scratch. It is the agent-oriented path when the task is \
-about the Office file itself rather than about converting it (conversion between \
-document formats belongs to `pandoc`).\n\
-\n\
-Pass the subcommand and its arguments as the `args` list, one argument per element \
-(do not pre-join them into a single shell-style string). OfficeCLI's own help output \
-is the authority on subcommand names -- when unsure of a subcommand's exact shape, \
-say so rather than guessing flags.\n",
-                },
-            ),
-            (
-                "zh-CN",
-                BuiltinSkillBody {
-                    description: "用本机 OfficeCLI 直接操作 Office 文件内容（Word、Excel、\
-                                  PowerPoint）：抽取文本与表格、编辑、填充模板、从零撰写文\
-                                  档。既有文档的格式间转换属于 pandoc。",
-                    body: "直接操作 Office 文档时使用 `office-cli` 工具——读取或编辑 \
-DOCX/XLSX/PPTX 内容、抽取文本与表格、填充模板、从零生成 Office 文件。任务围绕 Office \
-文件本身时走它；文档格式之间的转换属于 `pandoc`。\n\
-\n\
-子命令及其参数以 `args` 列表传入，一个参数一个元素（不要预先拼成 shell 风格的单一字符\
-串）。子命令名称以 OfficeCLI 自身的帮助输出为准——拿不准子命令形态时说明情况，而不是\
-猜测标志。\n",
-                },
-            ),
-        ],
     },
-    BuiltinSkillDefinition {
+    BuiltinSkillManifest {
         name: "vega-chart",
         companion_cli: None,
-        locales: &[
-            (
-                "en-US",
-                BuiltinSkillBody {
-                    description: "Chart numeric shape — a trend over time, a distribution, \
-                                  a comparison across categories or groups — by emitting a \
-                                  vega-lite fence in the reply. Flowcharts, diagrams, and \
-                                  lone KPI figures are out of scope; they belong to plain \
-                                  prose or a table.",
-                    body: "Produce charts as vega-lite fences written directly into the reply \
-prose: one fence per chart, a self-contained Vega-Lite JSON object with the data \
-inlined, interleaved freely with the surrounding text. The app renders each such \
-fence as a chart; every other code block stays plain text.\n\
-\n\
-When to chart -- the substance is numeric shape:\n\
-- a trend over time (line, area);\n\
-- a distribution or a histogram (bar);\n\
-- a comparison across categories or groups (bar), parts of a whole (arc), a \
-relationship between two measures (point family), or a dense two-axis grid \
-(rect heatmap).\n\
-A couple of numbers, a lone KPI figure, a flowchart, or a diagram is not a \
-chart -- write prose or a table instead.\n\
-\n\
-The fence contract (a broken fence never renders silently: a wrong fence \
-language stays a plain code block, and a spec that fails to decode renders \
-a visible error disclosure):\n\
-- the fence language is exactly `vega-lite` -- never `vega`, never a bare \
-`json` fence;\n\
-- `$schema` is mandatory: `https://vega.github.io/schema/vega-lite/v5.json`;\n\
-- the content is strict JSON: double-quoted keys and strings, no trailing \
-commas, no comments, no JavaScript expressions;\n\
-- the spec's key names are case-sensitive -- top-level `mark` and \
-`encoding`, and `field` and `type` inside each encoding channel, verbatim, \
-and every `field` must match a key of the inlined data;\n\
-- each encoding channel's `type` is one of `quantitative`, `nominal`, \
-`ordinal`, `temporal`.\n\
-\n\
-Marks -- the renderer's whitelist, mapped to intent (anything else degrades):\n\
-- `bar`: category comparison, histogram;\n\
-- `line`: trend over time or an ordered series;\n\
-- `area`: cumulative or stacked volume over time;\n\
-- `point` / `circle` / `square`: scatter, relationship, concentration;\n\
-- `arc`: composition of a small set of categories;\n\
-- `rect`: heatmap over two categorical axes.\n\
-\n\
-Data discipline:\n\
-- aggregate in SQL first, then inline the aggregated rows as the fence's \
-`data.values` array;\n\
-- roughly 150 rows per chart is the ceiling (day-grain lines and mid-size \
-heatmaps sit at the boundary) -- pre-bin, sample, or top-N anything larger.\n\
-\n\
-A minimal fence to imitate (single-line or pretty-printed, both render):\n\
-\n\
-```vega-lite\n\
-{\"$schema\":\"https://vega.github.io/schema/vega-lite/v5.json\",\"mark\":\"bar\",\"data\":{\"values\":[{\"k\":\"A\",\"v\":12},{\"k\":\"B\",\"v\":19}]},\"encoding\":{\"x\":{\"field\":\"k\",\"type\":\"nominal\"},\"y\":{\"field\":\"v\",\"type\":\"quantitative\"}}}\n\
-```\n",
-                },
-            ),
-            (
-                "zh-CN",
-                BuiltinSkillBody {
-                    description: "用 vega-lite fence 表现数值形态——时间趋势、分布、跨类\
-                                  目或分组的对比——在回复中直接产出图表。流程图、示意图\
-                                  与孤立 KPI 数字不在范围，那些属于纯文字或表格。",
-                    body: "把图表作为 vega-lite fence 直接写进回复正文：一条 fence 一张图，\
-是自包含的 Vega-Lite JSON 对象、数据内联，与前后文字自由穿插。app 会把每条这样的 \
-fence 渲染成图表；其余代码块保持纯文本呈现。\n\
-\n\
-何时画图——内容是数值形态时：\n\
-- 时间上的趋势（line、area）；\n\
-- 分布或直方图（bar）；\n\
-- 跨类目或分组的对比（bar）、整体构成（arc）、两个度量间的关系（point \
-族）、双轴密集网格（rect 热力图）。\n\
-寥寥几个数字、孤立的 KPI 数字、流程图或示意图不是图表——改写文字或表格。\n\
-\n\
-fence 契约（坏 fence 不会静默渲染：fence 语言错误保持纯代码块，解析失败的 \
-spec 渲染为可见的错误披露）：\n\
-- fence 语言恒为 `vega-lite`——不是 `vega`，也不是裸 `json` fence；\n\
-- `$schema` 必带：`https://vega.github.io/schema/vega-lite/v5.json`；\n\
-- 内容是严格 JSON：键与字符串双引号、无尾逗号、无注释、无 JS 表达式；\n\
-- spec 键名大小写敏感——顶层 `mark`、`encoding` 与编码通道内的 `field`、\
-`type` 逐字对齐，且每个 `field` 必须匹配内联数据的某个键；\n\
-- 每个编码通道的 `type` 只认 `quantitative`、`nominal`、`ordinal`、\
-`temporal` 四者之一。\n\
-\n\
-mark——渲染端白名单，按意图映射（其余形态降级）：\n\
-- `bar`：类目对比、直方图；\n\
-- `line`：时间趋势或有序序列；\n\
-- `area`：时间上的累计或堆叠体量；\n\
-- `point` / `circle` / `square`：散点、关系、密度；\n\
-- `arc`：少量类目的整体构成；\n\
-- `rect`：两个类目轴上的热力图。\n\
-\n\
-数据纪律：\n\
-- 先用 SQL 聚合，再把聚合后的行内联为 fence 的 `data.values` 数组；\n\
-- 每图内联数据约 150 行封顶（日粒度折线与中型热力图正处边界）——超出的先\
-分箱、采样或取 top-N。\n\
-\n\
-一条最小可仿的 fence（单行与 pretty-print 皆可渲染）：\n\
-\n\
-```vega-lite\n\
-{\"$schema\":\"https://vega.github.io/schema/vega-lite/v5.json\",\"mark\":\"bar\",\"data\":{\"values\":[{\"k\":\"A\",\"v\":12},{\"k\":\"B\",\"v\":19}]},\"encoding\":{\"x\":{\"field\":\"k\",\"type\":\"nominal\"},\"y\":{\"field\":\"v\",\"type\":\"quantitative\"}}}\n\
-```\n",
-                },
-            ),
-        ],
     },
 ];
 
 /// The reserved-name class for the SKILLS namespace (ADR-0109 Decision 7
-/// mirrored on the skill side): static full-set membership, independent of
-/// detection or materialization. Create / import / rename refuse these
-/// names with the dedicated typed error so the refusal reads as "reserved
-/// for a builtin", not "already taken".
+/// mirrored on the skill side; ADR-0121 keeps it reading the manifest):
+/// static full-set membership, independent of detection or alignment.
+/// Create / import / rename refuse these names with the dedicated typed
+/// error so the refusal reads as "reserved for a builtin", not "already
+/// taken" -- while the filesystem stays free (the fork channel).
 pub(crate) fn is_reserved_skill_name(name: &str) -> bool {
-    find_skill_definition(name).is_some()
+    find_manifest_entry(name).is_some()
 }
 
-/// Find the shipped skill definition a name belongs to. `None` = not in the
+/// Find the shipped manifest entry a name belongs to. `None` = not in the
 /// curated set.
-pub(crate) fn find_skill_definition(name: &str) -> Option<&'static BuiltinSkillDefinition> {
-    BUILTIN_SKILL_DEFINITIONS.iter().find(|d| d.name == name)
+pub(crate) fn find_manifest_entry(name: &str) -> Option<&'static BuiltinSkillManifest> {
+    BUILTIN_SKILL_MANIFEST.iter().find(|m| m.name == name)
 }
 
-/// Resolve the materialization locale off the persisted preference:
-/// explicit overrides map directly; `system` reads the OS locale fresh (the
-/// same philosophy as the provider-locale resolution in
-/// `LiveProviderConfig::locale` -- no caching, a language switch lands on
-/// the next scan). Any zh* tag maps zh-CN; everything else en-US.
-pub(crate) fn resolve_materialization_locale(pref: LocalePreference) -> &'static str {
-    match pref {
-        LocalePreference::ZhCN => "zh-CN",
-        LocalePreference::EnUS => "en-US",
-        LocalePreference::System => {
-            let tag = sys_locale::get_locale().unwrap_or_default();
-            if tag.to_ascii_lowercase().starts_with("zh") {
-                "zh-CN"
-            } else {
-                "en-US"
-            }
-        }
+/// Whether a directory at the registry root owns the name -- the
+/// shadowing arm of [`resolve_skill_dir`]'s order (ADR-0121 Decision 5).
+/// Shared by the resolver and the registry scan's merge-side suppression,
+/// so the rule lives in one place.
+pub(crate) fn is_shadowed_by_local(root: &Path, name: &str) -> bool {
+    std::fs::metadata(root.join(name))
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+}
+
+/// Resolve a skill name to its on-disk directory in the shadowing order
+/// (ADR-0121 Decision 5): a directory at `<root>/<name>` -- local, linked,
+/// or a filesystem fork -- wins; the reserved-subtree copy
+/// `<root>/.system/<name>` is the fallback. Listing, invocation, and
+/// auto-include all resolve through this one order, so a local skill owning
+/// the name shadows the builtin everywhere and the builtin returns when the
+/// local copy is deleted. `None` when neither exists.
+pub(crate) fn resolve_skill_dir(root: &Path, name: &str) -> Option<PathBuf> {
+    if is_shadowed_by_local(root, name) {
+        return Some(root.join(name));
+    }
+    let system = root.join(SYSTEM_SUBTREE).join(name);
+    if std::fs::metadata(&system)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
+        return Some(system);
+    }
+    None
+}
+
+/// The registered `Builtin`-sourced CLI entry a manifest entry rides
+/// (ADR-0120 Decision 7, kept by ADR-0121): the shared lookup under the
+/// alignment anchor and the auto-include gate (the gate additionally
+/// requires the entry ENABLED). `None` for a knowledge-only skill (no
+/// companion) or an unregistered / user-sourced companion.
+fn companion_entry<'a>(
+    entry: &BuiltinSkillManifest,
+    cli: &'a [crate::cli_tools::config::CliToolConfig],
+) -> Option<&'a crate::cli_tools::config::CliToolConfig> {
+    let companion = entry.companion_cli?;
+    cli.iter().find(|t| {
+        t.name == companion && t.source == crate::cli_tools::config::CliToolSource::Builtin
+    })
+}
+
+/// The alignment anchor: whether a CLI registry anchors this entry (ADR-0120
+/// Decision 7, kept by ADR-0121). A companioned skill anchors on its
+/// `Builtin`-sourced entry being registered (a dormant or user-sourced entry
+/// anchors nothing); a knowledge-only skill is anchored by the app version
+/// itself.
+fn cli_anchor(
+    entry: &BuiltinSkillManifest,
+    cli: &[crate::cli_tools::config::CliToolConfig],
+) -> bool {
+    match entry.companion_cli {
+        None => true,
+        Some(_) => companion_entry(entry, cli).is_some(),
+    }
+}
+
+/// The auto-include gate: a companioned skill rides the enabled state of its
+/// `Builtin`-sourced entry; a knowledge-only skill has nothing to ride, so
+/// the gate is unconditionally open.
+fn auto_include_gate(
+    entry: &BuiltinSkillManifest,
+    cli: &[crate::cli_tools::config::CliToolConfig],
+) -> bool {
+    match entry.companion_cli {
+        None => true,
+        Some(_) => companion_entry(entry, cli).is_some_and(|t| t.enabled),
     }
 }
 
 // ---------------------------------------------------------------------------
-// The baseline side table (app-config, ADR-0109 Decision 6 / issue #677)
+// Alignment (rides the CLI scan window, issue #677; ADR-0121 Decision 3)
 
-/// One `builtin_skill_baselines` record: the hash of the SKILL.md bytes as
-/// materialized (the recorded baseline) + the locale it was rendered in (the
-/// upgrade re-renders at THIS locale; the explicit restore uses the current
-/// one; a locale switch never rewrites).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BuiltinSkillBaseline {
-    pub hash: String,
-    pub locale: String,
-}
-
-/// The runtime face of the side table the registry needs: WHICH names are
-/// materialized builtin skills. Loader-side `Acquired::Builtin` marking keys
-/// on this (not on the static set) so a user's pre-existing same-named skill
-/// -- the reverse-conflict window -- keeps reading as their own `local`
-/// skill, editable and deletable, until they dispose of it.
-#[derive(Debug, Default)]
-pub struct BuiltinSkillMark {
-    names: std::collections::BTreeSet<String>,
-}
-
-impl BuiltinSkillMark {
-    /// A mark carrying exactly the given names (tests pin the materialized
-    /// posture without an app-config fixture).
-    #[cfg(test)]
-    pub(crate) fn of(names: &[&str]) -> Self {
-        Self {
-            names: names.iter().map(|n| n.to_string()).collect(),
-        }
-    }
-
-    pub fn from_config(cfg: &AppConfig) -> Self {
-        // Only shipped names can be materialized builtin skills: a stale or
-        // hand-edited record outside the static set must not promote a user
-        // skill to the builtin posture (undeletable, name-locked). The
-        // scan-window retain drops such records from disk; this filter keeps
-        // the runtime view consistent until it does.
-        Self {
-            names: cfg
-                .builtin_skill_baselines
-                .keys()
-                .filter(|n| find_skill_definition(n).is_some())
-                .cloned()
-                .collect(),
-        }
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.names.contains(name)
-    }
-
-    /// The `Acquired` value for a loaded skill directory: a materialized
-    /// builtin outranks the real-directory default (`Linked` stays --
-    /// materialization only ever creates real directories, so the two never
-    /// collide in practice; the check order keeps the precedence explicit).
-    pub fn acquired(&self, name: &str, fs_acquired: Acquired) -> Acquired {
-        if fs_acquired != Acquired::Linked && self.contains(name) {
-            Acquired::Builtin
-        } else {
-            fs_acquired
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Reconciliation (rides the CLI scan window, issue #677)
-
-/// The reconcile outcome: the persist bit plus the names of the builtin
-/// skills whose SKILL.md the window could not CREATE (issue #1016). A
-/// failure keeps the degraded posture -- warn, no side-table record, not
-/// dirty -- but now surfaces by name so the scan payload can render the
-/// missing row's warning in the Skills panel. Only fresh creates ride
-/// this list, in `BUILTIN_SKILL_DEFINITIONS` order: a skill whose file
-/// already exists never appears here (its row is the listing's own), and
-/// upgrade / hash-read failures stay warn-only.
-pub(crate) struct ReconcileOutcome {
-    pub(crate) dirty: bool,
+/// The align outcome: the names of the builtin skills whose reserved-subtree
+/// write the window could not complete (issue #1016 semantics, now riding
+/// the whole-tree write). A failure keeps the degraded posture -- warn, no
+/// marker, nothing persisted -- but surfaces by name so the scan payload can
+/// render the missing row's warning in the Skills panel; the next scan
+/// retries. Alignment writes NOTHING to app-config (the side table is
+/// retired), so there is no dirty bit.
+pub(crate) struct AlignOutcome {
     pub(crate) materialize_failures: Vec<String>,
 }
 
-/// Materialize / upgrade / clean the builtin skills against the CURRENT CLI
-/// registry, mutating the side table in place. Returns the outcome
-/// ([`ReconcileOutcome`]; the caller folds the dirty bit into its persist
-/// decision).
-///
-/// Per definition: a companioned skill materializes when its
-/// `Builtin`-sourced CLI entry is registered and the skill file is missing
-/// (a dormant or conflict-postured entry materializes nothing -- the skill
-/// enters the library only when the tool is registered); a knowledge-only
-/// skill (no companion, ADR-0120 Decision 7) materializes with no CLI
-/// condition -- nothing to detect, the app version itself is the anchor.
-/// An existing file with NO record is the reverse-conflict posture (a user
-/// skill owns the name): the
-/// scan warns and skips, and the next scan after the user renames or removes
-/// theirs materializes (mirrors the CLI-side `Conflict` semantics). An
-/// existing file WITH a record: hash-different = edited, preserved verbatim;
-/// hash-agreeing but outside the shipped hash set = silently upgraded at the
-/// RECORDED locale and re-recorded. Finally, records whose name left the
-/// shipped set, or whose file AND CLI entry are both gone, are dropped.
-///
-/// Filesystem failures degrade per-skill with a warn (the scan window must
-/// not fail the whole read-modify-write); a failed CREATE's name rides the
-/// outcome for the scan payload (issue #1016) while upgrade and hash-read
-/// failures stay warn-only (their rows already exist in the listing); the
-/// settings-page rescan retries.
-pub(crate) fn reconcile(
-    root: &Path,
-    locale: &str,
-    cli: &crate::cli_tools::config::CliToolRegistry,
-    baselines: &mut BTreeMap<String, BuiltinSkillBaseline>,
-) -> ReconcileOutcome {
-    let mut dirty = false;
+/// Align the reserved subtree against the embedded tree and the CURRENT CLI
+/// registry: per anchored manifest entry, the on-disk `.system/<name>/` tree
+/// is brought to byte-agreement with the embedded one (skip when the
+/// fingerprint already agrees; delete + rewrite otherwise). Filesystem
+/// failures degrade per-skill with a warn and the name rides the outcome
+/// (issue #1016); the settings-page rescan retries. Shadowing is NOT
+/// consulted here (ADR-0121 Decision 5): materialization always runs; the
+/// deference happens only at the registry-scan merge.
+pub(crate) fn align(root: &Path, cli: &crate::cli_tools::config::CliToolRegistry) -> AlignOutcome {
     let mut materialize_failures = Vec::new();
-    for def in BUILTIN_SKILL_DEFINITIONS {
-        if !def.cli_anchor(&cli.tools) {
+    for entry in BUILTIN_SKILL_MANIFEST {
+        if !cli_anchor(entry, &cli.tools) {
             continue;
         }
-        let dir = root.join(def.name);
-        let md_path = dir.join("SKILL.md");
-        if !md_path.exists() {
-            match materialize(def, root, locale) {
-                Ok(record) => {
-                    baselines.insert(def.name.to_string(), record);
-                    dirty = true;
-                    log::info!(
-                        target: "skills",
-                        "builtin skill `{}` materialized into the registry", def.name
-                    );
-                }
-                Err(e) => {
-                    materialize_failures.push(def.name.to_string());
-                    log::warn!(
-                        target: "skills",
-                        "builtin skill `{}` failed to materialize (the next scan retries): {e}",
-                        def.name
-                    );
-                }
-            }
-            continue;
-        }
-        let bytes = match std::fs::read(&md_path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                log::warn!(
-                    target: "skills",
-                    "builtin skill `{}` hash read failed (the next scan retries): {e}",
-                    def.name
-                );
-                continue;
-            }
-        };
-        let current = crate::util::sha256_hex(&bytes);
-        let Some(record) = baselines.get(def.name).cloned() else {
-            // An existing file with no record is either the reverse-conflict
-            // posture (a user skill owns the name) or the interrupted-persist
-            // half state (the file landed, the side-table store did not).
-            // Content tells them apart: a shipped render is ours by
-            // construction, so it is adopted as the record -- the self-heal,
-            // no rewrite (the bytes already agree), the locale is the
-            // render's own. Anything else is the user's -- defer.
-            let adopted_locale = def.locales.iter().find_map(|(tag, _)| {
-                def.render(tag)
-                    .ok()
-                    .filter(|content| crate::util::sha256_hex(content.as_bytes()) == current)
-                    .map(|_| *tag)
-            });
-            if let Some(tag) = adopted_locale {
-                baselines.insert(
-                    def.name.to_string(),
-                    BuiltinSkillBaseline {
-                        hash: current,
-                        locale: tag.to_string(),
-                    },
-                );
-                dirty = true;
-                log::info!(
-                    target: "skills",
-                    "builtin skill `{}` adopted a shipped-render file with no \
-                     record (self-heal after an interrupted persist)",
-                    def.name
-                );
-            } else {
-                log::warn!(
-                    target: "skills",
-                    "builtin skill `{}` deferred: a user skill owns the name; it \
-                     materializes once the user renames or removes it",
-                    def.name
-                );
-            }
-            continue;
-        };
-        if current != record.hash {
-            continue; // Edited (in-app or by an external editor): preserved.
-        }
-        if def.shipped_hashes().contains(&record.hash) {
-            continue; // Agrees with the shipped baseline: nothing to do.
-        }
-        // Baseline moved by the app version: upgrade at the recorded locale.
-        match materialize(def, root, &record.locale) {
-            Ok(new_record) => {
-                baselines.insert(def.name.to_string(), new_record);
-                dirty = true;
-                log::info!(
-                    target: "skills",
-                    "builtin skill `{}` upgraded to the shipped definition (unedited)",
-                    def.name
-                );
-            }
-            Err(e) => {
-                log::warn!(
-                    target: "skills",
-                    "builtin skill `{}` failed to upgrade (the next scan retries): {e}",
-                    def.name
-                );
-            }
+        if let Err(e) = align_one(root, entry) {
+            materialize_failures.push(entry.name.to_string());
+            log::warn!(
+                target: "skills",
+                "builtin skill `{}` failed to align (the next scan retries): {e}",
+                entry.name
+            );
         }
     }
-    // Side-table cleanup: a record is stale when its name left the shipped
-    // set (the curation moved on; the file stays in the library as a plain
-    // local skill), or when neither the file nor a Builtin CLI entry anchors
-    // it anymore (dormant + hand-deleted file -- a future detection starts
-    // fresh at the then-current locale).
-    let before = baselines.len();
-    baselines.retain(|name, _| {
-        if find_skill_definition(name).is_none() {
-            return false;
-        }
-        if root.join(name).join("SKILL.md").exists() {
-            return true;
-        }
-        cli.tools.iter().any(|t| {
-            t.name == *name && t.source == crate::cli_tools::config::CliToolSource::Builtin
-        })
-    });
-    // A dropped record is a side-table change like an insert: without this
-    // the cleanup is the one mutation the caller's persist-skip branch
-    // swallows, and a retired name's stale record would survive on disk
-    // forever -- pinning the user's same-named skill into the undeletable
-    // builtin posture with no self-service exit.
-    dirty |= baselines.len() != before;
-    ReconcileOutcome {
-        dirty,
+    AlignOutcome {
         materialize_failures,
     }
 }
 
-/// Write the definition's SKILL.md at `locale` and produce the record for
-/// the side table. The registry root is minted lazily (a never-created
-/// registry materializes on the first detection), and the write is the
-/// registry's own atomic replace.
-fn materialize(
-    def: &BuiltinSkillDefinition,
-    root: &Path,
-    locale: &str,
-) -> Result<BuiltinSkillBaseline, SkillError> {
-    let dir = root.join(def.name);
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        SkillError::FsFailure(format!(
-            "create builtin skill directory `{}` failed: {e}",
+/// Align one skill's subtree (see [`align`]). The registry root is minted
+/// lazily (a never-created registry materializes on the first anchored
+/// window).
+fn align_one(root: &Path, entry: &BuiltinSkillManifest) -> Result<(), SkillError> {
+    let files = embedded_files(entry.name);
+    let expected = tree_fingerprint(&files);
+    let dir = root.join(SYSTEM_SUBTREE).join(entry.name);
+    // A plain FILE squatting the subtree path is a blocker, not app content:
+    // fail per-skill (the #1016 degrade posture -- the name rides the
+    // failure lane, the next scan retries) rather than delete anything.
+    if dir.symlink_metadata().map(|m| !m.is_dir()).unwrap_or(false) {
+        return Err(SkillError::FsFailure(format!(
+            "builtin skill path `{}` is occupied by a non-directory",
             dir.display()
+        )));
+    }
+    // Quiet path: the on-disk tree already fingerprint-matches the embedded
+    // one -- zero writes (the fingerprint covers every file plus the version
+    // salt, so an external edit, a stale file, or an app bump all read as a
+    // mismatch below).
+    if let Ok(found) = disk_files(&dir) {
+        if tree_fingerprint(&found) == expected {
+            return Ok(());
+        }
+    }
+    // Mismatch: the subtree is an app cache, so it is deleted wholesale and
+    // rewritten from the embedded tree, marker last (a crash mid-rewrite
+    // leaves a fingerprint-less subtree that the next window rebuilds).
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| {
+            SkillError::FsFailure(format!(
+                "remove stale builtin subtree `{}` failed: {e}",
+                dir.display()
+            ))
+        })?;
+    }
+    for (path, bytes) in &files {
+        // '/'-separated relatives join correctly on both platform families.
+        let target = dir.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                SkillError::FsFailure(format!(
+                    "create builtin asset directory `{}` failed: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        std::fs::write(&target, bytes).map_err(|e| {
+            SkillError::FsFailure(format!(
+                "write builtin asset `{}` failed: {e}",
+                target.display()
+            ))
+        })?;
+    }
+    std::fs::write(dir.join(FINGERPRINT_FILE), &expected).map_err(|e| {
+        SkillError::FsFailure(format!(
+            "write builtin fingerprint `{}` failed: {e}",
+            dir.join(FINGERPRINT_FILE).display()
         ))
     })?;
-    let content = def.render(locale)?;
-    registry::write_skill_md(&dir, &content)?;
-    Ok(BuiltinSkillBaseline {
-        hash: crate::util::sha256_hex(content.as_bytes()),
-        locale: locale.to_string(),
-    })
+    log::info!(
+        target: "skills",
+        "builtin skill `{}` aligned to the embedded tree", entry.name
+    );
+    Ok(())
 }
 
-/// The explicit restore (issue #677): rewrite the file at the CURRENT locale
-/// and re-record, returning the session to the shipped baseline (future
-/// upgrades follow again). The name must address a materialized builtin
-/// skill; anything else is the typed refusal (an unknown name, or a user
-/// skill that happens to share a reserved name, must not be overwritten).
-pub(crate) fn restore(
-    root: &Path,
-    locale: &str,
-    name: &str,
-    baselines: &mut BTreeMap<String, BuiltinSkillBaseline>,
-) -> Result<(), SkillError> {
-    let Some(def) = find_skill_definition(name) else {
-        return Err(SkillError::NoSuchSkill(name.to_string()));
-    };
-    if !baselines.contains_key(name) {
-        return Err(SkillError::NoSuchSkill(name.to_string()));
+/// Compute a tree fingerprint (ADR-0121 Decision 3): the version salt folded
+/// with every file's '/'-relative path + content hash, iterated in sorted
+/// path order. Deterministic by construction, so equal trees hash equal and
+/// the marker comparison is exact.
+fn tree_fingerprint(files: &[(String, Vec<u8>)]) -> String {
+    let mut acc = String::from(VERSION_SALT);
+    for (path, bytes) in files {
+        acc.push_str(path);
+        acc.push('\0');
+        acc.push_str(&crate::util::sha256_hex(bytes));
+        acc.push('\n');
     }
-    let record = materialize(def, root, locale)?;
-    baselines.insert(name.to_string(), record);
+    crate::util::sha256_hex(acc.as_bytes())
+}
+
+/// The embedded subtree of one builtin skill: every file with its
+/// '/'-relative path, sorted by path (the fingerprint's iteration order).
+/// Empty when the asset tree carries no such directory (the manifest / asset
+/// agreement test pins that this never happens for a shipped entry).
+fn embedded_files(name: &str) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    if let Some(dir) = BUILTIN_SKILL_ASSETS.get_dir(name) {
+        collect_embedded(dir, "", &mut files);
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+/// Join one component onto a '/'-separated relative prefix (the shared
+/// spelling of the embedded and disk collectors).
+fn join_rel(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+fn collect_embedded(dir: &Dir, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+    for file in dir.files() {
+        let name = file
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push((join_rel(prefix, &name), file.contents().to_vec()));
+    }
+    for sub in dir.dirs() {
+        let name = sub
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let prefix = join_rel(prefix, &name);
+        collect_embedded(sub, &prefix, out);
+    }
+}
+
+/// Collect the on-disk subtree as ('/'-path, bytes) pairs for the
+/// fingerprint comparison, EXCLUDING the marker file itself (it is written
+/// after the tree and re-derived every alignment). A missing subtree reads
+/// empty (a mismatch against any non-empty embedded tree -> write). A read
+/// error skips the quiet path -- the rewrite attempt that follows is what
+/// surfaces it as a per-skill failure (the #1016 degrade posture).
+fn disk_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, SkillError> {
+    let mut out = Vec::new();
+    collect_disk(dir, "", &mut out)?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn collect_disk(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), SkillError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // A missing subtree is the empty fingerprint input, not an error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(SkillError::FsFailure(format!(
+                "read builtin subtree `{}` failed: {e}",
+                dir.display()
+            )))
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            SkillError::FsFailure(format!(
+                "read builtin subtree entry under `{}` failed: {e}",
+                dir.display()
+            ))
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let rel = join_rel(prefix, &name);
+        // The alignment marker is bookkeeping, never fingerprint input.
+        if prefix.is_empty() && name == FINGERPRINT_FILE {
+            continue;
+        }
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        // Real directories recurse (links never do -- the subtree is
+        // app-owned and the write path only ever creates real directories).
+        // A hand-placed DIRECTORY link never reaches this arm and so is
+        // absent from the fingerprint input -- it rides until some mismatch
+        // rewrites the subtree around it. A hand-placed FILE link is
+        // followed below and enters the input as (link path, target bytes)
+        // -- itself a mismatch against the embedded tree, so the next
+        // window deletes and rewrites the subtree around it.
+        if ft.is_dir() {
+            collect_disk(&path, &rel, out)?;
+        } else if std::fs::metadata(&path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            let bytes = std::fs::read(&path).map_err(|e| {
+                SkillError::FsFailure(format!(
+                    "read builtin asset `{}` failed: {e}",
+                    path.display()
+                ))
+            })?;
+            out.push((rel, bytes));
+        }
+    }
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Auto-include (ADR-0109 Decision 6: the folded initial set)
 
-/// The builtin skill names a NEW session auto-includes: a companioned
-/// skill needs its companion CLI entry `Builtin`-sourced AND enabled; a
-/// knowledge-only skill (no companion, ADR-0120 Decision 7) rides the app
-/// version and skips the CLI conjunct. Both paths require the skill to be
-/// MATERIALIZED (a side-table record -- the same anchor the frontend's
-/// `acquired: builtin` derives from, so the chip count and the seeded set
-/// agree even in the reverse-conflict window, where the file exists but
-/// is the user's) and the skill file to exist (a materialized skill whose
-/// CLI entry went missing kept its file -- but with no entry there is
-/// nothing to detect+enable, so it stays out). Computed fresh at session
+/// The builtin skill names a NEW session auto-includes: a companioned skill
+/// needs its companion CLI entry `Builtin`-sourced AND enabled; a
+/// knowledge-only skill (ADR-0120 Decision 7) rides the app version and
+/// skips the CLI conjunct. Presence resolves through the shadowing order
+/// ([`resolve_skill_dir`]), so under a local fork the seeded name resolves
+/// to the local copy (ADR-0121 Decision 5). Computed fresh at session
 /// creation and at resume (never persisted, never an event); a disabled
 /// tool drops out on the next recomputation.
 pub(crate) fn auto_included_names(
     cli: &[crate::cli_tools::config::CliToolConfig],
-    mark: &BuiltinSkillMark,
     skills_root: &Path,
 ) -> Vec<String> {
-    BUILTIN_SKILL_DEFINITIONS
+    BUILTIN_SKILL_MANIFEST
         .iter()
-        .filter(|def| {
-            def.auto_include_gate(cli)
-                && mark.contains(def.name)
-                && skills_root.join(def.name).join("SKILL.md").exists()
-        })
-        .map(|def| def.name.to_string())
+        .filter(|entry| auto_include_gate(entry, cli))
+        .filter(|entry| resolve_skill_dir(skills_root, entry.name).is_some())
+        .map(|entry| entry.name.to_string())
         .collect()
 }
 
@@ -740,7 +452,7 @@ mod tests {
     use super::*;
     use crate::cli_tools::config::{CliToolConfig, CliToolSource};
 
-    /// A registry builder for the reconcile scenarios.
+    /// A registry builder for the align scenarios.
     fn registry_with(tools: Vec<CliToolConfig>) -> crate::cli_tools::config::CliToolRegistry {
         crate::cli_tools::config::CliToolRegistry { tools }
     }
@@ -760,625 +472,130 @@ mod tests {
         }
     }
 
-    fn pandoc_def() -> &'static BuiltinSkillDefinition {
-        find_skill_definition("pandoc").expect("pandoc skill definition")
+    /// The parsed SKILL.md of one embedded skill (every content test reads
+    /// through this single door, so the asset->parse pipeline itself is what
+    /// the suite pins).
+    fn parsed_asset(name: &str) -> super::super::frontmatter::ParsedSkillMd {
+        let files = embedded_files(name);
+        let content = String::from_utf8(
+            files
+                .iter()
+                .find(|(p, _)| p == "SKILL.md")
+                .unwrap_or_else(|| panic!("{name} has no embedded SKILL.md"))
+                .1
+                .clone(),
+        )
+        .expect("SKILL.md is UTF-8");
+        super::super::frontmatter::parse_skill_md(&content).expect("SKILL.md parses")
     }
 
-    /// The side-table keys a fresh install settles on: exactly the
-    /// knowledge-only definitions (a companioned skill needs its CLI entry
-    /// detected to materialize). Sorted to match the BTreeMap key order, so
-    /// the exact-set assertions below self-scale as the knowledge-only set
-    /// grows instead of hardcoding today's count.
+    fn description_of(name: &str) -> String {
+        super::super::frontmatter::get_string(&parsed_asset(name).frontmatter, "description")
+            .expect("description")
+    }
+
+    fn body_of(name: &str) -> String {
+        parsed_asset(name).body
+    }
+
+    /// The knowledge-only names, sorted (the set an EMPTY CLI registry
+    /// still aligns); self-scales as the knowledge-only set grows.
     fn knowledge_only_names_sorted() -> Vec<&'static str> {
-        let mut names: Vec<&'static str> = BUILTIN_SKILL_DEFINITIONS
+        let mut names: Vec<&'static str> = BUILTIN_SKILL_MANIFEST
             .iter()
-            .filter(|def| def.companion_cli.is_none())
-            .map(|def| def.name)
+            .filter(|m| m.companion_cli.is_none())
+            .map(|m| m.name)
             .collect();
         names.sort_unstable();
         names
     }
 
-    // --- shipped set --------------------------------------------------------
+    // --- the shipped set ----------------------------------------------------
 
+    /// The manifest and the embedded asset tree agree both ways (ADR-0121
+    /// Decision 1): every asset directory has a manifest entry, every
+    /// manifest entry has an asset directory carrying a `SKILL.md`. A
+    /// renamed or deleted asset dir dies here instead of shipping a
+    /// silently-empty skill.
     #[test]
-    fn every_definition_carries_en_us_first_and_renders_a_valid_skill_md() {
-        for def in BUILTIN_SKILL_DEFINITIONS {
+    fn the_manifest_and_the_asset_tree_agree() {
+        let mut asset_dirs: Vec<String> = BUILTIN_SKILL_ASSETS
+            .dirs()
+            .map(|d| {
+                d.path()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        asset_dirs.sort();
+        let mut manifest_names: Vec<&str> = BUILTIN_SKILL_MANIFEST.iter().map(|m| m.name).collect();
+        manifest_names.sort_unstable();
+        assert_eq!(asset_dirs, manifest_names, "asset dirs == manifest names");
+        for name in &manifest_names {
+            assert!(
+                embedded_files(name).iter().any(|(p, _)| p == "SKILL.md"),
+                "{name} must embed a SKILL.md"
+            );
+        }
+        // The reserved-name set reads the manifest (ADR-0121): the four
+        // shipped names refuse create/import/rename, anything else is free.
+        for name in &manifest_names {
+            assert!(is_reserved_skill_name(name), "{name} is reserved");
+        }
+        assert!(!is_reserved_skill_name("my-pandoc"));
+    }
+
+    /// Every embedded SKILL.md is spec-valid: parses, carries its manifest
+    /// name, a description, a non-blank body, and no metadata mapping (the
+    /// retired extension keys, issue #952 -- materialization leaves no
+    /// toptopduck trace).
+    #[test]
+    fn every_embedded_skill_md_is_valid_and_name_matched() {
+        for entry in BUILTIN_SKILL_MANIFEST {
+            let parsed = parsed_asset(entry.name);
             assert_eq!(
-                def.locales[0].0, "en-US",
-                "{} must lead with en-US",
-                def.name
+                super::super::frontmatter::get_string(&parsed.frontmatter, "name").unwrap(),
+                entry.name
             );
-            for (tag, _) in def.locales {
-                let content = def.render(tag).expect("render");
-                let parsed = frontmatter::parse_skill_md(&content).expect("parse");
-                assert_eq!(
-                    frontmatter::get_string(&parsed.frontmatter, "name").unwrap(),
-                    def.name
-                );
-                // The retired extension keys lived under `metadata` (issue
-                // #952): a rendered SKILL.md must carry no metadata mapping
-                // at all, so materialization leaves no toptopduck trace.
-                assert!(
-                    parsed
-                        .frontmatter
-                        .get(serde_yaml::Value::String("metadata".into()))
-                        .is_none(),
-                    "{} must render metadata-free",
-                    def.name
-                );
-                assert!(!parsed.body.trim().is_empty(), "body must be non-blank");
-            }
+            assert!(
+                parsed
+                    .frontmatter
+                    .get(serde_yaml::Value::String("metadata".into()))
+                    .is_none(),
+                "{} must be metadata-free",
+                entry.name
+            );
+            assert!(!parsed.body.trim().is_empty(), "body must be non-blank");
         }
     }
 
+    /// English-only (ADR-0121 Decision 2): the embedded prose carries no
+    /// CJK -- a locale literal migrating into the asset tree undetected
+    /// dies here.
     #[test]
-    fn render_is_deterministic_so_the_hash_is_stable() {
-        let def = pandoc_def();
-        let a = def.render("en-US").unwrap();
-        let b = def.render("en-US").unwrap();
-        assert_eq!(a, b);
-        assert_ne!(a, def.render("zh-CN").unwrap());
-    }
-
-    #[test]
-    fn body_for_falls_back_to_en_us_for_an_unknown_locale() {
-        let def = pandoc_def();
-        assert_eq!(
-            def.body_for("fr-FR").description,
-            def.body_for("en-US").description
-        );
-    }
-
-    #[test]
-    fn explicit_locale_preferences_map_directly() {
-        assert_eq!(
-            resolve_materialization_locale(LocalePreference::ZhCN),
-            "zh-CN"
-        );
-        assert_eq!(
-            resolve_materialization_locale(LocalePreference::EnUS),
-            "en-US"
-        );
-    }
-
-    // --- curated trigger copy --------------------------------------------
-
-    /// The locked trigger copy (curation brief, verbatim): sentence 1 is
-    /// capability + trigger timing, sentence 2 the neighbor-tool boundary.
-    /// With progressive disclosure the metadata index is the only discovery
-    /// surface, so the wording itself is load-bearing -- pinned byte for
-    /// byte.
-    #[test]
-    fn descriptions_carry_the_locked_trigger_copy() {
-        let expected: &[(&str, &str, &str)] = &[
-            (
-                "pandoc",
-                "Convert existing documents between formats with the local \
-                 pandoc — render Markdown to DOCX/HTML/PDF for delivery, or \
-                 read DOCX/EPUB into Markdown for analysis. Authoring or \
-                 manipulating Office-file content (tables, templates, \
-                 reports) belongs to office-cli.",
-                "用本机 pandoc 在格式之间转换既有文档——把 Markdown 渲染为 \
-                 DOCX/HTML/PDF 交付，或把 DOCX/EPUB 整篇读成 Markdown 分析。\
-                 撰写或操作 Office 文件内容（表格、模板、报告）属于 \
-                 office-cli。",
-            ),
-            (
-                "office-cli",
-                "Work directly on Office-file content with the local \
-                 OfficeCLI (Word, Excel, PowerPoint): extract text and \
-                 tables, edit, fill templates, or author a document from \
-                 scratch. Converting a document that already exists between \
-                 formats belongs to pandoc.",
-                "用本机 OfficeCLI 直接操作 Office 文件内容（Word、Excel、\
-                 PowerPoint）：抽取文本与表格、编辑、填充模板、从零撰写文\
-                 档。既有文档的格式间转换属于 pandoc。",
-            ),
-            (
-                "python",
-                "Clean and transform data with a Python script on the local \
-                 interpreter (stdlib always; user-installed packages usable) \
-                 — reach for it when the logic is procedural: reshaping, \
-                 regex massaging, unit fixing, multi-step row logic. Plain \
-                 projection, filtering, and aggregation belong to SQL.",
-                "用本机解释器运行 Python 脚本做数据清洗与转换（标准库恒可\
-                 用；用户自装的包也可导入）——逻辑过程化时用它：重塑、正则\
-                 整理、单位修正、多步行级处理。单纯的投影、过滤、聚合属于 \
-                 SQL。",
-            ),
-        ];
-        for (name, en, zh) in expected {
-            let def = find_skill_definition(name).expect("definition");
-            assert_eq!(def.body_for("en-US").description, *en, "{name} en-US");
-            assert_eq!(def.body_for("zh-CN").description, *zh, "{name} zh-CN");
-        }
-    }
-
-    /// The index entry a model reads is the YAML round-trip of the render,
-    /// not the struct field -- the long prose (em dashes, colons,
-    /// parentheticals) must survive serialization unharmed.
-    #[test]
-    fn render_round_trips_the_curated_descriptions_verbatim() {
-        for def in BUILTIN_SKILL_DEFINITIONS {
-            for (tag, _) in def.locales {
-                let parsed =
-                    frontmatter::parse_skill_md(&def.render(tag).expect("render")).expect("parse");
-                assert_eq!(
-                    frontmatter::get_string(&parsed.frontmatter, "description")
-                        .expect("description"),
-                    def.body_for(tag).description,
-                    "{} {} description survives the render round-trip",
-                    def.name,
-                    tag
-                );
-            }
-        }
-    }
-
-    /// The format/content split is cross-referenced symmetrically through
-    /// the OWNERSHIP sentence ("belongs to X" / 属于 X), not a bare neighbor
-    /// mention: pandoc points at office-cli, office-cli at pandoc, python at
-    /// SQL. The index shows all entries at once, so the boundary sentence is
-    /// what disambiguates them. A re-curation rewrites the verbatim pin and
-    /// the copy together -- asserting the ownership phrase (not just the
-    /// name) is what keeps the boundary exclusive through that rewrite. The
-    /// phrases are locale-specific, so each assertion also catches a locale
-    /// mix-up.
-    #[test]
-    fn boundary_sentences_cross_reference_the_neighbor() {
-        // (skill, en-US ownership phrase, zh-CN ownership phrase)
-        let pairs: &[(&str, &str, &str)] = &[
-            ("pandoc", "belongs to office-cli", "属于 office-cli"),
-            ("office-cli", "belongs to pandoc", "属于 pandoc"),
-            ("python", "belong to SQL", "属于 SQL"),
-        ];
-        for (name, en_phrase, zh_phrase) in pairs {
-            let def = find_skill_definition(name).expect("definition");
+    fn embedded_prose_is_english_only() {
+        for entry in BUILTIN_SKILL_MANIFEST {
+            let files = embedded_files(entry.name);
+            let all = files
+                .iter()
+                .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
+                .collect::<String>();
             assert!(
-                def.body_for("en-US").description.contains(*en_phrase),
-                "{} en-US description must keep the boundary phrase {en_phrase:?}",
-                def.name
-            );
-            assert!(
-                def.body_for("zh-CN").description.contains(*zh_phrase),
-                "{} zh-CN description must keep the boundary phrase {zh_phrase:?}",
-                def.name
+                all.chars().all(|c| !('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "{} carries CJK prose",
+                entry.name
             );
         }
     }
-
-    /// Python library semantics erratum: "nothing bundled with the app" is
-    /// not "stdlib only" -- user-installed packages import normally, and the
-    /// description's parenthetical and the body must agree on that.
-    #[test]
-    fn python_copy_states_library_semantics_accurately() {
-        let def = find_skill_definition("python").expect("definition");
-        // The stale absolute claim, per locale, must be gone from both the
-        // description and the body.
-        let stale_claims: &[(&str, &str)] = &[("en-US", "stdlib only"), ("zh-CN", "只用标准库")];
-        for (tag, claim) in stale_claims {
-            let prose = def.body_for(tag);
-            assert!(
-                !prose.description.contains(claim),
-                "{tag} description must not claim {claim:?}"
-            );
-            assert!(
-                !prose.body.contains(claim),
-                "{tag} body must not claim {claim:?}"
-            );
-        }
-        assert!(def
-            .body_for("en-US")
-            .body
-            .contains("packages the user has installed themselves import normally"));
-        assert!(def
-            .body_for("zh-CN")
-            .body
-            .contains("用户自行安装的包也能正常导入"));
-    }
-
-    /// Length discipline (curation brief): every en-US description fits two
-    /// sentences and at most 45 words -- the index is re-read every turn, so
-    /// length is a recurring token cost. The bounds are deliberately loose
-    /// upper limits, not exact counts (the brief targets ~40 words). A
-    /// sentence boundary is a `.`, `?`, or `!` followed by whitespace;
-    /// period-bearing abbreviations ("e.g. ") over-count, failing safe.
-    #[test]
-    fn en_us_descriptions_stay_within_the_curated_length_budget() {
-        const MAX_WORDS: usize = 45;
-        for def in BUILTIN_SKILL_DEFINITIONS {
-            let en = def.body_for("en-US").description;
-            let words = en.split_whitespace().count();
-            assert!(
-                words <= MAX_WORDS,
-                "{} en-US description is {words} words (budget {MAX_WORDS})",
-                def.name
-            );
-            // n terminator-then-whitespace boundaries -> n + 1 sentences
-            // (the final terminator ends the last sentence without one).
-            let sentences = en
-                .char_indices()
-                .filter(|(i, c)| {
-                    matches!(c, '.' | '?' | '!') && en[i + c.len_utf8()..].starts_with(' ')
-                })
-                .count()
-                + 1;
-            assert!(
-                sentences <= 2,
-                "{} en-US description has {sentences} sentences",
-                def.name
-            );
-        }
-    }
-
-    // --- reconcile ----------------------------------------------------------
-
-    #[test]
-    fn reconcile_materializes_the_file_and_records_the_baseline() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let dirty = reconcile(
-            root.path(),
-            "en-US",
-            &registry_with(vec![builtin_pandoc(true)]),
-            &mut baselines,
-        )
-        .dirty;
-        assert!(dirty);
-        let content = std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).expect("file");
-        assert_eq!(content, pandoc_def().render("en-US").unwrap());
-        let record = &baselines["pandoc"];
-        assert_eq!(record.locale, "en-US");
-        assert_eq!(record.hash, crate::util::sha256_hex(content.as_bytes()));
-    }
-
-    #[test]
-    fn reconcile_reports_a_materialize_failure_by_name() {
-        // A plain FILE occupying the skill's directory path makes
-        // create_dir_all fail on every platform -- the deterministic
-        // stand-in for the real failure classes (read-only skills root,
-        // full disk, antivirus interference; issue #1016).
-        let root = tempfile::tempdir().expect("root");
-        std::fs::write(root.path().join("pandoc"), b"not a directory").expect("blocker");
-        std::fs::write(root.path().join("vega-chart"), b"not a directory").expect("blocker");
-        let mut baselines = BTreeMap::new();
-        let outcome = reconcile(
-            root.path(),
-            "en-US",
-            &registry_with(vec![builtin_pandoc(true)]),
-            &mut baselines,
-        );
-        // The degraded posture is unchanged (warn, no record, not dirty):
-        // the window must not persist anything for a skill it could not
-        // write...
-        assert!(!outcome.dirty);
-        assert!(baselines.is_empty());
-        // ...but the failure surfaces by name for the scan payload, in
-        // definition order: the companion trio and the knowledge-only
-        // skill share the one failure lane (issue #1016).
-        assert_eq!(
-            outcome.materialize_failures,
-            vec!["pandoc".to_string(), "vega-chart".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_recovered_materialization_leaves_the_failure_lane() {
-        let root = tempfile::tempdir().expect("root");
-        std::fs::write(root.path().join("vega-chart"), b"not a directory").expect("blocker");
-        let cli = registry_with(vec![]);
-        let mut baselines = BTreeMap::new();
-        let failed = reconcile(root.path(), "en-US", &cli, &mut baselines);
-        assert_eq!(failed.materialize_failures, vec!["vega-chart".to_string()]);
-        // The condition clears (the user freed the path): the next window
-        // materializes and the failure lane is empty -- the warning must
-        // not outlive the failure it reported (issue #1016 self-heal).
-        std::fs::remove_file(root.path().join("vega-chart")).expect("unblock");
-        let recovered = reconcile(root.path(), "en-US", &cli, &mut baselines);
-        assert!(recovered.dirty);
-        assert!(recovered.materialize_failures.is_empty());
-        assert!(baselines.contains_key("vega-chart"));
-    }
-
-    #[test]
-    fn reconcile_is_idempotent_when_the_file_agrees_with_the_record() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let cli = registry_with(vec![builtin_pandoc(true)]);
-        reconcile(root.path(), "en-US", &cli, &mut baselines);
-        let dirty = reconcile(root.path(), "zh-CN", &cli, &mut baselines).dirty;
-        assert!(!dirty, "an agreeing file is not rewritten (locale switch)");
-        // The recorded locale survives a switch: no rewrite, no re-record.
-        assert_eq!(baselines["pandoc"].locale, "en-US");
-    }
-
-    #[test]
-    fn reconcile_skips_dormant_and_user_sourced_entries() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        // Let the knowledge-only skill settle FIRST (the drops-test pattern)
-        // so the scenario window itself must stay quiet -- keeping the
-        // not-dirty pin vega-chart's same-window materialization had
-        // masked.
-        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
-        let mut user = builtin_pandoc(true);
-        user.source = CliToolSource::User;
-        let dirty = reconcile(
-            root.path(),
-            "en-US",
-            &registry_with(vec![user]),
-            &mut baselines,
-        )
-        .dirty;
-        // The user-sourced entry anchors nothing: no pandoc file, no pandoc
-        // record, and no side-table change at all.
-        assert!(!dirty);
-        assert!(!root.path().join("pandoc/SKILL.md").exists());
-        assert_eq!(
-            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
-            knowledge_only_names_sorted(),
-            "only the settled knowledge-only records remain"
-        );
-    }
-
-    #[test]
-    fn reconcile_defers_when_a_user_skill_owns_the_name() {
-        // Reverse conflict: a directory we never wrote occupies the name.
-        let root = tempfile::tempdir().expect("root");
-        // Let the knowledge-only skill settle FIRST so the defer window
-        // itself must stay quiet (a defer is not a side-table change).
-        let mut baselines = BTreeMap::new();
-        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
-        let user_file = "---\nname: pandoc\ndescription: owned\n---\nBody.\n";
-        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
-        std::fs::write(root.path().join("pandoc/SKILL.md"), user_file).expect("write");
-        let dirty = reconcile(
-            root.path(),
-            "en-US",
-            &registry_with(vec![builtin_pandoc(true)]),
-            &mut baselines,
-        )
-        .dirty;
-        assert!(
-            !baselines.contains_key("pandoc"),
-            "no record: the file is not ours"
-        );
-        assert!(!dirty, "a defer is not a side-table change");
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).unwrap(),
-            user_file,
-            "the user file is preserved"
-        );
-        assert_eq!(
-            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
-            knowledge_only_names_sorted(),
-            "only the settled knowledge-only records remain"
-        );
-    }
-
-    #[test]
-    fn reconcile_adopts_a_shipped_render_file_with_no_record() {
-        // The interrupted-persist half state (the file landed, the side-table
-        // store did not): content identifies the file as ours -- adopted as
-        // the record without a rewrite, at the render's own locale. The
-        // user-file deference is pinned by the test above.
-        let root = tempfile::tempdir().expect("root");
-        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
-        std::fs::write(
-            root.path().join("pandoc/SKILL.md"),
-            pandoc_def().render("zh-CN").unwrap(),
-        )
-        .expect("write shipped render");
-        let mut baselines = BTreeMap::new();
-        let dirty = reconcile(
-            root.path(),
-            "en-US",
-            &registry_with(vec![builtin_pandoc(true)]),
-            &mut baselines,
-        )
-        .dirty;
-        assert!(dirty);
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).unwrap(),
-            pandoc_def().render("zh-CN").unwrap(),
-            "no rewrite: the bytes already agree"
-        );
-        let record = &baselines["pandoc"];
-        assert_eq!(
-            record.locale, "zh-CN",
-            "the adopt records the render's locale"
-        );
-        assert_eq!(
-            record.hash,
-            crate::util::sha256_hex(pandoc_def().render("zh-CN").unwrap().as_bytes())
-        );
-    }
-
-    #[test]
-    fn reconcile_preserves_an_edited_file() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let cli = registry_with(vec![builtin_pandoc(true)]);
-        reconcile(root.path(), "en-US", &cli, &mut baselines);
-        let file = root.path().join("pandoc/SKILL.md");
-        let edited = "---\nname: pandoc\ndescription: edited\n---\nEdited body.\n";
-        std::fs::write(&file, edited).expect("edit");
-        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines).dirty;
-        assert!(!dirty);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), edited);
-    }
-
-    #[test]
-    fn reconcile_upgrades_an_unedited_file_whose_record_left_the_shipped_set() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let cli = registry_with(vec![builtin_pandoc(true)]);
-        reconcile(root.path(), "zh-CN", &cli, &mut baselines);
-        let file = root.path().join("pandoc/SKILL.md");
-        // Simulate the app version moving the baseline: the on-disk file is
-        // an OLDER shipped body (recorded as-is), so file == record (the
-        // unedited posture) but the record hash matches no CURRENT shipped
-        // render. Reachable in production by a version whose prose evolved.
-        let stale = format!(
-            "---\nname: pandoc\ndescription: {}\n---\nOld body.\n",
-            "older description"
-        );
-        std::fs::write(&file, &stale).expect("write stale body");
-        baselines.get_mut("pandoc").unwrap().hash = crate::util::sha256_hex(stale.as_bytes());
-        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines).dirty;
-        assert!(dirty);
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
-            pandoc_def().render("zh-CN").unwrap(),
-            "the upgrade re-renders at the recorded locale, not the current one"
-        );
-        assert_eq!(baselines["pandoc"].hash, pandoc_def().shipped_hashes()[1]);
-    }
-
-    #[test]
-    fn reconcile_rematerializes_a_hand_deleted_file() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let cli = registry_with(vec![builtin_pandoc(true)]);
-        reconcile(root.path(), "en-US", &cli, &mut baselines);
-        std::fs::remove_file(root.path().join("pandoc/SKILL.md")).expect("delete");
-        let dirty = reconcile(root.path(), "zh-CN", &cli, &mut baselines).dirty;
-        assert!(dirty, "the re-materialization re-records");
-        assert!(root.path().join("pandoc/SKILL.md").exists());
-        assert_eq!(baselines["pandoc"].locale, "zh-CN");
-    }
-
-    #[test]
-    fn reconcile_drops_records_with_no_anchor() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        // Let the knowledge-only skill settle FIRST so its materialization
-        // cannot mask the dirty pin below: the only side-table change left
-        // must be the drops.
-        reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines);
-        baselines.insert(
-            "pandoc".to_string(),
-            BuiltinSkillBaseline {
-                hash: "h".to_string(),
-                locale: "en-US".to_string(),
-            },
-        );
-        baselines.insert(
-            "retired-skill".to_string(),
-            BuiltinSkillBaseline {
-                hash: "h".to_string(),
-                locale: "en-US".to_string(),
-            },
-        );
-        // No file, no Builtin CLI entry -> dropped; unknown name -> dropped.
-        // The drops report dirty: a cleanup-only scan still persists (the
-        // skip-write branch must not swallow a side-table shrink) -- pinned
-        // against a settled skills side so vega-chart's earlier
-        // materialization cannot be the dirty source.
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
-        assert!(!baselines.contains_key("pandoc"));
-        assert!(!baselines.contains_key("retired-skill"));
-        assert_eq!(
-            baselines.keys().map(String::as_str).collect::<Vec<_>>(),
-            knowledge_only_names_sorted(),
-            "only the settled knowledge-only records remain"
-        );
-        assert!(dirty, "a dropped record is a side-table change");
-    }
-
-    #[test]
-    fn reconcile_keeps_the_record_of_a_dangling_file() {
-        // The CLI entry persists after an uninstall (probe semantics) and so
-        // does the file; the record must survive so edited-derivation stays
-        // truthful.
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let cli = registry_with(vec![builtin_pandoc(true)]);
-        reconcile(root.path(), "en-US", &cli, &mut baselines);
-        let dirty = reconcile(root.path(), "en-US", &cli, &mut baselines).dirty;
-        assert!(!dirty);
-        assert!(baselines.contains_key("pandoc"));
-    }
-
-    // --- restore --------------------------------------------------------
-
-    #[test]
-    fn restore_rewrites_at_the_current_locale_and_rerecords() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let cli = registry_with(vec![builtin_pandoc(true)]);
-        reconcile(root.path(), "en-US", &cli, &mut baselines);
-        std::fs::write(
-            root.path().join("pandoc/SKILL.md"),
-            "---\nname: pandoc\ndescription: edited\n---\nEdited.\n",
-        )
-        .expect("edit");
-        restore(root.path(), "zh-CN", "pandoc", &mut baselines).expect("restore");
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("pandoc/SKILL.md")).unwrap(),
-            pandoc_def().render("zh-CN").unwrap()
-        );
-        assert_eq!(baselines["pandoc"].locale, "zh-CN");
-    }
-
-    #[test]
-    fn restore_refuses_unknown_and_unmaterialized_names() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        assert_eq!(
-            restore(root.path(), "en-US", "no-such-skill", &mut baselines),
-            Err(SkillError::NoSuchSkill("no-such-skill".to_string()))
-        );
-        // A curated name with no record (the conflict window) is not ours.
-        assert_eq!(
-            restore(root.path(), "en-US", "pandoc", &mut baselines),
-            Err(SkillError::NoSuchSkill("pandoc".to_string()))
-        );
-    }
-
-    // --- auto-include ---------------------------------------------------
-
-    #[test]
-    fn auto_included_names_gates_on_source_enabled_materialization_and_file_presence() {
-        let root = tempfile::tempdir().expect("root");
-        let marked = BuiltinSkillMark::of(&["pandoc"]);
-        // No file yet: nothing auto-included even with an enabled entry.
-        assert!(auto_included_names(&[builtin_pandoc(true)], &marked, root.path()).is_empty());
-        std::fs::create_dir_all(root.path().join("pandoc")).expect("mkdir");
-        std::fs::write(
-            root.path().join("pandoc/SKILL.md"),
-            "---\nname: pandoc\ndescription: d\n---\nBody.\n",
-        )
-        .expect("write");
-        assert_eq!(
-            auto_included_names(&[builtin_pandoc(true)], &marked, root.path()),
-            vec!["pandoc".to_string()]
-        );
-        // Not materialized (no side-table record) drops out -- the
-        // reverse-conflict window: the file exists but is the user's, and
-        // the frontend chip (acquired: builtin) does not count it either.
-        assert!(auto_included_names(
-            &[builtin_pandoc(true)],
-            &BuiltinSkillMark::default(),
-            root.path()
-        )
-        .is_empty());
-        // Disabled drops out; a user-sourced entry of the same name is not
-        // an auto-include anchor.
-        assert!(auto_included_names(&[builtin_pandoc(false)], &marked, root.path()).is_empty());
-        let mut user = builtin_pandoc(true);
-        user.source = CliToolSource::User;
-        assert!(auto_included_names(&[user], &marked, root.path()).is_empty());
-    }
-
-    // --- the companion axis (issue #1012, ADR-0120 Decision 7) ------------
 
     /// The declared companion wiring: the v1 trio rides its same-named CLI
-    /// entry; `vega-chart` is the first knowledge-only skill (no CLI to
-    /// detect, nothing to gate on).
+    /// entry; `vega-chart` is the first knowledge-only skill. The pairing
+    /// stays 1:1 with the CLI shipped set and same-name (the module-doc
+    /// invariant -- a divergent pair would desync the anchor
+    /// (companion-keyed) from the reserved-name set (name-keyed)).
     #[test]
-    fn companioned_definitions_declare_their_cli_and_vega_chart_rides_none() {
+    fn companioned_entries_declare_their_cli_and_vega_chart_rides_none() {
         let trio: &[(&str, &str)] = &[
             ("pandoc", "pandoc"),
             ("python", "python"),
@@ -1386,32 +603,23 @@ mod tests {
         ];
         for (skill, cli) in trio {
             assert_eq!(
-                find_skill_definition(skill)
-                    .expect("definition")
-                    .companion_cli,
+                find_manifest_entry(skill).expect("entry").companion_cli,
                 Some(*cli),
                 "{skill} keeps its CLI companion"
             );
         }
         assert_eq!(
-            find_skill_definition("vega-chart")
-                .expect("definition")
+            find_manifest_entry("vega-chart")
+                .expect("entry")
                 .companion_cli,
             None,
             "vega-chart is knowledge-only"
         );
-        // The declared companions stay 1:1 with the CLI shipped set, and the
-        // pairing is same-name (the module-doc invariant): every companion
-        // addresses a shipped CLI definition AND equals the skill's own
-        // name -- a divergent pair would desync the anchor (companion-keyed)
-        // from the record-retain arm (name-keyed), and a hand-copied trio
-        // would silently drift as the CLI set grows.
-        for def in BUILTIN_SKILL_DEFINITIONS {
-            if let Some(companion) = def.companion_cli {
+        for entry in BUILTIN_SKILL_MANIFEST {
+            if let Some(companion) = entry.companion_cli {
                 assert_eq!(
-                    companion, def.name,
-                    "a companioned skill shares its CLI entry's name (the \
-                     two namespaces are disjoint only through these pairs)"
+                    companion, entry.name,
+                    "a companioned skill shares its CLI entry's name"
                 );
                 assert!(
                     crate::cli_tools::builtin::BUILTIN_DEFINITIONS
@@ -1423,228 +631,400 @@ mod tests {
         }
     }
 
-    /// The no-companion materialization path: with an EMPTY CLI registry
-    /// (no detection, no registration) the knowledge-only skill still
-    /// materializes and records -- the app version itself is the anchor.
-    /// Removing the dispatch (a no-companion skill falling back to the CLI
-    /// judgment) leaves the file unwritten and this red.
+    // --- curated trigger copy ------------------------------------------------
+
+    /// The locked trigger copy (curation brief, verbatim): sentence 1 is
+    /// capability + trigger timing, sentence 2 the neighbor-tool boundary.
+    /// With progressive disclosure the metadata index is the only discovery
+    /// surface, so the wording itself is load-bearing -- pinned byte for
+    /// byte. English-only since ADR-0121 Decision 2.
     #[test]
-    fn reconcile_materializes_a_no_companion_skill_with_no_cli_entry() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
-        assert!(dirty);
-        let def = find_skill_definition("vega-chart").expect("definition");
-        let content =
-            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).expect("file");
-        assert_eq!(content, def.render("en-US").unwrap());
-        assert_eq!(baselines["vega-chart"].locale, "en-US");
-        assert_eq!(
-            baselines["vega-chart"].hash,
-            crate::util::sha256_hex(content.as_bytes())
-        );
+    fn descriptions_carry_the_locked_trigger_copy() {
+        let expected: &[(&str, &str)] = &[
+            (
+                "pandoc",
+                "Convert existing documents between formats with the local \
+                 pandoc — render Markdown to DOCX/HTML/PDF for delivery, or \
+                 read DOCX/EPUB into Markdown for analysis. Authoring or \
+                 manipulating Office-file content (tables, templates, \
+                 reports) belongs to office-cli.",
+            ),
+            (
+                "office-cli",
+                "Work directly on Office-file content with the local \
+                 OfficeCLI (Word, Excel, PowerPoint): extract text and \
+                 tables, edit, fill templates, or author a document from \
+                 scratch. Converting a document that already exists between \
+                 formats belongs to pandoc.",
+            ),
+            (
+                "python",
+                "Clean and transform data with a Python script on the local \
+                 interpreter (stdlib always; user-installed packages usable) \
+                 — reach for it when the logic is procedural: reshaping, \
+                 regex massaging, unit fixing, multi-step row logic. Plain \
+                 projection, filtering, and aggregation belong to SQL.",
+            ),
+            (
+                "vega-chart",
+                "Chart numeric shape — a trend over time, a distribution, a \
+                 comparison across categories or groups — by emitting a \
+                 vega-lite fence in the reply. Flowcharts, diagrams, and lone \
+                 KPI figures are out of scope; they belong to plain prose or \
+                 a table.",
+            ),
+        ];
+        for (name, en) in expected {
+            assert_eq!(&description_of(name), en, "{name} description");
+        }
     }
 
-    /// The no-companion auto-include path: admission without any CLI entry
-    /// (the dispatch's open arm), while materialization and file presence
-    /// keep gating (the closed arms). Falling back to the CLI judgment for
-    /// a knowledge-only skill empties the first assert.
+    /// The format/content split is cross-referenced symmetrically through
+    /// the OWNERSHIP sentence ("belongs to X"), not a bare neighbor
+    /// mention: the index shows all entries at once, so the boundary
+    /// sentence is what disambiguates them.
     #[test]
-    fn auto_included_names_admits_a_no_companion_skill_without_a_cli_entry() {
-        let root = tempfile::tempdir().expect("root");
-        std::fs::create_dir_all(root.path().join("vega-chart")).expect("mkdir");
-        std::fs::write(
-            root.path().join("vega-chart/SKILL.md"),
-            "---\nname: vega-chart\ndescription: d\n---\nBody.\n",
-        )
-        .expect("write");
-        let marked = BuiltinSkillMark::of(&["vega-chart"]);
-        assert_eq!(
-            auto_included_names(&[], &marked, root.path()),
-            vec!["vega-chart".to_string()]
-        );
-        // Unmarked (the reverse-conflict window) drops out.
-        assert!(auto_included_names(&[], &BuiltinSkillMark::default(), root.path()).is_empty());
-        // A missing file drops out.
-        std::fs::remove_file(root.path().join("vega-chart/SKILL.md")).expect("delete");
-        assert!(auto_included_names(&[], &marked, root.path()).is_empty());
+    fn boundary_sentences_cross_reference_the_neighbor() {
+        let pairs: &[(&str, &str)] = &[
+            ("pandoc", "belongs to office-cli"),
+            ("office-cli", "belongs to pandoc"),
+            ("python", "belong to SQL"),
+        ];
+        for (name, phrase) in pairs {
+            assert!(
+                description_of(name).contains(*phrase),
+                "{} description must keep the boundary phrase {phrase:?}",
+                name
+            );
+        }
     }
 
-    /// The knowledge-only steady state: a vega-chart materialized under one
-    /// locale stays byte-stable and quiet under another. The anchor fires
-    /// EVERY window (no CLI condition), so a non-idempotency bug here would
-    /// churn the config on every startup, unlike the trio's (whose anchor
-    /// needs a detection). Also pins the zh-CN materialization combination.
+    /// Python library semantics erratum: "nothing bundled with the app" is
+    /// not "stdlib only" -- user-installed packages import normally, and the
+    /// description and the body must agree on that.
     #[test]
-    fn reconcile_keeps_a_no_companion_skill_quiet_across_a_locale_switch() {
-        let root = tempfile::tempdir().expect("root");
-        let mut baselines = BTreeMap::new();
-        reconcile(root.path(), "zh-CN", &registry_with(vec![]), &mut baselines);
-        let def = find_skill_definition("vega-chart").expect("definition");
-        let content =
-            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).expect("file");
-        assert_eq!(content, def.render("zh-CN").unwrap());
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
-        assert!(!dirty, "the locale switch does not rewrite or re-record");
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).unwrap(),
-            content,
-            "the zh-CN render survives the en-US window"
-        );
-        assert_eq!(baselines["vega-chart"].locale, "zh-CN");
-    }
-
-    /// The knowledge-only reverse-conflict posture at the reconcile level:
-    /// a user-written vega-chart file defers (no record, bytes preserved
-    /// verbatim) with an EMPTY CLI registry -- the knowledge-only anchor
-    /// opens this window on every scan, unlike the trio's (which needs its
-    /// CLI registered first).
-    #[test]
-    fn reconcile_defers_a_user_written_no_companion_skill() {
-        let root = tempfile::tempdir().expect("root");
-        let user_file = "---\nname: vega-chart\ndescription: mine\n---\nBody.\n";
-        std::fs::create_dir_all(root.path().join("vega-chart")).expect("mkdir");
-        std::fs::write(root.path().join("vega-chart/SKILL.md"), user_file).expect("write");
-        let mut baselines = BTreeMap::new();
-        let dirty = reconcile(root.path(), "en-US", &registry_with(vec![]), &mut baselines).dirty;
+    fn python_copy_states_library_semantics_accurately() {
+        let description = description_of("python");
+        let body = body_of("python");
         assert!(
-            !baselines.contains_key("vega-chart"),
-            "no record: the file is not ours"
+            !description.contains("stdlib only") && !body.contains("stdlib only"),
+            "the stale absolute claim must be gone from both"
         );
-        assert!(!dirty, "a defer is not a side-table change");
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("vega-chart/SKILL.md")).unwrap(),
-            user_file,
-            "the user file is preserved"
-        );
+        assert!(body.contains("packages the user has installed themselves import normally"));
     }
 
-    /// The locked vega-chart trigger copy (curation brief, verbatim -- the
-    /// same discipline as the trio above): sentence 1 is capability +
-    /// trigger timing, sentence 2 the negative boundary routing flowcharts
-    /// and KPI figures to prose/tables.
+    /// Length discipline (curation brief): every description fits two
+    /// sentences and at most 45 words -- the index is re-read every turn.
     #[test]
-    fn vega_chart_description_pins_the_trigger_copy() {
-        let def = find_skill_definition("vega-chart").expect("definition");
-        assert_eq!(
-            def.body_for("en-US").description,
-            "Chart numeric shape — a trend over time, a distribution, a \
-             comparison across categories or groups — by emitting a \
-             vega-lite fence in the reply. Flowcharts, diagrams, and lone \
-             KPI figures are out of scope; they belong to plain prose or \
-             a table."
-        );
-        assert_eq!(
-            def.body_for("zh-CN").description,
-            "用 vega-lite fence 表现数值形态——时间趋势、分布、跨类目或分组\
-             的对比——在回复中直接产出图表。流程图、示意图与孤立 KPI 数字不在\
-             范围，那些属于纯文字或表格。"
-        );
+    fn descriptions_stay_within_the_curated_length_budget() {
+        const MAX_WORDS: usize = 45;
+        for entry in BUILTIN_SKILL_MANIFEST {
+            let en = description_of(entry.name);
+            let words = en.split_whitespace().count();
+            assert!(
+                words <= MAX_WORDS,
+                "{} description is {words} words (budget {MAX_WORDS})",
+                entry.name
+            );
+            let sentences = en
+                .char_indices()
+                .filter(|(i, c)| {
+                    matches!(c, '.' | '?' | '!') && en[i + c.len_utf8()..].starts_with(' ')
+                })
+                .count()
+                + 1;
+            assert!(
+                sentences <= 2,
+                "{} description has {sentences} sentences",
+                entry.name
+            );
+        }
     }
 
     /// The vega-chart body must teach the whole render contract (ADR-0120
     /// Decisions 1/3/5/6): the fence language rule, the four syntax rules,
     /// the whitelisted mark set (matching the frontend
-    /// `WHITELISTED_MARKS`), the SQL-first + row-cap data guardrail, and
-    /// an imitable minimal fence. Phrase pins, not verbatim: the body is
-    /// teaching prose a re-curation may rewrite; the CONTRACT items are
-    /// what must survive one.
+    /// `WHITELISTED_MARKS`), the SQL-first + row-cap data guardrail, and an
+    /// imitable minimal fence. Phrase pins, not verbatim: the CONTRACT
+    /// items are what must survive a re-curation.
     #[test]
     fn vega_chart_body_teaches_the_render_contract() {
-        let def = find_skill_definition("vega-chart").expect("definition");
-        for tag in ["en-US", "zh-CN"] {
-            let body = def.body_for(tag).body;
-            // The fence language rule (Decision 6).
-            assert!(
-                body.contains("`vega-lite`"),
-                "{tag} names the fence language"
-            );
-            // The four syntax rules.
-            assert!(body.contains("$schema"), "{tag} requires $schema");
-            assert!(body.contains("v5.json"), "{tag} pins the v5 schema URL");
-            assert!(
-                body.contains("case-sensitive") || body.contains("大小写敏感"),
-                "{tag} teaches field-name case sensitivity"
-            );
-            for t in ["quantitative", "nominal", "ordinal", "temporal"] {
-                assert!(body.contains(t), "{tag} lists type {t}");
-            }
-            // The data guardrail (Decision 5): SQL-first + the row ceiling.
-            assert!(body.contains("SQL"), "{tag} teaches SQL-first aggregation");
-            assert!(
-                body.contains("150 rows") || body.contains("150 行"),
-                "{tag} carries the row guardrail"
-            );
-            // Every whitelisted mark token appears.
-            for m in [
-                "bar", "line", "area", "point", "circle", "square", "arc", "rect",
-            ] {
-                assert!(body.contains(&format!("`{m}`")), "{tag} whitelists {m}");
-            }
-            // An imitable minimal fence ships in the body, and it is valid
-            // strict JSON with a whitelisted mark -- it is the direct
-            // template the agent imitates, so a re-curation typo must fail
-            // here rather than ship.
-            let example = body
-                .split("```vega-lite\n")
-                .nth(1)
-                .and_then(|rest| rest.split("```").next())
-                .expect("an example fence");
-            let spec: serde_json::Value =
-                serde_json::from_str(example).expect("the example fence is strict JSON");
-            assert!(spec.get("$schema").is_some());
-            assert_eq!(spec["mark"], "bar");
+        let body = body_of("vega-chart");
+        assert!(body.contains("`vega-lite`"), "names the fence language");
+        assert!(body.contains("$schema"), "requires $schema");
+        assert!(body.contains("v5.json"), "pins the v5 schema URL");
+        assert!(body.contains("case-sensitive"), "teaches case sensitivity");
+        for t in ["quantitative", "nominal", "ordinal", "temporal"] {
+            assert!(body.contains(t), "lists type {t}");
         }
+        assert!(body.contains("SQL"), "teaches SQL-first aggregation");
+        assert!(body.contains("150 rows"), "carries the row guardrail");
+        for m in [
+            "bar", "line", "area", "point", "circle", "square", "arc", "rect",
+        ] {
+            assert!(body.contains(&format!("`{m}`")), "whitelists {m}");
+        }
+        // An imitable minimal fence ships in the body, and it is valid
+        // strict JSON with a whitelisted mark -- it is the direct template
+        // the agent imitates, so a re-curation typo must fail here.
+        let example = body
+            .split("```vega-lite\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("an example fence");
+        let spec: serde_json::Value =
+            serde_json::from_str(example).expect("the example fence is strict JSON");
+        assert!(spec.get("$schema").is_some());
+        assert_eq!(spec["mark"], "bar");
     }
 
-    /// The curation budget for the vega-chart body (issue #1012): ~3-4KB.
-    /// The body enters the prompt on every `invoke_skill`, so size is a
-    /// recurring token cost and 4096 bytes is the hard ceiling.
+    /// The curation budget for the vega-chart body (issue #1012): the body
+    /// enters the prompt on every `invoke_skill`, so 4096 bytes is the hard
+    /// ceiling.
     #[test]
     fn vega_chart_body_stays_within_the_curation_budget() {
-        let def = find_skill_definition("vega-chart").expect("definition");
-        for tag in ["en-US", "zh-CN"] {
-            assert!(
-                def.body_for(tag).body.len() <= 4096,
-                "{tag} body is {} bytes (budget 4096)",
-                def.body_for(tag).body.len()
+        assert!(
+            body_of("vega-chart").len() <= 4096,
+            "body is {} bytes (budget 4096)",
+            body_of("vega-chart").len()
+        );
+    }
+
+    // --- align ----------------------------------------------------------------
+
+    #[test]
+    fn align_materializes_anchored_skills_under_the_reserved_subtree() {
+        let root = tempfile::tempdir().expect("root");
+        let outcome = align(root.path(), &registry_with(vec![builtin_pandoc(true)]));
+        assert!(outcome.materialize_failures.is_empty());
+        // The companioned skill aligns behind its Builtin-sourced entry...
+        let pandoc = embedded_files("pandoc");
+        for (path, bytes) in &pandoc {
+            assert_eq!(
+                &std::fs::read(root.path().join(".system/pandoc").join(path)).unwrap(),
+                bytes,
+                "embedded `{path}` materialized verbatim"
             );
         }
+        assert!(root.path().join(".system/pandoc/.fingerprint").exists());
+        // ...the knowledge-only skill aligns with no CLI condition...
+        assert!(root.path().join(".system/vega-chart/SKILL.md").exists());
+        // ...and the un-anchored companions materialize nothing.
+        assert!(!root.path().join(".system/python").exists());
+        assert!(!root.path().join(".system/office-cli").exists());
     }
 
-    // --- the registry mark -------------------------------------------------
-
+    /// The quiet path (ADR-0121 Decision 3): a matching fingerprint writes
+    /// nothing -- pinned by the marker's mtime, which a rewrite would
+    /// necessarily move.
     #[test]
-    fn the_mark_promotes_a_materialized_name_and_leaves_others_alone() {
-        let cfg = AppConfig::defaults();
-        let unmarked = BuiltinSkillMark::from_config(&cfg);
-        assert!(!unmarked.contains("pandoc"));
+    fn align_skips_with_zero_writes_when_the_fingerprint_agrees() {
+        let root = tempfile::tempdir().expect("root");
+        let cli = registry_with(vec![builtin_pandoc(true)]);
+        align(root.path(), &cli);
+        let marker = root.path().join(".system/pandoc/.fingerprint");
+        let before = std::fs::metadata(&marker)
+            .expect("marker")
+            .modified()
+            .unwrap();
+        align(root.path(), &cli);
+        let after = std::fs::metadata(&marker)
+            .expect("marker")
+            .modified()
+            .unwrap();
+        assert_eq!(before, after, "an agreeing fingerprint rewrites nothing");
+    }
+
+    /// The readonly-cache reset semantics: an externally edited file (or a
+    /// hand-dropped extra file) is reset on the next alignment -- the
+    /// subtree is app-deployed content, never preserved (mutation pin:
+    /// dropping the mismatch rewrite leaves the edit in place and this
+    /// fails).
+    #[test]
+    fn align_resets_an_external_edit_and_removes_a_stale_file() {
+        let root = tempfile::tempdir().expect("root");
+        let cli = registry_with(vec![builtin_pandoc(true)]);
+        align(root.path(), &cli);
+        let skill_md = root.path().join(".system/pandoc/SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: pandoc\ndescription: edited\n---\nEdited.\n",
+        )
+        .expect("edit");
+        let stale = root.path().join(".system/pandoc/scripts/old.py");
+        std::fs::create_dir_all(stale.parent().unwrap()).expect("mkdir");
+        std::fs::write(&stale, "# stale\n").expect("stale");
+        let outcome = align(root.path(), &cli);
+        assert!(outcome.materialize_failures.is_empty());
+        let (_, bytes) = embedded_files("pandoc")
+            .into_iter()
+            .find(|(p, _)| p == "SKILL.md")
+            .unwrap();
         assert_eq!(
-            unmarked.acquired("pandoc", Acquired::Local),
-            Acquired::Local
+            std::fs::read(&skill_md).unwrap(),
+            bytes,
+            "the external edit is reset"
         );
-        let with = BuiltinSkillMark::of(&["pandoc"]);
-        assert_eq!(with.acquired("pandoc", Acquired::Local), Acquired::Builtin);
-        // A linked directory outranks the mark (the read-only posture is
-        // the safer reading of a hand-mangled state).
-        assert_eq!(with.acquired("pandoc", Acquired::Linked), Acquired::Linked);
+        assert!(
+            !stale.exists(),
+            "a stale file outside the embedded set is removed"
+        );
+    }
+
+    /// The failure lane (issue #1016, now riding the whole-tree write): a
+    /// blocked path degrades per-skill -- warn, name in the lane, next scan
+    /// retries -- and a cleared blocker heals. A plain FILE occupying the
+    /// subtree path is the deterministic stand-in for the real failure
+    /// classes (read-only skills root, full disk, antivirus interference).
+    #[test]
+    fn align_reports_failures_by_name_and_heals_when_cleared() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir(root.path().join(".system")).expect("mkdir");
+        std::fs::write(root.path().join(".system/pandoc"), b"not a directory").expect("blocker");
+        let outcome = align(root.path(), &registry_with(vec![builtin_pandoc(true)]));
+        assert_eq!(
+            outcome.materialize_failures,
+            vec!["pandoc".to_string()],
+            "only the blocked skill fails; vega-chart still aligns"
+        );
+        assert!(root.path().join(".system/vega-chart/SKILL.md").exists());
+        // The degraded posture leaves no half-written tree behind.
+        assert!(!root.path().join(".system/pandoc").is_dir());
+        // The condition clears: the next window heals the lane (the warning
+        // must not outlive the failure it reported).
+        std::fs::remove_file(root.path().join(".system/pandoc")).expect("unblock");
+        let healed = align(root.path(), &registry_with(vec![builtin_pandoc(true)]));
+        assert!(healed.materialize_failures.is_empty());
+        assert!(root.path().join(".system/pandoc/SKILL.md").exists());
     }
 
     #[test]
-    fn from_config_ignores_records_outside_the_shipped_set() {
-        // A hand-edited or stale record for a non-shipped name must not
-        // promote a user skill to the builtin posture; the scan-window
-        // retain drops the record from disk on its next pass.
-        let mut cfg = AppConfig::defaults();
-        cfg.builtin_skill_baselines.insert(
-            "ghost".to_string(),
-            BuiltinSkillBaseline {
-                hash: "h".to_string(),
-                locale: "en-US".to_string(),
-            },
+    fn align_skips_dormant_and_user_sourced_entries() {
+        let root = tempfile::tempdir().expect("root");
+        let mut user = builtin_pandoc(true);
+        user.source = CliToolSource::User;
+        let outcome = align(root.path(), &registry_with(vec![user]));
+        // The user-sourced entry anchors nothing: no pandoc subtree, no
+        // failure -- only the knowledge-only skill aligned.
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(!root.path().join(".system/pandoc").exists());
+        let mut aligned: Vec<String> = std::fs::read_dir(root.path().join(".system"))
+            .expect(".system")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| find_manifest_entry(n).is_some())
+            .collect();
+        aligned.sort();
+        let expected: Vec<String> = knowledge_only_names_sorted()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(aligned, expected);
+    }
+
+    /// A local skill owning the name does NOT stop alignment (ADR-0121
+    /// Decision 5: materialization always runs; the deference happens only
+    /// at the registry-scan merge). The mutation target for the shadowing
+    /// family: consulting shadowing here would skip the write and the
+    /// restore-on-delete semantics would die with it.
+    #[test]
+    fn align_still_writes_when_a_local_skill_shadows_the_name() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join("vega-chart")).expect("fork dir");
+        std::fs::write(
+            root.path().join("vega-chart/SKILL.md"),
+            "---\nname: vega-chart\ndescription: mine\n---\nBody.\n",
+        )
+        .expect("write");
+        let outcome = align(root.path(), &registry_with(vec![]));
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(
+            root.path().join(".system/vega-chart/SKILL.md").exists(),
+            "the reserved subtree is written regardless of the shadow"
         );
-        let mark = BuiltinSkillMark::from_config(&cfg);
-        assert!(!mark.contains("ghost"));
-        assert_eq!(mark.acquired("ghost", Acquired::Local), Acquired::Local);
+    }
+
+    // --- auto-include -------------------------------------------------------
+
+    #[test]
+    fn auto_included_names_gates_on_source_enabled_and_presence() {
+        let root = tempfile::tempdir().expect("root");
+        // Nothing on disk: an enabled entry admits nothing.
+        assert!(auto_included_names(&[builtin_pandoc(true)], root.path()).is_empty());
+        std::fs::create_dir_all(root.path().join(".system/pandoc")).expect("mkdir");
+        std::fs::write(
+            root.path().join(".system/pandoc/SKILL.md"),
+            "---\nname: pandoc\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write");
+        assert_eq!(
+            auto_included_names(&[builtin_pandoc(true)], root.path()),
+            vec!["pandoc".to_string()]
+        );
+        // Disabled drops out; a user-sourced entry of the same name is not
+        // an auto-include anchor.
+        assert!(auto_included_names(&[builtin_pandoc(false)], root.path()).is_empty());
+        let mut user = builtin_pandoc(true);
+        user.source = CliToolSource::User;
+        assert!(auto_included_names(&[user], root.path()).is_empty());
+    }
+
+    /// The no-companion auto-include path: admission without any CLI entry
+    /// (the dispatch's open arm), with presence still gating (the closed
+    /// arm).
+    #[test]
+    fn auto_included_names_admits_a_no_companion_skill_without_a_cli_entry() {
+        let root = tempfile::tempdir().expect("root");
+        assert!(auto_included_names(&[], root.path()).is_empty());
+        std::fs::create_dir_all(root.path().join(".system/vega-chart")).expect("mkdir");
+        std::fs::write(
+            root.path().join(".system/vega-chart/SKILL.md"),
+            "---\nname: vega-chart\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write");
+        assert_eq!(
+            auto_included_names(&[], root.path()),
+            vec!["vega-chart".to_string()]
+        );
+    }
+
+    /// Under shadowing, presence resolves to the LOCAL copy (ADR-0121
+    /// Decision 5: auto-include resolves to the local skill) -- a fork at
+    /// the registry root satisfies presence with no reserved-subtree copy
+    /// at all.
+    #[test]
+    fn auto_included_names_resolves_a_shadowing_local_copy() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join("vega-chart")).expect("fork dir");
+        std::fs::write(
+            root.path().join("vega-chart/SKILL.md"),
+            "---\nname: vega-chart\ndescription: mine\n---\nBody.\n",
+        )
+        .expect("write");
+        assert_eq!(
+            auto_included_names(&[], root.path()),
+            vec!["vega-chart".to_string()]
+        );
+    }
+
+    // --- the shadowing resolver ----------------------------------------------
+
+    #[test]
+    fn resolve_skill_dir_prefers_local_and_falls_back_to_the_reserved_subtree() {
+        let root = tempfile::tempdir().expect("root");
+        // Neither: None.
+        assert!(resolve_skill_dir(root.path(), "pandoc").is_none());
+        // Reserved-subtree only: the subtree copy.
+        std::fs::create_dir_all(root.path().join(".system/pandoc")).expect("mkdir");
+        let resolved = resolve_skill_dir(root.path(), "pandoc").expect("resolved");
+        assert!(resolved.starts_with(root.path().join(".system")));
+        // A local copy shadows (the fork channel / mutation pin for the
+        // shadowing family: flipping the resolution order serves the
+        // builtin and the fork stops being what everything resolves to).
+        std::fs::create_dir_all(root.path().join("pandoc")).expect("fork");
+        assert_eq!(
+            resolve_skill_dir(root.path(), "pandoc").expect("resolved"),
+            root.path().join("pandoc")
+        );
     }
 }

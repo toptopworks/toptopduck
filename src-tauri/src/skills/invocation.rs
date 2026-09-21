@@ -229,6 +229,41 @@ mod tests {
                 input: json!({"name": name}),
             }
         }
+
+        /// The builtin posture's on-disk shape (ADR-0121): the same skill
+        /// tree living ONLY under the reserved subtree, nothing at the
+        /// registry root -- the gateway must resolve through the shadowing
+        /// order's fallback arm to serve it.
+        fn put_system_skill(&self, body: &str) {
+            let dir = self.root.path().join(".system").join("sql-coach");
+            std::fs::create_dir_all(&dir).unwrap();
+            let content = format!("---\nname: sql-coach\ndescription: Coach SQL.\n---\n{body}");
+            std::fs::write(dir.join("SKILL.md"), content).unwrap();
+        }
+    }
+
+    /// A skill existing only under the reserved subtree is invokable
+    /// end-to-end: the gateway's canonical anchor and the fragment
+    /// resolution both fall back to `.system/` (ADR-0121 Decision 5). A
+    /// resolver joining `root/<name>` directly would refuse it as unknown
+    /// (the review-pass wiring mutants).
+    #[test]
+    fn a_builtin_tree_under_the_reserved_subtree_is_invokable() {
+        let fx = Fixture::new();
+        fx.put_system_skill("Coach the SQL.\n");
+        let mut pending = Vec::new();
+        let snapshot = vec!["sql-coach".to_string()];
+        let mut ctx = fx.ctx(&mut pending, &snapshot, &[]);
+        match resolve_skill_invocation(&Fixture::call("sql-coach"), &mut ctx) {
+            SkillInvocationOutcome::Local { summary, payload } => {
+                assert_eq!(summary, "sql-coach");
+                assert_eq!(payload, Value::String("Coach the SQL.\n".to_string()));
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].body, "Coach the SQL.\n");
+        assert!(!pending[0].content_hash.is_empty());
     }
 
     /// A served invocation returns the body verbatim, appends the AGENT-actor

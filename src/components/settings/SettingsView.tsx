@@ -164,12 +164,7 @@ function SectionContent({
         />
       );
     case "skills":
-      return (
-        <SkillsSection
-          builtinSkillBaselines={appConfig.builtin_skill_baselines}
-          onAppConfigSync={onCliToolsChanged}
-        />
-      );
+      return <SkillsSection onAppConfigSync={onCliToolsChanged} />;
     case "agents":
       return <AgentsSection onAppConfigSync={onCliToolsChanged} />;
     case "runtime":

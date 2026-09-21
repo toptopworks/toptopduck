@@ -185,6 +185,13 @@ keyring = { version = "3", features = ["windows-native", "apple-native"] }
 # dropped (add an env_logger dev-dep + init if test diagnostics are ever
 # needed).
 log = "0.4"
+# Compile-time embedding of the builtin-skill asset tree (ADR-0121 Decision
+# 1): the SKILL.md + scripts/references file set under
+# `src/skills/assets/builtin/` ships inside the binary (single-file
+# distribution keeps its deployment property), while the prose lives as real
+# files with readable diffs instead of escaped string literals. build.rs
+# declares the recursive rerun-if-changed so asset edits rebuild.
+include_dir = "0.7"
 # Unified log sink for both the Rust `log` facade and the frontend
 # `@tauri-apps/plugin-log` bindings (issue #98, ADR-0029 invariant 2 /
 # ADR-0038). Registered on the lib.rs Builder chain so the existing

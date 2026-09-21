@@ -25,6 +25,7 @@ export function skillEntry(name: string, overrides?: Partial<SkillEntry>): Skill
     link_target: null,
     content_hash: "ab".repeat(32),
     enabled: true,
+    covers_builtin: false,
     ...overrides,
   };
 }
@@ -57,7 +58,6 @@ export function baseAppConfig(overrides?: Partial<AppConfig>): AppConfig {
     shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
     mcp_servers: { servers: [] },
     cli_tools: { tools: [] },
-    builtin_skill_baselines: {},
     sessions_dir: null,
     default_runtime: { kind: "built_in" },
     last_model_postures: {},

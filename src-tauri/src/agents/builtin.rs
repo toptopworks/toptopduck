@@ -7,8 +7,8 @@
 //! materializes the shipped set into the registry (a real file per
 //! definition) and records the materialization mark in app-config -- the
 //! mark, not the static set, is the builtin-identity anchor, so a user's
-//! pre-existing same-named file keeps its own source (the
-//! `builtin_skill_baselines` posture of the skills loader). Unlike skills,
+//! pre-existing same-named file keeps its own source (the skills loader's
+//! former side-table posture, retired there by ADR-0121). Unlike skills,
 //! agent definitions carry no version-following in v1: a recorded builtin
 //! stays builtin across edits, with no baseline hash and no upgrade pass
 //! (the shipped prose is stable; a follow-up slice adds the axis if it
