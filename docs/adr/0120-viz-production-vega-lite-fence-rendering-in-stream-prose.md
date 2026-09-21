@@ -43,4 +43,5 @@ ADR-0016 定义了 viz 意图与白名单，ADR-0033 补触发与退化披露，
 - 流中图表卡与工作区联动（点击跳转关联结果）及放大查看、报告导出（Vega 视图序列化路线已识别）留尾。
 - 结果卡 `viz` 槽位（ADR-0016/0033 原设计）继续闲置；若未来结果卡图表诉求真实，emit_chart 路线按本 ADR Considered 记录重评。
 - **校准 ADR-0016**：白名单增 heatmap；图表生产表面增流内 fence 一路，结果卡槽位与降级/主题路径不变。
+- **被 ADR-0121 校准**：Decision 7 的「技能单文件、双语（en-US / zh-CN 随响应 locale），不启用 references 多文件物化」读作「技能为文件树、英文单语、支持 scripts/references 多文件」；Considered 的「references/ 多文件渐进披露」否决项就此翻案（复杂技能压力就此真实）；Why 4 所引「用户可编辑 / hash 漂移跟踪」治理随 ADR-0109 校准失效；伴随关系可选化与自动包含判定不变。
 - **留实施期**：白名单增 `rect` 与 catalog 扩词、markdown 管道 fence 渲染分支与 live/settled 通路、内置技能可选伴随字段与自动包含判定分发、现有三个伴随定义补字段（行为不变）、`vega-chart` 双语定义文案。
