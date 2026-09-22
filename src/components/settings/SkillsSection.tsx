@@ -64,7 +64,13 @@ import {
   PaneHeader,
   SettingsCard,
 } from "./settings-chrome";
-import { matchesSearch, searchableText } from "./settings-filters";
+import {
+  FILTER_OPTIONS,
+  matchesFilter,
+  matchesSearch,
+  searchableText,
+  type EnabledFilter,
+} from "./settings-filters";
 
 // Skills settings pane (issue #362, ADR-0086; issue #1033, ADR-0122). The
 // registry is a directory scan (no app-config entry), so this pane reads
@@ -80,15 +86,6 @@ import { matchesSearch, searchableText } from "./settings-filters";
 // skills from external agent libraries and invalidates the same skills query
 // on success.
 
-type AcquiredFilter = "all" | SkillAcquired;
-
-const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
-  "all",
-  "linked",
-  "local",
-  "builtin",
-];
-
 // The row is list chrome (hover highlight + layout); the text block is the
 // detail affordance (click / Enter opens the read-only dialog) and every
 // write action lives in the row-end cluster -- never on the text block.
@@ -100,19 +97,6 @@ type SkillsRoot =
   | { phase: "loading" }
   | { phase: "resolved"; root: string }
   | { phase: "failed"; error: string };
-
-/** One filter-axis half shared by the rows and the failure lane: "all"
- *  passes everything; otherwise the value must match the axis. The lane
- *  calls it with the literal "builtin" -- a failed skill never landed on
- *  disk, so it has no acquired value to compare; the literal is its
- *  declared stand-in. */
-function matchesAcquired(filter: AcquiredFilter, acquired: SkillAcquired): boolean {
-  return filter === "all" || filter === acquired;
-}
-
-function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
-  return matchesAcquired(filter, skill.acquired);
-}
 
 /** The acquired axis's locale label: the row badge and the detail dialog's
  *  scope value share the one vocabulary -- no second word for the same
@@ -272,7 +256,7 @@ export function SkillsSection({
   }, []);
 
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<AcquiredFilter>("all");
+  const [filter, setFilter] = useState<EnabledFilter>("all");
   const [detailName, setDetailName] = useState<string | null>(null);
   // The detail dialog's own error line (the open-file failure face): the
   // section-level line is unreachable while the dialog is up (Radix marks
@@ -358,16 +342,18 @@ export function SkillsSection({
   // leaves the row on disk stale or absent, so the stand-in ALWAYS renders
   // beside any real row -- the write really did fail, and hiding the hint
   // (e.g. behind a stale pre-upgrade row) would report a healthy skill
-  // while the model keeps resolving old bytes. Visible under the "all"
-  // and "builtin" filters and matched by name (regular rows also match
-  // their description; the lane shows no description to match).
+  // while the model keeps resolving old bytes. Its enablement reads off the
+  // stale row when one exists, defaulting to enabled when the failed write
+  // left none (the default-on startup posture); a name failing the shared
+  // enabled-axis filter or the search hides like any row.
   const failedNames = useMemo(
     () =>
-      (materializeFailures ?? []).filter(
-        (name) =>
-          matchesAcquired(filter, "builtin") && matchesSearch(name, search),
-      ),
-    [materializeFailures, filter, search],
+      (materializeFailures ?? []).filter((name) => {
+        const enabled =
+          allSkills.find((s) => s.name === name)?.enabled ?? true;
+        return matchesFilter({ enabled }, filter) && matchesSearch(name, search);
+      }),
+    [materializeFailures, allSkills, filter, search],
   );
 
   /** The row's open anchor (issue #1033): a `local` row's own
@@ -515,18 +501,18 @@ export function SkillsSection({
           })}
           className="max-w-xs"
         />
-        <Label htmlFor="skills-acquired-filter" className="sr-only">
+        <Label htmlFor="skills-enabled-filter" className="sr-only">
           <FormattedMessage
             id="settings.skills.filterLabel"
-            defaultMessage="Filter by skill type"
+            defaultMessage="Filter by status"
           />
         </Label>
-        <Select value={filter} onValueChange={(v) => setFilter(v as AcquiredFilter)}>
+        <Select value={filter} onValueChange={(v) => setFilter(v as EnabledFilter)}>
           <SelectTrigger
-            id="skills-acquired-filter"
+            id="skills-enabled-filter"
             aria-label={intl.formatMessage({
               id: "settings.skills.filterLabel",
-              defaultMessage: "Filter by skill type",
+              defaultMessage: "Filter by status",
             })}
           >
             <SelectValue />
@@ -539,20 +525,15 @@ export function SkillsSection({
                     id="settings.skills.filterAll"
                     defaultMessage="All"
                   />
-                ) : opt === "linked" ? (
+                ) : opt === "enabled" ? (
                   <FormattedMessage
-                    id="settings.skills.filterLinked"
-                    defaultMessage="Linked"
-                  />
-                ) : opt === "local" ? (
-                  <FormattedMessage
-                    id="settings.skills.filterLocal"
-                    defaultMessage="Local"
+                    id="settings.skills.filterEnabled"
+                    defaultMessage="Enabled"
                   />
                 ) : (
                   <FormattedMessage
-                    id="settings.skills.filterBuiltin"
-                    defaultMessage="System"
+                    id="settings.skills.filterDisabled"
+                    defaultMessage="Disabled"
                   />
                 )}
               </SelectItem>

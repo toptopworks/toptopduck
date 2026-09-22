@@ -1,10 +1,11 @@
-// The shared list-filter vocabulary for settings panes (issue #976): the
-// enabled-axis Select trio consumed verbatim by the MCP and agents panes, plus
-// the search-box predicate the MCP / agents / skills panes share. Functions,
-// types, and one option-list constant only -- the Select's option-label JSX
-// stays in each pane as literal FormattedMessage children, because formatjs
-// extract only matches a direct literal descriptor and would drop ids hoisted
-// here.
+// The shared list-filter vocabulary for settings panes (issue #976; the
+// skills pane joined the enabled-axis trio when its acquired Select
+// retired): the enabled-axis Select trio consumed verbatim by the MCP,
+// agents, and skills panes, plus the search-box predicate the same three
+// panes share. Functions, types, and one option-list constant only -- the
+// Select's option-label JSX stays in each pane as literal FormattedMessage
+// children, because formatjs extract only matches a direct literal
+// descriptor and would drop ids hoisted here.
 
 import { searchMatcher } from "../../lib/searchMatcher";
 

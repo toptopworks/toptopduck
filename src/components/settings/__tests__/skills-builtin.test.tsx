@@ -147,18 +147,18 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
     ).not.toHaveAttribute("aria-disabled");
   });
 
-  it("filters builtin rows through the acquired filter", async () => {
+  it("filters builtin rows through the status filter", async () => {
     renderSection();
     await screen.findByTestId("skill-row");
     // Radix Select opens on a pointer sequence and commits on an option
-    // click (the AgentsSection filter posture) -- fireEvent.change is
+    // click (the Agents/MCP filter posture) -- fireEvent.change is
     // inert on it.
-    const filter = screen.getByLabelText("Filter by skill type");
+    const filter = screen.getByLabelText("Filter by status");
     openSelect(filter);
-    chooseOption("System");
+    chooseOption("Enabled");
     expect(screen.getByTestId("skill-row")).toBeInTheDocument();
     openSelect(filter);
-    chooseOption("Local");
+    chooseOption("Disabled");
     expect(screen.queryByTestId("skill-row")).toBeNull();
   });
 });
@@ -189,19 +189,43 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     expect(row).toHaveTextContent("next scan retries");
   });
 
-  it("rides the acquired filter like the rows it stands in for", async () => {
+  it("rides the status filter like the rows it stands in for", async () => {
     renderSection();
     await screen.findByTestId("skill-materialize-failure-row-vega-chart");
-    const filter = screen.getByLabelText("Filter by skill type");
-    // A failed skill is (would-be) builtin: the lane shows under "System"
-    // and hides under "Local".
+    const filter = screen.getByLabelText("Filter by status");
+    // The failed write left no row, so the stand-in reads as enabled by
+    // default: the lane shows under "Enabled" and hides under "Disabled".
     openSelect(filter);
-    chooseOption("System");
+    chooseOption("Enabled");
     expect(
       screen.getByTestId("skill-materialize-failure-row-vega-chart"),
     ).toBeInTheDocument();
     openSelect(filter);
-    chooseOption("Local");
+    chooseOption("Disabled");
+    expect(
+      screen.queryByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeNull();
+  });
+
+  it("reads the lane's enablement off a stale listing row (#1016)", async () => {
+    // When the failed write DID leave a stale row (a pre-upgrade leftover),
+    // the stand-in takes the row's enablement: a disabled failure shows
+    // under "Disabled", not "Enabled".
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [{ ...skillEntry("vega-chart"), enabled: false }],
+      ignored: [],
+      root_error: null,
+    });
+    renderSection();
+    await screen.findByTestId("skill-materialize-failure-row-vega-chart");
+    const filter = screen.getByLabelText("Filter by status");
+    openSelect(filter);
+    chooseOption("Disabled");
+    expect(
+      screen.getByTestId("skill-materialize-failure-row-vega-chart"),
+    ).toBeInTheDocument();
+    openSelect(filter);
+    chooseOption("Enabled");
     expect(
       screen.queryByTestId("skill-materialize-failure-row-vega-chart"),
     ).toBeNull();

@@ -274,24 +274,27 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.queryByText("pdf-tools")).not.toBeInTheDocument();
   });
 
-  it("filters local and linked rows through the acquired filter", async () => {
-    // The Radix Select's local/linked arms (the AgentsSection filter
-    // posture, driven through the shared pointer helpers): each arm hides
-    // the other source's rows while the row under test stays visible. The
-    // builtin arm is pinned separately in skills-builtin.
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill, linkedSkill], ignored: [], root_error: null });
+  it("filters enabled and disabled rows through the status filter", async () => {
+    // The shared enabled-axis trio (the Agents/MCP filter posture, driven
+    // through the shared pointer helpers): each arm hides the other
+    // state's rows while the row under test stays visible.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill, { ...linkedSkill, enabled: false }],
+      ignored: [],
+      root_error: null,
+    });
     renderPane();
     expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
     expect(screen.getByText("external-skill")).toBeInTheDocument();
 
-    const filter = screen.getByLabelText("Filter by skill type");
+    const filter = screen.getByLabelText("Filter by status");
     openSelect(filter);
-    chooseOption("Local");
+    chooseOption("Enabled");
     expect(screen.getByText("pdf-tools")).toBeInTheDocument();
     expect(screen.queryByText("external-skill")).toBeNull();
 
     openSelect(filter);
-    chooseOption("Linked");
+    chooseOption("Disabled");
     expect(screen.queryByText("pdf-tools")).toBeNull();
     expect(screen.getByText("external-skill")).toBeInTheDocument();
   });
