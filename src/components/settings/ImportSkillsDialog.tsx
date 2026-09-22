@@ -493,7 +493,7 @@ function SkillRow({ skill, checked, onToggle }: SkillRowProps) {
         className="min-w-0 flex-1 cursor-pointer"
       >
         <div className="flex items-center gap-2">
-          <span className="truncate font-mono text-xs">{skill.name}</span>
+          <span className="truncate text-sm font-medium">{skill.name}</span>
           {skill.status === "already_exists" && (
             <Badge variant="secondary" className="shrink-0">
               <FormattedMessage
@@ -511,11 +511,6 @@ function SkillRow({ skill, checked, onToggle }: SkillRowProps) {
             </Badge>
           )}
         </div>
-        {skill.description && (
-          <p className="text-muted-foreground truncate text-xs">
-            {skill.description}
-          </p>
-        )}
       </label>
     </div>
   );
