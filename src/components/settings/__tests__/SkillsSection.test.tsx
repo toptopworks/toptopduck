@@ -436,8 +436,10 @@ describe("SkillsSection (issue #362)", () => {
 
   it("drops the open detail when the listing loses the row and never reopens it (issue #1039)", async () => {
     // The drop arrives as a background refetch while the dialog is open (a
-    // late mount-rescan invalidate), so the trigger stays out-of-tree of the
-    // Radix dialog (the outside tree is aria-hidden to role queries).
+    // late mount-rescan invalidate), staged via the deferred rescan because
+    // while the dialog is open the outside tree is aria-hidden to role
+    // queries -- a Refresh click cannot deliver the drop until the dialog
+    // unmounts (the Refresh click below runs after that).
     let resolveRescan!: (result: BuiltinScanResult) => void;
     vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
       () =>
@@ -508,6 +510,41 @@ describe("SkillsSection (issue #362)", () => {
     expect(
       await screen.findByText("/roots/skills/pdf-tools/SKILL.md"),
     ).toBeInTheDocument();
+  });
+
+  it("ignores a stale root rejection landing after a newer fetch resolved (issue #1039)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    // The mount fetch stays pending; the open click's re-fetch resolves
+    // first, and the stale mount rejection lands last (the PR #1041
+    // review's ordering): the resolved path must survive it.
+    let rejectMount!: (e: Error) => void;
+    vi.mocked(getSkillsDir)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((_, reject) => {
+            rejectMount = reject;
+          }),
+      )
+      .mockResolvedValue("/roots/skills");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    // Opening while the mount fetch is pending fires the re-fetch (the
+    // loading-phase arm), which resolves the path bar.
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(
+      await screen.findByText("/roots/skills/pdf-tools/SKILL.md"),
+    ).toBeInTheDocument();
+
+    // The stale rejection landing afterwards must not flip the resolved
+    // root back to failed -- the path stays and no error line appears.
+    rejectMount(new Error("stale transport failure"));
+    await waitFor(() => {
+      expect(
+        screen.getByText("/roots/skills/pdf-tools/SKILL.md"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("surfaces an open failure as a formatted error", async () => {

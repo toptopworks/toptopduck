@@ -468,7 +468,7 @@
   "settings.skills.deleteLabel": "删除技能 {name}",
   "settings.skills.deleteDisabledHint": "系统技能不能删除；可改为禁用",
   "settings.skills.enabledLabel": "启用技能 {name}",
-  "settings.skills.description": "技能为智能体添加能力。你可以在对话中新建技能，也可以从其他应用导入。",
+  "settings.skills.description": "技能为智能体添加能力。你可以在对话中创建技能，也可以从其他应用导入。",
   "settings.skills.empty": "暂无技能。在对话中创建，或导入一个。",
   "settings.skills.filterAll": "全部",
   "settings.skills.filterLabel": "按类型筛选",

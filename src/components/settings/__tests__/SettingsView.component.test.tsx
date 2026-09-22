@@ -45,7 +45,8 @@ vi.mock("../../../api", async (importOriginal) => {
     listAdapters: vi.fn(),
     rescanAdapters: vi.fn(),
     // The skills pane's mount reads (issue #1039's New-exit render-through
-    // pin): resolved quietly so the pane renders its header chrome.
+    // pin): bare mocks -- the pane mounts on demand, so a test that visits
+    // it resolves these itself (today only the New-exit pin does).
     listSkills: vi.fn(),
     getSkillsDir: vi.fn(),
     rescanBuiltinCliTools: vi.fn(),

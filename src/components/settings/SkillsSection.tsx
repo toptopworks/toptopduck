@@ -241,12 +241,28 @@ export function SkillsSection({
     phase: "loading",
   });
 
+  // Each fetch bumps a generation so a late response from an older fetch
+  // cannot overwrite a newer one (the PR #1041 review): with the mount
+  // fetch and an open-click re-fetch both in flight, a stale rejection
+  // landing after a newer resolve would flip the phase back to failed
+  // mid-dialog. The writeGenRef posture above, at fetch scope -- the warn
+  // still fires unconditionally so a stale failure stays diagnosable.
+  const fetchGenRef = useRef(0);
+
   function fetchSkillsRoot() {
+    fetchGenRef.current += 1;
+    const gen = fetchGenRef.current;
     getSkillsDir()
-      .then((dir) => setSkillsRoot({ phase: "resolved", root: dir }))
+      .then((dir) => {
+        if (fetchGenRef.current === gen) {
+          setSkillsRoot({ phase: "resolved", root: dir });
+        }
+      })
       .catch((e) => {
         log.warn("SkillsSection", "get_skills_dir failed", e);
-        setSkillsRoot({ phase: "failed", error: fmtError(e, intl) });
+        if (fetchGenRef.current === gen) {
+          setSkillsRoot({ phase: "failed", error: fmtError(e, intl) });
+        }
       });
   }
 
@@ -406,8 +422,9 @@ export function SkillsSection({
   // derived detail goes null); clearing the stale name keeps a same-named
   // skill from spontaneously reopening the dialog when it re-enters the
   // registry (issue #1039). The render-phase reset -- the documented
-  // "adjusting state when a prop changes" pattern -- keeps the derived
-  // detail and its name in lockstep without an effect.
+  // "adjusting state when a prop changes" pattern, applied to a memoized
+  // derivation here rather than a prop -- keeps the derived detail and its
+  // name in lockstep without an effect.
   const [prevSkills, setPrevSkills] = useState(allSkills);
   if (prevSkills !== allSkills) {
     setPrevSkills(allSkills);
