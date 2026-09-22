@@ -144,9 +144,8 @@ export function SkillsSection({
    *  command already persisted and returned the updated full config -- the
    *  same state-only-sync contract the CLI pane's writes use). */
   onAppConfigSync: (cfg: AppConfig) => void;
-  /** The New button's create intent (issues #1033/#1040): lands through the
-   *  SettingsView's single close path (busy-gated), and the shell answers it
-   *  by staging the skill-creator teaching skill on the workspace composer. */
+  /** The New button's create exit (#1033): the single busy-gated close path
+   *  carrying the "new-skill" intent (see WorkspaceExitIntent). */
   onNewSkill: () => void;
 }) {
   const intl = useIntl();
@@ -476,10 +475,9 @@ export function SkillsSection({
                 defaultMessage: "New",
               })}
               icon={Plus}
-              // No interposing dialog: the New click exits the settings
-              // overlay straight to the workspace's chat, where the
-              // create_skill meta-tool conversation happens (issue #1033);
-              // the intent stages skill-creator on the composer (#1040).
+              // No interposing dialog: the New click exits through the
+              // single close path (#1033), carrying the create intent
+              // (#1040 -- see WorkspaceExitIntent).
               onClick={onNewSkill}
             />
             <HeaderActionButton

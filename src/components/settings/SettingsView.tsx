@@ -248,9 +248,8 @@ export function SettingsView({
   // snapshot that read nothing could clobber concurrent config writes.
   onCliToolsChanged: (cfg: AppConfig) => void;
   // Called to exit back to the workspace (rail-top back, the gear, or ESC).
-  /** Close the overlay. The optional intent (issue #1040) reports WHY the
-   *  user left for the workspace -- "new-skill" is the Skills pane's New
-   *  button, and the shell stages the teaching skill on it. */
+  /** Close the overlay. The optional intent (see WorkspaceExitIntent) tells
+   *  the shell why the user left for the workspace. */
   onClose: (intent?: WorkspaceExitIntent) => void;
   // The live settings section is controlled by the shell (issue #288): the
   // shell's back/forward history restores it, so SettingsView no longer owns it.

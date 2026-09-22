@@ -1324,10 +1324,9 @@ export default function App() {
                     onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
                     onCliToolsChanged={handleCliToolsChanged}
                     onClose={(intent: WorkspaceExitIntent | undefined) => {
-                      // The skills pane's New (issue #1040): the create intent
-                      // rides the close -- stage the teaching skill so the
-                      // composer carries the create signal when the workspace
-                      // reappears.
+                      // "new-skill" (the Skills pane's New) stages the
+                      // teaching skill -- the mechanics live on
+                      // WorkspaceExitIntent.
                       if (intent === "new-skill") {
                         handleSkillPick("skill-creator");
                       }
