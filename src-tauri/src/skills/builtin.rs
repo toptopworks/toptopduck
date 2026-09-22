@@ -1,7 +1,7 @@
 //! Builtin skills (ADR-0121): the app-authored skills that ride the app
 //! version. Most are CLI companions, one per builtin CLI registration entry
-//! (same name, 1:1); a knowledge-only skill (first: `vega-chart`) ships
-//! without a CLI counterpart and anchors on the app version alone.
+//! (same name, 1:1); knowledge-only skills (`vega-chart`, `skill-creator`)
+//! ship without a CLI counterpart and anchor on the app version alone.
 //!
 //! The definition body is a compile-time-embedded FILE TREE
 //! (`src/skills/assets/builtin/<name>/`, `include_dir!`): `SKILL.md` plus any
@@ -66,15 +66,16 @@ pub(crate) struct BuiltinSkillManifest {
     pub name: &'static str,
     /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision 7).
     /// `Some` -- the CLI companions: alignment and auto-include gate on the
-    /// entry. `None` -- a knowledge-only skill (first: `vega-chart`): the
-    /// app version is the anchor, so alignment takes no CLI condition and
-    /// auto-include drops the CLI conjunct.
+    /// entry. `None` -- a knowledge-only skill (`vega-chart` or
+    /// `skill-creator`): the app version is the anchor, so alignment
+    /// takes no CLI condition and auto-include drops the CLI conjunct.
     pub companion_cli: Option<&'static str>,
 }
 
 /// The shipped set: the v1 CLI-companion trio (pandoc, python, office-cli)
-/// plus the knowledge-only `vega-chart`. Additive evolution mirrors the CLI
-/// set: new entries pass the same curation screen.
+/// plus the knowledge-only pair (`vega-chart` and the distillation
+/// curriculum `skill-creator`). Additive evolution mirrors the CLI set:
+/// new entries pass the same curation screen.
 pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
     BuiltinSkillManifest {
         name: "pandoc",
@@ -90,6 +91,10 @@ pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
     },
     BuiltinSkillManifest {
         name: "vega-chart",
+        companion_cli: None,
+    },
+    BuiltinSkillManifest {
+        name: "skill-creator",
         companion_cli: None,
     },
 ];
@@ -647,10 +652,11 @@ mod tests {
     }
 
     /// The declared companion wiring: the v1 trio rides its same-named CLI
-    /// entry; `vega-chart` is the first knowledge-only skill. The pairing
-    /// stays 1:1 with the CLI shipped set and same-name (the module-doc
-    /// invariant -- a divergent pair would desync the anchor
-    /// (companion-keyed) from the reserved-name set (name-keyed)).
+    /// entry; the knowledge-only pair (`vega-chart`, `skill-creator`)
+    /// rides `None`. The pairing stays 1:1 with the CLI shipped set and
+    /// same-name (the module-doc invariant -- a divergent pair would
+    /// desync the anchor (companion-keyed) from the reserved-name set
+    /// (name-keyed)).
     #[test]
     fn companioned_entries_declare_their_cli_and_vega_chart_rides_none() {
         let trio: &[(&str, &str)] = &[
@@ -729,6 +735,14 @@ mod tests {
                  vega-lite fence in the reply. Flowcharts, diagrams, and lone \
                  KPI figures are out of scope; they belong to plain prose or \
                  a table.",
+            ),
+            (
+                "skill-creator",
+                "Turn a repeated, reusable instruction pattern from this \
+                 conversation into a skill — propose this whenever the user \
+                 repeats a workflow, asks to remember how to do something, or \
+                 wants a new skill; drafts the document and calls the \
+                 create_skill tool.",
             ),
         ];
         for (name, en) in expected {
@@ -845,6 +859,74 @@ mod tests {
             "body is {} bytes (budget 4096)",
             body_of("vega-chart").len()
         );
+    }
+
+    /// The skill-creator body must teach the whole distillation curriculum
+    /// (ADR-0122 Decision 8, issue #1032): the SKILL.md format, the four
+    /// distillation questions, description engineering demonstrated by a
+    /// weak/strong rewrite pair, and the post-create test loop riding the
+    /// by-name invocation channel. Phrase pins, not verbatim -- the
+    /// CONTRACT items are what must survive a re-curation. Element 3's
+    /// demo labels (`Weak:` / `Strong:`) are pinned too: a relabel of
+    /// the rewrite pair is itself a curriculum change.
+    #[test]
+    fn skill_creator_body_teaches_the_distillation_curriculum() {
+        let body = body_of("skill-creator");
+        // Element 1: the SKILL.md format -- frontmatter fields + body.
+        assert!(body.contains("frontmatter"), "teaches the frontmatter");
+        for field in ["`name`", "`description`"] {
+            assert!(body.contains(field), "names the {field} field");
+        }
+        // Element 2: the four distillation questions.
+        for question in [
+            "what it does",
+            "when it applies",
+            "what output it produces",
+            "which session passages",
+        ] {
+            assert!(body.contains(question), "covers the {question} question");
+        }
+        // Element 3: description engineering -- the anti-undertrigger push,
+        // demonstrated on a weak/strong rewrite pair.
+        assert!(body.contains("undertrigger"), "names undertriggering");
+        assert!(body.contains("Weak:"), "shows a weak example");
+        assert!(body.contains("Strong:"), "shows a strong rewrite");
+        // Element 4: the create + test loop, pinned against the #1031
+        // landed shape (whole-document parameter, by-name test channel).
+        assert!(body.contains("`create_skill`"), "references the tool");
+        assert!(body.contains("`skillMarkdown`"), "names the parameter");
+        assert!(body.contains("`invoke_skill`"), "names the test channel");
+        assert!(body.contains("test prompt"), "suggests test prompts");
+    }
+
+    /// The curation budget for the skill-creator body: the same 4096-byte
+    /// hard ceiling as vega-chart (the body enters the prompt on every
+    /// `invoke_skill`).
+    #[test]
+    fn skill_creator_body_stays_within_the_curation_budget() {
+        assert!(
+            body_of("skill-creator").len() <= 4096,
+            "body is {} bytes (budget 4096)",
+            body_of("skill-creator").len()
+        );
+    }
+
+    /// Bootstrap (ADR-0122 Decision 8): the skill's own description must
+    /// pass the bar its curriculum sets -- each cue has its own assertion
+    /// (no disjunctions), so removing a cue entirely -- every carrier of
+    /// it -- dies here. A cue with multiple carriers (repeat, skill)
+    /// survives partial rewording; the locked trigger-copy table holds
+    /// the per-word half.
+    #[test]
+    fn skill_creator_description_walks_its_own_talk() {
+        let description = description_of("skill-creator").to_lowercase();
+        assert!(description.contains("skill"), "names the domain");
+        assert!(
+            description.contains("create_skill"),
+            "names the create channel"
+        );
+        assert!(description.contains("whenever"), "carries a fire scene");
+        assert!(description.contains("repeat"), "carries the pattern cue");
     }
 
     // --- align ----------------------------------------------------------------
@@ -1178,6 +1260,30 @@ mod tests {
         assert_eq!(
             auto_included_names(&[], root.path()),
             vec!["vega-chart".to_string()]
+        );
+    }
+
+    /// The teaching skill's admission (issue #1032): `skill-creator` rides
+    /// the same no-companion arm as `vega-chart` -- aligned by the app
+    /// version with an empty CLI registry, then in the auto-include index
+    /// of every fresh session. Sorted comparison: the manifest's iteration
+    /// order is curation order, not the admission contract.
+    #[test]
+    fn auto_included_names_admits_skill_creator_once_aligned() {
+        let root = tempfile::tempdir().expect("root");
+        align(root.path(), &registry_with(vec![]));
+        let mut admitted = auto_included_names(&[], root.path());
+        admitted.sort();
+        // Name-level first: the self-scaling set below cannot fail on this
+        // skill's own absence, so the admission the AC names is pinned
+        // directly.
+        assert!(admitted.contains(&"skill-creator".to_string()));
+        assert_eq!(
+            admitted,
+            knowledge_only_names_sorted()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<String>>()
         );
     }
 
