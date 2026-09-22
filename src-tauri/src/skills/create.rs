@@ -35,13 +35,14 @@ pub(crate) const SKILL_MARKDOWN_PARAM: &str = "skillMarkdown";
 /// the same remedy `land_enabled`'s warn does. The same-session clause
 /// presumes the turn's discovery snapshot is non-empty (`invoke_skill`'s
 /// mount condition); the parenthetical covers a session that started with
-/// no skills.
+/// no skills, whose snapshot stays empty for the session's whole life
+/// (ADR-0119's immutability) and defers invocability to the next session.
 pub(crate) fn created_skill_result(entry: &crate::skills::SkillEntry) -> String {
     let name = &entry.name;
     if entry.enabled {
         format!(
             "Created skill `{name}` -- enabled, and invocable by name this session \
-             (or from the next turn if this session started with no skills)."
+             (or from the next session if this session started with no skills)."
         )
     } else {
         format!(

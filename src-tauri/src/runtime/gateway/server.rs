@@ -778,8 +778,9 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     // refusal is the model's, never the approver's), and only an approved
     // call executes the live-config composite (mint + stale-entry clear).
     // The discovery snapshot is untouched (ADR-0119's session-immutable
-    // posture): the new skill is invocable by name this session, seeded
-    // into the next.
+    // posture): the new skill is invocable by name this session and seeded
+    // into the next -- except a session that started with no skills never
+    // mounts `invoke_skill`, so invocability defers to the next session.
     if call.name == crate::skills::create::CREATE_SKILL {
         return match crate::skills::create::resolve_skill_creation(call, ctx.create.root) {
             crate::skills::create::SkillCreateOutcome::Refused(message) => {
