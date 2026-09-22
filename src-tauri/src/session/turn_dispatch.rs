@@ -332,11 +332,7 @@ fn dispatch_gated_call_inner(
                 crate::skills::create::SkillCreateOutcome::Refused(message) => {
                     (meta_failure(call, &message), None, None)
                 }
-                crate::skills::create::SkillCreateOutcome::Gated {
-                    summary,
-                    file_attachments,
-                    markdown,
-                } => {
+                crate::skills::create::SkillCreateOutcome::Gated { summary, markdown } => {
                     let Some(live) = create.live else {
                         return Ok((
                             meta_failure(call, crate::skills::create::UNAVAILABLE_FAILURE),
@@ -348,7 +344,9 @@ fn dispatch_gated_call_inner(
                         key: crate::approval::ToolKey::builtin(crate::skills::create::CREATE_SKILL),
                         operation_kind: OperationKind::Write,
                         summary: summary.clone(),
-                        file_attachments,
+                        file_attachments: vec![crate::skills::create::skill_markdown_attachment(
+                            &markdown,
+                        )],
                         // The originator annotation rides the gate like every
                         // other call's (issue #934).
                         origin_agent: origin.map(str::to_string),
@@ -388,7 +386,7 @@ fn dispatch_gated_call_inner(
                                     let result = ToolResult {
                                         tool_use_id: call.id.clone(),
                                         content: crate::skills::create::created_skill_result(
-                                            &entry_minted.name,
+                                            &entry_minted,
                                         ),
                                         is_error: false,
                                     };
@@ -1419,7 +1417,10 @@ mod tests {
     /// malformed document refuses with the bare typed error (no trace row,
     /// no phase, no card), and a trusted (always-allowed) call executes the
     /// mint -- a Write-shaped started/completed phase pair + trace row, and
-    /// the skill lands on disk verbatim + enabled.
+    /// the skill lands on disk verbatim + enabled. The trusted mint is
+    /// seeded with a STALE disabled entry, so it is the composite's clear
+    /// that lands the rebirth enabled -- and the success prose reads as
+    /// the enabled branch.
     #[test]
     fn dispatch_serves_create_skill_refusals_and_a_trusted_mint() {
         let engine = Engine::new();
@@ -1445,6 +1446,11 @@ mod tests {
             crate::provider::keychain::KeychainStore,
             engine.temp.path().join("config.json"),
         );
+        // Seed the stale disabled entry: the mint's live-config composite
+        // (not the registry's default) is what lands the rebirth enabled,
+        // which the assertions below pin.
+        live.set_skill_enabled("sql-coach", false)
+            .expect("stale disable");
         let skills_root = tempfile::tempdir().expect("skills root");
         let create = crate::skills::create::SkillCreateGate {
             root: skills_root.path(),
@@ -1519,6 +1525,11 @@ mod tests {
         )
         .expect("the trusted create dispatches");
         assert!(!result.is_error, "the mint succeeds: {}", result.content);
+        assert!(
+            result.content.contains("invocable by name this session"),
+            "the enabled branch's prose rides the result: {}",
+            result.content
+        );
         let entry = entry.expect("a served mint records an entry");
         assert!(entry.success);
         assert_eq!(entry.operation_kind, OperationKind::Write);
@@ -1538,6 +1549,196 @@ mod tests {
         assert!(
             !live.load().disabled_skills.contains("sql-coach"),
             "the mint lands enabled"
+        );
+    }
+
+    /// The create arm's denied envelope (ADR-0078's shape on this channel):
+    /// a gate denial completes as the tool-level error + one denied trace
+    /// row with NO started phase -- and the refusal never mints, so nothing
+    /// lands on disk.
+    #[test]
+    fn dispatch_denies_create_skill_without_minting() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let cancel = CancelToken::new();
+        // PerCall + untrusted: the gate surfaces the card, and the responder
+        // answers Deny.
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let live = crate::LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore,
+            engine.temp.path().join("config.json"),
+        );
+        let skills_root = tempfile::tempdir().expect("skills root");
+        let create = crate::skills::create::SkillCreateGate {
+            root: skills_root.path(),
+            live: Some(&live),
+        };
+        let call = ToolUse {
+            id: "c3".into(),
+            name: "create_skill".into(),
+            input: json!({
+                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
+            }),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let responder = std::thread::spawn(move || {
+            let request_id = poll_request_id(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted an approval request");
+            approval_c
+                .respond(request_id, ApprovalResponse::Deny)
+                .expect("deny ok");
+        });
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &*sink,
+            cancel: &cancel,
+        };
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (result, entry, _) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &crate::skills::read::SkillReadGate::inert(),
+            &create,
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("a denial is a tool result, not an abort");
+        responder.join().expect("responder thread");
+
+        assert!(result.is_error, "the denial is the call's error");
+        assert_eq!(result.content, DENIED_BY_GATEWAY_CONTENT);
+        let entry = entry.expect("a denial records an entry");
+        assert!(!entry.success);
+        assert_eq!(entry.operation_kind, OperationKind::Write);
+        assert_eq!(entry.result_excerpt, "denied by approval gateway");
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(
+            phases.len(),
+            1,
+            "a denial completes without a started phase"
+        );
+        match &phases[0] {
+            TurnPhase::ToolCallCompleted(view) => {
+                assert!(!view.success, "the denial completes failure");
+            }
+            other => panic!("expected ToolCallCompleted, got {other:?}"),
+        }
+        assert!(
+            !skills_root.path().join("sql-coach").exists(),
+            "the denial never mints"
+        );
+    }
+
+    /// The create arm's post-race failure envelope: a same-name mint
+    /// landing inside the gate-pending window races the approved write --
+    /// the typed NameTaken error rides the result (isError) with a failed
+    /// trace row and the started/completed pair intact, so the model
+    /// self-corrects from the message alone.
+    #[test]
+    fn dispatch_serves_a_post_race_create_failure_as_the_calls_error() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let cancel = CancelToken::new();
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let live = crate::LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore,
+            engine.temp.path().join("config.json"),
+        );
+        let skills_root = tempfile::tempdir().expect("skills root");
+        let create = crate::skills::create::SkillCreateGate {
+            root: skills_root.path(),
+            live: Some(&live),
+        };
+        let call = ToolUse {
+            id: "c4".into(),
+            name: "create_skill".into(),
+            input: json!({
+                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
+            }),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        // The post-race seam: the responder takes the name while the card
+        // is pending, then allows -- the approved write meets a taken name.
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let incumbent = skills_root.path().join("sql-coach");
+        let responder = std::thread::spawn(move || {
+            let request_id = poll_request_id(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted an approval request");
+            std::fs::create_dir_all(&incumbent).expect("occupy the name mid-window");
+            approval_c
+                .respond(request_id, ApprovalResponse::AllowOnce)
+                .expect("allow ok");
+        });
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &*sink,
+            cancel: &cancel,
+        };
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (result, entry, _) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &crate::skills::read::SkillReadGate::inert(),
+            &create,
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("the raced create returns, not aborts");
+        responder.join().expect("responder thread");
+
+        assert!(result.is_error, "the raced write is the call's error");
+        assert!(
+            result.content.starts_with("create_skill") && result.content.contains("already taken"),
+            "the typed error rides the result: {}",
+            result.content
+        );
+        let entry = entry.expect("a raced failure records an entry");
+        assert!(!entry.success);
+        assert_eq!(entry.operation_kind, OperationKind::Write);
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(phases.len(), 2, "started + completed survive the failure");
+        assert!(
+            skills_root.path().join("sql-coach").exists(),
+            "the incumbent directory stays"
+        );
+        assert!(
+            !skills_root.path().join("sql-coach/SKILL.md").exists(),
+            "no mint landed into the incumbent"
         );
     }
 

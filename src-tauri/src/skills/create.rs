@@ -21,12 +21,35 @@ use crate::LiveProviderConfig;
 /// `read_skill_file` family.
 pub(crate) const CREATE_SKILL: &str = "create_skill";
 
+/// The one parameter's name: the schema key, the extraction key, and the
+/// approval attachment's param label share it (single source).
+pub(crate) const SKILL_MARKDOWN_PARAM: &str = "skillMarkdown";
+
 /// Compose the success message both dispatch arms serve after an approved
 /// mint -- a function (not a format-string const; `format!` demands a
 /// literal) so the two per-side envelopes share the exact prose by
-/// construction.
-pub(crate) fn created_skill_result(name: &str) -> String {
-    format!("Created skill `{name}` -- enabled, and invocable by name this session.")
+/// construction. The prose branches on the entry's own enablement: when the
+/// mint landed but the stale-disabled-entry clear failed (issue #961's
+/// degrade window), the message stays honest instead of promising an
+/// invocability the turn's disabled snapshot would refuse, and points at
+/// the same remedy `land_enabled`'s warn does. The same-session clause
+/// presumes the turn's discovery snapshot is non-empty (`invoke_skill`'s
+/// mount condition); the parenthetical covers a session that started with
+/// no skills.
+pub(crate) fn created_skill_result(entry: &crate::skills::SkillEntry) -> String {
+    let name = &entry.name;
+    if entry.enabled {
+        format!(
+            "Created skill `{name}` -- enabled, and invocable by name this session \
+             (or from the next turn if this session started with no skills)."
+        )
+    } else {
+        format!(
+            "Created skill `{name}` -- the mint landed but a stale disabled entry \
+             kept it disabled; the user can flip the switch in the Skills pane \
+             to invoke it."
+        )
+    }
 }
 
 /// The refusal for a call that reached a config-less gate (a stray call --
@@ -67,13 +90,22 @@ pub(crate) enum SkillCreateOutcome {
     /// bare error result with no trace row.
     Refused(String),
     /// A validated creation awaiting the gate: the trace / approval
-    /// summary, the card's full-text attachment, and the verbatim payload
-    /// to write.
-    Gated {
-        summary: String,
-        file_attachments: Vec<FileAttachment>,
-        markdown: String,
-    },
+    /// summary and the verbatim payload to write. The card's full-text
+    /// attachment derives from the payload below -- one store, one derived
+    /// view, so the informed-consent invariant (the approver's text equals
+    /// the written bytes) holds by construction.
+    Gated { summary: String, markdown: String },
+}
+
+/// The approval card's full-text attachment derived from the verbatim
+/// payload: the single derivation point both dispatch arms pass to their
+/// `ApprovalRequest`s, so the approver's expand-on-demand copy can never
+/// drift from the bytes an approved mint writes.
+pub(crate) fn skill_markdown_attachment(markdown: &str) -> FileAttachment {
+    FileAttachment {
+        param: SKILL_MARKDOWN_PARAM.to_string(),
+        content: markdown.to_string(),
+    }
 }
 
 /// The tool definition as advertised on both tool surfaces (the built-in
@@ -102,14 +134,14 @@ pub(crate) fn create_skill_definition() -> ToolDefinition {
         input_schema: json!({
             "type": "object",
             "properties": {
-                "skillMarkdown": {
+                SKILL_MARKDOWN_PARAM: {
                     "type": "string",
                     "description": "The complete SKILL.md document -- frontmatter \
                          delimiters, YAML frontmatter, and the Markdown body, exactly as \
                          it should land on disk."
                 }
             },
-            "required": ["skillMarkdown"],
+            "required": [SKILL_MARKDOWN_PARAM],
         }),
     }
 }
@@ -117,9 +149,8 @@ pub(crate) fn create_skill_definition() -> ToolDefinition {
 /// The failure message for a `create_skill` call whose `skillMarkdown` is
 /// missing, non-string, or empty -- the `mcp_search_tools` malformed-input
 /// style, shared by both dispatch sites through the resolver.
-fn missing_markdown_failure() -> String {
-    "create_skill failed: parameter `skillMarkdown`: expected a non-empty string".to_string()
-}
+const MISSING_MARKDOWN_FAILURE: &str =
+    "create_skill failed: parameter `skillMarkdown`: expected a non-empty string";
 
 /// Classify one `create_skill` call against the write path (ADR-0122
 /// Decisions 1 + 3): the whole-string parse + per-field validation (the
@@ -130,8 +161,8 @@ fn missing_markdown_failure() -> String {
 /// window re-checks under the registry's own contract at write time (the
 /// gate-pending window can race a same-name mint).
 pub(crate) fn resolve_skill_creation(call: &ToolUse, root: &std::path::Path) -> SkillCreateOutcome {
-    let Some(markdown) = str_param(&call.input, "skillMarkdown") else {
-        return SkillCreateOutcome::Refused(missing_markdown_failure());
+    let Some(markdown) = str_param(&call.input, SKILL_MARKDOWN_PARAM) else {
+        return SkillCreateOutcome::Refused(MISSING_MARKDOWN_FAILURE.to_string());
     };
     let (name, description) = match crate::skills::registry::parse_skill_markdown(markdown) {
         Ok(fields) => fields,
@@ -148,14 +179,6 @@ pub(crate) fn resolve_skill_creation(call: &ToolUse, root: &std::path::Path) -> 
             &format!("Create skill `{name}`: {description}"),
             SUMMARY_MAX_CHARS,
         ),
-        // The pre-truncation original: the broadcast copy caps at
-        // FILE_ATTACHMENT_MAX_CHARS, the pending-window full-text pull
-        // (issue #1009) serves this verbatim copy -- informed consent reads
-        // the whole document, never a preview.
-        file_attachments: vec![FileAttachment {
-            param: "skillMarkdown".to_string(),
-            content: markdown.to_string(),
-        }],
         markdown: markdown.to_string(),
     }
 }
@@ -268,25 +291,52 @@ mod tests {
         }
     }
 
-    /// A valid document yields the gated shape: a name-bearing summary, the
-    /// whole document as the card's attachment, and the verbatim write
-    /// payload.
+    /// A valid document yields the gated shape: a name-bearing summary and
+    /// the verbatim write payload, whose derived card attachment is the same
+    /// whole document under the parameter's name.
     #[test]
     fn resolve_yields_the_gated_shape() {
         let root = tempfile::tempdir().expect("root");
         match resolve_skill_creation(&call(json!(VALID)), root.path()) {
-            SkillCreateOutcome::Gated {
-                summary,
-                file_attachments,
-                markdown,
-            } => {
+            SkillCreateOutcome::Gated { summary, markdown } => {
                 assert!(summary.contains("sql-coach"), "{summary}");
                 assert_eq!(markdown, VALID);
-                assert_eq!(file_attachments.len(), 1);
-                assert_eq!(file_attachments[0].param, "skillMarkdown");
-                assert_eq!(file_attachments[0].content, VALID);
+                let attachment = skill_markdown_attachment(&markdown);
+                assert_eq!(attachment.param, SKILL_MARKDOWN_PARAM);
+                assert_eq!(attachment.content, VALID);
             }
             _ => panic!("expected the gated shape"),
         }
+    }
+
+    /// The success prose branches on the entry's own enablement (the
+    /// #961/#935 degrade window: a mint that landed while the
+    /// stale-disabled-entry clear failed): the disabled branch stays honest
+    /// and points at the Skills-pane remedy instead of promising an
+    /// invocability the turn's disabled snapshot would refuse.
+    #[test]
+    fn created_skill_result_branches_on_the_entrys_enablement() {
+        let root = tempfile::tempdir().expect("root");
+        let mut entry = crate::skills::registry::create_skill(
+            root.path(),
+            "sql-coach",
+            "Coach SQL.",
+            "Body.\n",
+        )
+        .expect("mint a real entry");
+        assert!(
+            created_skill_result(&entry).contains("enabled, and invocable by name this session"),
+            "the enabled branch keeps the invocability claim"
+        );
+        entry.enabled = false;
+        let degraded = created_skill_result(&entry);
+        assert!(
+            degraded.contains("kept it disabled") && degraded.contains("Skills pane"),
+            "the disabled branch names the state and the remedy: {degraded}"
+        );
+        assert!(
+            !degraded.contains("invocable by name this session"),
+            "the disabled branch drops the invocability claim: {degraded}"
+        );
     }
 }

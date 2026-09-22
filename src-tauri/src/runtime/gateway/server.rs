@@ -785,11 +785,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             crate::skills::create::SkillCreateOutcome::Refused(message) => {
                 resolution_failure(message)
             }
-            crate::skills::create::SkillCreateOutcome::Gated {
-                summary,
-                file_attachments,
-                markdown,
-            } => {
+            crate::skills::create::SkillCreateOutcome::Gated { summary, markdown } => {
                 let Some(live) = ctx.create.live else {
                     return resolution_failure(
                         crate::skills::create::UNAVAILABLE_FAILURE.to_string(),
@@ -805,7 +801,9 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                     key: crate::approval::ToolKey::builtin(crate::skills::create::CREATE_SKILL),
                     operation_kind: OperationKind::Write,
                     summary: summary.clone(),
-                    file_attachments,
+                    file_attachments: vec![crate::skills::create::skill_markdown_attachment(
+                        &markdown,
+                    )],
                     // An external runtime's bridge-originated call carries
                     // no sub-agent originator (delegation is built-in-only,
                     // ADR-0117's v1 calibration).
@@ -835,7 +833,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                             &markdown,
                         ) {
                             Ok(entry) => {
-                                let text = crate::skills::create::created_skill_result(&entry.name);
+                                let text = crate::skills::create::created_skill_result(&entry);
                                 outcome.trace.push(TraceEntry::succeeded(
                                     call.id.clone(),
                                     call.name.clone(),
@@ -3388,6 +3386,116 @@ mod tests {
         );
     }
 
+    /// The bridge face's create arm denial: the tool-level `isError` result
+    /// and one denied trace row -- and the refusal never mints, so nothing
+    /// lands on disk.
+    #[test]
+    fn handle_tools_call_create_skill_denial_is_tool_level_error() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::Deny,
+        )));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
+        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let live: &'static crate::LiveProviderConfig =
+            Box::leak(Box::new(crate::LiveProviderConfig::new(
+                crate::provider::keychain::KeychainStore,
+                tmp.path().join("config.json"),
+            )));
+        ctx.create = crate::skills::create::SkillCreateGate {
+            root: tmp.path(),
+            live: Some(live),
+        };
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "tools/call",
+            "params": {"name": "create_skill", "arguments": {
+                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
+            }}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "the denial is the call's error");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("denied by the approval gateway"),
+                    "denial surfaces as the tool result: {text}"
+                );
+            }
+            _ => panic!("denial must return a tool result, not an error"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one denial -> one trace row");
+        let row = &outcome.trace[0];
+        assert!(!row.success);
+        assert_eq!(row.name, "create_skill");
+        assert_eq!(row.operation_kind, crate::approval::OperationKind::Write);
+        assert_eq!(row.result_excerpt, "denied by approval gateway");
+        assert!(
+            !tmp.path().join("sql-coach").exists(),
+            "the denial never mints"
+        );
+    }
+
+    /// The bridge face's post-race failure envelope: a same-name mint
+    /// landing inside the gate-pending window races the approved write --
+    /// the typed NameTaken error rides the `isError` result with a failed
+    /// trace row, so the model self-corrects from the message alone.
+    #[test]
+    fn handle_tools_call_create_skill_post_race_failure_is_the_calls_error() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let sink: &'static OccupyingSink = Box::leak(Box::new(OccupyingSink {
+            state: approval,
+            occupy: tmp.path().join("sql-coach"),
+        }));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
+        let live: &'static crate::LiveProviderConfig =
+            Box::leak(Box::new(crate::LiveProviderConfig::new(
+                crate::provider::keychain::KeychainStore,
+                tmp.path().join("config.json"),
+            )));
+        ctx.create = crate::skills::create::SkillCreateGate {
+            root: tmp.path(),
+            live: Some(live),
+        };
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 24,
+            "method": "tools/call",
+            "params": {"name": "create_skill", "arguments": {
+                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
+            }}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "the raced write is the call's error");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(
+                    text.starts_with("create_skill") && text.contains("already taken"),
+                    "the typed error rides the result: {text}"
+                );
+            }
+            _ => panic!("the raced create must return a tool result, not an error"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one raced failure -> one trace row");
+        let row = &outcome.trace[0];
+        assert!(!row.success);
+        assert_eq!(row.name, "create_skill");
+        assert!(
+            tmp.path().join("sql-coach").exists()
+                && !tmp.path().join("sql-coach/SKILL.md").exists(),
+            "the incumbent stays and no mint landed into it"
+        );
+    }
+
     /// The read surface's mount condition (issue #714, ADR-0111 Decision 1
     /// calibrated by ADR-0119 Decision 4): an EMPTY invoked set lists no
     /// `read_skill_file` even with skills in the snapshot; a non-empty
@@ -3851,6 +3959,26 @@ mod tests {
             self.cards().push(body.clone());
             let id: uuid::Uuid = body.request_id.parse().expect("request_id is a uuid");
             self.state.respond(id, self.answer).expect("respond");
+        }
+
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+
+    /// The post-race seam: occupies the mint target when the card surfaces,
+    /// then allows -- the approved write meets a taken name exactly as the
+    /// gate-pending same-name race produces.
+    struct OccupyingSink {
+        state: &'static ApprovalState,
+        occupy: std::path::PathBuf,
+    }
+
+    impl ApprovalSink for OccupyingSink {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            std::fs::create_dir_all(&self.occupy).expect("occupy the name mid-window");
+            let id: uuid::Uuid = body.request_id.parse().expect("request_id is a uuid");
+            self.state
+                .respond(id, ApprovalResponse::AllowOnce)
+                .expect("respond");
         }
 
         fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}

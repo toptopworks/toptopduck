@@ -1499,7 +1499,7 @@ impl Session {
                     // the registry root + the live-config handle (the mint's
                     // stale-disabled-entry clear needs the config write).
                     // `None` (a config-less test session) never advertises
-                    // the tool -- the resolver's guard is defensive only.
+                    // the tool -- the dispatch arms' guard is defensive only.
                     let create_gate = crate::skills::create::SkillCreateGate {
                         root: inputs.skills_root,
                         live: inputs.live_config,
