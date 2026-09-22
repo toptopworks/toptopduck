@@ -84,6 +84,9 @@ type QuestionBarProps = {
 // from it for the aria-activedescendant hand-off (focus never leaves the
 // textarea).
 const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
+/** The textarea's DOM id -- the shell's one anchor for seating focus on the
+ *  composer (the create exit's focus hand-off, issue #1040). */
+export const COMPOSER_INPUT_ID = "question-bar-input";
 export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
@@ -133,7 +136,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
       <div className="flex flex-wrap items-start gap-x-3 gap-y-1 px-3 pt-3 pb-2">
         {skillPicker?.chips.node}
         <textarea
-          id="question-bar-input"
+          id={COMPOSER_INPUT_ID}
           ref={textareaRef}
           value={value}
           onChange={(e) => {

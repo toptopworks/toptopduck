@@ -20,7 +20,7 @@ import {
   IDLE_SESSION_FIELDS,
 } from "./session/useComposerState";
 import type { ComposerSessionFields } from "./session/useComposerState";
-import { QuestionBar } from "./components/thread/QuestionBar";
+import { COMPOSER_INPUT_ID, QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
@@ -1325,10 +1325,17 @@ export default function App() {
                     onCliToolsChanged={handleCliToolsChanged}
                     onClose={(intent: WorkspaceExitIntent | undefined) => {
                       // "new-skill" (the Skills pane's New) stages the
-                      // teaching skill -- the mechanics live on
-                      // WorkspaceExitIntent.
+                      // teaching skill and seats focus on the composer's
+                      // textarea, caret right after the chip -- the
+                      // staging mechanics live on WorkspaceExitIntent.
                       if (intent === "new-skill") {
                         handleSkillPick("skill-creator");
+                        // Runs after the overlay's synchronous focus
+                        // restore to its trigger, and after React has
+                        // committed the chip onto the bar.
+                        window.setTimeout(() => {
+                          document.getElementById(COMPOSER_INPUT_ID)?.focus();
+                        }, 0);
                       }
                       setSettingsView({ open: false });
                       setLiveSettingsSection("general");

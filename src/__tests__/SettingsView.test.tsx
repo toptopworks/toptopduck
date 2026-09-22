@@ -296,5 +296,10 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(
       within(chips).getByRole("button", { name: "移除技能 skill-creator" }),
     ).toBeInTheDocument();
+    // The user left settings to create: focus seats on the composer's
+    // textarea, caret right after the staged chip, ready to type.
+    await waitFor(() =>
+      expect(document.getElementById("question-bar-input")).toHaveFocus(),
+    );
   });
 });
