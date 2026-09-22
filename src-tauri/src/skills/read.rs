@@ -230,7 +230,11 @@ fn serve_file(name: &str, path: &str, resolved: &Path, anchor: &Path) -> SkillRe
     // no read-back), so it must not hand back quiet U+FFFD content
     // either. One ladder-shaped warn makes the divergence
     // observable (issue #1025) -- the parity signal for the resolve-time
-    // and assemble-time warns.
+    // and assemble-time warns. The remedy stays external-editor-only
+    // (unlike the SKILL.md warn's dual guidance, issue #1027): this face
+    // reads arbitrary skill files, and the in-app editor writes only
+    // SKILL.md -- the one payload with an in-app channel, and its shared
+    // warn already carries the dual guidance there.
     if std::str::from_utf8(&bytes).is_err() {
         log::warn!(
             target: "skills",

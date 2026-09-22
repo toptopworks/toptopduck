@@ -391,7 +391,13 @@ pub fn update_skill(
 
     let result = (|| -> Result<SkillEntry, SkillError> {
         let md_path = work_dir.join(SKILL_MD);
-        let raw = fs::read_to_string(&md_path).map_err(|e| fs_err("read SKILL.md", &md_path, e))?;
+        // Raw bytes + the shared lossy decode (issue #1027), matching the
+        // loaders: a non-UTF-8 SKILL.md stays editable in-app -- the save
+        // writes back valid UTF-8 (the U+FFFD stand-ins the editor showed)
+        // and re-anchors the hash, which IS the reconcile the lossy warn
+        // prescribes.
+        let bytes = fs::read(&md_path).map_err(|e| fs_err("read SKILL.md", &md_path, e))?;
+        let raw = super::decode_skill_md_lossy(&bytes, &update.name);
         let parsed = frontmatter::parse_skill_md(&raw).map_err(SkillError::InvalidSkill)?;
         let mut fm = parsed.frontmatter;
         frontmatter::set_string_or_remove(&mut fm, "name", Some(&update.name));
@@ -771,6 +777,18 @@ mod tests {
         dir
     }
 
+    /// A skill directory whose SKILL.md body holds non-UTF-8 bytes -- the
+    /// shared fixture of the lossy-load and lossy-edit pins. Returns the
+    /// dir plus the ORIGINAL bytes (the load pin hashes them).
+    fn put_mixed_encoding_skill(root: &Path) -> (PathBuf, Vec<u8>) {
+        let dir = root.join("mixed-encoding");
+        fs::create_dir_all(&dir).expect("create skill dir");
+        let raw: &[u8] =
+            b"---\nname: mixed-encoding\ndescription: Test skill.\n---\nBody with \xFF bytes.\n";
+        fs::write(dir.join(SKILL_MD), raw).expect("write SKILL.md");
+        (dir, raw.to_vec())
+    }
+
     /// A SKILL.md whose body holds non-UTF-8 bytes loads lossy (U+FFFD
     /// stand-ins) with the hash anchoring the ORIGINAL bytes -- the
     /// divergence the assemble-time warn makes observable (issue #1025).
@@ -780,11 +798,7 @@ mod tests {
     #[test]
     fn non_utf8_body_loads_lossy_with_whole_file_hash() {
         let tmp = tempfile::tempdir().expect("skills root");
-        let dir = tmp.path().join("mixed-encoding");
-        fs::create_dir_all(&dir).expect("create skill dir");
-        let raw: &[u8] =
-            b"---\nname: mixed-encoding\ndescription: Test skill.\n---\nBody with \xFF bytes.\n";
-        fs::write(dir.join(SKILL_MD), raw).expect("write SKILL.md");
+        let (_dir, raw) = put_mixed_encoding_skill(tmp.path());
         let listing = list_skills(tmp.path());
         assert_eq!(listing.skills.len(), 1);
         let skill = &listing.skills[0];
@@ -793,7 +807,31 @@ mod tests {
             skill.body.contains('\u{FFFD}'),
             "the invalid byte renders as the replacement char"
         );
-        assert_eq!(skill.content_hash, sha256_hex(raw));
+        assert_eq!(skill.content_hash, sha256_hex(&raw));
+    }
+
+    /// A non-UTF-8 SKILL.md rides the shared lossy decode on the EDIT read
+    /// too (issue #1027): the update opens the file instead of failing
+    /// `InvalidData`, and the save writes back valid UTF-8 with the U+FFFD
+    /// stand-ins the editor showed baked in -- the in-app reconcile channel
+    /// the lossy warns prescribe (hash re-anchored onto the bytes now on
+    /// disk).
+    #[test]
+    fn update_reconciles_a_non_utf8_skill_md() {
+        let tmp = tempfile::tempdir().expect("skills root");
+        let (dir, _raw) = put_mixed_encoding_skill(tmp.path());
+
+        // The edit face shows the lossy stand-ins (the listing body), so the
+        // round-trip payload carries them -- what you see is what saves.
+        let mut payload = update_payload("mixed-encoding");
+        payload.body = "Body with \u{FFFD} bytes.\n".into();
+        let entry = update_skill(tmp.path(), "mixed-encoding", payload).unwrap();
+        assert_eq!(entry.body, "Body with \u{FFFD} bytes.\n");
+
+        let on_disk = fs::read(dir.join(SKILL_MD)).unwrap();
+        let text = std::str::from_utf8(&on_disk).expect("SKILL.md re-saved as valid UTF-8");
+        assert!(text.contains("\u{FFFD} bytes."));
+        assert_eq!(entry.content_hash, sha256_hex(&on_disk));
     }
 
     fn update_payload(name: &str) -> SkillUpdate {
