@@ -125,8 +125,9 @@ pub(crate) fn create_skill_definition() -> ToolDefinition {
              delimiters, YAML frontmatter with `name` (kebab-case, at most 64 chars) and \
              `description`, then the Markdown body. Only `name` and `description` are \
              validated per-field; other frontmatter keys land on disk verbatim. A refused \
-             create names its exact defect (invalid name, invalid or missing description, \
-             blank body, reserved or taken name) -- fix the markdown and retry. Creating \
+             create names its exact defect (invalid name, an invalid, missing, or \
+             over-long description, blank body, unparseable frontmatter, reserved or \
+             taken name) -- fix the markdown and retry. Creating \
              needs user approval, with the full text shown on the approval card; an \
              approved skill lands enabled, is reachable by name in this session, and \
              appears in later sessions' skill index."

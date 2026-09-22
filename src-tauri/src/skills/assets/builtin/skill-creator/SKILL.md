@@ -26,5 +26,5 @@ The strong form carries trigger scenes and the output shape; prefer concrete nou
 
 Create and test:
 - call `create_skill` with the WHOLE document as its single `skillMarkdown` string -- frontmatter fences included, exactly as it should land on disk;
-- a refusal names its exact defect (invalid name, invalid or missing description, blank body, reserved or taken name) -- fix the markdown and retry; the user approves the full text on a card before anything lands;
-- once it lands, suggest two or three short test prompt lines for the task and run them through `invoke_skill` by name -- a skill that fires only when hand-fed needs a stronger description.
+- a refusal names its exact defect (invalid name, an invalid, missing, or over-long description, blank body, unparseable frontmatter, reserved or taken name) -- fix the markdown and retry; the user approves the full text on a card before anything lands;
+- once it lands, pull it with `invoke_skill` by name to check the body reads as intended, then suggest two or three short test prompt lines for the user to try in a fresh session without naming the skill -- if it fires only when hand-fed, the description needs strengthening. To revise a landed skill, ask the user: the Skills pane edits or deletes it, and a same-name re-mint is refused.

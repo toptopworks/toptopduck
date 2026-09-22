@@ -1,7 +1,7 @@
 //! Builtin skills (ADR-0121): the app-authored skills that ride the app
 //! version. Most are CLI companions, one per builtin CLI registration entry
-//! (same name, 1:1); a knowledge-only skill (first: `vega-chart`) ships
-//! without a CLI counterpart and anchors on the app version alone.
+//! (same name, 1:1); knowledge-only skills (`vega-chart`, `skill-creator`)
+//! ship without a CLI counterpart and anchor on the app version alone.
 //!
 //! The definition body is a compile-time-embedded FILE TREE
 //! (`src/skills/assets/builtin/<name>/`, `include_dir!`): `SKILL.md` plus any
@@ -66,14 +66,14 @@ pub(crate) struct BuiltinSkillManifest {
     pub name: &'static str,
     /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision 7).
     /// `Some` -- the CLI companions: alignment and auto-include gate on the
-    /// entry. `None` -- a knowledge-only skill (first: `vega-chart`): the
-    /// app version is the anchor, so alignment takes no CLI condition and
-    /// auto-include drops the CLI conjunct.
+    /// entry. `None` -- a knowledge-only skill (`vega-chart` or
+    /// `skill-creator`): the app version is the anchor, so alignment
+    /// takes no CLI condition and auto-include drops the CLI conjunct.
     pub companion_cli: Option<&'static str>,
 }
 
 /// The shipped set: the v1 CLI-companion trio (pandoc, python, office-cli)
-/// plus the knowledge-only pair (`vega-chart`, and the distillation
+/// plus the knowledge-only pair (`vega-chart` and the distillation
 /// curriculum `skill-creator`). Additive evolution mirrors the CLI set:
 /// new entries pass the same curation screen.
 pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
@@ -652,10 +652,11 @@ mod tests {
     }
 
     /// The declared companion wiring: the v1 trio rides its same-named CLI
-    /// entry; `vega-chart` is the first knowledge-only skill. The pairing
-    /// stays 1:1 with the CLI shipped set and same-name (the module-doc
-    /// invariant -- a divergent pair would desync the anchor
-    /// (companion-keyed) from the reserved-name set (name-keyed)).
+    /// entry; the knowledge-only pair (`vega-chart`, `skill-creator`)
+    /// rides `None`. The pairing stays 1:1 with the CLI shipped set and
+    /// same-name (the module-doc invariant -- a divergent pair would
+    /// desync the anchor (companion-keyed) from the reserved-name set
+    /// (name-keyed)).
     #[test]
     fn companioned_entries_declare_their_cli_and_vega_chart_rides_none() {
         let trio: &[(&str, &str)] = &[
@@ -865,7 +866,9 @@ mod tests {
     /// distillation questions, description engineering demonstrated by a
     /// weak/strong rewrite pair, and the post-create test loop riding the
     /// by-name invocation channel. Phrase pins, not verbatim -- the
-    /// CONTRACT items are what must survive a re-curation.
+    /// CONTRACT items are what must survive a re-curation. Element 3's
+    /// demo labels (`Weak:` / `Strong:`) are pinned too: a relabel of
+    /// the rewrite pair is itself a curriculum change.
     #[test]
     fn skill_creator_body_teaches_the_distillation_curriculum() {
         let body = body_of("skill-creator");
@@ -909,9 +912,11 @@ mod tests {
     }
 
     /// Bootstrap (ADR-0122 Decision 8): the skill's own description must
-    /// pass the bar its curriculum sets -- each cue is pinned on its own
-    /// (no disjunctions), so removing any one fire-surface word dies here,
-    /// not only removing them all.
+    /// pass the bar its curriculum sets -- each cue has its own assertion
+    /// (no disjunctions), so removing a cue entirely -- every carrier of
+    /// it -- dies here. A cue with multiple carriers (repeat, skill)
+    /// survives partial rewording; the locked trigger-copy table holds
+    /// the per-word half.
     #[test]
     fn skill_creator_description_walks_its_own_talk() {
         let description = description_of("skill-creator").to_lowercase();

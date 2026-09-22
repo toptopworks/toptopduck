@@ -1068,7 +1068,8 @@ mod tests {
     /// the `skill-creator` name carries the covers badge and suppresses
     /// the builtin row -- the filesystem fork channel stays open beside
     /// the app-boundary reserved refusal, name-pinned where the
-    /// vega-chart pin above carries the mechanism.
+    /// vega-chart pin above carries the mechanism, with the row's
+    /// absence pinned here too.
     #[test]
     fn a_local_fork_shadows_skill_creator_with_the_covers_badge() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1085,6 +1086,13 @@ mod tests {
         assert_eq!(rows[0].acquired, Acquired::Local);
         assert!(rows[0].covers_builtin, "the fork carries the covers badge");
         assert_eq!(rows[0].body, "My curriculum fork.\n");
+        assert!(
+            !listing
+                .skills
+                .iter()
+                .any(|s| s.acquired == Acquired::Builtin),
+            "no builtin row survives the fork"
+        );
     }
 
     /// A broken reserved-subtree child surfaces in the ignored lane under
