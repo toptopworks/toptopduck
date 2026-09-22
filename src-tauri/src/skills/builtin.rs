@@ -73,8 +73,9 @@ pub(crate) struct BuiltinSkillManifest {
 }
 
 /// The shipped set: the v1 CLI-companion trio (pandoc, python, office-cli)
-/// plus the knowledge-only `vega-chart`. Additive evolution mirrors the CLI
-/// set: new entries pass the same curation screen.
+/// plus the knowledge-only pair (`vega-chart`, and the distillation
+/// curriculum `skill-creator`). Additive evolution mirrors the CLI set:
+/// new entries pass the same curation screen.
 pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
     BuiltinSkillManifest {
         name: "pandoc",
@@ -90,6 +91,10 @@ pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
     },
     BuiltinSkillManifest {
         name: "vega-chart",
+        companion_cli: None,
+    },
+    BuiltinSkillManifest {
+        name: "skill-creator",
         companion_cli: None,
     },
 ];
@@ -730,6 +735,14 @@ mod tests {
                  KPI figures are out of scope; they belong to plain prose or \
                  a table.",
             ),
+            (
+                "skill-creator",
+                "Turn a repeated, reusable instruction pattern from this \
+                 conversation into a skill — propose this whenever the user \
+                 repeats a workflow, asks to remember how to do something, or \
+                 wants a new skill; drafts the document and calls the \
+                 create_skill tool.",
+            ),
         ];
         for (name, en) in expected {
             assert_eq!(&description_of(name), en, "{name} description");
@@ -845,6 +858,70 @@ mod tests {
             "body is {} bytes (budget 4096)",
             body_of("vega-chart").len()
         );
+    }
+
+    /// The skill-creator body must teach the whole distillation curriculum
+    /// (ADR-0122 Decision 8, issue #1032): the SKILL.md format, the four
+    /// distillation questions, description engineering demonstrated by a
+    /// weak/strong rewrite pair, and the post-create test loop riding the
+    /// by-name invocation channel. Phrase pins, not verbatim -- the
+    /// CONTRACT items are what must survive a re-curation.
+    #[test]
+    fn skill_creator_body_teaches_the_distillation_curriculum() {
+        let body = body_of("skill-creator");
+        // Element 1: the SKILL.md format -- frontmatter fields + body.
+        assert!(body.contains("frontmatter"), "teaches the frontmatter");
+        for field in ["`name`", "`description`"] {
+            assert!(body.contains(field), "names the {field} field");
+        }
+        // Element 2: the four distillation questions.
+        for question in [
+            "what it does",
+            "when it applies",
+            "what output it produces",
+            "which session passages",
+        ] {
+            assert!(body.contains(question), "covers the {question} question");
+        }
+        // Element 3: description engineering -- the anti-undertrigger push,
+        // demonstrated on a weak/strong rewrite pair.
+        assert!(body.contains("undertrigger"), "names undertriggering");
+        assert!(body.contains("Weak:"), "shows a weak example");
+        assert!(body.contains("Strong:"), "shows a strong rewrite");
+        // Element 4: the create + test loop, pinned against the #1031
+        // landed shape (whole-document parameter, by-name test channel).
+        assert!(body.contains("`create_skill`"), "references the tool");
+        assert!(body.contains("`skillMarkdown`"), "names the parameter");
+        assert!(body.contains("`invoke_skill`"), "names the test channel");
+        assert!(body.contains("test prompt"), "suggests test prompts");
+    }
+
+    /// The curation budget for the skill-creator body: the same 4096-byte
+    /// hard ceiling as vega-chart (the body enters the prompt on every
+    /// `invoke_skill`).
+    #[test]
+    fn skill_creator_body_stays_within_the_curation_budget() {
+        assert!(
+            body_of("skill-creator").len() <= 4096,
+            "body is {} bytes (budget 4096)",
+            body_of("skill-creator").len()
+        );
+    }
+
+    /// Bootstrap (ADR-0122 Decision 8): the skill's own description must
+    /// pass the bar its curriculum sets -- each cue is pinned on its own
+    /// (no disjunctions), so removing any one fire-surface word dies here,
+    /// not only removing them all.
+    #[test]
+    fn skill_creator_description_walks_its_own_talk() {
+        let description = description_of("skill-creator").to_lowercase();
+        assert!(description.contains("skill"), "names the domain");
+        assert!(
+            description.contains("create_skill"),
+            "names the create channel"
+        );
+        assert!(description.contains("whenever"), "carries a fire scene");
+        assert!(description.contains("repeat"), "carries the pattern cue");
     }
 
     // --- align ----------------------------------------------------------------
@@ -1178,6 +1255,30 @@ mod tests {
         assert_eq!(
             auto_included_names(&[], root.path()),
             vec!["vega-chart".to_string()]
+        );
+    }
+
+    /// The teaching skill's admission (issue #1032): `skill-creator` rides
+    /// the same no-companion arm as `vega-chart` -- aligned by the app
+    /// version with an empty CLI registry, then in the auto-include index
+    /// of every fresh session. Sorted comparison: the manifest's iteration
+    /// order is curation order, not the admission contract.
+    #[test]
+    fn auto_included_names_admits_skill_creator_once_aligned() {
+        let root = tempfile::tempdir().expect("root");
+        align(root.path(), &registry_with(vec![]));
+        let mut admitted = auto_included_names(&[], root.path());
+        admitted.sort();
+        // Name-level first: the self-scaling set below cannot fail on this
+        // skill's own absence, so the admission the AC names is pinned
+        // directly.
+        assert!(admitted.contains(&"skill-creator".to_string()));
+        assert_eq!(
+            admitted,
+            knowledge_only_names_sorted()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<String>>()
         );
     }
 

@@ -1064,6 +1064,29 @@ mod tests {
         assert_eq!(row.body, "Shipped body.\n");
     }
 
+    /// The teaching skill's shadowing (issue #1032): a local fork owning
+    /// the `skill-creator` name carries the covers badge and suppresses
+    /// the builtin row -- the filesystem fork channel stays open beside
+    /// the app-boundary reserved refusal, name-pinned where the
+    /// vega-chart pin above carries the mechanism.
+    #[test]
+    fn a_local_fork_shadows_skill_creator_with_the_covers_badge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put_system_skill(root, "skill-creator");
+        put_skill(root, "skill-creator", "", "My curriculum fork.\n");
+        let listing = list_skills(root);
+        let rows: Vec<&SkillEntry> = listing
+            .skills
+            .iter()
+            .filter(|s| s.name == "skill-creator")
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one row under shadowing");
+        assert_eq!(rows[0].acquired, Acquired::Local);
+        assert!(rows[0].covers_builtin, "the fork carries the covers badge");
+        assert_eq!(rows[0].body, "My curriculum fork.\n");
+    }
+
     /// A broken reserved-subtree child surfaces in the ignored lane under
     /// its `.system/`-prefixed handle (the diagnostic fold, parallel to the
     /// root scan).
@@ -1653,8 +1676,16 @@ mod tests {
             create_skill(root.path(), "pandoc", "mine", "b").unwrap_err(),
             SkillError::ReservedSkillName("pandoc".to_string())
         );
+        // The knowledge-only name refuses through the same face (issue
+        // #1032): curation membership, not the companion wiring, is what
+        // reserves a name.
+        assert_eq!(
+            create_skill(root.path(), "skill-creator", "mine", "b").unwrap_err(),
+            SkillError::ReservedSkillName("skill-creator".to_string())
+        );
         // Nothing landed on disk.
         assert!(!root.path().join("pandoc").exists());
+        assert!(!root.path().join("skill-creator").exists());
     }
 
     /// A builtin skill is readonly (ADR-0121 Decision 3): the edit and the
