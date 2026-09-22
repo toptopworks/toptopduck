@@ -204,6 +204,7 @@ pub(crate) fn dispatch_gated_call(
     cli: &[crate::cli_tools::config::CliToolConfig],
     invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
     read: &crate::skills::read::SkillReadGate<'_>,
+    create: &crate::skills::create::SkillCreateGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
     origin: Option<&str>,
@@ -225,6 +226,7 @@ pub(crate) fn dispatch_gated_call(
             cli,
             invocations,
             read,
+            create,
             gate,
             on_phase,
             origin,
@@ -245,6 +247,7 @@ fn dispatch_gated_call_inner(
     cli: &[crate::cli_tools::config::CliToolConfig],
     invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
     read: &crate::skills::read::SkillReadGate<'_>,
+    create: &crate::skills::create::SkillCreateGate<'_>,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
     origin: Option<&str>,
@@ -313,6 +316,125 @@ fn dispatch_gated_call_inner(
                 (meta_failure(call, &message), None, None)
             }
         });
+    }
+    // The skill-creation meta-tool (ADR-0122 Decisions 1 + 3): unlike the
+    // two read-shaped skill meta-tools above, the mint PERSISTS across
+    // sessions and its body is a future prompt-injection source, so it
+    // GATES -- the resolver validates + pre-checks ahead of the card (a
+    // refusal is the model's, never the approver's), and only an approved
+    // call executes the live-config composite (mint + stale-entry clear).
+    // The discovery snapshot is untouched (ADR-0119's session-immutable
+    // posture): the new skill is invocable by name this session, seeded
+    // into the next.
+    if call.name == crate::skills::create::CREATE_SKILL {
+        return Ok(
+            match crate::skills::create::resolve_skill_creation(call, create.root) {
+                crate::skills::create::SkillCreateOutcome::Refused(message) => {
+                    (meta_failure(call, &message), None, None)
+                }
+                crate::skills::create::SkillCreateOutcome::Gated {
+                    summary,
+                    file_attachments,
+                    markdown,
+                } => {
+                    let Some(live) = create.live else {
+                        return Ok((
+                            meta_failure(call, crate::skills::create::UNAVAILABLE_FAILURE),
+                            None,
+                            None,
+                        ));
+                    };
+                    let gate_req = ApprovalRequest {
+                        key: crate::approval::ToolKey::builtin(crate::skills::create::CREATE_SKILL),
+                        operation_kind: OperationKind::Write,
+                        summary: summary.clone(),
+                        file_attachments,
+                        // The originator annotation rides the gate like every
+                        // other call's (issue #934).
+                        origin_agent: origin.map(str::to_string),
+                    };
+                    match gate.approval.gate(gate_req, gate.sink, gate.cancel) {
+                        Err(GateCancelled) => return Err(GateCancelled),
+                        Ok(GateOutcome::Denied) => {
+                            let entry = TraceEntry::denied(
+                                call.id.clone(),
+                                call.name.clone(),
+                                OperationKind::Write,
+                                summary,
+                            );
+                            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+                            (
+                                ToolResult {
+                                    tool_use_id: call.id.clone(),
+                                    content: DENIED_BY_GATEWAY_CONTENT.to_string(),
+                                    is_error: true,
+                                },
+                                Some(entry),
+                                None,
+                            )
+                        }
+                        Ok(GateOutcome::Allow) => {
+                            on_phase(TurnPhase::ToolCallStarted {
+                                name: call.name.clone(),
+                                operation_kind: OperationKind::Write,
+                                summary: summary.clone(),
+                            });
+                            match crate::skills::create::execute_skill_creation(
+                                live,
+                                create.root,
+                                &markdown,
+                            ) {
+                                Ok(entry_minted) => {
+                                    let result = ToolResult {
+                                        tool_use_id: call.id.clone(),
+                                        content: crate::skills::create::created_skill_result(
+                                            &entry_minted.name,
+                                        ),
+                                        is_error: false,
+                                    };
+                                    let entry = TraceEntry::succeeded(
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                        OperationKind::Write,
+                                        summary,
+                                        String::new(),
+                                    );
+                                    on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(
+                                        &entry,
+                                    )));
+                                    (result, Some(entry), None)
+                                }
+                                Err(e) => {
+                                    // The gate-pending window can race a
+                                    // same-name mint -- the typed error rides
+                                    // the result so the model self-corrects.
+                                    let message = format!("create_skill: {e}");
+                                    let entry = TraceEntry::failed(
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                        OperationKind::Write,
+                                        summary,
+                                        truncate_trace_excerpt(&message, TRACE_EXCERPT_MAX),
+                                    );
+                                    on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(
+                                        &entry,
+                                    )));
+                                    (
+                                        ToolResult {
+                                            tool_use_id: call.id.clone(),
+                                            content: message,
+                                            is_error: true,
+                                        },
+                                        Some(entry),
+                                        None,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        );
     }
     // A registered CLI tool classifies under its own reserved server
     // (ADR-0108 Decision 7): the trust key is the registration name, the
@@ -1214,6 +1336,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut on_phase,
             None,
@@ -1264,6 +1387,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut on_phase,
             None,
@@ -1289,6 +1413,132 @@ mod tests {
             }
             other => panic!("expected ToolCallCompleted, got {other:?}"),
         }
+    }
+
+    /// The `create_skill` dispatch arm (ADR-0122 Decisions 1+3): a
+    /// malformed document refuses with the bare typed error (no trace row,
+    /// no phase, no card), and a trusted (always-allowed) call executes the
+    /// mint -- a Write-shaped started/completed phase pair + trace row, and
+    /// the skill lands on disk verbatim + enabled.
+    #[test]
+    fn dispatch_serves_create_skill_refusals_and_a_trusted_mint() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let live = crate::LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore,
+            engine.temp.path().join("config.json"),
+        );
+        let skills_root = tempfile::tempdir().expect("skills root");
+        let create = crate::skills::create::SkillCreateGate {
+            root: skills_root.path(),
+            live: Some(&live),
+        };
+
+        // (a) A malformed document: the bare typed error, nothing else.
+        let bad = ToolUse {
+            id: "c1".into(),
+            name: "create_skill".into(),
+            input: json!({"skillMarkdown": "no frontmatter at all"}),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (result, entry, _) = dispatch_gated_call(
+            &bad,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &crate::skills::read::SkillReadGate::inert(),
+            &create,
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("the refused create returns, not aborts");
+        assert!(result.is_error, "a malformed document is the call's error");
+        assert!(
+            result.content.starts_with("create_skill"),
+            "{}",
+            result.content
+        );
+        assert!(entry.is_none(), "a refusal records no trace row");
+        assert!(
+            phases.into_inner().unwrap().is_empty(),
+            "a refusal emits no phase"
+        );
+        assert!(
+            sink.requests.lock().unwrap().is_empty(),
+            "a refusal never surfaces a card"
+        );
+
+        // (b) A trusted mint: the always-allow short-circuit passes the
+        // gate, the composite lands enabled, and the bytes are verbatim.
+        approval.seed_trust(&crate::approval::ToolKey::builtin(
+            crate::skills::create::CREATE_SKILL,
+        ));
+        let markdown = "---\nname: sql-coach\ndescription: Coach SQL.\nlicense: MIT\n\
+             ---\nCoach the body.\n";
+        let good = ToolUse {
+            id: "c2".into(),
+            name: "create_skill".into(),
+            input: json!({ "skillMarkdown": markdown }),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let (result, entry, _) = dispatch_gated_call(
+            &good,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &crate::skills::read::SkillReadGate::inert(),
+            &create,
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("the trusted create dispatches");
+        assert!(!result.is_error, "the mint succeeds: {}", result.content);
+        let entry = entry.expect("a served mint records an entry");
+        assert!(entry.success);
+        assert_eq!(entry.operation_kind, OperationKind::Write);
+        let phases = phases.into_inner().unwrap();
+        assert_eq!(phases.len(), 2, "one mint -> Started + Completed");
+        assert_eq!(
+            phases[0],
+            TurnPhase::ToolCallStarted {
+                name: "create_skill".into(),
+                operation_kind: OperationKind::Write,
+                summary: "Create skill `sql-coach`: Coach SQL.".into(),
+            }
+        );
+        let on_disk =
+            std::fs::read_to_string(skills_root.path().join("sql-coach/SKILL.md")).expect("read");
+        assert_eq!(on_disk, markdown, "the bytes land verbatim");
+        assert!(
+            !live.load().disabled_skills.contains("sql-coach"),
+            "the mint lands enabled"
+        );
     }
 
     /// An externally-classified call the gate denies completes WITHOUT
@@ -1345,6 +1595,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut forward,
             None,
@@ -1432,6 +1683,7 @@ mod tests {
             std::slice::from_ref(&registration),
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut on_phase,
             None,
@@ -1549,6 +1801,7 @@ mod tests {
             std::slice::from_ref(&registration),
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut on_phase,
             None,
@@ -1633,6 +1886,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut forward,
             None,
@@ -1721,6 +1975,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut on_phase,
             None,
@@ -1851,6 +2106,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut |_| {},
             None,
@@ -2099,6 +2355,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut on_phase,
             None,
@@ -2166,6 +2423,7 @@ mod tests {
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
             &gate,
             &mut on_phase,
             None,

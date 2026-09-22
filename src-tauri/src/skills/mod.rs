@@ -40,8 +40,11 @@
 //! - [`read`]: the `read_skill_file` restricted attachment-read surface
 //!   (issue #714, ADR-0111) -- the gate trilogy + the gateway meta-tool
 //!   resolver over an INVOKED skill's tree.
+//! - [`create`]: the `create_skill` meta-tool (ADR-0122 Decision 1) -- the
+//!   gated whole-document creation channel.
 
 pub mod builtin;
+pub mod create;
 pub mod frontmatter;
 pub mod import;
 pub mod invocation;
