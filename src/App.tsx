@@ -42,7 +42,7 @@ import { ResumeProgress } from "./shell/ResumeProgress";
 import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SettingsView } from "./components/settings/SettingsView";
-import type { SettingsSection } from "./components/settings/sections";
+import type { SettingsSection, WorkspaceExitIntent } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
@@ -1323,7 +1323,14 @@ export default function App() {
                     onSessionsDirChanged={handleSessionsDirChanged}
                     onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
                     onCliToolsChanged={handleCliToolsChanged}
-                    onClose={() => {
+                    onClose={(intent: WorkspaceExitIntent | undefined) => {
+                      // The skills pane's New (issue #1040): the create intent
+                      // rides the close -- stage the teaching skill so the
+                      // composer carries the create signal when the workspace
+                      // reappears.
+                      if (intent === "new-skill") {
+                        handleSkillPick("skill-creator");
+                      }
                       setSettingsView({ open: false });
                       setLiveSettingsSection("general");
                       // A Settings Save may have changed a keychain slot; bump

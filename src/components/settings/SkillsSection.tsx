@@ -138,17 +138,16 @@ function AcquiredLabel({ acquired }: { acquired: SkillAcquired }) {
 
 export function SkillsSection({
   onAppConfigSync,
-  onExitToWorkspace,
+  onNewSkill,
 }: {
   /** Sync the shell's app-config wholesale after a write command (the
    *  command already persisted and returned the updated full config -- the
    *  same state-only-sync contract the CLI pane's writes use). */
   onAppConfigSync: (cfg: AppConfig) => void;
-  /** Close the settings overlay back to the workspace (the New button's
-   *  action, issue #1033): the SettingsView's single close path
-   *  (busy-gated), so the New exit honors the same contract as the
-   *  rail's "Back to workspace". */
-  onExitToWorkspace: () => void;
+  /** The New button's create intent (issues #1033/#1040): lands through the
+   *  SettingsView's single close path (busy-gated), and the shell answers it
+   *  by staging the skill-creator teaching skill on the workspace composer. */
+  onNewSkill: () => void;
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -479,8 +478,9 @@ export function SkillsSection({
               icon={Plus}
               // No interposing dialog: the New click exits the settings
               // overlay straight to the workspace's chat, where the
-              // create_skill meta-tool conversation happens (issue #1033).
-              onClick={onExitToWorkspace}
+              // create_skill meta-tool conversation happens (issue #1033);
+              // the intent stages skill-creator on the composer (#1040).
+              onClick={onNewSkill}
             />
             <HeaderActionButton
               label={intl.formatMessage({

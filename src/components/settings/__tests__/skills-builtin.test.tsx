@@ -52,7 +52,7 @@ function renderSection() {
     <QueryClientProvider client={queryClient}>
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
-          <SkillsSection onAppConfigSync={onSync} onExitToWorkspace={() => {}} />
+          <SkillsSection onAppConfigSync={onSync} onNewSkill={() => {}} />
         </TooltipProvider>
       </IntlProvider>
     </QueryClientProvider>,
