@@ -64,18 +64,20 @@ pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 /// the caller's `content_hash` still anchors the ORIGINAL bytes -- an
 /// invisible divergence between what rides the prompts and the drift
 /// anchor. One ladder-shaped warn makes the divergence observable; shared
-/// by the resolve face (`prompt::resolve_one`) and the assemble face
-/// (`registry::assemble_skill_parts`) so the signal cannot drift between
-/// channels -- while the serve face (`read::serve_file`) deliberately
-/// keeps its own unshared warn, matching its anchor-less payloads.
+/// by the resolve face (`prompt::resolve_one`), the assemble face
+/// (`registry::assemble_skill_parts`), and the edit-read face
+/// (`registry::update_skill`, issue #1027) so the signal cannot drift
+/// between channels -- while the serve face (`read::serve_file`)
+/// deliberately keeps its own unshared warn, matching its anchor-less
+/// payloads.
 fn decode_skill_md_lossy(bytes: &[u8], name: &str) -> String {
     if std::str::from_utf8(bytes).is_err() {
         log::warn!(
             target: "skills",
             "skill `{name}` SKILL.md holds non-UTF-8 bytes -- the body rides \
              lossy U+FFFD replacements while the content hash anchors the \
-             original bytes; re-save the file as UTF-8 in an external \
-             editor to reconcile them",
+             original bytes; re-save the file as UTF-8 (the in-app skill \
+             editor or an external editor) to reconcile them",
         );
     }
     String::from_utf8_lossy(bytes).into_owned()
