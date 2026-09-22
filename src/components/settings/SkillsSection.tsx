@@ -94,6 +94,13 @@ const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
 // write action lives in the row-end cluster -- never on the text block.
 const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
 
+/** The registry root's resolution state: `failed` carries the formatted
+ *  error the detail dialog's path face reports (issue #1039). */
+type SkillsRoot =
+  | { phase: "loading" }
+  | { phase: "resolved"; root: string }
+  | { phase: "failed"; error: string };
+
 /** One filter-axis half shared by the rows and the failure lane: "all"
  *  passes everything; otherwise the value must match the axis. The lane
  *  calls it with the literal "builtin" -- a failed skill never landed on
@@ -220,23 +227,34 @@ export function SkillsSection({
   }, []);
 
   // The registry root for the local rows' open anchors (issue #1033): the
-  // backend is the path authority (the get_agents_dir posture), fetched once
-  // per mount. A fetch failure leaves the local rows' open links inert
-  // (log-only) -- the pane stays usable.
-  const [skillsRoot, setSkillsRoot] = useState<string | null>(null);
+  // backend is the path authority (the get_agents_dir posture). Fetched on
+  // mount and re-fetched by a local row's detail-open while unresolved
+  // (issue #1039) -- the open click is the retry entry -- so a failed fetch
+  // reports on that row's detail dialog (the path face) instead of leaving
+  // the open link permanently inert. A re-fetch keeps the previous phase
+  // until its response lands, and the fetch callbacks alone write the
+  // state: a response landing after unmount is a silent React no-op, so
+  // unlike the rescan above there is no cancelled guard to thread through
+  // the shared fetcher (its callbacks carry no cross-pane cache write or
+  // config sync).
+  const [skillsRoot, setSkillsRoot] = useState<SkillsRoot>({
+    phase: "loading",
+  });
 
-  useEffect(() => {
-    let cancelled = false;
+  function fetchSkillsRoot() {
     getSkillsDir()
-      .then((dir) => {
-        if (!cancelled) setSkillsRoot(dir);
-      })
+      .then((dir) => setSkillsRoot({ phase: "resolved", root: dir }))
       .catch((e) => {
         log.warn("SkillsSection", "get_skills_dir failed", e);
+        setSkillsRoot({ phase: "failed", error: fmtError(e, intl) });
       });
-    return () => {
-      cancelled = true;
-    };
+  }
+
+  useEffect(() => {
+    fetchSkillsRoot();
+    // fetchSkillsRoot closes over the pane-lifetime intl (stable for the
+    // provider's life); the mount-once contract matches the rescan effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const [search, setSearch] = useState("");
@@ -347,9 +365,9 @@ export function SkillsSection({
    *  through the join, so a Windows root reads native backslashes. */
   function revealTarget(skill: SkillEntry): string | null {
     if (skill.acquired !== "local") return skill.link_target;
-    if (skillsRoot === null) return null;
-    const sep = skillsRoot.includes("\\") ? "\\" : "/";
-    return `${skillsRoot}${sep}${skill.name}`;
+    if (skillsRoot.phase !== "resolved") return null;
+    const sep = skillsRoot.root.includes("\\") ? "\\" : "/";
+    return `${skillsRoot.root}${sep}${skill.name}`;
   }
 
   /** Open the row's read-only detail dialog (the row-click affordance):
@@ -359,6 +377,12 @@ export function SkillsSection({
   function openDetail(skill: SkillEntry) {
     setError(null);
     setDetailError(null);
+    // A local row's path bar needs the registry root: while unresolved --
+    // still loading or failed -- ask again now (issue #1039), making the
+    // open click the retry entry after a failed fetch.
+    if (skill.acquired === "local" && skillsRoot.phase !== "resolved") {
+      fetchSkillsRoot();
+    }
     setDetailName(skill.name);
   }
 
@@ -378,6 +402,20 @@ export function SkillsSection({
     }
   }
 
+  // A listing refetch that drops the open row unmounts the dialog (the
+  // derived detail goes null); clearing the stale name keeps a same-named
+  // skill from spontaneously reopening the dialog when it re-enters the
+  // registry (issue #1039). The render-phase reset -- the documented
+  // "adjusting state when a prop changes" pattern -- keeps the derived
+  // detail and its name in lockstep without an effect.
+  const [prevSkills, setPrevSkills] = useState(allSkills);
+  if (prevSkills !== allSkills) {
+    setPrevSkills(allSkills);
+    if (detailName !== null && !allSkills.some((s) => s.name === detailName)) {
+      setDetailName(null);
+    }
+  }
+
   const detail =
     detailName === null
       ? null
@@ -386,6 +424,23 @@ export function SkillsSection({
   // OS default editor, one click from the bytes. Null (a local row asked
   // before the registry root resolved) keeps the button inert.
   const detailFile = skillFilePath(detail === null ? null : revealTarget(detail));
+  // The local-row face when the root fetch failed (issue #1039): the failed
+  // resolution reports under the dialog's path link instead of leaving it
+  // inert with no signal. Null on every other row and phase.
+  const detailPathUnavailable =
+    detail !== null &&
+    detail.acquired === "local" &&
+    detailFile === null &&
+    skillsRoot.phase === "failed"
+      ? intl.formatMessage(
+          {
+            id: "settings.skills.pathUnavailable",
+            defaultMessage:
+              "Couldn't determine the skills folder path: {detail}",
+          },
+          { detail: skillsRoot.error },
+        )
+      : null;
 
   return (
     <div>
@@ -394,7 +449,7 @@ export function SkillsSection({
         description={(
           <FormattedMessage
             id="settings.skills.description"
-            defaultMessage="Skills add capabilities to your agent. Create your own or import them from other apps."
+            defaultMessage="Skills add capabilities to your agent. Create them in a chat or import them from other apps."
           />
         )}
         action={(
@@ -553,6 +608,7 @@ export function SkillsSection({
         <SkillDetailDialog
           skill={detail}
           file={detailFile}
+          pathUnavailable={detailPathUnavailable}
           error={detailError}
           onClose={() => setDetailName(null)}
           onOpenFile={() => void openFile(detailFile)}
@@ -749,6 +805,9 @@ type SkillDetailDialogProps = {
    *  row's registry root resolved, or when a linked row's link target is
    *  unreadable (the link then stays disabled). */
   file: string | null;
+  /** The local-row face when the registry root failed to resolve (issue
+   *  #1039); null on every other row and phase. */
+  pathUnavailable: string | null;
   /** The open-file failure's dialog-level face (null = no error shown). */
   error: string | null;
   onClose: () => void;
@@ -759,6 +818,7 @@ type SkillDetailDialogProps = {
 function SkillDetailDialog({
   skill,
   file,
+  pathUnavailable,
   error,
   onClose,
   onOpenFile,
@@ -860,9 +920,13 @@ function SkillDetailDialog({
                 aria-hidden
               />
             </button>
-            {error && (
+            {/* One error line for the path area's two failure faces,
+                mutually exclusive: the failed root fetch (issue #1039)
+                shows only while the link above is inert, the open failure
+                only after a click on a resolved link. */}
+            {(pathUnavailable ?? error) && (
               <p className="text-destructive text-xs" role="alert">
-                {error}
+                {pathUnavailable ?? error}
               </p>
             )}
           </div>

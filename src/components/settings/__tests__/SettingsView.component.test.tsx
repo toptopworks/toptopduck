@@ -13,12 +13,15 @@ import {
   setDefaultRuntime,
   listAdapters,
   rescanAdapters,
+  listSkills,
+  getSkillsDir,
+  rescanBuiltinCliTools,
 } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { AdapterEntry } from "../../../types/runtime";
 import type { SettingsSection } from "../sections";
 import { chooseOption, openSelect, renderSettings } from "./helpers";
-import { baseAppConfig } from "../../../test-fixtures";
+import { baseAppConfig, scanResult } from "../../../test-fixtures";
 
 // SettingsView reaches the per-profile keychain surface (issue #153); mock the
 // IPC functions so the view never hits Tauri. listProviderProfiles feeds the
@@ -41,6 +44,11 @@ vi.mock("../../../api", async (importOriginal) => {
     setDefaultRuntime: vi.fn(),
     listAdapters: vi.fn(),
     rescanAdapters: vi.fn(),
+    // The skills pane's mount reads (issue #1039's New-exit render-through
+    // pin): resolved quietly so the pane renders its header chrome.
+    listSkills: vi.fn(),
+    getSkillsDir: vi.fn(),
+    rescanBuiltinCliTools: vi.fn(),
   };
 });
 
@@ -601,6 +609,21 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     // The rail-top back button carries the settings-back hook class (distinct
     // from the gear, which shares its accessible name).
     fireEvent.click(container.querySelector(".settings-back") as HTMLElement);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  // --- Skills pane: the New exit (issue #1033) ------------------------------
+
+  it("New on the skills pane closes the overlay through the single close path", async () => {
+    // The render-through pin (issue #1039): the prop-level call is pinned in
+    // SkillsSection.test, but the SettingsView wiring itself -- render the
+    // skills pane, click New, the busy-gated requestClose reaches onClose --
+    // had no guard, so a wiring regression dodged every suite.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
+    vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
+    const { onClose } = renderView({ initialSection: "skills" });
+    fireEvent.click(await screen.findByRole("button", { name: "New" }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
