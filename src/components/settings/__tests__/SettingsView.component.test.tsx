@@ -50,6 +50,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
+  openPath: vi.fn(),
 }));
 
 // The single write path the view awaits; typed so a commit mock is assignable to

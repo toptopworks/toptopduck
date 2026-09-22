@@ -17,11 +17,11 @@
 //! Decision 1, calibrated by ADR-0111).
 //!
 //! Submodules:
-//! - [`model`]: the wire types (`SkillEntry` / `SkillUpdate` / `Acquired`),
+//! - [`model`]: the wire types (`SkillEntry` / `Acquired`),
 //!   the typed `SkillError` reject, and the spec validation rules.
 //! - [`frontmatter`]: `SKILL.md` frontmatter split / parse / render -- unknown
 //!   spec fields survive an edit verbatim.
-//! - [`registry`]: the root-parameterized scan + create / update / delete
+//! - [`registry`]: the root-parameterized scan + create / delete
 //!   (Tauri-state-free, so the whole surface tests against a tempdir).
 //! - [`import`]: external-agent-library discovery + link / copy import
 //!   (issue #367) -- projects candidate source dirs onto importable skill
@@ -56,8 +56,8 @@ pub mod registry;
 pub use import::{discover_skill_sources, import_skill, import_skills};
 pub use model::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
-    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillUpdate,
-    SkillsRoot, SkippedSkill,
+    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
+    SkippedSkill,
 };
 pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 
@@ -67,9 +67,8 @@ pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 /// the caller's `content_hash` still anchors the ORIGINAL bytes -- an
 /// invisible divergence between what rides the prompts and the drift
 /// anchor. One ladder-shaped warn makes the divergence observable; shared
-/// by the resolve face (`prompt::resolve_one`), the assemble face
-/// (`registry::assemble_skill_parts`), and the edit-read face
-/// (`registry::update_skill`, issue #1027) so the signal cannot drift
+/// by the resolve face (`prompt::resolve_one`) and the assemble face
+/// (`registry::assemble_skill_parts`) so the signal cannot drift
 /// between channels -- while the serve face (`read::serve_file`)
 /// deliberately keeps its own unshared warn, matching its anchor-less
 /// payloads.

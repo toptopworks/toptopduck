@@ -57,8 +57,8 @@ use crate::session::{
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
     discover_skill_sources, import_skills as import_skills_impl, resolve_prompt_fragments,
-    ImportItem, ImportMode, ImportOutcome, SkillEntry, SkillError, SkillListing,
-    SkillPromptFragment, SkillSource, SkillSourceCandidate, SkillUpdate, SkillsRoot,
+    ImportItem, ImportMode, ImportOutcome, SkillError, SkillListing, SkillPromptFragment,
+    SkillSource, SkillSourceCandidate, SkillsRoot,
 };
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
@@ -3376,13 +3376,17 @@ fn record_last_model_posture(
 
 // --- Skills registry (issue #362, ADR-0086) ---------------------------------
 //
-// CRUD over the Agent Skills registry under `<app_data_dir>/skills`.
-// Session-AGNOSTIC: the registry is process-global (one root shared by every
-// session), addressed through the managed [`SkillsRoot`] state. The directory
-// scan IS the registry (no sidecar, no app-config entry); a directory is a
-// skill iff it holds a spec-valid `SKILL.md`. Rejects are the typed
-// [`SkillError`] (adjacently tagged like every other typed IPC error) so the
-// frontend renders each refusal through the locale catalog (ADR-0052).
+// Reads + row-level governance over the Agent Skills registry under
+// `<app_data_dir>/skills`. Session-AGNOSTIC: the registry is process-global
+// (one root shared by every session), addressed through the managed
+// [`SkillsRoot`] state. The directory scan IS the registry (no sidecar, no
+// app-config entry); a directory is a skill iff it holds a spec-valid
+// `SKILL.md`. Creation rides the model-face `create_skill` meta-tool
+// (ADR-0122 Decision 1) and edits happen in the external editor the
+// detail dialog's SKILL.md path bar opens (issue #1033) -- no
+// form-shaped write commands remain. Rejects are the typed [`SkillError`] (adjacently tagged like
+// every other typed IPC error) so the frontend renders each refusal
+// through the locale catalog (ADR-0052).
 
 /// List every spec-valid skill in the registry plus the directories the scan
 /// skipped (issue #362 / #373). Skipped directories carry the English technical
@@ -3418,39 +3422,6 @@ pub fn set_skill_enabled(
         .map_err(|e| crate::skills::SkillError::FsFailure(e.to_string()))
 }
 
-/// Mint a new `local` skill (issue #362): `<root>/<name>/SKILL.md` with the
-/// given description and body. The name must be spec-shaped (kebab-case,
-/// <= 64) and free, and the body non-blank; the registry root is minted
-/// lazily on first create. Returns the entry for the written skill (read
-/// back, or derived from the written payload on a transient read-back
-/// failure). The mint is composite with a stale-disabled-entry clear, so a
-/// same-name rebirth lands enabled (issue #961, ADR-0118 Decision 2).
-#[tauri::command]
-pub fn create_skill(
-    root: State<'_, SkillsRoot>,
-    live: State<'_, LiveProviderConfig>,
-    name: String,
-    description: String,
-    body: String,
-) -> Result<SkillEntry, SkillError> {
-    live.create_skill(&root.0, &name, &description, &body)
-}
-
-/// Rewrite one `local` skill's `SKILL.md` (frontmatter + body) atomically
-/// (issue #362). `name` addresses the current directory; `update.name` is the
-/// identity to write -- a different value renames the directory and carries
-/// the disablement entry with it (issue #961). Refuses a `linked` skill
-/// (read-only), an unknown skill, and a taken rename target.
-#[tauri::command]
-pub fn update_skill(
-    root: State<'_, SkillsRoot>,
-    live: State<'_, LiveProviderConfig>,
-    name: String,
-    update: SkillUpdate,
-) -> Result<SkillEntry, SkillError> {
-    live.update_skill(&root.0, &name, update)
-}
-
 /// Delete a skill from the registry (issue #362). A `local` skill's directory
 /// is removed with all its contents; a `linked` skill's LINK is removed
 /// without touching the external source directory. The delete is composite
@@ -3463,6 +3434,17 @@ pub fn delete_skill(
     name: String,
 ) -> Result<(), SkillError> {
     live.delete_skill(&root.0, &name)
+}
+
+/// The skills registry root as an absolute path string, for the detail
+/// dialog's SKILL.md path bar (issue #1033): a `local` row's bar shows
+/// `<root>/<name>/SKILL.md` and opens the file in the OS default editor.
+/// The backend is the path authority (the sessions_dir resolve posture) --
+/// the frontend never re-derives app-data layout. Always non-null -- the
+/// root is resolved at setup, mirroring `get_agents_dir`.
+#[tauri::command]
+pub fn get_skills_dir(root: State<'_, SkillsRoot>) -> Result<String, String> {
+    Ok(root.0.to_string_lossy().into_owned())
 }
 
 // The agent-definitions commands (issue #932, ADR-0117) are thin shells:

@@ -8,27 +8,25 @@ import { SkillsSection } from "../SkillsSection";
 import { TooltipProvider } from "../../ui/tooltip";
 import { chooseOption, openSelect } from "./helpers";
 import {
-  createSkill,
   deleteSkill,
+  getSkillsDir,
   listSkills,
   listSkillSources,
   rescanBuiltinCliTools,
   setSkillEnabled,
-  updateSkill,
 } from "../../../api";
-import type { SkillEntry } from "../../../types/skills";
 import type { AppConfig } from "../../../types/app-config";
 import { baseAppConfig, scanResult, skillEntry } from "../../../test-fixtures";
 import type { BuiltinScanResult } from "../../../types/cli-tool";
 
 // The pane drives everything through IPC + the opener plugin; mock both so the
-// test never touches Tauri. revealItemInDir is the "open source location" call
-// for linked skills. listSkillSources feeds the import dialog's discovery read
+// test never touches Tauri. openPath is the detail dialog's external-edit
+// channel (issue #1033); getSkillsDir supplies the local rows' SKILL.md
+// anchors. listSkillSources feeds the import dialog's discovery read
 // (issue #367).
 vi.mock("../../../api", () => ({
   listSkills: vi.fn(),
-  createSkill: vi.fn(),
-  updateSkill: vi.fn(),
+  getSkillsDir: vi.fn(),
   deleteSkill: vi.fn(),
   listSkillSources: vi.fn(),
   importSkills: vi.fn(),
@@ -36,7 +34,7 @@ vi.mock("../../../api", () => ({
   rescanBuiltinCliTools: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
-  revealItemInDir: vi.fn(),
+  openPath: vi.fn(),
 }));
 
 const localSkill = skillEntry("pdf-tools", {
@@ -79,10 +77,20 @@ function renderWithProviders(ui: ReactElement) {
   );
 }
 
+function renderPane() {
+  return renderWithProviders(
+    <SkillsSection
+      onAppConfigSync={() => {}}
+      onExitToWorkspace={() => {}}
+    />,
+  );
+}
+
 describe("SkillsSection (issue #362)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
     vi.mocked(listSkillSources).mockResolvedValue([]);
     // The pane's mount rescan (issue #1016) resolves quietly by default:
     // no failure lane, no config churn beyond the wholesale sync.
@@ -113,6 +121,7 @@ describe("SkillsSection (issue #362)", () => {
     renderWithProviders(
       <SkillsSection
         onAppConfigSync={onAppConfigSync}
+        onExitToWorkspace={() => {}}
       />,
     );
     // The user write lands while the mount rescan is still in flight.
@@ -157,6 +166,7 @@ describe("SkillsSection (issue #362)", () => {
     renderWithProviders(
       <SkillsSection
         onAppConfigSync={onAppConfigSync}
+        onExitToWorkspace={() => {}}
       />,
     );
     const row = await screen.findByTestId("skill-row");
@@ -200,36 +210,12 @@ describe("SkillsSection (issue #362)", () => {
       ignored: [],
       root_error: null,
     });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
     const row = await screen.findByTestId("skill-row");
     expect(row).toHaveAttribute("data-disabled", "true");
     expect(
       screen.getByRole("switch", { name: "Enable skill pdf-tools" }),
     ).not.toBeChecked();
-  });
-
-  it("opens the edit drawer from the keyboard on the text block", async () => {
-    vi.mocked(listSkills).mockResolvedValue({
-      skills: [localSkill],
-      ignored: [],
-      root_error: null,
-    });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByTestId("skill-row");
-    // The open-edit target is the row's text block: Enter activates it
-    // like a click (Space shares the same handler).
-    fireEvent.keyDown(screen.getByRole("button", { name: /^pdf-tools/ }), {
-      key: "Enter",
-    });
-    expect(await screen.findByLabelText("Name")).toBeVisible();
   });
 
   it("lists the skills returned by listSkills", async () => {
@@ -238,11 +224,7 @@ describe("SkillsSection (issue #362)", () => {
       ignored: [],
       root_error: null,
     });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
 
     expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
     expect(screen.getByText("Work with PDF files.")).toBeInTheDocument();
@@ -257,11 +239,7 @@ describe("SkillsSection (issue #362)", () => {
       ignored: [],
       root_error: null,
     });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
     await screen.findByText("pdf-tools");
 
     fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
@@ -296,293 +274,13 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.queryByText("pdf-tools")).not.toBeInTheDocument();
   });
 
-  it("creates a skill via the New drawer", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    vi.mocked(createSkill).mockResolvedValue(localSkill);
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
-
-    fireEvent.click(screen.getByRole("button", { name: /New/i }));
-
-    const nameInput = await screen.findByLabelText("Name");
-    const descInput = screen.getByLabelText("Description");
-    const bodyInput = screen.getByLabelText("Instructions");
-    fireEvent.change(nameInput, { target: { value: "pdf-tools" } });
-    fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
-    fireEvent.change(bodyInput, { target: { value: "Use when working with PDFs.\n" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(createSkill).toHaveBeenCalledWith(
-        "pdf-tools",
-        "Work with PDF files.",
-        "Use when working with PDFs.\n",
-      );
-    });
-  });
-
-  it("keeps the create drawer quiet when pristine fields blur", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
-
-    fireEvent.click(screen.getByRole("button", { name: /New/i }));
-    const nameInput = await screen.findByLabelText("Name");
-
-    // The dialog auto-focuses the name field, so a click-away blur lands
-    // on pristine inputs; empty content must not surface any invalid hint.
-    fireEvent.blur(nameInput);
-    fireEvent.blur(screen.getByLabelText("Description"));
-    fireEvent.blur(screen.getByLabelText("Instructions"));
-    expect(
-      screen.queryByText(/Use only lowercase letters/),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("Description is required."),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("Instructions can't be empty."),
-    ).not.toBeInTheDocument();
-  });
-
-  it("arms the description hint once an edited field goes blank", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
-
-    fireEvent.click(screen.getByRole("button", { name: /New/i }));
-
-    // A valid edit + blur arms the field without surfacing the hint.
-    fireEvent.change(await screen.findByLabelText("Description"), {
-      target: { value: "Work with PDF files." },
-    });
-    fireEvent.blur(screen.getByLabelText("Description"));
-    expect(
-      screen.queryByText("Description is required."),
-    ).not.toBeInTheDocument();
-
-    // Blanking the armed field surfaces the rule immediately.
-    fireEvent.change(screen.getByLabelText("Description"), {
-      target: { value: "" },
-    });
-    expect(screen.getByText("Description is required.")).toBeInTheDocument();
-  });
-
-  it("surfaces the create-mode body hint once the armed field goes blank", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
-
-    fireEvent.click(screen.getByRole("button", { name: /New/i }));
-
-    // A valid edit + blur arms the field without surfacing the hint.
-    fireEvent.change(await screen.findByLabelText("Instructions"), {
-      target: { value: "Body text.\n" },
-    });
-    fireEvent.blur(screen.getByLabelText("Instructions"));
-    expect(
-      screen.queryByText("Instructions can't be empty."),
-    ).not.toBeInTheDocument();
-
-    // Blanking the armed field surfaces the rule immediately: create mode
-    // owns the body field since the one-form fold.
-    fireEvent.change(screen.getByLabelText("Instructions"), {
-      target: { value: "" },
-    });
-    expect(screen.getByText("Instructions can't be empty.")).toBeInTheDocument();
-  });
-
-  it("closes the drawer after a one-form create", async () => {
-    // The create dialog captures name + description + body in one pass, so
-    // a successful mint closes it instead of stepping into an edit drawer.
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    vi.mocked(createSkill).mockResolvedValue(localSkill);
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
-
-    fireEvent.click(screen.getByRole("button", { name: /New/i }));
-    fireEvent.change(await screen.findByLabelText("Name"), {
-      target: { value: "pdf-tools" },
-    });
-    fireEvent.change(screen.getByLabelText("Description"), {
-      target: { value: "Work with PDF files." },
-    });
-    fireEvent.change(screen.getByLabelText("Instructions"), {
-      target: { value: "Body text.\n" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(createSkill).toHaveBeenCalledWith(
-        "pdf-tools",
-        "Work with PDF files.",
-        "Body text.\n",
-      );
-    });
-    // The mint closes the drawer: the list is the only face left.
-    await waitFor(() => {
-      expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
-    });
-  });
-
-  it("gates the create drawer's Save on a valid name, description, and body", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
-
-    fireEvent.click(screen.getByRole("button", { name: /New/i }));
-    const nameInput = await screen.findByLabelText("Name");
-    const descInput = screen.getByLabelText("Description");
-    const save = screen.getByRole("button", { name: "Save" });
-
-    // Empty form: gated off before any IPC round-trip can reject it.
-    expect(save).toBeDisabled();
-
-    // An invalid name keeps the gate shut and surfaces the rule once the
-    // field has been touched.
-    fireEvent.change(nameInput, { target: { value: "Bad Name" } });
-    fireEvent.blur(nameInput);
-    expect(
-      await screen.findByText(/Use only lowercase letters/),
-    ).toBeInTheDocument();
-    expect(save).toBeDisabled();
-
-    // Valid name + description, still no body: gated off.
-    fireEvent.change(nameInput, { target: { value: "pdf-tools" } });
-    fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
-    expect(save).toBeDisabled();
-
-    // All three fields valid: the gate opens.
-    fireEvent.change(screen.getByLabelText("Instructions"), {
-      target: { value: "Body text.\n" },
-    });
-    expect(save).toBeEnabled();
-  });
-
-  it("gates the edit drawer's Save on a non-blank body", async () => {
-    // Clearing the body must gate Save behind the same client-side rule
-    // the backend enforces (create and edit share it).
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("pdf-tools");
-    fireEvent.click(screen.getByText("pdf-tools"));
-
-    const bodyInput = await screen.findByLabelText("Instructions");
-    const save = screen.getByRole("button", { name: "Save" });
-    expect(save).toBeEnabled();
-
-    fireEvent.change(bodyInput, { target: { value: "" } });
-    fireEvent.blur(bodyInput);
-    expect(save).toBeDisabled();
-    expect(await screen.findByText(/can't be empty/)).toBeInTheDocument();
-
-    // Re-filling re-opens the gate.
-    fireEvent.change(bodyInput, { target: { value: "Restored body.\n" } });
-    expect(save).toBeEnabled();
-  });
-
-  it("opens a local skill in the edit drawer and saves via updateSkill", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    vi.mocked(updateSkill).mockResolvedValue(localSkill);
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("pdf-tools");
-
-    // Click the skill's name text -- it sits inside the row's click surface.
-    fireEvent.click(screen.getByText("pdf-tools"));
-
-    const bodyInput = await screen.findByLabelText("Instructions");
-    fireEvent.change(bodyInput, { target: { value: "Updated body.\n" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(updateSkill).toHaveBeenCalledWith(
-        "pdf-tools",
-        expect.objectContaining({
-          name: "pdf-tools",
-          body: "Updated body.\n",
-          // No edit surface for these: the original values must ride back
-          // untouched (null is the wire's frontmatter-key removal signal).
-          license: "MIT",
-          compatibility: "requires network",
-        }),
-      );
-    });
-  });
-
-  it("keeps the drawer open and Cancel disabled while a save is in flight", async () => {
-    // The drawer cannot be dismissed mid-write: Escape, the close request,
-    // and Cancel are all gated while the mutation is pending.
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    let resolveUpdate!: (entry: SkillEntry) => void;
-    vi.mocked(updateSkill).mockImplementation(
-      () => new Promise<SkillEntry>((resolve) => { resolveUpdate = resolve; }),
-    );
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("pdf-tools");
-    fireEvent.click(screen.getByText("pdf-tools"));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
-    });
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.getByLabelText("Instructions")).toBeInTheDocument();
-
-    resolveUpdate(localSkill);
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
-  });
-
   it("filters local and linked rows through the acquired filter", async () => {
     // The Radix Select's local/linked arms (the AgentsSection filter
     // posture, driven through the shared pointer helpers): each arm hides
     // the other source's rows while the row under test stays visible. The
     // builtin arm is pinned separately in skills-builtin.
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill, linkedSkill], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
     expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
     expect(screen.getByText("external-skill")).toBeInTheDocument();
 
@@ -603,11 +301,7 @@ describe("SkillsSection (issue #362)", () => {
     // query. The aria-label carries the accessible name; the spin glyph is
     // presentational.
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
     await screen.findByText("pdf-tools");
     const callsBefore = vi.mocked(listSkills).mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -616,38 +310,155 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
-  it("renders a linked skill read-only with an Open original folder button", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [linkedSkill], ignored: [], root_error: null });
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+  it("keeps the detail dialog's file action inert until the registry root resolves", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    // The root fetch never settles: a local row asked in that window must
+    // not synthesize a garbage "null/SKILL.md" path -- the path bar stays
+    // empty and the open link disabled.
+    vi.mocked(getSkillsDir).mockReturnValue(new Promise(() => {}));
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    const open = await screen.findByRole("button", { name: /^Open file/ });
+    expect(open).toBeDisabled();
+    fireEvent.click(open);
+    expect(openPath).not.toHaveBeenCalled();
+  });
+
+  it("opens the detail dialog from the row's text block", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    // The row's text block is the detail affordance (issue #1033 follow-up
+    // direction): click opens a READ-ONLY dialog -- name + description +
+    // the path bar, no form fields, no Save.
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(
+      await screen.findByRole("heading", { name: "pdf-tools" }),
+    ).toBeInTheDocument();
+    // The description rides twice -- the row's line and the dialog's.
+    expect(screen.getAllByText("Work with PDF files.")).toHaveLength(2);
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+  });
+
+  it("opens the detail dialog from the keyboard on the text block", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    const text = screen.getByText("pdf-tools").closest("[role='button']");
+    expect(text).not.toBeNull();
+    fireEvent.keyDown(text as HTMLElement, { key: "Enter" });
+    expect(
+      await screen.findByRole("heading", { name: "pdf-tools" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the SKILL.md file from the detail dialog's path link", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    // The path bar carries the absolute SKILL.md path (the displayed-path
+    // clause); clicking it is the direct-edit channel -- the file opens in
+    // the OS default editor.
+    expect(await screen.findByText("/roots/skills/pdf-tools/SKILL.md")).toBeInTheDocument();
+    // The metadata face: source rides the acquired vocabulary, status the
+    // enablement axis.
+    expect(screen.getByText("Source")).toBeInTheDocument();
+    expect(screen.getByText("Status")).toBeInTheDocument();
+    expect(screen.getByText("Enabled")).toBeInTheDocument();
+    // Label in Name (WCAG 2.5.3): the accessible name carries the action AND
+    // the visible path, so a speech-input user voicing what they see hits
+    // the button.
+    const open = screen.getByRole("button", { name: /^Open file/ });
+    expect(open).toHaveAccessibleName("Open file /roots/skills/pdf-tools/SKILL.md");
+    fireEvent.click(open);
+    await waitFor(() => {
+      expect(openPath).toHaveBeenCalledWith("/roots/skills/pdf-tools/SKILL.md");
+    });
+  });
+
+  it("joins a Windows root with its own separator", async () => {
+    // The anchor's separator threads through both joins (revealTarget's
+    // middle segment and skillFilePath's tail), so a Windows root reads
+    // native backslashes in the path bar -- never mixed separators.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    vi.mocked(getSkillsDir).mockResolvedValue("C:\\roots\\skills");
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(
+      await screen.findByText("C:\\roots\\skills\\pdf-tools\\SKILL.md"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Open file/ }));
+    await waitFor(() => {
+      expect(openPath).toHaveBeenCalledWith("C:\\roots\\skills\\pdf-tools\\SKILL.md");
+    });
+  });
+
+  it("closes the detail dialog", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("surfaces an open failure as a formatted error", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    vi.mocked(openPath).mockRejectedValueOnce(new Error("opener unavailable"));
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    fireEvent.click(await screen.findByRole("button", { name: /^Open file/ }));
+
+    // The failure lands on the dialog's own error line (issue #1033): the
+    // dialog stays open -- the open is context, not a navigation away --
+    // and Radix marks the section-level tree aria-hidden behind it, so the
+    // dialog itself carries the report.
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("opener unavailable");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("exits straight to the workspace from the New button", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    const onExitToWorkspace = vi.fn();
     renderWithProviders(
       <SkillsSection
         onAppConfigSync={() => {}}
+        onExitToWorkspace={onExitToWorkspace}
       />,
     );
-    await screen.findByText("external-skill");
+    await screen.findByText("No skills yet. Create one in a chat, or import it.");
 
-    fireEvent.click(screen.getByText("external-skill"));
-
-    expect(
-      await screen.findByRole("button", { name: "Open original folder" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Name")).toBeDisabled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Open original folder" }));
-    await waitFor(() => {
-      expect(revealItemInDir).toHaveBeenCalledWith(linkedSkill.link_target);
-    });
+    // No dialog interposes (issue #1033): the New click lands on the
+    // SettingsView's single close path directly -- the workspace's chat is
+    // where the create_skill meta-tool conversation happens.
+    fireEvent.click(screen.getByRole("button", { name: /New/i }));
+    expect(onExitToWorkspace).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("deletes a skill after confirmation", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
     await screen.findByText("pdf-tools");
 
     // The delete icon button carries an action-verb aria-label naming the
@@ -662,57 +473,11 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
-  it("surfaces a create failure as a formatted error", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    vi.mocked(createSkill).mockRejectedValue({
-      kind: "NameTaken",
-      data: "pdf-tools",
-    });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
-
-    fireEvent.click(screen.getByRole("button", { name: /New/i }));
-    const nameInput = await screen.findByLabelText("Name");
-    const descInput = screen.getByLabelText("Description");
-    const bodyInput = screen.getByLabelText("Instructions");
-    fireEvent.change(nameInput, { target: { value: "pdf-tools" } });
-    fireEvent.change(descInput, { target: { value: "Work with PDF files." } });
-    fireEvent.change(bodyInput, { target: { value: "Body text.\n" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("A skill named \"pdf-tools\" already exists"),
-      ).toBeInTheDocument();
-    });
-    // The drawer stays open and OWNS the error face while it is up (the
-    // modal covers the section-level line), so the reject is visible where
-    // the user is working -- as an alert, not only as text.
-    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toBeInTheDocument();
-
-    // A retry that succeeds clears the stale reject: the alert must not
-    // ride into a later drawer.
-    vi.mocked(createSkill).mockResolvedValue(localSkill);
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => {
-      expect(screen.queryByRole("alert")).toBeNull();
-    });
-  });
-
   it("opens the import dialog when the Import button is clicked (issue #367)", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(listSkillSources).mockResolvedValue([]);
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
-    await screen.findByText("No skills yet. Click New to create one.");
+    renderPane();
+    await screen.findByText("No skills yet. Create one in a chat, or import it.");
 
     // The Import button is now enabled (was disabled before #367); clicking it
     // opens the two-stage drill-down dialog, surfaced by its title.
@@ -725,11 +490,7 @@ describe("SkillsSection (issue #362)", () => {
 
   it("does not render the ignored section when the registry is clean", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
     await screen.findByText("pdf-tools");
 
     expect(screen.queryByTestId("skills-ignored-details")).not.toBeInTheDocument();
@@ -751,11 +512,7 @@ describe("SkillsSection (issue #362)", () => {
       ],
       root_error: null,
     });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
     await screen.findByText("pdf-tools");
 
     // The summary is always visible (the fold is closed by default); the
@@ -778,11 +535,7 @@ describe("SkillsSection (issue #362)", () => {
 
   it("surfaces a listSkills IPC rejection as a formatted error (issue #375)", async () => {
     vi.mocked(listSkills).mockRejectedValue("IPC transport error");
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
 
     // A raw string reject falls through fmtError to the typeof === "string"
     // branch, rendered verbatim so the user sees the IPC failure rather than
@@ -797,11 +550,7 @@ describe("SkillsSection (issue #362)", () => {
       ignored: [],
       root_error: "read skills root `/locked` failed: Permission denied (os error 13)",
     });
-    renderWithProviders(
-      <SkillsSection
-        onAppConfigSync={() => {}}
-      />,
-    );
+    renderPane();
 
     // The locale-catalog prefix renders, and the dynamic root_error detail
     // rides verbatim so the user sees the OS-level reason.

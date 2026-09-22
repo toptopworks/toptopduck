@@ -61,10 +61,9 @@ pub(crate) const UNAVAILABLE_FAILURE: &str =
 
 /// The creation channel's runtime bundle: the skills registry root (the
 /// mint target) and the live-config handle (the stale-disabled-entry clear
-/// that lands a same-name rebirth enabled, the form channel's composite
-/// contract). `live: None` marks a config-less session (tests) -- the tool
-/// never advertises there, and a stray call is refused rather than minting
-/// untracked.
+/// that lands a same-name rebirth enabled). `live: None` marks a config-less
+/// session (tests) -- the tool never advertises there, and a stray call is
+/// refused rather than minting untracked.
 pub(crate) struct SkillCreateGate<'a> {
     pub root: &'a std::path::Path,
     pub live: Option<&'a LiveProviderConfig>,
@@ -111,9 +110,8 @@ pub(crate) fn skill_markdown_attachment(markdown: &str) -> FileAttachment {
 
 /// The tool definition as advertised on both tool surfaces (the built-in
 /// table and the gateway `tools/list`), unconditional on the discovery
-/// snapshot -- with the form channel on its retirement path (#1033) this
-/// is the in-app creation channel, so a session pays the standing tool
-/// cost whatever its snapshot holds. The one mount condition is the
+/// snapshot -- this is the in-app creation channel, so a session pays the
+/// standing tool cost whatever its snapshot holds. The one mount condition is the
 /// live-config handle riding the turn's inputs (the mint needs the config
 /// write); a config-less session never advertises. English by the
 /// two-surface language split. The description teaches the whole-document
@@ -186,8 +184,7 @@ pub(crate) fn resolve_skill_creation(call: &ToolUse, root: &std::path::Path) -> 
 }
 
 /// Land an approved creation: the live-config composite (registry mint +
-/// stale-disabled-entry clear), so a same-name rebirth lands enabled --
-/// identical to the form channel's contract by construction.
+/// stale-disabled-entry clear), so a same-name rebirth lands enabled.
 pub(crate) fn execute_skill_creation(
     live: &LiveProviderConfig,
     root: &std::path::Path,
@@ -319,11 +316,14 @@ mod tests {
     #[test]
     fn created_skill_result_branches_on_the_entrys_enablement() {
         let root = tempfile::tempdir().expect("root");
-        let mut entry = crate::skills::registry::create_skill(
+        let mut entry = crate::skills::registry::create_skill_from_markdown(
             root.path(),
-            "sql-coach",
-            "Coach SQL.",
-            "Body.\n",
+            "---
+name: sql-coach
+description: Coach SQL.
+---
+Body.
+",
         )
         .expect("mint a real entry");
         assert!(

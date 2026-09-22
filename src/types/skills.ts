@@ -3,9 +3,10 @@
 // `<root>/<name>/SKILL.md`; identity IS the spec `name` (kebab-case, <= 64,
 // equals the directory name). `acquired` is loader-derived (linked = symlink /
 // junction onto an external source, local = real directory); the file carries
-// the prompt fragment (the body after the frontmatter). The settings page
-// edits local skills in full and shows linked skills read-only + "open source
-// location".
+// the prompt fragment (the body after the frontmatter). The settings page is
+// row-level governance (list / enablement / delete); creation rides the
+// model-face create_skill meta-tool and edits happen in the external editor
+// the detail dialog's path bar opens (issue #1033).
 
 // Loader-derived link/real-directory posture. Crosses IPC as the bare
 // snake_case variant (mirrors the Rust `#[serde(rename_all = "snake_case")]`).
@@ -28,9 +29,9 @@ export interface SkillEntry {
   compatibility: string | null;
   // The Markdown body after the frontmatter -- the prompt fragment.
   body: string;
-  // The resolved link target for `linked` skills (the "open source location"
-  // anchor); the reserved-subtree directory (the reveal / fork anchor) for
-  // `builtin` rows; null for `local`.
+  // The resolved link target for `linked` skills (the detail dialog's open
+  // anchor); the reserved-subtree directory for `builtin` rows; null for
+  // `local`.
   link_target: string | null;
   // The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
   // in the new-session seed's reach; disabled = dormant (grayed row, the
@@ -89,29 +90,6 @@ export interface SkillListing {
   // distinct from a never-created registry (null). When non-null, `skills`
   // and `ignored` are both empty.
   root_error: string | null;
-}
-
-// The editable payload of update_skill. Addressed by the command's separate
-// `name` parameter (the CURRENT directory name); `name` here is the identity to
-// WRITE -- equal to the current one for a plain edit, different for a rename.
-export interface SkillUpdate {
-  name: string;
-  description: string;
-  // Blank / null removes the key from frontmatter.
-  license: string | null;
-  compatibility: string | null;
-  // Required non-blank (a skill without a prompt fragment has nothing to
-  // inject on mount).
-  body: string;
-}
-
-// The create payload of create_skill: what the one-form create drawer
-// submits. A mint carries no license/compatibility (those keys do not exist
-// at birth), which is why this stays distinct from SkillUpdate.
-export interface SkillCreate {
-  name: string;
-  description: string;
-  body: string;
 }
 
 // Typed reject for the skills commands (issue #362). Adjacently tagged

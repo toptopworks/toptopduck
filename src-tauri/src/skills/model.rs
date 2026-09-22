@@ -18,8 +18,9 @@ use std::path::PathBuf;
 pub struct SkillsRoot(pub PathBuf);
 
 /// How a skill entered the registry (loader-derived, never frontmatter -- issue
-/// #303 spec). Drives the settings page's edit contract: `local` is fully
-/// editable; `linked` is read-only + "open source location".
+/// #303 spec). Drives the settings pane's posture: `local` skills live in
+/// the registry; `linked` skills are read-only, opened at their link
+/// target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Acquired {
@@ -145,25 +146,6 @@ pub struct SkillListing {
     pub root_error: Option<String>,
 }
 
-/// The editable payload of `update_skill` (issue #362). Addressed by the command's
-/// separate `name` parameter (the CURRENT directory name); `name` here is the
-/// identity to WRITE -- equal to the current one for a plain edit, different for
-/// a rename (the backend renames the directory + rewrites the frontmatter).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SkillUpdate {
-    /// The identity to write (kebab-case, <= 64, becomes the directory name).
-    pub name: String,
-    /// The spec `description` (required, <= 1024 chars).
-    pub description: String,
-    /// The spec `license` field; blank / null removes the key from frontmatter.
-    pub license: Option<String>,
-    /// The spec `compatibility` field; blank / null removes the key.
-    pub compatibility: Option<String>,
-    /// The Markdown body (required non-blank -- a skill without a prompt
-    /// fragment has nothing to inject).
-    pub body: String,
-}
-
 /// Typed reject for the skills commands (issue #362). Adjacently tagged
 /// (`#[serde(tag = "kind", content = "data")]`) like every other typed IPC
 /// error; the kind set is DISJOINT from SessionError / SaveError /
@@ -173,8 +155,8 @@ pub struct SkillUpdate {
 /// `Display` text crosses IPC in two places, both rendering English detail
 /// verbatim: primarily [`SkippedSkill::reason`] (the diagnostic fold for
 /// spec-invalid directories the scan skipped, issue #373), and the
-/// [`SkillError::FsFailure`] `data` string when `update_skill`'s rollback
-/// folds the inner error's Display into its message (issue #362). The plain
+/// [`SkillError::FsFailure`] `data` string, whose `#[error]` Display folds
+/// the inner io error's message (issue #362). The plain
 /// typed-reject path serializes each variant's inner payload string as serde
 /// `data` -- that payload is the raw detail, NOT the Display string, so a
 /// `kind`-dispatch consumer never reads Display.
@@ -193,11 +175,11 @@ pub enum SkillError {
     /// No registry skill exists under the given name. Carries the name.
     #[error("no such skill: {0}")]
     NoSuchSkill(String),
-    /// A create / rename targeted a name an existing directory already occupies.
+    /// A create targeted a name an existing directory already occupies.
     /// Carries the name.
     #[error("skill name already taken: {0}")]
     NameTaken(String),
-    /// A create / import / rename targeted a name in the builtin skills'
+    /// A create / import targeted a name in the builtin skills'
     /// reserved set (issue #677, ADR-0109 Decision 7): the static full-set
     /// membership, independent of detection or materialization. Distinct
     /// from [`Self::NameTaken`] so the refusal reads as "reserved", not
@@ -208,7 +190,11 @@ pub enum SkillError {
     /// ADR-0121): the reserved-subtree files are an app cache that
     /// re-aligns on the next scan, so edits cannot stick -- the editable
     /// variant is a filesystem copy of the subtree (the fork channel).
-    /// Carries the name.
+    /// Carries the name. With the form channel retired (issue #1033) no
+    /// in-repo writer produces this variant -- the wire kind, the frontend
+    /// dispatch, and the locale entry stay because ADR-0122 Decision 5
+    /// reserves a future model-face update channel whose builtin refusals
+    /// would reuse exactly this face.
     #[error("built-in skill is read-only: {0}")]
     BuiltinReadOnly(String),
     /// A delete targeted a MATERIALIZED builtin skill (issue #677): builtin
@@ -219,7 +205,11 @@ pub enum SkillError {
     #[error("built-in skill cannot be deleted: {0}")]
     BuiltinUndeletable(String),
     /// A mutating call targeted a `linked` skill (the app never writes through
-    /// an external link). Carries the name.
+    /// an external link). Carries the name. With the form channel retired
+    /// (issue #1033) no in-repo writer produces this variant -- the wire
+    /// kind, the frontend dispatch, and the locale entry stay because
+    /// ADR-0122 Decision 5 reserves a future model-face update channel
+    /// whose read-only refusals would reuse exactly this face.
     #[error("skill is linked (read-only): {0}")]
     ReadOnly(String),
     /// An underlying filesystem failure (create / read / write / rename /
